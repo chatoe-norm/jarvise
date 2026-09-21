@@ -317,7 +317,7 @@ def index_sources(
         }
 
     url = qdrant_url or os.environ.get("QDRANT_URL", "http://localhost:6333")
-    client = QdrantClient(url=url, check_compatibility=False)
+    client = QdrantClient(url=url, timeout=120, check_compatibility=False)
     model = SentenceTransformer(MODEL_NAME)
     dim = int(model.get_embedding_dimension())
     root = repo_root()
@@ -330,7 +330,7 @@ def index_sources(
     }
 
     if not skip_index:
-        points: list[Any] = []
+        pending: list[dict[str, Any]] = []
         for path in collect_source_files(root):
             kind = "doctrine"
             for part in ("notebook", "fetch", "firecrawl"):
@@ -338,42 +338,58 @@ def index_sources(
                     kind = part
                     break
             raw = path.read_text(encoding="utf-8", errors="replace")
-            # Strip HTML comment meta lines for embedding text
             body = re.sub(r"<!--.*?-->\n?", "", raw, flags=re.DOTALL).strip()
             url_meta = None
             m = re.search(r"<!--\s*url:\s*(.*?)\s*-->", raw)
             if m:
                 url_meta = m.group(1)
+            rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
             for idx, chunk in enumerate(chunk_text(body)):
-                pid = int(
-                    hashlib.sha256(f"{path.as_posix()}:{idx}:{chunk[:40]}".encode()).hexdigest()[:16],
-                    16,
+                pending.append(
+                    {
+                        "id": int(
+                            hashlib.sha256(f"{path.as_posix()}:{idx}:{chunk[:40]}".encode()).hexdigest()[:15],
+                            16,
+                        ),
+                        "text": chunk,
+                        "source": path.name,
+                        "path": rel,
+                        "kind": kind,
+                        "url": url_meta,
+                    }
                 )
-                vec = model.encode(chunk).tolist()
-                points.append(
-                    qm.PointStruct(
-                        id=pid,
-                        vector=vec,
-                        payload={
-                            "text": chunk,
-                            "source": path.name,
-                            "path": str(path.relative_to(root)) if path.is_relative_to(root) else str(path),
-                            "kind": kind,
-                            "url": url_meta,
-                            "ingested_at": utc_now_iso(),
-                            "paper_only": True,
-                            "note": "no order placement",
-                        },
-                    )
-                )
+        vectors = (
+            model.encode([item["text"] for item in pending], batch_size=32, show_progress_bar=False)
+            if pending
+            else []
+        )
+        ingested_at = utc_now_iso()
+        points = [
+            qm.PointStruct(
+                id=item["id"],
+                vector=vec.tolist(),
+                payload={
+                    "text": item["text"],
+                    "source": item["source"],
+                    "path": item["path"],
+                    "kind": item["kind"],
+                    "url": item["url"],
+                    "ingested_at": ingested_at,
+                    "paper_only": True,
+                    "note": "no order placement",
+                },
+            )
+            for item, vec in zip(pending, vectors, strict=True)
+        ]
         if client.collection_exists(collection):
             client.delete_collection(collection)
         client.create_collection(
             collection_name=collection,
             vectors_config=qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
         )
-        if points:
-            client.upsert(collection_name=collection, points=points)
+        batch = 64
+        for start in range(0, len(points), batch):
+            client.upsert(collection_name=collection, points=points[start : start + batch])
         result["chunks"] = len(points)
 
     if query:
