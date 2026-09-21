@@ -125,12 +125,12 @@ The `jobs` service stays on the Docker network only. It runs paper ingest and RA
 
 ## 8. Updates
 
+Pushing to `main` runs CI on a GitHub-hosted runner. After CI succeeds, the self-hosted runner on this VPS (`ghrunner`, label `jarvise`) runs [infra/deploy/vps-deploy.sh](../../infra/deploy/vps-deploy.sh). The runner only makes outbound connections to GitHub. Pull requests never run on it.
+
+Manual fallback, from the VPS:
+
 ```bash
-cd ~/jarvise
-git pull
-export TAILSCALE_IP=$(tailscale ip -4)
-docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+sudo /opt/jarvise/infra/deploy/vps-deploy.sh
 ```
 
 ## 9. Backups

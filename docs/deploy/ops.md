@@ -50,12 +50,12 @@ Restore by extracting into the same volume/bind paths, then `up -d`.
 
 ## Update path
 
+A push to `main` deploys after CI. The self-hosted runner lives at `/opt/actions-runner` and calls `/opt/jarvise/infra/deploy/vps-deploy.sh`. It does not listen on a public port.
+
+Manual fallback:
+
 ```bash
-cd ~/jarvise
-git pull
-export TAILSCALE_IP=$(tailscale ip -4)
-docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+sudo /opt/jarvise/infra/deploy/vps-deploy.sh
 ```
 
 ## Kill switch
