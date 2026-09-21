@@ -148,6 +148,9 @@ cmd_ingest() {
     fail_with_example "python3 not found" "python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'"
   fi
   export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:$PYTHONPATH}"
+  if "$py" -m jarvise --help >/dev/null 2>&1; then
+    exec "$py" -m jarvise ingest "$@"
+  fi
   exec "$py" -m jarvise_ingest "$@"
 }
 
