@@ -6,22 +6,28 @@ Repository: https://github.com/chatoe-norm/jarvise
 
 ## Quick start (Phase 1 — ingest)
 
-```bash
-# Python 3.11+ (repo uses 3.12 locally)
-python3.12 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+One Typer entrypoint: `jarvise` (`status` / `init` / `config` / `ingest`). Paper ingest is delegated from that CLI; `jarvise-ingest` remains a compatibility alias.
 
-./bin/jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 50 --skip-derivatives --json
+```powershell
+# Python 3.11+ (repo uses 3.12 locally)
+python -m venv .venv
+.venv\Scripts\pip install -e ".[dev]"
+
+.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 50 --skip-derivatives --json
 ```
+
+On macOS/Linux, use `.venv/bin/pip` and `.venv/bin/jarvise` instead.
 
 With CoinGlass:
 
-```bash
-export COINGLASS_API_KEY=...
-./bin/jarvise ingest --symbol BTCUSDT --timeframe 1h --json
+```powershell
+$env:COINGLASS_API_KEY="..."
+.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --json
 ```
 
 SQLite DB: `data/analytics/jarvise.db` (gitignored). Doctrine extract: `data/analytics/`.
+
+On Windows, prefer `.venv\Scripts\jarvise` over bash `bin/jarvise status` — the bash shim and Typer CLI use separate state files.
 
 ## Background MCP plane (Phase 2)
 
@@ -57,31 +63,24 @@ nlm notebook get jarvise
 
 Sessions last about 20 minutes. If MCP calls fail with auth errors, run `nlm login --profile chatoe` then MCP `refresh_auth`. Do not use the `default` nlm profile for this notebook.
 
-## Local workspace CLI (WIP)
+## Local workspace CLI
 
-Agent-friendly local status/config CLI under `src/jarvise/` (separate from `jarvise-ingest`). Every command takes flags, prints copy-pasteable examples on `--help`, and treats a second successful run as a no-op.
+Agent-friendly Typer CLI under `src/jarvise/`. Commands: `status`, `init`, `config`, and `ingest` (delegates to the paper-ingest path). `jarvise-ingest` is still installed as a compatibility alias. Every command takes flags, prints copy-pasteable examples on `--help`, and treats a second successful run as a no-op.
 
-```bash
-python -m venv .venv
-.venv\Scripts\pip install -e ".[dev]"
-```
-
-On macOS or Linux, use `.venv/bin/pip install -e ".[dev]"`.
-
-```bash
-jarvise --help
-jarvise status --output json
-jarvise init --yes
-jarvise init --dry-run
-jarvise config set --key name --value jarvise
-jarvise config get --key name --output json
-cat config.json | jarvise config import --stdin
+```powershell
+.venv\Scripts\jarvise --help
+.venv\Scripts\jarvise status --output json
+.venv\Scripts\jarvise init --yes
+.venv\Scripts\jarvise init --dry-run
+.venv\Scripts\jarvise config set --key name --value jarvise
+.venv\Scripts\jarvise config get --key name --output json
+Get-Content config.json | .venv\Scripts\jarvise config import --stdin
 ```
 
 Config lives in `.jarvise/config.json` under `--path` (default: the current directory). `init` and `config set` accept `--dry-run`. Missing flags exit immediately with an example invocation.
 
-```bash
-pytest
+```powershell
+.venv\Scripts\python -m pytest
 ```
 
 ## Ask the repo (optional)
