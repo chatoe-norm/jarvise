@@ -43,6 +43,20 @@ Import `infra/n8n/workflows/jarvise-ingest-schedule.json` in the n8n UI (http://
 
 Cursor MCP example (paper-only, OpenClaw execution tools disabled): [mcp/jarvise-mcp.json.example](mcp/jarvise-mcp.json.example).
 
+## Gemini Notebook
+
+Trading doctrine is in notebook **Jarvise : Crypto Trader** (`14e11c63-e2ee-4b49-898f-b0cc4c61cb4e`). Cursor MCP `gemini-notebook-mcp` is already registered. Alias: `jarvise`. Google account: `chatoe@gmail.com` (`nlm` profile `chatoe`).
+
+IDs live in [`config/notebook.json`](config/notebook.json). Agent workflow is [`.cursor/skills/jarvise-notebook/SKILL.md`](.cursor/skills/jarvise-notebook/SKILL.md).
+
+```bash
+nlm login switch chatoe
+nlm login --profile chatoe
+nlm notebook get jarvise
+```
+
+Sessions last about 20 minutes. If MCP calls fail with auth errors, run `nlm login --profile chatoe` then MCP `refresh_auth`. Do not use the `default` nlm profile for this notebook.
+
 ## Guardrails
 
 - Deployment ladder: paper → manual approval → autonomy
