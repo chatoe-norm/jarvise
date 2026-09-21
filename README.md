@@ -84,7 +84,9 @@ Config lives in `.jarvise/config.json` under `--path` (default: the current dire
 pytest
 ```
 
-## Ask the repo
+## Ask the repo (optional)
+
+Secondary npm helper for ad-hoc repo Q&A; the Python CLI above is the primary local interface. Requires Node ≥22.13.
 
 `scripts/ask-repo.ts` runs a local Cursor agent against this working tree. Set `CURSOR_API_KEY` first (user key or team service-account key from https://cursor.com/dashboard/cloud-agents). Copy `.env.example` to `.env` or export the variable in your shell. Do not commit the key.
 
