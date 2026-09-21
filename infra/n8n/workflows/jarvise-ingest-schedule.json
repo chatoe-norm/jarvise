@@ -31,28 +31,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [260, 0],
-      "notes": "Internal jobs service. GET-only paper ingest. No order placement."
-    },
-    {
-      "parameters": {
-        "operation": "set",
-        "key": "jarvise:ingest:last",
-        "value": "={{ JSON.stringify({ at: $now.toISO(), ok: true, paper_only: true, note: 'no order placement', stdout: $json.stdout }) }}"
-      },
-      "id": "redis-status",
-      "name": "Redis status jarvise:ingest:last",
-      "type": "n8n-nodes-base.redis",
-      "typeVersion": 1,
-      "position": [520, 0],
-      "notes": "Stores last paper-ingest status. Configure Redis credentials to redis://redis:6379"
+      "notes": "Internal jobs service. GET-only paper ingest. No order placement. Jobs writes jarvise:ingest:last."
     }
   ],
   "connections": {
     "Every 15m": {
       "main": [[{ "node": "POST paper ingest", "type": "main", "index": 0 }]]
-    },
-    "POST paper ingest": {
-      "main": [[{ "node": "Redis status jarvise:ingest:last", "type": "main", "index": 0 }]]
     }
   },
   "settings": {
@@ -67,5 +51,5 @@
     }
   },
   "pinData": {},
-  "active": false
+  "active": true
 }

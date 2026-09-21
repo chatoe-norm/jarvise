@@ -31,28 +31,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [280, 0],
-      "notes": "NotebookLM + fetch + Firecrawl into Qdrant. Respects kill switch. No order placement."
-    },
-    {
-      "parameters": {
-        "operation": "set",
-        "key": "jarvise:rag:n8n",
-        "value": "={{ JSON.stringify({ at: $now.toISO(), ok: true, paper_only: true, note: 'no order placement', stdout: $json.stdout }) }}"
-      },
-      "id": "redis-rag-status",
-      "name": "Redis status jarvise:rag:n8n",
-      "type": "n8n-nodes-base.redis",
-      "typeVersion": 1,
-      "position": [560, 0],
-      "notes": "Configure Redis credentials to redis://redis:6379"
+      "notes": "NotebookLM + fetch + Firecrawl into Qdrant. Respects kill switch. No order placement. Leave inactive until nlm is logged in on the VPS."
     }
   ],
   "connections": {
     "Every 6h": {
       "main": [[{ "node": "POST rag refresh", "type": "main", "index": 0 }]]
-    },
-    "POST rag refresh": {
-      "main": [[{ "node": "Redis status jarvise:rag:n8n", "type": "main", "index": 0 }]]
     }
   },
   "settings": {
@@ -64,5 +48,6 @@
       "paper_only": true,
       "no_order_placement": true
     }
-  }
+  },
+  "active": false
 }

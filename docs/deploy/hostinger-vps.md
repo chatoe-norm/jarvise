@@ -114,14 +114,19 @@ docker compose --profile tools run --rm worker jarvise rag ingest-sources
 docker compose --profile tools run --rm worker jarvise rag index
 ```
 
-## 7. Import n8n workflows
+## 7. Schedules
 
-1. Open n8n UI over Tailscale.
-2. Import `infra/n8n/workflows/jarvise-ingest-schedule.json` (every 15m `POST http://jobs:8090/jobs/ingest`).
-3. Import `infra/n8n/workflows/jarvise-rag-refresh.json` (every 6h `POST http://jobs:8090/jobs/rag-refresh`).
-4. Redis credential: `redis://redis:6379`.
+n8n workflow `jarvise-ingest-schedule` posts to `http://jobs:8090/jobs/ingest` every 15 minutes. The jobs service writes `jarvise:ingest:last`. Do not also cron that same ingest.
 
-The `jobs` service stays on the Docker network only. It runs paper ingest and RAG refresh and stops both when `jarvise:kill_switch` is set.
+RAG reindex stays on the VPS cron (`jarvise-rag-index.sh` every 6 hours). The n8n RAG workflow stays inactive until NotebookLM is logged in on the VPS.
+
+Import once inside the n8n container:
+
+```bash
+docker exec jarvise-n8n-1 n8n import:workflow --separate --input=/workflows
+```
+
+Then activate only the ingest workflow.
 
 ## 8. Updates
 

@@ -9,6 +9,8 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from jarvise.rag import publish_redis_status
+
 
 def kill_switch_engaged() -> bool:
     redis_url = os.environ.get("REDIS_URL")
@@ -33,7 +35,9 @@ def _skipped() -> dict[str, Any]:
 
 def run_ingest() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
-        return 3, _skipped()
+        payload = _skipped()
+        publish_redis_status("jarvise:ingest:last", payload)
+        return 3, payload
     cmd = [
         sys.executable,
         "-m",
@@ -52,6 +56,7 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
     payload = _parse_stdout(proc)
     payload["paper_only"] = True
     payload["exit_code"] = proc.returncode
+    publish_redis_status("jarvise:ingest:last", payload)
     return proc.returncode, payload
 
 
