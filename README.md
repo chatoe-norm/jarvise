@@ -65,7 +65,7 @@ Sessions last about 20 minutes. If MCP calls fail with auth errors, run `nlm log
 
 ## Local workspace CLI
 
-Agent-friendly Typer CLI under `src/jarvise/`. Commands: `status`, `init`, `config`, and `ingest` (delegates to the paper-ingest path). `jarvise-ingest` is still installed as a compatibility alias. Every command takes flags, prints copy-pasteable examples on `--help`, and treats a second successful run as a no-op.
+Agent-friendly Typer CLI under `src/jarvise/`. Commands: `status`, `init`, `config`, `ingest`, and `rag` (NotebookLM/fetch/Firecrawl → Qdrant). `jarvise-ingest` is still installed as a compatibility alias. Every command takes flags, prints copy-pasteable examples on `--help`, and treats a second successful run as a no-op.
 
 ```powershell
 .venv\Scripts\jarvise --help
@@ -75,9 +75,24 @@ Agent-friendly Typer CLI under `src/jarvise/`. Commands: `status`, `init`, `conf
 .venv\Scripts\jarvise config set --key name --value jarvise
 .venv\Scripts\jarvise config get --key name --output json
 Get-Content config.json | .venv\Scripts\jarvise config import --stdin
+.venv\Scripts\jarvise rag refresh --dry-run --output json
 ```
 
 Config lives in `.jarvise/config.json` under `--path` (default: the current directory). `init` and `config set` accept `--dry-run`. Missing flags exit immediately with an example invocation.
+
+## Hostinger VPS (Tailscale + OpenRouter)
+
+24/7 Docker stack: Redis, Qdrant, n8n, OpenClaw (OpenRouter), worker, control web. **Private Tailscale mesh only** — no public Redis/Qdrant.
+
+See [docs/deploy/hostinger-vps.md](docs/deploy/hostinger-vps.md) and [docs/deploy/ops.md](docs/deploy/ops.md).
+
+```bash
+cp .env.example .env   # OPENROUTER_API_KEY, N8N_BASIC_AUTH_PASSWORD, TAILSCALE_IP
+export TAILSCALE_IP=$(tailscale ip -4)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+Trusted RAG allowlist: [config/rag-sources.json](config/rag-sources.json).
 
 ```powershell
 .venv\Scripts\python -m pytest

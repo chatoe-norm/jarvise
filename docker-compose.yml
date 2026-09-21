@@ -1,10 +1,18 @@
-# Jarvise background plane — Redis, Qdrant RAG, n8n
-# Paper analytics scheduling only. No order placement / live trading.
+# Jarvise background plane — Redis, Qdrant RAG, n8n, worker, OpenClaw, control web
+# Paper analytics / research only. No order placement / live trading.
+#
+# Dev (default): ports on 127.0.0.1
+# Prod: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+name: jarvise
+
 services:
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
+    networks: [jarvise_net]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - jarvise_redis:/data
     command: ["redis-server", "--appendonly", "yes"]
@@ -16,9 +24,11 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.13.4
+    restart: unless-stopped
+    networks: [jarvise_net]
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - jarvise_qdrant:/qdrant/storage
     healthcheck:
@@ -30,13 +40,15 @@ services:
 
   n8n:
     image: n8nio/n8n:1.82.3
+    restart: unless-stopped
+    networks: [jarvise_net]
     ports:
-      - "${N8N_PORT:-5678}:5678"
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
     environment:
       - N8N_HOST=${N8N_HOST:-localhost}
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
-      - WEBHOOK_URL=http://localhost:${N8N_PORT:-5678}/
+      - WEBHOOK_URL=http://127.0.0.1:${N8N_PORT:-5678}/
       - GENERIC_TIMEZONE=Asia/Bangkok
       - N8N_BASIC_AUTH_ACTIVE=true
       - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-jarvise}
@@ -51,12 +63,132 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      jobs:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 15
       start_period: 30s
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+    image: jarvise-worker:local
+    restart: "no"
+    networks: [jarvise_net]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY:-}
+      - JARVISE_PAPER_ONLY=true
+      - JARVISE_ROOT=/app
+      - NLM_PROFILE=${NLM_PROFILE:-chatoe}
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+      - ${NLM_HOME:-./data/nlm}:/root/.nlm
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    profiles: ["tools"]
+
+  jobs:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+    image: jarvise-worker:local
+    restart: unless-stopped
+    networks: [jarvise_net]
+    command: ["python", "-m", "jarvise.jobs"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY:-}
+      - JARVISE_PAPER_ONLY=true
+      - JARVISE_ROOT=/app
+      - NLM_PROFILE=${NLM_PROFILE:-chatoe}
+      - JARVISE_JOBS_TOKEN=${JARVISE_JOBS_TOKEN:-}
+      - JOBS_PORT=8090
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+      - ${NLM_HOME:-./data/nlm}:/root/.nlm
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  openclaw:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    restart: unless-stopped
+    networks: [jarvise_net]
+    ports:
+      - "127.0.0.1:${OPENCLAW_PORT:-18789}:18789"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENCLAW_PAPER_ONLY=true
+      - JARVISE_PAPER_ONLY=true
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
+      - OPENCLAW_GATEWAY_BIND=lan
+    volumes:
+      - ./data/openclaw:/home/node/.openclaw
+      - ./config/openclaw:/config:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.web
+    image: jarvise-web:local
+    restart: unless-stopped
+    networks: [jarvise_net]
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - JARVISE_PAPER_ONLY=true
+      - WEB_BASIC_AUTH_USER=${WEB_BASIC_AUTH_USER:-}
+      - WEB_BASIC_AUTH_PASSWORD=${WEB_BASIC_AUTH_PASSWORD:-}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-jarvise_doctrine}
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+networks:
+  jarvise_net:
+    driver: bridge
 
 volumes:
   jarvise_redis:

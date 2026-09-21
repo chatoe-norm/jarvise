@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    JARVISE_PAPER_ONLY=true \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY scripts ./scripts
+COPY config ./config
+COPY bin ./bin
+
+RUN pip install --upgrade pip \
+    && pip install -e '.[rag]' \
+    && pip install redis
+
+# Optional NotebookLM CLI (best-effort; sync works when nlm is present)
+RUN pip install notebooklm-py 2>/dev/null || true
+
+COPY infra/docker/worker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["jarvise", "--help"]

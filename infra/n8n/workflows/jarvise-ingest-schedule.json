@@ -20,14 +20,18 @@
     },
     {
       "parameters": {
-        "command": "cd \"${JARVISE_ROOT:-/host/jarvise}\" && ./bin/jarvise ingest --symbol BTCUSDT,ETHUSDT --timeframe 1h --limit 200 --skip-derivatives --json"
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/ingest",
+        "options": {
+          "timeout": 120000
+        }
       },
-      "id": "exec-ingest",
-      "name": "Run jarvise ingest (paper only)",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
+      "id": "http-ingest",
+      "name": "POST paper ingest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [260, 0],
-      "notes": "GET-only paper ingest. No order placement. Prefer host Execute Command / SSH if container lacks ./bin/jarvise venv."
+      "notes": "Internal jobs service. GET-only paper ingest. No order placement."
     },
     {
       "parameters": {
@@ -45,9 +49,9 @@
   ],
   "connections": {
     "Every 15m": {
-      "main": [[{ "node": "Run jarvise ingest (paper only)", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "POST paper ingest", "type": "main", "index": 0 }]]
     },
-    "Run jarvise ingest (paper only)": {
+    "POST paper ingest": {
       "main": [[{ "node": "Redis status jarvise:ingest:last", "type": "main", "index": 0 }]]
     }
   },

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from enum import Enum
 from pathlib import Path
@@ -71,6 +72,16 @@ config_app = typer.Typer(
     epilog=CONFIG_EPILOG,
 )
 app.add_typer(config_app, name="config")
+
+rag_app = typer.Typer(
+    name="rag",
+    help="Doctrine RAG: NotebookLM/fetch/Firecrawl → Qdrant (paper only).",
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    pretty_exceptions_show_locals=False,
+)
+app.add_typer(rag_app, name="rag")
 
 
 class OutputFormat(str, Enum):
@@ -271,3 +282,98 @@ def ingest(ctx: typer.Context) -> None:
 
     code = ingest_main(ctx.args)
     raise typer.Exit(code if isinstance(code, int) else 0)
+
+
+@rag_app.command("sync-notebook")
+def rag_sync_notebook(
+    dry_run: DryRunOpt = False,
+    output: OutputOpt = OutputFormat.text,
+) -> None:
+    """Export NotebookLM sources into data/analytics/sources/notebook/."""
+    from jarvise import rag as ragmod
+
+    result = ragmod.sync_notebook(dry_run=dry_run)
+    ragmod.publish_redis_status("jarvise:rag:notebook", result)
+    emit(result, output)
+    if not result.get("ok") and not dry_run:
+        raise typer.Exit(code=2)
+
+
+@rag_app.command("ingest-sources")
+def rag_ingest_sources(
+    dry_run: DryRunOpt = False,
+    skip_fetch: Annotated[bool, typer.Option("--skip-fetch")] = False,
+    skip_firecrawl: Annotated[bool, typer.Option("--skip-firecrawl")] = False,
+    output: OutputOpt = OutputFormat.text,
+) -> None:
+    """Fetch + Firecrawl allowlisted URLs from config/rag-sources.json."""
+    from jarvise import rag as ragmod
+
+    payload: dict[str, Any] = {"paper_only": True}
+    if not skip_fetch:
+        payload["fetch"] = ragmod.ingest_fetch(dry_run=dry_run)
+    if not skip_firecrawl:
+        payload["firecrawl"] = ragmod.ingest_firecrawl(dry_run=dry_run)
+    ok = True
+    for key in ("fetch", "firecrawl"):
+        part = payload.get(key)
+        if isinstance(part, dict) and part.get("ok") is False:
+            ok = False
+    payload["ok"] = ok
+    ragmod.publish_redis_status("jarvise:rag:ingest_sources", payload)
+    emit(payload, output)
+    if not ok and not dry_run:
+        raise typer.Exit(code=2)
+
+
+@rag_app.command("index")
+def rag_index(
+    query: Annotated[Optional[str], typer.Option("--query", help="Smoke-search after index.")] = None,
+    skip_index: Annotated[bool, typer.Option("--skip-index")] = False,
+    output: OutputOpt = OutputFormat.text,
+) -> None:
+    """Index local doctrine/source files into Qdrant collection jarvise_doctrine."""
+    from jarvise import rag as ragmod
+
+    result = ragmod.index_sources(query=query, skip_index=skip_index)
+    ragmod.publish_redis_status("jarvise:rag:last", {**result, "at": ragmod.utc_now_iso()})
+    emit(result, output)
+    if not result.get("ok"):
+        raise typer.Exit(code=2)
+
+
+@rag_app.command("refresh")
+def rag_refresh(
+    dry_run: DryRunOpt = False,
+    output: OutputOpt = OutputFormat.text,
+) -> None:
+    """Full pipeline: notebook sync → fetch/firecrawl → Qdrant index."""
+    from jarvise import rag as ragmod
+
+    if os.environ.get("REDIS_URL"):
+        try:
+            import redis
+
+            if redis.Redis.from_url(os.environ["REDIS_URL"], decode_responses=True).get(
+                "jarvise:kill_switch"
+            ) in {"1", "true", "on", "yes"}:
+                payload = {"ok": False, "skipped": True, "reason": "kill_switch engaged", "paper_only": True}
+                emit(payload, output)
+                raise typer.Exit(code=3)
+        except ImportError:
+            pass
+
+    steps: dict[str, Any] = {"paper_only": True, "dry_run": dry_run}
+    steps["notebook"] = ragmod.sync_notebook(dry_run=dry_run)
+    steps["fetch"] = ragmod.ingest_fetch(dry_run=dry_run)
+    steps["firecrawl"] = ragmod.ingest_firecrawl(dry_run=dry_run)
+    if dry_run:
+        steps["index"] = {"ok": True, "dry_run": True}
+        steps["ok"] = True
+    else:
+        steps["index"] = ragmod.index_sources()
+        steps["ok"] = bool(steps["index"].get("ok"))
+    ragmod.publish_redis_status("jarvise:rag:last", {**steps, "at": ragmod.utc_now_iso()})
+    emit(steps, output)
+    if not steps.get("ok"):
+        raise typer.Exit(code=2)

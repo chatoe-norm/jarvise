@@ -14,10 +14,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "fastapi>=0.115", "httpx>=0.27", "python-multipart>=0.0.9"]
 rag = [
   "qdrant-client>=1.9",
   "sentence-transformers>=3.0",
+  "redis>=5.0",
+]
+web = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "python-multipart>=0.0.9",
+  "redis>=5.0",
+  "qdrant-client>=1.9",
 ]
 
 [project.scripts]

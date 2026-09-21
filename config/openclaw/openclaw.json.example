@@ -1,0 +1,26 @@
+{
+  "env": {
+    "vars": {
+      "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
+      "OPENCLAW_PAPER_ONLY": "true",
+      "JARVISE_PAPER_ONLY": "true",
+      "QDRANT_URL": "http://qdrant:6333",
+      "REDIS_URL": "redis://redis:6379/0"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openrouter/openrouter/auto"
+      },
+      "models": {
+        "openrouter/openrouter/auto": {}
+      }
+    }
+  },
+  "_jarvise": {
+    "paper_only": true,
+    "no_order_placement": true,
+    "note": "Research/signal context only. Do not enable live execution tools."
+  }
+}

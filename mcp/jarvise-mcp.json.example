@@ -31,17 +31,20 @@
       "url": "${OPENCLAW_MCP_URL}",
       "env": {
         "OPENCLAW_PAPER_ONLY": "true",
-        "JARVISE_GUARDRAIL": "Use OpenClaw for research/signal context only. Do not enable live execution tools until Jarvise manual-approval phase. No order placement from this MCP in paper mode."
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
+        "JARVISE_GUARDRAIL": "Use OpenClaw for research/signal context only. Do not enable live execution tools until Jarvise manual-approval phase. No order placement from this MCP in paper mode. Prefer OpenRouter model openrouter/openrouter/auto."
       }
     }
   },
   "_jarvise": {
     "paper_only": true,
     "no_order_placement": true,
+    "deploy": "On Hostinger VPS use docker internal URLs redis://redis:6379 and http://qdrant:6333; access UIs only via Tailscale.",
     "notes": [
       "Copy into Cursor MCP settings; replace ${...} placeholders.",
       "Prefer command OR url for openclaw — not both live at once.",
-      "Write path remains: jarvise ingest → data/analytics/jarvise.db"
+      "Write path remains: jarvise ingest → data/analytics/jarvise.db",
+      "RAG path: jarvise rag refresh → Qdrant jarvise_doctrine"
     ]
   }
 }

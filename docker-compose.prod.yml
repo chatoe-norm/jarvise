@@ -1,0 +1,28 @@
+# Production override for Hostinger VPS + Tailscale.
+# Usage:
+#   export TAILSCALE_IP=$(tailscale ip -4)
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Requires Docker Compose v2.24+ (!override). Redis/Qdrant: internal network only.
+
+services:
+  redis:
+    ports: !override []
+
+  qdrant:
+    ports: !override []
+
+  n8n:
+    ports: !override
+      - "${TAILSCALE_IP:?Set TAILSCALE_IP to the VPS Tailscale IPv4}:${N8N_PORT:-5678}:5678"
+    environment:
+      N8N_HOST: ${N8N_HOST:-n8n.jarvise.ts.net}
+      WEBHOOK_URL: http://${TAILSCALE_IP}:${N8N_PORT:-5678}/
+
+  openclaw:
+    ports: !override
+      - "${TAILSCALE_IP:?Set TAILSCALE_IP to the VPS Tailscale IPv4}:${OPENCLAW_PORT:-18789}:18789"
+
+  web:
+    ports: !override
+      - "${TAILSCALE_IP:?Set TAILSCALE_IP to the VPS Tailscale IPv4}:${WEB_PORT:-8080}:8080"

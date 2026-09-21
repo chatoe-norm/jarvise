@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "paper_only": true,
+  "note": "Trusted RAG allowlist only. No order placement.",
+  "fetch": [
+    {
+      "id": "binance-spot-docs",
+      "url": "https://developers.binance.com/docs/binance-spot-api-docs",
+      "kind": "fetch"
+    }
+  ],
+  "firecrawl": [
+    {
+      "id": "coingecko-learn",
+      "url": "https://www.coingecko.com/learn",
+      "kind": "firecrawl"
+    }
+  ],
+  "notebook": {
+    "alias": "jarvise",
+    "nlm_profile": "chatoe",
+    "export_dir": "data/analytics/sources/notebook"
+  }
+}
