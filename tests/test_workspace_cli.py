@@ -27,6 +27,7 @@ def combined(result) -> str:
         ["config", "get", "--help"],
         ["config", "set", "--help"],
         ["config", "import", "--help"],
+        ["ingest", "--help"],
     ],
 )
 def test_help_includes_examples(args: list[str]) -> None:
@@ -40,6 +41,7 @@ def test_root_help_stays_layered() -> None:
     assert result.exit_code == 0
     assert "status" in result.stdout
     assert "init" in result.stdout
+    assert "ingest" in result.stdout
     assert "config" in result.stdout
     assert "--value" not in result.stdout
 
@@ -218,6 +220,31 @@ def test_config_import_dry_run_does_not_write(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "dry-run" in result.stdout
     assert json.loads((tmp_path / ".jarvise" / "config.json").read_text(encoding="utf-8")) == {}
+
+
+def test_ingest_missing_symbol_exit_2() -> None:
+    result = invoke("ingest")
+    assert result.exit_code == 2
+    assert "Error: --symbol is required." in combined(result)
+
+
+def test_ingest_dry_run_delegates(tmp_path: Path) -> None:
+    db = tmp_path / "missing" / "jarvise.db"
+    result = invoke(
+        "ingest",
+        "--symbol",
+        "BTCUSDT",
+        "--skip-derivatives",
+        "--dry-run",
+        "--json",
+        "--db",
+        str(db),
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["dry_run"] is True
+    assert not db.exists()
 
 
 def test_config_set_requires_init(tmp_path: Path) -> None:
