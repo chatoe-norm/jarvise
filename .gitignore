@@ -30,13 +30,30 @@ __pycache__/
 venv/
 .pytest_cache/
 .mypy_cache/
+*.egg-info/
+src/*.egg-info/
+
+# Local CLI config
+.jarvise/
 
 # Logs
 *.log
-.jarvise/
 
 # Analytics runtime
 *.db
 data/analytics/jarvise.db
-.egg-info/
-*.egg-info/
+
+# Runtime mounts / secrets on VPS
+data/nlm/
+!data/nlm/README.md
+data/openclaw/*
+!data/openclaw/.gitkeep
+data/analytics/sources/notebook/
+data/analytics/sources/fetch/
+data/analytics/sources/firecrawl/
+
+# Local sync salvage
+.local-wip/
+
+# SDD scratch
+.superpowers/

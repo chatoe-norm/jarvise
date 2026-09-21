@@ -1,0 +1,68 @@
+{
+  "name": "Jarvise RAG refresh",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "cron-rag",
+      "name": "Every 6h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/rag-refresh",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "http-rag",
+      "name": "POST rag refresh",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 0],
+      "notes": "NotebookLM + fetch + Firecrawl into Qdrant. Respects kill switch. No order placement."
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "jarvise:rag:n8n",
+        "value": "={{ JSON.stringify({ at: $now.toISO(), ok: true, paper_only: true, note: 'no order placement', stdout: $json.stdout }) }}"
+      },
+      "id": "redis-rag-status",
+      "name": "Redis status jarvise:rag:n8n",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [560, 0],
+      "notes": "Configure Redis credentials to redis://redis:6379"
+    }
+  ],
+  "connections": {
+    "Every 6h": {
+      "main": [[{ "node": "POST rag refresh", "type": "main", "index": 0 }]]
+    },
+    "POST rag refresh": {
+      "main": [[{ "node": "Redis status jarvise:rag:n8n", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true
+    }
+  }
+}

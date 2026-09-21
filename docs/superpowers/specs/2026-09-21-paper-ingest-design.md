@@ -1,7 +1,7 @@
 # Jarvise paper ingest (SQLite + CLI) — design
 
 **Date:** 2026-09-21  
-**Status:** draft for user review  
+**Status:** Phase 1+2 shipped on `main` (2026-09-21); see plan for CLI unify / notebook / ask-repo next slice  
 **Notebook:** [Jarvise : Crypto Trader](https://notebooklm.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e)  
 **Doctrine source:** `data/analytics/sources/jarvise-doctrine.txt`, `data/analytics/api-map.json`
 
