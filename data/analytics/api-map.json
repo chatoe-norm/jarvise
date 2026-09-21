@@ -1,0 +1,99 @@
+{
+  "notebook_id": "14e11c63-e2ee-4b49-898f-b0cc4c61cb4e",
+  "notebook_title": "Jarvise : Crypto Trader",
+  "synced_at": "2026-09-21T07:46:00Z",
+  "account": "chatoe@gmail.com",
+  "drive_sources": 0,
+  "stale_count": 0,
+  "source_count": 94,
+  "venue": {
+    "name": "Binance TH",
+    "market": "spot",
+    "regulator": "Thai SEC",
+    "notes": "Fees, spread, and book depth are real EV costs."
+  },
+  "analyzer_layers": [
+    {
+      "id": "price_graph",
+      "ingest": ["OHLC", "volume", "VWAP", "ATR", "EMA/SMA", "ADX", "RSI", "MACD", "Stochastic", "CCI", "OBV", "A/D", "Bollinger", "Keltner", "Donchian"],
+      "rule": "Structure first. Oscillators are context, never standalone triggers."
+    },
+    {
+      "id": "order_book",
+      "ingest": ["bid", "ask", "spread", "L2/L3 depth", "large_limit_orders", "taker_buy_sell_volume", "slippage"],
+      "rule": "Validate walls against prints. BTC thicker; ETH thinner with more spoof wicks."
+    },
+    {
+      "id": "onchain_derivatives",
+      "ingest": ["exchange_netflow", "exchange_reserve", "open_interest", "funding_rate", "liquidations", "etf_net_flow", "fear_greed", "btc_dominance"],
+      "rule": "Context for spot even when not trading futures."
+    },
+    {
+      "id": "performance",
+      "ingest": ["EV_after_fees", "Sharpe", "Sortino", "max_drawdown", "hit_rate", "avg_win_loss", "confidence"],
+      "output": ["regime: TREND|RANGE|CHAOTIC", "2-3 scenarios with invalidation", "confidence 0-1", "fractional Kelly size"]
+    }
+  ],
+  "providers": [
+    {
+      "name": "CoinGlass",
+      "role": "Derivatives, liquidations, funding, OI, ETF flows, spot order-book heatmaps",
+      "base_url": "https://open-api-v4.coinglass.com",
+      "auth_header": "CG-API-KEY",
+      "docs": "https://docs.coinglass.com/reference/getting-started-with-your-api",
+      "mvp_endpoints": [
+        "/api/futures/openInterest/ohlc-history",
+        "/api/futures/fundingRate/oi-weight-ohlc-history",
+        "/api/futures/liquidation/history",
+        "/api/futures/liquidation/heatmap/model2",
+        "/api/bitcoin/etf/flow-history",
+        "/api/spot/orderbook/large-limit-order"
+      ]
+    },
+    {
+      "name": "CoinGecko",
+      "role": "Spot prices, market cap, breadth, DEX via GeckoTerminal",
+      "docs": "https://docs.coingecko.com/"
+    },
+    {
+      "name": "CoinMarketCap",
+      "role": "Dominance, Fear & Greed, Altcoin Season, global metrics",
+      "mvp_endpoints": [
+        "GET https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest"
+      ]
+    },
+    {
+      "name": "CryptoQuant",
+      "role": "Exchange inflow/outflow/netflow, reserves, miner flows",
+      "docs": "https://userguide.cryptoquant.com/cryptoquant-metrics/exchange"
+    },
+    {
+      "name": "Glassnode",
+      "role": "Network supply, realized cap, entity-adjusted flows, PIT backtest metrics",
+      "docs": "https://docs.glassnode.com/basic-api/api"
+    },
+    {
+      "name": "Dune",
+      "role": "Custom on-chain SQL: blocks, transactions, logs, traces, decoded protocols",
+      "docs": "https://docs.dune.com/"
+    },
+    {
+      "name": "TradingView",
+      "role": "OHLC charts and indicator library for the price-graph layer"
+    }
+  ],
+  "do_not_build_first": [
+    "Fully autonomous live execution",
+    "Single-indicator oscillator bots",
+    "Full Kelly sizing",
+    "Entries without invalidation/stop",
+    "Execution without daily drawdown kill-switch"
+  ],
+  "deployment_ladder": ["paper", "manual_approval", "autonomy"],
+  "sizing": {
+    "risk_per_idea_pct": [0.25, 1.0],
+    "kelly": "fraction of Kelly; full Kelly is a ceiling not a target",
+    "stop_distance": ">= 1.5x ATR / current range"
+  },
+  "conversation_id": "f19760bb-b4a9-4e16-a303-7e80d112c189"
+}

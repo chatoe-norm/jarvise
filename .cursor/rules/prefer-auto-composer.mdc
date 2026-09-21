@@ -1,0 +1,11 @@
+---
+description: Prefer Auto + Composer; use API models only when necessary
+alwaysApply: true
+---
+
+# Model preference (cost)
+
+- Prefer **Auto** or **Composer** (Standard, not Fast) for almost all work.
+- Do **not** switch to Claude / GPT / other API models unless the user asks, or Auto/Composer clearly fails the task.
+- Keep responses and tool loops lean to stretch Auto + Composer quota.
+- If a harder model is needed, say so briefly and wait for user OK before assuming API spend.
