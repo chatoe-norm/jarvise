@@ -33,3 +33,10 @@ venv/
 
 # Logs
 *.log
+.jarvise/
+
+# Analytics runtime
+*.db
+data/analytics/jarvise.db
+.egg-info/
+*.egg-info/

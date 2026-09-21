@@ -1,0 +1,64 @@
+# Jarvise background plane — Redis, Qdrant RAG, n8n
+# Paper analytics scheduling only. No order placement / live trading.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - jarvise_redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - jarvise_qdrant:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+
+  n8n:
+    image: n8nio/n8n:1.82.3
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:${N8N_PORT:-5678}/
+      - GENERIC_TIMEZONE=Asia/Bangkok
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-jarvise}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD:-change-me}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - JARVISE_ROOT=/host/jarvise
+      - JARVISE_PAPER_ONLY=true
+    volumes:
+      - jarvise_n8n:/home/node/.n8n
+      - ./infra/n8n/workflows:/workflows:ro
+      - .:/host/jarvise:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+volumes:
+  jarvise_redis:
+  jarvise_qdrant:
+  jarvise_n8n:

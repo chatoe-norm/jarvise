@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# jarvise — agent-friendly CLI scaffold
+# Patterns: non-interactive flags, layered --help with examples,
+# actionable errors, --dry-run, idempotent status, machine-useful output.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STATE_DIR="${JARVISE_STATE_DIR:-$ROOT/.jarvise}"
+STATE_FILE="$STATE_DIR/status.json"
+
+usage_root() {
+  cat <<'EOF'
+jarvise — local assistant workspace CLI
+
+Usage:
+  jarvise <command> [options]
+
+Commands:
+  status    Show workspace readiness
+  init      Create local jarvise state (idempotent)
+  doctor    Check environment for agent automation
+  ingest    Paper market ingest into SQLite (no order placement)
+
+Run `jarvise <command> --help` for options and examples.
+EOF
+}
+
+usage_status() {
+  cat <<'EOF'
+Usage:
+  jarvise status [options]
+
+Options:
+  --json    Machine-readable output (default for agents)
+  --help    Show this help
+
+Examples:
+  jarvise status
+  jarvise status --json
+EOF
+}
+
+usage_init() {
+  cat <<'EOF'
+Usage:
+  jarvise init [options]
+
+Options:
+  --force     Recreate state even if it already exists
+  --dry-run   Print the plan; make no changes
+  --yes       Skip confirmation (no-op today; reserved for future prompts)
+  --help      Show this help
+
+Examples:
+  jarvise init
+  jarvise init --dry-run
+  jarvise init --force --yes
+EOF
+}
+
+usage_doctor() {
+  cat <<'EOF'
+Usage:
+  jarvise doctor [options]
+
+Options:
+  --json    Machine-readable checks
+  --help    Show this help
+
+Examples:
+  jarvise doctor
+  jarvise doctor --json
+EOF
+}
+
+fail_with_example() {
+  local msg="$1"
+  local example="$2"
+  echo "Error: $msg" >&2
+  echo "  $example" >&2
+  exit 1
+}
+
+cmd_status() {
+  local as_json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) as_json=1; shift ;;
+      --help|-h) usage_status; exit 0 ;;
+      *) fail_with_example "Unknown option: $1" "jarvise status --json" ;;
+    esac
+  done
+
+  local initialized=false
+  local path=""
+  if [[ -f "$STATE_FILE" ]]; then
+    initialized=true
+    path="$STATE_FILE"
+  fi
+
+  if [[ $as_json -eq 1 ]]; then
+    printf '{"initialized":%s,"state_file":"%s","root":"%s"}\n' \
+      "$initialized" "$path" "$ROOT"
+  else
+    echo "initialized: $initialized"
+    echo "root: $ROOT"
+    [[ -n "$path" ]] && echo "state_file: $path"
+  fi
+}
+
+cmd_init() {
+  local force=0 dry_run=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      --dry-run) dry_run=1; shift ;;
+      --yes) shift ;; # reserved: keeps agents non-interactive
+      --help|-h) usage_init; exit 0 ;;
+      *) fail_with_example "Unknown option: $1" "jarvise init --dry-run" ;;
+    esac
+  done
+
+  if [[ -f "$STATE_FILE" && $force -eq 0 ]]; then
+    echo "already initialized"
+    echo "state_file: $STATE_FILE"
+    exit 0
+  fi
+
+  if [[ $dry_run -eq 1 ]]; then
+    echo "dry-run: would create $STATE_FILE"
+    exit 0
+  fi
+
+  mkdir -p "$STATE_DIR"
+  printf '{"initialized_at":"%s","root":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ROOT" >"$STATE_FILE"
+  echo "initialized"
+  echo "state_file: $STATE_FILE"
+}
+
+cmd_ingest() {
+  local py
+  if [[ -x "$ROOT/.venv/bin/python" ]]; then
+    py="$ROOT/.venv/bin/python"
+  elif command -v python3 >/dev/null; then
+    py="python3"
+  else
+    fail_with_example "python3 not found" "python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'"
+  fi
+  export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:$PYTHONPATH}"
+  exec "$py" -m jarvise_ingest "$@"
+}
+
+cmd_doctor() {
+  local as_json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) as_json=1; shift ;;
+      --help|-h) usage_doctor; exit 0 ;;
+      *) fail_with_example "Unknown option: $1" "jarvise doctor --json" ;;
+    esac
+  done
+
+  local bash_ok=true git_ok=true
+  command -v bash >/dev/null || bash_ok=false
+  command -v git >/dev/null || git_ok=false
+
+  if [[ $as_json -eq 1 ]]; then
+    printf '{"bash":%s,"git":%s,"ok":%s}\n' \
+      "$bash_ok" "$git_ok" \
+      "$([[ $bash_ok == true && $git_ok == true ]] && echo true || echo false)"
+  else
+    echo "bash: $bash_ok"
+    echo "git: $git_ok"
+    if [[ $bash_ok == true && $git_ok == true ]]; then
+      echo "ok: true"
+    else
+      echo "ok: false"
+      echo "Error: Missing required tools." >&2
+      echo "  jarvise doctor --json" >&2
+      exit 1
+    fi
+  fi
+}
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    usage_root
+    exit 0
+  fi
+
+  local cmd="$1"
+  shift
+  case "$cmd" in
+    --help|-h) usage_root; exit 0 ;;
+    status) cmd_status "$@" ;;
+    init) cmd_init "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    ingest) cmd_ingest "$@" ;;
+    *)
+      fail_with_example "Unknown command: $cmd" "jarvise ingest --symbol BTCUSDT --skip-derivatives --json"
+      ;;
+  esac
+}
+
+main "$@"

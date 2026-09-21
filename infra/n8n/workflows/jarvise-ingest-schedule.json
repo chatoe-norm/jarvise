@@ -1,0 +1,67 @@
+{
+  "name": "Jarvise paper ingest schedule",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "cron-ingest",
+      "name": "Every 15m",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "command": "cd \"${JARVISE_ROOT:-/host/jarvise}\" && ./bin/jarvise ingest --symbol BTCUSDT,ETHUSDT --timeframe 1h --limit 200 --skip-derivatives --json"
+      },
+      "id": "exec-ingest",
+      "name": "Run jarvise ingest (paper only)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [260, 0],
+      "notes": "GET-only paper ingest. No order placement. Prefer host Execute Command / SSH if container lacks ./bin/jarvise venv."
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "jarvise:ingest:last",
+        "value": "={{ JSON.stringify({ at: $now.toISO(), ok: true, paper_only: true, note: 'no order placement', stdout: $json.stdout }) }}"
+      },
+      "id": "redis-status",
+      "name": "Redis status jarvise:ingest:last",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [520, 0],
+      "notes": "Stores last paper-ingest status. Configure Redis credentials to redis://redis:6379"
+    }
+  ],
+  "connections": {
+    "Every 15m": {
+      "main": [[{ "node": "Run jarvise ingest (paper only)", "type": "main", "index": 0 }]]
+    },
+    "Run jarvise ingest (paper only)": {
+      "main": [[{ "node": "Redis status jarvise:ingest:last", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "n8n UI → Workflows → Import from File → infra/n8n/workflows/jarvise-ingest-schedule.json"
+    }
+  },
+  "pinData": {},
+  "active": false
+}
