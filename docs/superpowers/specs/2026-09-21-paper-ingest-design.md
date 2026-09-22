@@ -40,8 +40,9 @@ bin/jarvise ingest
         ├─ providers/
         │     binance_klines.py   → OHLC klines (no API key)
         │     coinglass.py        → OI, funding, liquidations (CG-API-KEY)
+        ├─ timeframes.py          → allowed intervals and their durations
         ├─ indicators.py          → ATR-14, RSI-14, EMA-20/200 math + warm-up rule
-        ├─ series.py              → recompute indicators over the whole stored series
+        ├─ series.py              → recompute indicators, report series gaps
         ├─ db.py                  → SQLite open, migrate, upsert
         └─ cli.py                 → argparse, dry-run plan, JSON summary
         │
@@ -63,7 +64,10 @@ jarvise ingest --help
 Options:
   --symbol SYMBOL       Trading pair, e.g. BTCUSDT (repeatable or comma-separated)
   --timeframe TF        One of: 15m, 1h, 4h, 1d (default: 1h)
-  --limit N             Candles to fetch (default: 200, max: 1000)
+  --limit N             Candles to fetch (default: 200, max: 1000; page size when
+                        --since is set, where it defaults to 1000)
+  --since INSTANT       Backfill from an ISO-8601 instant, paging past the cap
+  --until INSTANT       Stop the backfill here (requires --since; default: now)
   --skip-derivatives    Skip CoinGlass (OHLC-only run)
   --db PATH             SQLite path (default: data/analytics/jarvise.db)
   --dry-run             Print plan; write nothing
@@ -74,6 +78,7 @@ Examples:
   jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 200
   jarvise ingest --symbol BTCUSDT,ETHUSDT --dry-run --json
   jarvise ingest --symbol BTCUSDT --skip-derivatives
+  jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives
 ```
 
 Missing required `--symbol` → fail fast with the example invocation above (CLI-for-agents pattern).
@@ -125,7 +130,7 @@ Dry-run prints the same shape with planned counts and `dry_run: true`, zero writ
 ## Data flow
 
 1. Parse flags; resolve DB path; open SQLite; migrate.
-2. For each symbol: fetch klines (closed candles only) → upsert OHLCV into `market_technicals` → recompute indicator columns from the full stored series.
+2. For each symbol: fetch klines (closed candles only; paged from `--since` when given) → upsert OHLCV into `market_technicals` → recompute indicator columns from the full stored series → report any gaps in that series.
 3. Unless `--skip-derivatives`: map `BTCUSDT` → `BTC`, fetch CoinGlass series → upsert `derivatives_analytics`.
 4. Print summary; exit 0 on full success. Partial provider failure: exit non-zero after writing whatever succeeded, and list failures in JSON `errors[]`.
 
@@ -134,6 +139,9 @@ Dry-run prints the same shape with planned counts and `dry_run: true`, zero writ
 | Case | Behavior |
 |---|---|
 | Missing `--symbol` | Exit 2 + example |
+| `--until` without `--since`, unparseable instant, or `--since` not before `--until` | Exit 2 + backfill example |
+| Backfill window needs more pages than `max_pages` | Exit 1; message says to narrow the window |
+| Gap inside a stored series | Reported in the summary (`gaps`), not fatal — weekends are normal for stocks |
 | Network / HTTP error | Exit 1; message includes provider + status + retry hint |
 | Missing CoinGlass key | Exit 2 unless `--skip-derivatives` |
 | Empty kline response | Exit 1; do not wipe existing rows |

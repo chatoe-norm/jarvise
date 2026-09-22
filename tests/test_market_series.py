@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from jarvise_ingest.db import open_db, upsert_market_technicals
-from jarvise_ingest.series import recompute_indicators
+from jarvise_ingest.series import find_gaps, recompute_indicators
 
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "1h"
@@ -123,6 +123,32 @@ def test_recompute_refuses_a_series_with_a_missing_close(tmp_path: Path):
 
     with pytest.raises(ValueError, match="incomplete candle"):
         recompute_indicators(conn, SYMBOL, TIMEFRAME)
+    conn.close()
+
+
+def test_find_gaps_is_empty_for_a_contiguous_series(tmp_path: Path):
+    conn = open_db(tmp_path / "t.db")
+    upsert_market_technicals(conn, _candles(0, 50))
+
+    assert find_gaps(conn, SYMBOL, TIMEFRAME) == []
+    conn.close()
+
+
+def test_find_gaps_reports_the_missing_span(tmp_path: Path):
+    conn = open_db(tmp_path / "t.db")
+    upsert_market_technicals(conn, _candles(0, 20) + _candles(25, 10))
+
+    gaps = find_gaps(conn, SYMBOL, TIMEFRAME)
+
+    # candles 20..24 are absent: five missing between index 19 and index 25
+    assert gaps == [(EPOCH_MS + 19 * STEP_MS, EPOCH_MS + 25 * STEP_MS, 5)]
+    conn.close()
+
+
+def test_find_gaps_on_an_empty_series_is_empty(tmp_path: Path):
+    conn = open_db(tmp_path / "t.db")
+
+    assert find_gaps(conn, SYMBOL, TIMEFRAME) == []
     conn.close()
 
 
