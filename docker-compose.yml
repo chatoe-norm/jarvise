@@ -8,7 +8,7 @@ name: jarvise
 
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine
     restart: unless-stopped
     networks: [jarvise_net]
     ports:
@@ -23,7 +23,7 @@ services:
       retries: 10
 
   qdrant:
-    image: qdrant/qdrant:v1.13.4
+    image: qdrant/qdrant:v1.19.1
     restart: unless-stopped
     networks: [jarvise_net]
     ports:
@@ -39,7 +39,7 @@ services:
       start_period: 10s
 
   n8n:
-    image: n8nio/n8n:2.39.10
+    image: n8nio/n8n:2.40.0
     restart: unless-stopped
     networks: [jarvise_net]
     ports:
@@ -135,7 +135,7 @@ services:
       start_period: 40s
 
   openclaw:
-    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.2}
     restart: unless-stopped
     networks: [jarvise_net]
     ports:
