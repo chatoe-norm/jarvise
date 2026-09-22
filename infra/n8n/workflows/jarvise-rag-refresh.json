@@ -31,7 +31,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [280, 0],
-      "notes": "NotebookLM + fetch + Firecrawl into Qdrant. Respects kill switch. No order placement. Leave inactive until nlm is logged in on the VPS."
+      "notes": "NotebookLM + fetch + Firecrawl + openclaw into Qdrant. Respects kill switch. No order placement. Requires nlm profile chatoe under data/nlm (NOTEBOOKLM_MCP_CLI_PATH)."
     }
   ],
   "connections": {
@@ -49,5 +49,5 @@
       "no_order_placement": true
     }
   },
-  "active": false
+  "active": true
 }
