@@ -9,7 +9,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from jarvise_ingest.db import append_derivatives, open_db, upsert_market_technicals
+from jarvise_ingest.db import (
+    append_derivatives,
+    open_db,
+    universe_as_of,
+    upsert_market_technicals,
+)
 from jarvise_ingest.providers.binance_klines import (
     MAX_PAGE_LIMIT,
     fetch_klines,
@@ -18,6 +23,7 @@ from jarvise_ingest.providers.binance_klines import (
 from jarvise_ingest.providers.coinglass import fetch_derivatives, resolve_api_key
 from jarvise_ingest.series import find_gaps, recompute_indicators
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
+from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
@@ -25,6 +31,9 @@ DEFAULT_LIMIT = 200
 EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 1h --skip-derivatives --json"
 BACKFILL_EXAMPLE = (
     "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives"
+)
+UNIVERSE_EXAMPLE = (
+    "jarvise ingest --universe paper_core --timeframe 4h --skip-derivatives --json"
 )
 
 
@@ -53,13 +62,21 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Examples:\n  {EXAMPLE}\n"
         "  jarvise ingest --symbol BTCUSDT,ETHUSDT --dry-run --json\n"
-        f"  {BACKFILL_EXAMPLE}",
+        f"  {BACKFILL_EXAMPLE}\n"
+        f"  {UNIVERSE_EXAMPLE}",
     )
     p.add_argument(
         "--symbol",
         action="append",
         dest="symbols",
         help="Trading pair, e.g. BTCUSDT (repeatable or comma-separated)",
+    )
+    p.add_argument(
+        "--universe",
+        help=(
+            f"Resolve symbols from a point-in-time universe "
+            f"(seeded: {PAPER_CORE}); may combine with --symbol"
+        ),
     )
     p.add_argument(
         "--timeframe",
@@ -108,13 +125,13 @@ def build_parser() -> argparse.ArgumentParser:
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not args.symbols:
-        print(f"Error: --symbol is required.\n  {EXAMPLE}", file=sys.stderr)
+    if not args.symbols and not args.universe:
+        print(
+            f"Error: --symbol or --universe is required.\n  {EXAMPLE}\n  {UNIVERSE_EXAMPLE}",
+            file=sys.stderr,
+        )
         return 2
-    symbols = _parse_symbols(args.symbols)
-    if not symbols:
-        print(f"Error: --symbol is required.\n  {EXAMPLE}", file=sys.stderr)
-        return 2
+    symbols = _parse_symbols(args.symbols or [])
     if args.until and not args.since:
         print(
             f"Error: --until requires --since.\n  {BACKFILL_EXAMPLE}", file=sys.stderr
@@ -160,6 +177,39 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Resolve --universe against membership at the end of the window (or now).
+    # Opens the DB briefly to seed paper_core and query; closed before ingest.
+    universe_id = args.universe
+    if universe_id:
+        resolve_conn = open_db(args.db)
+        try:
+            if universe_id == PAPER_CORE:
+                seed_paper_core(resolve_conn)
+            as_of_ms = int((until or datetime.now(timezone.utc)).timestamp() * 1000)
+            from_universe = universe_as_of(resolve_conn, universe_id, as_of_ms)
+        finally:
+            resolve_conn.close()
+        if not from_universe and not symbols:
+            print(
+                f"Error: universe {universe_id!r} has no eligible symbols at "
+                f"as_of={as_of_ms}.\n  {UNIVERSE_EXAMPLE}",
+                file=sys.stderr,
+            )
+            return 2
+        seen: set[str] = set()
+        merged: list[str] = []
+        for sym in symbols + from_universe:
+            if sym not in seen:
+                seen.add(sym)
+                merged.append(sym)
+        symbols = merged
+    elif not symbols:
+        print(
+            f"Error: --symbol or --universe is required.\n  {EXAMPLE}\n  {UNIVERSE_EXAMPLE}",
+            file=sys.stderr,
+        )
+        return 2
+
     started = time.perf_counter()
     market_summary: dict = {}
     deriv_summary: dict = {}
@@ -190,6 +240,7 @@ def run(argv: list[str] | None = None) -> int:
             "ok": True,
             "dry_run": True,
             "db": str(args.db),
+            "universe": universe_id,
             "market_technicals": market_summary,
             "derivatives_analytics": deriv_summary,
             "skipped": skipped,
@@ -264,6 +315,7 @@ def run(argv: list[str] | None = None) -> int:
         "ok": ok,
         "dry_run": False,
         "db": str(args.db.resolve()),
+        "universe": universe_id,
         "market_technicals": market_summary,
         "derivatives_analytics": deriv_summary,
         "skipped": skipped,
