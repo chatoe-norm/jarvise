@@ -17,6 +17,8 @@ services:
       - "${TAILSCALE_IP:?Set TAILSCALE_IP to the VPS Tailscale IPv4}:${N8N_PORT:-5678}:5678"
     environment:
       N8N_HOST: ${N8N_HOST:-n8n.jarvise.ts.net}
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-false}
       WEBHOOK_URL: http://${TAILSCALE_IP}:${N8N_PORT:-5678}/
 
   openclaw:

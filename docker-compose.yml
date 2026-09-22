@@ -39,7 +39,7 @@ services:
       start_period: 10s
 
   n8n:
-    image: n8nio/n8n:1.82.3
+    image: n8nio/n8n:2.39.10
     restart: unless-stopped
     networks: [jarvise_net]
     ports:
@@ -48,6 +48,8 @@ services:
       - N8N_HOST=${N8N_HOST:-localhost}
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
+      # Tailscale / private HTTP: secure cookies require HTTPS or localhost.
+      - N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE:-false}
       - WEBHOOK_URL=http://127.0.0.1:${N8N_PORT:-5678}/
       - GENERIC_TIMEZONE=Asia/Bangkok
       - N8N_BASIC_AUTH_ACTIVE=true
