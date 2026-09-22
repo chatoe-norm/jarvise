@@ -1,9 +1,9 @@
 from pathlib import Path
 
 from jarvise_ingest.db import (
+    append_derivatives,
     count_market,
     open_db,
-    upsert_derivatives,
     upsert_market_technicals,
 )
 
@@ -40,7 +40,7 @@ def test_upsert_market_idempotent(tmp_path: Path):
     conn.close()
 
 
-def test_upsert_derivatives_idempotent(tmp_path: Path):
+def test_append_derivatives_skips_identical_payload(tmp_path: Path):
     db = tmp_path / "t.db"
     conn = open_db(db)
     row = {
@@ -51,8 +51,8 @@ def test_upsert_derivatives_idempotent(tmp_path: Path):
         "long_short_ratio": None,
         "liquidations_24h_usd": 1e6,
     }
-    upsert_derivatives(conn, [row])
-    upsert_derivatives(conn, [row])
+    assert append_derivatives(conn, [row], ingested_at=1_800_000_000_000) == 1
+    assert append_derivatives(conn, [row], ingested_at=1_800_000_100_000) == 0
     assert count_derivatives_rows(conn) == 1
     conn.close()
 

@@ -2,11 +2,16 @@
 
 Timestamps are INTEGER Unix milliseconds (UTC).
 GET-only analytics storage — no order placement.
+
+Derivatives rows are bitemporal: `timestamp` is event time (the bar CoinGlass
+attributes) and `ingested_at` is when Jarvise learned the values. Revisions
+append a new version; they never overwrite the prior one.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 SCHEMA_SQL = """
@@ -32,11 +37,12 @@ CREATE TABLE IF NOT EXISTS market_technicals (
 CREATE TABLE IF NOT EXISTS derivatives_analytics (
     symbol TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
+    ingested_at INTEGER NOT NULL,
     open_interest_usd REAL,
     funding_rate REAL,
     long_short_ratio REAL,
     liquidations_24h_usd REAL,
-    PRIMARY KEY (symbol, timestamp)
+    PRIMARY KEY (symbol, timestamp, ingested_at)
 );
 
 CREATE TABLE IF NOT EXISTS order_book_microstructure (
@@ -87,6 +93,13 @@ CREATE TABLE IF NOT EXISTS analysis_output (
 );
 """
 
+_DERIV_METRIC_KEYS = (
+    "open_interest_usd",
+    "funding_rate",
+    "long_short_ratio",
+    "liquidations_24h_usd",
+)
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,8 +108,45 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate_derivatives_bitemporal(conn: sqlite3.Connection) -> None:
+    """Rebuild legacy (symbol, timestamp) PK tables to include ingested_at."""
+    cols = _table_columns(conn, "derivatives_analytics")
+    if not cols or "ingested_at" in cols:
+        return
+
+    conn.executescript(
+        """
+        ALTER TABLE derivatives_analytics RENAME TO derivatives_analytics_legacy;
+        CREATE TABLE derivatives_analytics (
+            symbol TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            ingested_at INTEGER NOT NULL,
+            open_interest_usd REAL,
+            funding_rate REAL,
+            long_short_ratio REAL,
+            liquidations_24h_usd REAL,
+            PRIMARY KEY (symbol, timestamp, ingested_at)
+        );
+        INSERT INTO derivatives_analytics (
+            symbol, timestamp, ingested_at,
+            open_interest_usd, funding_rate, long_short_ratio, liquidations_24h_usd
+        )
+        SELECT
+            symbol, timestamp, timestamp,
+            open_interest_usd, funding_rate, long_short_ratio, liquidations_24h_usd
+        FROM derivatives_analytics_legacy;
+        DROP TABLE derivatives_analytics_legacy;
+        """
+    )
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+    _migrate_derivatives_bitemporal(conn)
     conn.commit()
 
 
@@ -159,26 +209,97 @@ def write_indicators(conn: sqlite3.Connection, rows: list[dict]) -> int:
     return len(rows)
 
 
-def upsert_derivatives(conn: sqlite3.Connection, rows: list[dict]) -> int:
+def _metrics_equal(left: dict | sqlite3.Row, right: dict) -> bool:
+    for key in _DERIV_METRIC_KEYS:
+        lv = left[key] if not isinstance(left, dict) else left.get(key)
+        rv = right.get(key)
+        if lv is None and rv is None:
+            continue
+        if lv is None or rv is None:
+            return False
+        if float(lv) != float(rv):
+            return False
+    return True
+
+
+def append_derivatives(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+    *,
+    ingested_at: int | None = None,
+) -> int:
+    """Append a knowledge-time version of each row; skip unchanged payloads.
+
+    `timestamp` is event time. `ingested_at` is when Jarvise learned the values.
+    """
     if not rows:
         return 0
-    sql = """
+    stamp = ingested_at if ingested_at is not None else int(time.time() * 1000)
+    insert_sql = """
     INSERT INTO derivatives_analytics (
-        symbol, timestamp, open_interest_usd, funding_rate,
+        symbol, timestamp, ingested_at, open_interest_usd, funding_rate,
         long_short_ratio, liquidations_24h_usd
     ) VALUES (
-        :symbol, :timestamp, :open_interest_usd, :funding_rate,
+        :symbol, :timestamp, :ingested_at, :open_interest_usd, :funding_rate,
         :long_short_ratio, :liquidations_24h_usd
     )
-    ON CONFLICT(symbol, timestamp) DO UPDATE SET
-        open_interest_usd=excluded.open_interest_usd,
-        funding_rate=excluded.funding_rate,
-        long_short_ratio=excluded.long_short_ratio,
-        liquidations_24h_usd=excluded.liquidations_24h_usd
     """
-    conn.executemany(sql, rows)
+    latest_sql = """
+    SELECT open_interest_usd, funding_rate, long_short_ratio, liquidations_24h_usd
+    FROM derivatives_analytics
+    WHERE symbol=? AND timestamp=?
+    ORDER BY ingested_at DESC
+    LIMIT 1
+    """
+    written = 0
+    for row in rows:
+        previous = conn.execute(
+            latest_sql, (row["symbol"], row["timestamp"])
+        ).fetchone()
+        if previous is not None and _metrics_equal(previous, row):
+            continue
+        payload = {
+            "symbol": row["symbol"],
+            "timestamp": row["timestamp"],
+            "ingested_at": stamp,
+            "open_interest_usd": row.get("open_interest_usd"),
+            "funding_rate": row.get("funding_rate"),
+            "long_short_ratio": row.get("long_short_ratio"),
+            "liquidations_24h_usd": row.get("liquidations_24h_usd"),
+        }
+        conn.execute(insert_sql, payload)
+        written += 1
     conn.commit()
-    return len(rows)
+    return written
+
+
+def as_of_derivatives(
+    conn: sqlite3.Connection, symbol: str, as_of_ms: int
+) -> list[dict]:
+    """Latest version of each event-time row that was known by `as_of_ms`."""
+    sql = """
+    SELECT d.symbol, d.timestamp, d.ingested_at,
+           d.open_interest_usd, d.funding_rate,
+           d.long_short_ratio, d.liquidations_24h_usd
+    FROM derivatives_analytics d
+    INNER JOIN (
+        SELECT timestamp, MAX(ingested_at) AS ingested_at
+        FROM derivatives_analytics
+        WHERE symbol=? AND ingested_at <= ?
+        GROUP BY timestamp
+    ) latest
+      ON d.timestamp = latest.timestamp
+     AND d.ingested_at = latest.ingested_at
+    WHERE d.symbol=?
+    ORDER BY d.timestamp
+    """
+    cur = conn.execute(sql, (symbol, as_of_ms, symbol))
+    return [dict(row) for row in cur.fetchall()]
+
+
+def upsert_derivatives(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """Backward-compatible alias — appends versions; does not overwrite."""
+    return append_derivatives(conn, rows)
 
 
 def count_market(conn: sqlite3.Connection, symbol: str, timeframe: str) -> int:

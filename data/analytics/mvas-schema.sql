@@ -23,11 +23,12 @@ CREATE TABLE IF NOT EXISTS market_technicals (
 CREATE TABLE IF NOT EXISTS derivatives_analytics (
     symbol TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
+    ingested_at INTEGER NOT NULL,
     open_interest_usd REAL,
     funding_rate REAL,
     long_short_ratio REAL,
     liquidations_24h_usd REAL,
-    PRIMARY KEY (symbol, timestamp)
+    PRIMARY KEY (symbol, timestamp, ingested_at)
 );
 
 CREATE TABLE IF NOT EXISTS order_book_microstructure (
