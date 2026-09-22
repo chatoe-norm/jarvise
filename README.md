@@ -126,5 +126,6 @@ Exit codes: `0` finished, `1` startup or missing config, `2` the agent ran and f
 - [docs/product-usage.md](docs/product-usage.md) — product invoke paths (paper phase)
 - [docs/superpowers/specs/2026-09-23-product-roadmap-design.md](docs/superpowers/specs/2026-09-23-product-roadmap-design.md) — full product roadmap (P0–P5)
 - [docs/superpowers/plans/2026-09-23-p1-analytics-ui.md](docs/superpowers/plans/2026-09-23-p1-analytics-ui.md) — P1 Analytics UI implementation
+- [docs/superpowers/plans/2026-09-23-p2-paper-auto-trade.md](docs/superpowers/plans/2026-09-23-p2-paper-auto-trade.md) — P2 paper auto-trade ledger
 - [docs/superpowers/specs/2026-09-21-paper-ingest-design.md](docs/superpowers/specs/2026-09-21-paper-ingest-design.md)
 - [docs/superpowers/specs/2026-09-22-openclaw-intelligence-audit.md](docs/superpowers/specs/2026-09-22-openclaw-intelligence-audit.md)

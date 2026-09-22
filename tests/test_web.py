@@ -4,7 +4,12 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from jarvise_ingest.db import open_db, upsert_analysis_output
+from jarvise_ingest.db import (
+    ensure_paper_account,
+    open_db,
+    upsert_analysis_output,
+)
+from jarvise_paper.engine import apply_signal
 from jarvise_web.app import app
 
 
@@ -96,3 +101,39 @@ def test_analytics_and_api_with_rows(monkeypatch, tmp_path: Path) -> None:
     assert len(payload["rows"]) == 1
     assert payload["rows"][0]["action"] == "long"
     assert payload["rows"][0]["timeframe"] == "4h"
+
+
+def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    apply_signal(
+        conn,
+        analysis={
+            "analysis_id": "p1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "size_pct_equity": 5.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        mid_price=100.0,
+        timeframe="4h",
+        now_ms=1_700_000_000_000,
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+
+    client = TestClient(app)
+    html = client.get("/analytics")
+    assert html.status_code == 200
+    assert b"Paper ledger" in html.content
+
+    api = client.get("/api/paper")
+    assert api.status_code == 200
+    payload = api.json()
+    assert payload["ok"] is True
+    assert payload["paper_only"] is True
+    assert payload["equity"] is not None
+    assert any(p["symbol"] == "BTCUSDT" for p in payload["positions"])

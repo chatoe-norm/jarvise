@@ -85,15 +85,17 @@ UIs in this phase: n8n (`:5678`), control web health (`:8080`) — not a trading
 
 1. **Market data fresh** — n8n ingest on VPS, or `jarvise ingest` by hand
 2. **Paper signal** — `jarvise analyze --json` (or `--universe paper_core`)
-3. **Check doctrine** — Notebook / RAG before any human decision
-4. **Kill switch** — Redis `jarvise:kill_switch` per [ops.md](deploy/ops.md) to stop background work
+3. **Paper fills (P2)** — `jarvise paper run --symbol BTCUSDT --timeframe 4h --json` (simulated ledger; no exchange orders)
+4. **Check doctrine** — Notebook / RAG before any human decision
+5. **Kill switch** — Redis `jarvise:kill_switch` per [ops.md](deploy/ops.md) to stop background work
 
-**Not in this product yet:** live order entry, paper fill simulator, manual-approval gate (later deployment-ladder phases). Full path to auto-trade + analytics UI + exchange accounts: [product roadmap](superpowers/specs/2026-09-23-product-roadmap-design.md).
+**Not in this product yet:** live order entry, manual-approval gate (later deployment-ladder phases). Full path to auto-trade + analytics UI + exchange accounts: [product roadmap](superpowers/specs/2026-09-23-product-roadmap-design.md).
 
 ## Related
 
 - [README quick start](../README.md)
 - [Product roadmap (P0–P5)](superpowers/specs/2026-09-23-product-roadmap-design.md)
 - [P1 Analytics UI plan](superpowers/plans/2026-09-23-p1-analytics-ui.md) — `/analytics` on VPS (`http://$TAILSCALE_IP:8080/analytics`)
+- [P2 Paper auto-trade plan](superpowers/plans/2026-09-23-p2-paper-auto-trade.md) — `jarvise paper run|status`
 - [Paper ingest design](superpowers/specs/2026-09-21-paper-ingest-design.md)
 - [OpenClaw intelligence audit](superpowers/specs/2026-09-22-openclaw-intelligence-audit.md)

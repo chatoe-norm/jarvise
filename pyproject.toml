@@ -32,6 +32,7 @@ web = [
 jarvise = "jarvise.cli:app"
 jarvise-ingest = "jarvise_ingest.cli:main"
 jarvise-analyze = "jarvise_analyze.cli:main"
+jarvise-paper = "jarvise_paper.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

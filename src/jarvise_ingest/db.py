@@ -104,6 +104,36 @@ CREATE TABLE IF NOT EXISTS universe_membership (
     delisted_at INTEGER,
     PRIMARY KEY (universe_id, symbol, listed_at)
 );
+
+-- Simulated paper ledger (P2). No exchange order placement.
+CREATE TABLE IF NOT EXISTS paper_account (
+    key TEXT NOT NULL PRIMARY KEY,
+    value REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paper_orders (
+    order_id TEXT NOT NULL PRIMARY KEY,
+    ts INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    side TEXT NOT NULL,
+    qty REAL NOT NULL,
+    price REAL NOT NULL,
+    fee_usd REAL NOT NULL,
+    slip_bps REAL NOT NULL,
+    analysis_id TEXT,
+    reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS paper_positions (
+    symbol TEXT NOT NULL PRIMARY KEY,
+    side TEXT NOT NULL,
+    qty REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    entry_ts INTEGER NOT NULL,
+    unrealized_pnl REAL NOT NULL DEFAULT 0,
+    realized_pnl REAL NOT NULL DEFAULT 0
+);
 """
 
 _DERIV_METRIC_KEYS = (
@@ -428,6 +458,167 @@ def list_analysis_output(
         params,
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+STARTING_PAPER_EQUITY = 10_000.0
+
+
+def ensure_paper_account(
+    conn: sqlite3.Connection, *, starting_equity: float = STARTING_PAPER_EQUITY
+) -> dict[str, float]:
+    """Ensure paper_account keys exist; return cash/equity/starting_equity."""
+    row = conn.execute(
+        "SELECT value FROM paper_account WHERE key='starting_equity'"
+    ).fetchone()
+    if row is None:
+        conn.executemany(
+            "INSERT INTO paper_account (key, value) VALUES (?, ?)",
+            [
+                ("starting_equity", float(starting_equity)),
+                ("cash", float(starting_equity)),
+                ("equity", float(starting_equity)),
+            ],
+        )
+        conn.commit()
+    return get_paper_account(conn)
+
+
+def get_paper_account(conn: sqlite3.Connection) -> dict[str, float]:
+    rows = conn.execute("SELECT key, value FROM paper_account").fetchall()
+    data = {str(r[0]): float(r[1]) for r in rows}
+    return {
+        "starting_equity": data.get("starting_equity", STARTING_PAPER_EQUITY),
+        "cash": data.get("cash", STARTING_PAPER_EQUITY),
+        "equity": data.get("equity", STARTING_PAPER_EQUITY),
+    }
+
+
+def set_paper_account_value(conn: sqlite3.Connection, key: str, value: float) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_account (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (key, float(value)),
+    )
+
+
+def insert_paper_order(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_orders (
+            order_id, ts, symbol, timeframe, side, qty, price,
+            fee_usd, slip_bps, analysis_id, reason
+        ) VALUES (
+            :order_id, :ts, :symbol, :timeframe, :side, :qty, :price,
+            :fee_usd, :slip_bps, :analysis_id, :reason
+        )
+        """,
+        row,
+    )
+
+
+def upsert_paper_position(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_positions (
+            symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl
+        ) VALUES (
+            :symbol, :side, :qty, :entry_price, :entry_ts, :unrealized_pnl, :realized_pnl
+        )
+        ON CONFLICT(symbol) DO UPDATE SET
+            side=excluded.side,
+            qty=excluded.qty,
+            entry_price=excluded.entry_price,
+            entry_ts=excluded.entry_ts,
+            unrealized_pnl=excluded.unrealized_pnl,
+            realized_pnl=excluded.realized_pnl
+        """,
+        row,
+    )
+
+
+def delete_paper_position(conn: sqlite3.Connection, symbol: str) -> None:
+    conn.execute("DELETE FROM paper_positions WHERE symbol=?", (symbol.upper(),))
+
+
+def get_paper_position(conn: sqlite3.Connection, symbol: str) -> dict | None:
+    cur = conn.execute(
+        """
+        SELECT symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl
+        FROM paper_positions WHERE symbol=?
+        """,
+        (symbol.upper(),),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_paper_positions(conn: sqlite3.Connection) -> list[dict]:
+    cur = conn.execute(
+        """
+        SELECT symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl
+        FROM paper_positions
+        ORDER BY symbol
+        """
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def list_paper_orders(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
+    lim = max(1, min(int(limit), 500))
+    cur = conn.execute(
+        """
+        SELECT order_id, ts, symbol, timeframe, side, qty, price,
+               fee_usd, slip_bps, analysis_id, reason
+        FROM paper_orders
+        ORDER BY ts DESC
+        LIMIT ?
+        """,
+        (lim,),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def load_latest_analysis(
+    conn: sqlite3.Connection, symbol: str, timeframe: str
+) -> dict | None:
+    cur = conn.execute(
+        """
+        SELECT analysis_id, timestamp, symbol, timeframe, regime_state,
+               confidence_score, action, invalidation_price, size_pct_equity, thesis
+        FROM analysis_output
+        WHERE symbol=? AND timeframe=?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), timeframe),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def upsert_performance_risk_metrics(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO performance_risk_metrics (
+            strategy_id, timestamp, expected_value_ev, sharpe_ratio, sortino_ratio,
+            max_drawdown_pct, daily_pnl_usd, regime_state, confidence_score
+        ) VALUES (
+            :strategy_id, :timestamp, :expected_value_ev, :sharpe_ratio, :sortino_ratio,
+            :max_drawdown_pct, :daily_pnl_usd, :regime_state, :confidence_score
+        )
+        ON CONFLICT(strategy_id, timestamp) DO UPDATE SET
+            expected_value_ev=excluded.expected_value_ev,
+            sharpe_ratio=excluded.sharpe_ratio,
+            sortino_ratio=excluded.sortino_ratio,
+            max_drawdown_pct=excluded.max_drawdown_pct,
+            daily_pnl_usd=excluded.daily_pnl_usd,
+            regime_state=excluded.regime_state,
+            confidence_score=excluded.confidence_score
+        """,
+        row,
+    )
 
 
 def record_membership(

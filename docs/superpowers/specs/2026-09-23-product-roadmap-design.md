@@ -126,6 +126,8 @@ Extend [`src/jarvise_web/app.py`](../../../src/jarvise_web/app.py) (Tailscale-bo
 - Kill-switch halts paper run schedules the same way it halts rag/ingest helpers that check it  
 - **No** Binance (or other) signed trade endpoints  
 
+**Implementation plan:** [2026-09-23-p2-paper-auto-trade.md](../plans/2026-09-23-p2-paper-auto-trade.md).
+
 ### P3 — Exchange account (read-only)
 
 - Binance global account endpoints with **read-only** key permissions  
@@ -186,6 +188,7 @@ Exact columns land in each phase’s implementation plan; names above are the ro
 
 - [Product usage (paper)](../../product-usage.md)  
 - [P1 Analytics UI plan](../plans/2026-09-23-p1-analytics-ui.md)  
+- [P2 Paper auto-trade plan](../plans/2026-09-23-p2-paper-auto-trade.md)  
 - [Paper ingest design](2026-09-21-paper-ingest-design.md)  
 - [OpenClaw intelligence audit](2026-09-22-openclaw-intelligence-audit.md)  
 - [Hostinger VPS deploy](../../deploy/hostinger-vps.md)  

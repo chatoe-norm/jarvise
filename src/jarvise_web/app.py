@@ -13,7 +13,14 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from jarvise_ingest.db import list_analysis_output, open_db
+from jarvise_ingest.db import (
+    ensure_paper_account,
+    get_paper_account,
+    list_analysis_output,
+    list_paper_orders,
+    list_paper_positions,
+    open_db,
+)
 
 app = FastAPI(title="Jarvise Control", docs_url=None, redoc_url=None)
 security = HTTPBasic(auto_error=False)
@@ -238,6 +245,76 @@ def set_kill_switch(
     return RedirectResponse("/", status_code=303)
 
 
+def load_paper_ledger() -> tuple[dict[str, Any], str | None]:
+    path = db_path()
+    if not path.exists():
+        return {"account": None, "positions": [], "orders": []}, f"Database not found: {path}"
+    try:
+        conn = open_db(path)
+        try:
+            ensure_paper_account(conn)
+            payload = {
+                "account": get_paper_account(conn),
+                "positions": list_paper_positions(conn),
+                "orders": list_paper_orders(conn, limit=20),
+            }
+        finally:
+            conn.close()
+        return payload, None
+    except Exception as exc:  # noqa: BLE001
+        return {"account": None, "positions": [], "orders": []}, str(exc)
+
+
+def _paper_ledger_html() -> str:
+    ledger, err = load_paper_ledger()
+    if err and ledger.get("account") is None:
+        return (
+            f'<div class="card"><strong>Paper ledger</strong>'
+            f'<p class="muted">{html.escape(err)}</p></div>'
+        )
+    acct = ledger.get("account") or {}
+    positions = ledger.get("positions") or []
+    orders = ledger.get("orders") or []
+    pos_rows = []
+    for p in positions:
+        pos_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(p.get('symbol') or ''))}</td>"
+            f"<td>{html.escape(str(p.get('side') or ''))}</td>"
+            f"<td>{html.escape(str(p.get('qty') or ''))}</td>"
+            f"<td>{html.escape(str(p.get('entry_price') or ''))}</td>"
+            f"<td>{html.escape(str(p.get('unrealized_pnl') or ''))}</td>"
+            "</tr>"
+        )
+    pos_table = (
+        "<p class='muted'>No open paper positions. Run <code>jarvise paper run</code>.</p>"
+        if not pos_rows
+        else (
+            "<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th>"
+            "<th>Entry</th><th>uPnL</th></tr></thead>"
+            f"<tbody>{''.join(pos_rows)}</tbody></table>"
+        )
+    )
+    order_bits = []
+    for o in orders[:10]:
+        order_bits.append(
+            f"{o.get('ts')} {o.get('symbol')} {o.get('side')} "
+            f"qty={o.get('qty')} @ {o.get('price')} ({o.get('reason')})"
+        )
+    orders_pre = html.escape("\n".join(order_bits) if order_bits else "(no fills yet)")
+    return f"""
+    <div class="card">
+      <strong>Paper ledger</strong>
+      <p class="muted">Simulated only — no exchange orders.
+        equity={html.escape(str(acct.get('equity', '')))}
+        cash={html.escape(str(acct.get('cash', '')))}
+      </p>
+      {pos_table}
+      <pre>{orders_pre}</pre>
+    </div>
+    """
+
+
 @app.get("/analytics", response_class=HTMLResponse)
 def analytics(
     _: None = Depends(require_auth),
@@ -260,6 +337,7 @@ def analytics(
       </form>
       <p class="muted" style="margin:.75rem 0 0">DB: <code>{html.escape(str(db_path()))}</code></p>
     </div>
+    {_paper_ledger_html()}
     <div class="card">
       <strong>Pipeline status</strong>
       <pre>ingest={html.escape(str(ingest))}
@@ -322,6 +400,26 @@ def api_analysis(
         "rows": rows,
     }
     if err:
+        payload["ok"] = False
+        payload["error"] = err
+    else:
+        payload["ok"] = True
+    return payload
+
+
+@app.get("/api/paper")
+def api_paper(_: None = Depends(require_auth)) -> dict[str, Any]:
+    ledger, err = load_paper_ledger()
+    payload: dict[str, Any] = {
+        "paper_only": PAPER_ONLY,
+        "db": str(db_path()),
+        "equity": (ledger.get("account") or {}).get("equity"),
+        "cash": (ledger.get("account") or {}).get("cash"),
+        "account": ledger.get("account"),
+        "positions": ledger.get("positions") or [],
+        "orders": ledger.get("orders") or [],
+    }
+    if err and ledger.get("account") is None:
         payload["ok"] = False
         payload["error"] = err
     else:
