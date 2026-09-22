@@ -386,7 +386,11 @@ def index_sources(
     url = qdrant_url or os.environ.get("QDRANT_URL", "http://localhost:6333")
     client = QdrantClient(url=url, timeout=120, check_compatibility=False)
     model = SentenceTransformer(MODEL_NAME)
-    dim = int(model.get_embedding_dimension())
+    # sentence-transformers renamed get_embedding_dimension → get_sentence_embedding_dimension
+    if hasattr(model, "get_sentence_embedding_dimension"):
+        dim = int(model.get_sentence_embedding_dimension())
+    else:
+        dim = int(model.get_embedding_dimension())
     root = repo_root()
     result: dict[str, Any] = {
         "ok": True,
