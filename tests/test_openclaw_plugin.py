@@ -33,11 +33,11 @@ def test_openclaw_skill_frontmatter() -> None:
         assert "order" in text.lower()
 
 
-def test_openclaw_example_enables_plugin() -> None:
+def test_openclaw_example_loads_jarvise_skills() -> None:
     example = json.loads(
         (ROOT / "config" / "openclaw" / "openclaw.json.example").read_text(encoding="utf-8")
     )
-    assert "/plugins/jarvise-openclaw" in example["plugins"]["load"]["paths"]
-    assert example["plugins"]["entries"]["jarvise"]["enabled"] is True
-    assert example["_jarvise"]["paper_only"] is True
-    assert example["_jarvise"]["export_dir"] == "/home/node/.openclaw/exports"
+    assert "/plugins/jarvise-openclaw/skills" in example["skills"]["load"]["extraDirs"]
+    assert "_jarvise" not in example
+    assert "plugins" not in example
+    assert example["env"]["vars"]["OPENCLAW_PAPER_ONLY"] == "true"
