@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import httpx
 
 BINANCE_BASE = "https://api.binance.com"
@@ -35,8 +37,13 @@ def fetch_klines(
             http.close()
     if not raw:
         raise RuntimeError(f"binance returned empty klines for {symbol}")
+    now_ms = int(time.time() * 1000)
     candles: list[dict] = []
     for row in raw:
+        # row[6] is closeTime; the final kline is still forming and its OHLC
+        # keeps changing, so storing it would make derived values unreproducible.
+        if int(row[6]) >= now_ms:
+            continue
         candles.append(
             {
                 "symbol": symbol.upper(),
@@ -48,5 +55,10 @@ def fetch_klines(
                 "close": float(row[4]),
                 "volume": float(row[5]),
             }
+        )
+    if not candles:
+        raise RuntimeError(
+            f"binance returned no closed candles for {symbol}; "
+            f"the current {interval} candle is still open"
         )
     return candles

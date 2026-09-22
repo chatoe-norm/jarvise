@@ -9,9 +9,9 @@ import time
 from pathlib import Path
 
 from jarvise_ingest.db import open_db, upsert_derivatives, upsert_market_technicals
-from jarvise_ingest.indicators import enrich_candles
 from jarvise_ingest.providers.binance_klines import ALLOWED_INTERVALS, fetch_klines
 from jarvise_ingest.providers.coinglass import fetch_derivatives, resolve_api_key
+from jarvise_ingest.series import recompute_indicators
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
@@ -130,12 +130,17 @@ def run(argv: list[str] | None = None) -> int:
         for sym in symbols:
             try:
                 candles = fetch_klines(sym, args.timeframe, args.limit)
-                enrich_candles(candles)
                 n = upsert_market_technicals(conn, candles)
-                market_summary[sym] = {"timeframe": args.timeframe, "upserted": n}
+                derived = recompute_indicators(conn, sym, args.timeframe)
+                market_summary[sym] = {
+                    "timeframe": args.timeframe,
+                    "upserted": n,
+                    "indicators_recomputed": derived,
+                }
                 if not args.as_json:
                     print(
-                        f"ingested market_technicals: {sym} {args.timeframe} rows={n}"
+                        f"ingested market_technicals: {sym} {args.timeframe} rows={n} "
+                        f"(indicators recomputed over {derived} stored candles)"
                     )
             except Exception as exc:  # noqa: BLE001 — surface provider errors
                 errors.append(str(exc))

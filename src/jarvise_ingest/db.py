@@ -107,28 +107,52 @@ def open_db(db_path: Path) -> sqlite3.Connection:
 
 
 def upsert_market_technicals(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """Write OHLCV only.
+
+    Indicator columns are derived from the whole stored series by
+    `series.recompute_indicators`, never from one ingest window.
+    """
     if not rows:
         return 0
     sql = """
     INSERT INTO market_technicals (
-        symbol, timestamp, timeframe, open, high, low, close, volume,
-        vwap, atr_14, rsi_14, adx_14, ema_20, ema_200
+        symbol, timestamp, timeframe, open, high, low, close, volume
     ) VALUES (
-        :symbol, :timestamp, :timeframe, :open, :high, :low, :close, :volume,
-        :vwap, :atr_14, :rsi_14, :adx_14, :ema_20, :ema_200
+        :symbol, :timestamp, :timeframe, :open, :high, :low, :close, :volume
     )
     ON CONFLICT(symbol, timestamp, timeframe) DO UPDATE SET
         open=excluded.open,
         high=excluded.high,
         low=excluded.low,
         close=excluded.close,
-        volume=excluded.volume,
-        vwap=excluded.vwap,
-        atr_14=excluded.atr_14,
-        rsi_14=excluded.rsi_14,
-        adx_14=excluded.adx_14,
-        ema_20=excluded.ema_20,
-        ema_200=excluded.ema_200
+        volume=excluded.volume
+    """
+    conn.executemany(sql, rows)
+    conn.commit()
+    return len(rows)
+
+
+def load_candle_series(
+    conn: sqlite3.Connection, symbol: str, timeframe: str
+) -> list[sqlite3.Row]:
+    cur = conn.execute(
+        "SELECT timestamp, high, low, close FROM market_technicals "
+        "WHERE symbol=? AND timeframe=? ORDER BY timestamp",
+        (symbol, timeframe),
+    )
+    return cur.fetchall()
+
+
+def write_indicators(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    sql = """
+    UPDATE market_technicals SET
+        atr_14=:atr_14,
+        rsi_14=:rsi_14,
+        ema_20=:ema_20,
+        ema_200=:ema_200
+    WHERE symbol=:symbol AND timeframe=:timeframe AND timestamp=:timestamp
     """
     conn.executemany(sql, rows)
     conn.commit()
