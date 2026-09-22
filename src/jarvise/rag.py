@@ -1,4 +1,4 @@
-"""RAG ingest helpers — NotebookLM sync, fetch, Firecrawl → local sources → Qdrant.
+"""RAG ingest helpers — NotebookLM, OpenClaw, fetch, Firecrawl → local sources → Qdrant.
 
 Paper/doctrine only. No order placement.
 """
@@ -20,6 +20,9 @@ import httpx
 COLLECTION = "jarvise_doctrine"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_SOURCES_CONFIG = Path("config/rag-sources.json")
+OPENCLAW_EXPORT_REL = Path("data/openclaw/exports")
+OPENCLAW_SOURCES_REL = Path("data/analytics/sources/openclaw")
+SOURCE_KINDS = ("notebook", "fetch", "firecrawl", "openclaw")
 
 
 def repo_root() -> Path:
@@ -207,6 +210,70 @@ def ingest_fetch(entries: list[dict[str, Any]] | None = None, *, dry_run: bool =
     }
 
 
+def sync_openclaw(
+    *,
+    export_dir: Path | None = None,
+    dest_dir: Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Copy OpenClaw export notes into data/analytics/sources/openclaw/ for RAG."""
+    root = repo_root()
+    src = export_dir or root / OPENCLAW_EXPORT_REL
+    src = src if src.is_absolute() else root / src
+    dest = dest_dir or root / OPENCLAW_SOURCES_REL
+    dest = dest if dest.is_absolute() else root / dest
+
+    candidates: list[Path] = []
+    if src.is_dir():
+        for path in sorted(src.iterdir()):
+            if path.is_file() and path.suffix.lower() in {".md", ".txt", ".markdown"}:
+                candidates.append(path)
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "paper_only": True,
+        "export_dir": str(src),
+        "dest_dir": str(dest),
+        "candidates": len(candidates),
+        "written": [],
+        "skipped": [],
+    }
+
+    if dry_run:
+        result["dry_run"] = True
+        result["would_copy"] = [p.name for p in candidates]
+        return result
+
+    dest.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    skipped: list[str] = []
+    for path in candidates:
+        body = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not body:
+            skipped.append(path.name)
+            continue
+        sid = slugify(path.stem)
+        suffix = ".md" if path.suffix.lower() in {".md", ".markdown"} else ".txt"
+        out = dest / f"{sid}{suffix}"
+        _write_markdown(
+            out,
+            body,
+            {
+                "kind": "openclaw",
+                "source": sid,
+                "origin": path.name,
+                "ingested_at": utc_now_iso(),
+                "paper_only": True,
+                "jarvise": "kind=openclaw paper_only=true",
+            },
+        )
+        written.append(str(out))
+
+    result["written"] = written
+    result["skipped"] = skipped
+    return result
+
+
 def ingest_firecrawl(
     entries: list[dict[str, Any]] | None = None,
     *,
@@ -333,7 +400,7 @@ def index_sources(
         pending: list[dict[str, Any]] = []
         for path in collect_source_files(root):
             kind = "doctrine"
-            for part in ("notebook", "fetch", "firecrawl"):
+            for part in SOURCE_KINDS:
                 if part in path.parts:
                     kind = part
                     break

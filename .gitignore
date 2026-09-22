@@ -48,9 +48,13 @@ data/nlm/
 !data/nlm/README.md
 data/openclaw/*
 !data/openclaw/.gitkeep
+!data/openclaw/exports/
+!data/openclaw/exports/.gitkeep
 data/analytics/sources/notebook/
 data/analytics/sources/fetch/
 data/analytics/sources/firecrawl/
+data/analytics/sources/openclaw/*
+!data/analytics/sources/openclaw/.gitkeep
 
 # Local sync salvage
 .local-wip/

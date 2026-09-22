@@ -27,12 +27,18 @@
       }
     },
     "openclaw": {
-      "command": "${OPENCLAW_MCP_COMMAND}",
-      "url": "${OPENCLAW_MCP_URL}",
+      "command": "openclaw",
+      "args": [
+        "mcp",
+        "serve",
+        "--url",
+        "ws://127.0.0.1:18789"
+      ],
       "env": {
         "OPENCLAW_PAPER_ONLY": "true",
         "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
-        "JARVISE_GUARDRAIL": "Use OpenClaw for research/signal context only. Do not enable live execution tools until Jarvise manual-approval phase. No order placement from this MCP in paper mode. Prefer OpenRouter model openrouter/openrouter/auto."
+        "OPENCLAW_GATEWAY_TOKEN": "${OPENCLAW_GATEWAY_TOKEN}",
+        "JARVISE_GUARDRAIL": "Use OpenClaw for research/signal context only. Do not enable live execution tools until Jarvise manual-approval phase. No order placement from this MCP in paper mode. Prefer OpenRouter model openrouter/openrouter/auto. Add --token-file or rely on OPENCLAW_GATEWAY_TOKEN when the gateway requires auth."
       }
     }
   },
@@ -42,9 +48,11 @@
     "deploy": "On Hostinger VPS use docker internal URLs redis://redis:6379 and http://qdrant:6333; access UIs only via Tailscale.",
     "notes": [
       "Copy into Cursor MCP settings; replace ${...} placeholders.",
-      "Prefer command OR url for openclaw — not both live at once.",
+      "OpenClaw MCP: local `openclaw mcp serve --url ws://127.0.0.1:18789` (gateway must be up). Prefer command over OPENCLAW_MCP_URL.",
+      "For a remote Tailscale gateway, change --url to ws://$TAILSCALE_IP:18789 and pass a token file.",
       "Write path remains: jarvise ingest → data/analytics/jarvise.db",
-      "RAG path: jarvise rag refresh → Qdrant jarvise_doctrine"
+      "RAG path: jarvise rag refresh → Qdrant jarvise_doctrine (includes sync-openclaw)",
+      "OpenClaw paper notes: data/openclaw/exports → jarvise rag sync-openclaw"
     ]
   }
 }

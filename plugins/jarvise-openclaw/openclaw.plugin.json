@@ -1,0 +1,30 @@
+{
+  "id": "jarvise",
+  "name": "Jarvise",
+  "description": "Paper-only Jarvise research/signals and doctrine RAG. No order placement.",
+  "version": "0.1.0",
+  "skills": ["./skills/jarvise-paper-research", "./skills/jarvise-doctrine-rag"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "exportDir": {
+        "type": "string",
+        "description": "Directory for paper research markdown exports synced into jarvise_doctrine"
+      },
+      "paperOnly": {
+        "type": "boolean",
+        "description": "Must stay true — no live or paper order tools"
+      }
+    }
+  },
+  "uiHints": {
+    "exportDir": {
+      "label": "Export directory",
+      "placeholder": "/home/node/.openclaw/exports"
+    },
+    "paperOnly": {
+      "label": "Paper only"
+    }
+  }
+}

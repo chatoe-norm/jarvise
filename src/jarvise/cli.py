@@ -75,7 +75,7 @@ app.add_typer(config_app, name="config")
 
 rag_app = typer.Typer(
     name="rag",
-    help="Doctrine RAG: NotebookLM/fetch/Firecrawl → Qdrant (paper only).",
+    help="Doctrine RAG: NotebookLM/OpenClaw/fetch/Firecrawl → Qdrant (paper only).",
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_enable=False,
@@ -299,6 +299,21 @@ def rag_sync_notebook(
         raise typer.Exit(code=2)
 
 
+@rag_app.command("sync-openclaw")
+def rag_sync_openclaw(
+    dry_run: DryRunOpt = False,
+    output: OutputOpt = OutputFormat.text,
+) -> None:
+    """Copy OpenClaw exports into data/analytics/sources/openclaw/ for doctrine RAG."""
+    from jarvise import rag as ragmod
+
+    result = ragmod.sync_openclaw(dry_run=dry_run)
+    ragmod.publish_redis_status("jarvise:rag:openclaw", result)
+    emit(result, output)
+    if not result.get("ok") and not dry_run:
+        raise typer.Exit(code=2)
+
+
 @rag_app.command("ingest-sources")
 def rag_ingest_sources(
     dry_run: DryRunOpt = False,
@@ -347,7 +362,7 @@ def rag_refresh(
     dry_run: DryRunOpt = False,
     output: OutputOpt = OutputFormat.text,
 ) -> None:
-    """Full pipeline: notebook sync → fetch/firecrawl → Qdrant index."""
+    """Full pipeline: notebook → fetch/firecrawl → openclaw → Qdrant index."""
     from jarvise import rag as ragmod
 
     if os.environ.get("REDIS_URL"):
@@ -367,6 +382,7 @@ def rag_refresh(
     steps["notebook"] = ragmod.sync_notebook(dry_run=dry_run)
     steps["fetch"] = ragmod.ingest_fetch(dry_run=dry_run)
     steps["firecrawl"] = ragmod.ingest_firecrawl(dry_run=dry_run)
+    steps["openclaw"] = ragmod.sync_openclaw(dry_run=dry_run)
     if dry_run:
         steps["index"] = {"ok": True, "dry_run": True}
         steps["ok"] = True
