@@ -124,36 +124,70 @@ Then `jarvise rag index` / `refresh` tags those files as `kind=openclaw` in Qdra
 
 ## 6. NotebookLM credentials (RAG sync)
 
-On the VPS, authenticate `nlm` once and mount credentials:
+Worker image includes `notebooklm-mcp-cli` (`nlm`). Credentials live under `data/nlm` (mounted at `/root/.nlm` via `NOTEBOOKLM_MCP_CLI_PATH`).
+
+Prefer refreshing auth on a laptop (browser login), then syncing to the VPS:
 
 ```bash
-# Prefer running nlm login on the host, credentials under data/nlm
-mkdir -p data/nlm
-# Install nlm CLI, then:
-nlm login --profile chatoe
+# On laptop (after nlm login --profile chatoe is valid):
+nlm login --check --profile chatoe
+rsync -az --exclude chrome-profiles ~/.notebooklm-mcp-cli/profiles/chatoe/ jarvise-vps-ts:/opt/jarvise/data/nlm/profiles/chatoe/
+# Ensure config default_profile = chatoe under data/nlm/config.toml
 ```
 
-Worker mounts `./data/nlm` → `/root/.nlm`. Then:
+Or login on the VPS if a browser/CDP path is available:
 
 ```bash
-docker compose --profile tools run --rm worker jarvise rag sync-notebook
-docker compose --profile tools run --rm worker jarvise rag ingest-sources
-docker compose --profile tools run --rm worker jarvise rag index
+mkdir -p data/nlm
+# Host or one-off worker with nlm:
+nlm login --profile chatoe   # stores under NOTEBOOKLM_MCP_CLI_PATH / data/nlm
+```
+
+Smoke:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tools run --rm worker \
+  nlm login --check --profile chatoe
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tools run --rm worker \
+  jarvise rag sync-notebook --output json
+```
+
+Then ingest/index as needed:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tools run --rm worker jarvise rag ingest-sources
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tools run --rm worker jarvise rag index
 ```
 
 ## 7. Schedules
 
 n8n workflow `jarvise-ingest-schedule` posts to `http://jobs:8090/jobs/ingest` every 15 minutes. The jobs service writes `jarvise:ingest:last`. Do not also cron that same ingest.
 
-RAG reindex stays on the VPS cron (`jarvise-rag-index.sh` every 6 hours). The n8n RAG workflow stays inactive until NotebookLM is logged in on the VPS.
+After NotebookLM auth works, enable **both**:
 
-Import once inside the n8n container:
+1. **n8n** workflow `Jarvise RAG refresh` (every 6h → `POST http://jobs:8090/jobs/rag-refresh`)
+2. **Host cron** calling [`infra/n8n/jarvise-rag-index.sh`](../../infra/n8n/jarvise-rag-index.sh) (wrapper → `run-rag-refresh.sh`) as a fallback if n8n is down — pick one primary to avoid double-refresh; prefer n8n, keep cron commented unless needed.
+
+Import workflows once inside the n8n container:
 
 ```bash
 docker exec jarvise-n8n-1 n8n import:workflow --separate --input=/workflows
 ```
 
-Then activate only the ingest workflow.
+Activate ingest + RAG in the n8n UI (`http://$TAILSCALE_IP:5678/`), or:
+
+```bash
+# Example: list then activate by id after import
+docker exec jarvise-n8n-1 n8n list:workflow
+# activate via UI is simplest for first enable
+```
+
+Cron fallback (optional):
+
+```bash
+# root crontab — every 6 hours
+0 */6 * * * cd /opt/jarvise && bash infra/n8n/jarvise-rag-index.sh >>/var/log/jarvise-rag.log 2>&1
+```
 
 ## 8. Updates
 
