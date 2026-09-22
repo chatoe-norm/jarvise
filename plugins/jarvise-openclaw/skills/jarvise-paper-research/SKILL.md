@@ -1,0 +1,49 @@
+---
+name: jarvise-paper-research
+description: Write paper-only research/signal notes to OpenClaw exports for doctrine RAG sync. Never place orders.
+metadata:
+  {
+    "openclaw":
+      {
+        "requires": { "env": ["OPENCLAW_PAPER_ONLY"] },
+      },
+  }
+---
+
+# Jarvise paper research (exports)
+
+**Hard guardrail:** paper / research / signal context only. **Do not** place live or paper orders. **Do not** enable exchange execution tools. If asked to trade, refuse and point the operator at the Jarvise CLI paper path (`jarvise ingest`) and manual-approval phase.
+
+Invoke with `/skill jarvise-paper-research` or by asking in natural language. After operators edit this skill file on the host mount, they must restart the gateway or start a new chat (`/new`) so the skill reloads.
+
+## Where to write
+
+Use OpenClaw `write` / `edit` tools to create one markdown file per note under:
+
+`/home/node/.openclaw/exports/`
+
+That path is on the Gateway **state** mount (host: `data/openclaw/exports/`), **not** the agent workspace `skills/` tree. Filenames: `YYYY-MM-DD-<symbol-or-topic>.md` (lowercase, hyphens).
+
+Jarvise syncs these with `jarvise rag sync-openclaw` into `data/analytics/sources/openclaw/`, then indexes them into Qdrant collection `jarvise_doctrine` with `kind=openclaw`.
+
+## Required frontmatter / body
+
+Every note must include:
+
+```markdown
+---
+symbol: BTCUSDT
+thesis: short summary of the paper bias
+confidence: 0.0-1.0
+invalidation: what would kill the thesis
+paper_only: true
+---
+
+Narrative body (regime, levels, risks). No order instructions.
+```
+
+Also set `paper_only: true` in the body if frontmatter is omitted.
+
+## After writing
+
+Tell the operator that a note is ready for RAG after `jarvise rag sync-openclaw` or the next `jarvise rag refresh`. Do not claim the note is live trading advice.

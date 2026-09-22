@@ -93,7 +93,36 @@ docker compose exec openclaw openclaw onboard --auth-choice openrouter-api-key
 # or set OPENROUTER_API_KEY in .env and edit data/openclaw/openclaw.json
 ```
 
-Ensure primary model is `openrouter/openrouter/auto`. Keep `OPENCLAW_PAPER_ONLY=true` — research/signal only, **no order placement tools**.
+Ensure primary model is `openrouter/openrouter/auto`. Keep `OPENCLAW_PAPER_ONLY=true` — research/signal only, **no order placement tools**. Set `OPENCLAW_GATEWAY_TOKEN` in `.env` (compose passes it through).
+
+Deploy does **not** auto-seed or onboard OpenClaw (keeps secrets out of CI).
+
+### Bind layout (state vs Jarvise exports)
+
+Per [OpenClaw docs](https://docs.openclaw.ai/concepts/agent-workspace): agent **workspace** (persona files like `AGENTS.md` / `SOUL.md`) is separate from Gateway **state**.
+
+- Host `data/openclaw/` → container `/home/node/.openclaw` = OpenClaw **state** (`openclaw.json`, credentials, agent DB, managed skills). Not the agent workspace.
+- Plugin: compose mounts `plugins/jarvise-openclaw` → `/plugins/jarvise-openclaw`, loaded via `plugins.load.paths` + `plugins.entries.jarvise` in the seeded config.
+- Jarvise paper drop-folder (convention, not an OpenClaw core path): `data/openclaw/exports/*.md` → container `/home/node/.openclaw/exports/` → `jarvise rag sync-openclaw`.
+
+### Post-seed checks
+
+1. Open Control UI at `http://$TAILSCALE_IP:18789/` and paste the gateway token from `.env` (`OPENCLAW_GATEWAY_TOKEN`) into Settings.
+2. Confirm plugin + skills inside the container:
+
+```bash
+docker compose exec openclaw openclaw plugins list   # expect id jarvise
+docker compose exec openclaw openclaw skills list    # expect jarvise-paper-research, jarvise-doctrine-rag
+```
+
+3. Sync paper notes into doctrine RAG:
+
+```bash
+docker compose --profile tools run --rm worker jarvise rag sync-openclaw
+# or wait for jarvise rag refresh (includes openclaw → index)
+```
+
+Then `jarvise rag index` / `refresh` tags those files as `kind=openclaw` in Qdrant `jarvise_doctrine`.
 
 ## 6. NotebookLM credentials (RAG sync)
 

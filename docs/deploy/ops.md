@@ -94,7 +94,7 @@ If a bump misbehaves, restore the previous image tags in `docker-compose.yml` / 
 | Redis | `redis:7-alpine` |
 | Qdrant | `qdrant/qdrant:v1.13.4` |
 | n8n | `n8nio/n8n:2.39.10` |
-| OpenClaw | `ghcr.io/openclaw/openclaw:latest` (prefer last known good dated tag) |
+| OpenClaw | `ghcr.io/openclaw/openclaw:2026.9.5` (match `.env` / compose pin; never leave `:latest`) |
 | Python base | `python:3.12-slim-bookworm` |
 
 ## Kill switch
@@ -115,3 +115,13 @@ curl -fsS "http://<vps-ip>:8080/healthz"
 ```
 
 Open web `:8080`, n8n `:5678`, OpenClaw `:18789` only over Tailscale.
+
+## OpenClaw plugin + RAG sync
+
+- **State mount:** `data/openclaw/` → `/home/node/.openclaw` (config, credentials, sessions). Backup already covers this tree. Jarvise paper path does **not** require seeding OpenClaw workspace persona files (`AGENTS.md` / `SOUL.md`); those are optional agent workspace, not state.
+- **Plugin:** `plugins/jarvise-openclaw` → `/plugins/jarvise-openclaw` (id `jarvise` via `plugins.load.paths`).
+- **Paper notes:** `data/openclaw/exports/*.md` → `jarvise rag sync-openclaw` → `jarvise_doctrine` (`kind=openclaw`).
+- **First boot:** re-seed from `config/openclaw/openclaw.json.example` only when `data/openclaw/openclaw.json` is missing. **Upgrade in place:** merge `plugins.load.paths` and `plugins.entries.jarvise` from the example into the live config.
+- **After editing mounted skills:** restart the gateway (`docker compose restart openclaw`) or start a new chat session (`/new`) so skills reload.
+- **Verify:** `docker compose exec openclaw openclaw plugins list` and `openclaw skills list`.
+- **Cursor MCP:** `openclaw mcp serve --url ws://127.0.0.1:18789` (see `mcp/jarvise-mcp.json.example`); pass `OPENCLAW_GATEWAY_TOKEN` when the gateway requires auth.

@@ -116,7 +116,9 @@ Exit codes: `0` finished, `1` startup or missing config, `2` the agent ran and f
 - Deployment ladder: paper → manual approval → autonomy
 - Ingest HTTP is **GET-only** market data
 - OpenClaw MCP: research/signal context only until manual-approval phase
+- OpenClaw paper notes: `data/openclaw/exports` → `jarvise rag sync-openclaw` → Qdrant `kind=openclaw` (plugin: `plugins/jarvise-openclaw`)
 
 ## Specs
 
 - [docs/superpowers/specs/2026-09-21-paper-ingest-design.md](docs/superpowers/specs/2026-09-21-paper-ingest-design.md)
+- [docs/superpowers/specs/2026-09-22-openclaw-intelligence-audit.md](docs/superpowers/specs/2026-09-22-openclaw-intelligence-audit.md)

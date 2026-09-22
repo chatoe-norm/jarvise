@@ -45,6 +45,51 @@ def test_sync_notebook_dry_run(monkeypatch, tmp_path: Path) -> None:
     assert result["alias"] == "jarvise"
 
 
+def test_sync_openclaw_dry_run(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_ROOT", str(tmp_path))
+    export = tmp_path / "data" / "openclaw" / "exports"
+    export.mkdir(parents=True)
+    (export / "btc-note.md").write_text("# BTC paper thesis\n\nHold bias.", encoding="utf-8")
+    (export / "empty.md").write_text("  \n", encoding="utf-8")
+    result = rag.sync_openclaw(dry_run=True)
+    assert result["dry_run"] is True
+    assert result["candidates"] == 2
+    assert "btc-note.md" in result["would_copy"]
+    assert not (tmp_path / "data" / "analytics" / "sources" / "openclaw").exists()
+
+
+def test_sync_openclaw_copies_and_tags(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_ROOT", str(tmp_path))
+    export = tmp_path / "data" / "openclaw" / "exports"
+    export.mkdir(parents=True)
+    (export / "ETH Signal.md").write_text(
+        "symbol: ETHUSDT\nthesis: range\npaper_only: true\n",
+        encoding="utf-8",
+    )
+    (export / "skip-me.md").write_text("", encoding="utf-8")
+    result = rag.sync_openclaw(dry_run=False)
+    assert result["ok"] is True
+    assert len(result["written"]) == 1
+    assert result["skipped"] == ["skip-me.md"]
+    out = tmp_path / "data" / "analytics" / "sources" / "openclaw" / "eth-signal.md"
+    text = out.read_text(encoding="utf-8")
+    assert "<!-- kind: openclaw -->" in text
+    assert "<!-- paper_only: True -->" in text
+    assert "ETHUSDT" in text
+
+
+def test_index_kind_detects_openclaw(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "analytics" / "sources" / "openclaw" / "note.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("hello", encoding="utf-8")
+    kind = "doctrine"
+    for part in rag.SOURCE_KINDS:
+        if part in path.parts:
+            kind = part
+            break
+    assert kind == "openclaw"
+
+
 def test_rag_refresh_cli_dry_run() -> None:
     from typer.testing import CliRunner
 
@@ -52,6 +97,23 @@ def test_rag_refresh_cli_dry_run() -> None:
 
     runner = CliRunner()
     result = runner.invoke(app, ["rag", "refresh", "--dry-run", "--output", "json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["dry_run"] is True
+    assert payload["paper_only"] is True
+    assert "openclaw" in payload
+    assert payload["openclaw"].get("dry_run") is True
+
+
+def test_rag_sync_openclaw_cli_dry_run(tmp_path: Path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from jarvise.cli import app
+
+    monkeypatch.setenv("JARVISE_ROOT", str(tmp_path))
+    (tmp_path / "data" / "openclaw" / "exports").mkdir(parents=True)
+    runner = CliRunner()
+    result = runner.invoke(app, ["rag", "sync-openclaw", "--dry-run", "--output", "json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["dry_run"] is True
