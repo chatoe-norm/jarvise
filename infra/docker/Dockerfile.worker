@@ -21,8 +21,8 @@ RUN pip install --upgrade pip \
     && pip install -e '.[rag]' \
     && pip install redis
 
-# Optional NotebookLM CLI (best-effort; sync works when nlm is present)
-RUN pip install notebooklm-py 2>/dev/null || true
+# NotebookLM CLI used by `jarvise rag sync-notebook` (session under NOTEBOOKLM_MCP_CLI_PATH)
+RUN pip install notebooklm-mcp-cli 2>/dev/null || pip install notebooklm-py 2>/dev/null || true
 
 COPY infra/docker/worker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

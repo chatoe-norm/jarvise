@@ -86,6 +86,7 @@ services:
       - JARVISE_PAPER_ONLY=true
       - JARVISE_ROOT=/app
       - NLM_PROFILE=${NLM_PROFILE:-chatoe}
+      - NOTEBOOKLM_MCP_CLI_PATH=/root/.nlm
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
@@ -112,6 +113,7 @@ services:
       - JARVISE_PAPER_ONLY=true
       - JARVISE_ROOT=/app
       - NLM_PROFILE=${NLM_PROFILE:-chatoe}
+      - NOTEBOOKLM_MCP_CLI_PATH=/root/.nlm
       - JARVISE_JOBS_TOKEN=${JARVISE_JOBS_TOKEN:-}
       - JOBS_PORT=8090
     volumes:
