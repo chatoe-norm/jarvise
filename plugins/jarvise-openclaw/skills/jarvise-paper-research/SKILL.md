@@ -34,16 +34,18 @@ Every note must include:
 ---
 symbol: BTCUSDT
 thesis: short summary of the paper bias
+regime: trend|range|chaotic
 confidence: 0.0-1.0
-invalidation: what would kill the thesis
+invalidation: what would kill the thesis (price or structure; prefer >= 1.5x ATR when using volatility stops)
 paper_only: true
 ---
 
-Narrative body (regime, levels, risks). No order instructions.
+Narrative body (structure-first levels, risks, BTC vs ETH book notes if relevant).
+Scenarios: 2-3 with invalidation. No order instructions. Below confidence threshold → state FLAT.
 ```
 
 Also set `paper_only: true` in the body if frontmatter is omitted.
 
 ## After writing
 
-Tell the operator that a note is ready for RAG after `jarvise rag sync-openclaw` or the next `jarvise rag refresh`. Do not claim the note is live trading advice.
+Tell the operator that a note is ready for RAG after `jarvise rag sync-openclaw` or the next `jarvise rag refresh`. Do not claim the note is live trading advice. Never suggest bypassing the kill-switch or auto-resuming after a drawdown lock.

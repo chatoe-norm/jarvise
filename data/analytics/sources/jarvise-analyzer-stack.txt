@@ -1,9 +1,10 @@
 Jarvise analytics / analyzer stack (use these as the analysis layer; notebook is doctrine, live APIs/charts are the feed).
+Synced from NotebookLM on 2026-09-22 (Core Protocol + analyzer stack + microstructure notes).
 
 Price-graph analyzer
 Structure first: trend vs range, swing high/low, support/resistance, break and retest.
 Candle language: OHLC, Heikin-Ashi for trend noise filter, engulfing/doji as context not standalone triggers.
-Volatility: ATR for stop distance (often >= 1.5x range), Bollinger/Keltner/Donchian for squeeze vs expansion.
+Volatility: ATR for stop distance (often >= 1.5x ATR / range), Bollinger/Keltner/Donchian for squeeze vs expansion.
 Trend strength: ADX, EMA/SMA stack, Parabolic SAR only with trend confirmation.
 Momentum: RSI, MACD, Stochastic, CCI — look for divergence vs price; never trade oscillator alone.
 Volume: OBV, A/D, VWAP, volume-at-price / POC if available. Breaks without volume are suspect.
@@ -11,24 +12,27 @@ Intraday fair value: VWAP as magnet and S/R; TradeStation VWAP notes apply to se
 
 Order-book / microstructure analyzer
 Bid/ask, spread, depth, slippage, buy/sell walls. Validate walls with actual prints (spoofing is common).
-BTC book usually thicker/institutional; ETH thinner, more wicks, wider stops.
+BTC book usually thicker/institutional, smoother absorption; ETH thinner, more wicks, wider slippage, faster spoof walls — tighter execution discipline and wider structural stops.
 Venue for this project: Binance TH spot (Thai SEC). Fees + spread are part of EV.
 
 On-chain / market-data analyzer (when APIs available)
 Glassnode: network, supply, realized cap, entity-adjusted flows.
-CryptoQuant: exchange inflows/outflows, miner flows.
-CoinGlass: derivatives, liquidations, funding, OI (context even if we trade spot).
-CoinGecko / CoinMarketCap: breadth, dominance, sector rotation.
+CryptoQuant: exchange inflows (bearish pressure) / outflows (bullish pressure), reserves, miner flows.
+CoinGlass: derivatives, liquidations, funding, OI / heatmaps (context even if we trade spot).
+CoinGecko / CoinMarketCap: breadth, dominance, Fear & Greed, Altcoin Season, sector rotation.
 Dune / ethereum.org analytics: custom on-chain queries.
 DefiLlama: TVL only if analyzing DeFi tokens; not a spot-BTC signal by itself.
 
 Performance analyzer (paper and live)
 Expectancy after fees/slippage. Sharpe, Sortino, max drawdown, hit rate, avg win/loss, correlation of book.
 Backtest with walk-forward mindset; a pretty in-sample curve is not edge.
-Kill-switch if daily drawdown halt hits.
+Kill-switch if daily drawdown halt hits; resume only after written review.
 
 Output of every analysis
 Regime: trend / range / chaotic.
 2-3 scenarios with invalidation prices.
 Confidence 0-1. Below threshold -> FLAT.
 Size from account-risk / trade-risk, fraction of Kelly.
+
+Do not build first
+Fully autonomous live execution; single-indicator oscillator bots; full Kelly sizing; entries without invalidation/stop; execution without daily drawdown kill-switch; spot-BTC signals from isolated DeFi TVL; backtests that ignore fees/slippage.

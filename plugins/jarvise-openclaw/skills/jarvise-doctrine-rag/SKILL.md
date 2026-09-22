@@ -29,6 +29,17 @@ Invoke with `/skill jarvise-doctrine-rag` or by asking in natural language. Afte
 3. Prefer hits whose payload `kind` is `doctrine`, `notebook`, `fetch`, `firecrawl`, or `openclaw`.
 4. Respect payload `paper_only: true` and `note: no order placement`.
 
+## Doctrine themes to surface
+
+When summarizing hits, prioritize:
+
+- Capital preservation; FLAT over low-confidence activity
+- Paper → manual approval → autonomy ladder (current phase: paper analytics only)
+- Kill-switch / daily drawdown halt; no auto-resume without written review
+- Structure-first charts; oscillators as context; stops ≥ ~1.5× ATR
+- Fractional Kelly only; EV after fees/slippage
+- Binance TH spot costs and BTC vs ETH microstructure differences
+
 ## Response style
 
-Summarize doctrine constraints (capital preservation, kill-switch, paper-first). Cite `source` / `path` from payloads. If retrieval fails, say so and fall back to operator-supplied notebook rules — do not invent exchange orders.
+Summarize doctrine constraints (capital preservation, kill-switch, paper-first). Cite `source` / `path` from payloads. If retrieval fails, say so and fall back to operator-supplied notebook rules — do not invent exchange orders. Default recommendation under uncertainty: **FLAT**.
