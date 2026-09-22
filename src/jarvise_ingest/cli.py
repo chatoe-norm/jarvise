@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from jarvise_ingest.db import open_db, upsert_derivatives, upsert_market_technicals
+from jarvise_ingest.db import append_derivatives, open_db, upsert_market_technicals
 from jarvise_ingest.providers.binance_klines import (
     MAX_PAGE_LIMIT,
     fetch_klines,
@@ -243,11 +243,15 @@ def run(argv: list[str] | None = None) -> int:
                 continue
             try:
                 rows = fetch_derivatives(sym, args.timeframe, limit=min(30, args.limit))
-                n = upsert_derivatives(conn, rows)
+                # One knowledge-time stamp per ingest run so the batch is a unit.
+                n = append_derivatives(conn, rows)
                 coin = rows[0]["symbol"] if rows else sym
-                deriv_summary[coin] = {"upserted": n}
+                deriv_summary[coin] = {"versions_appended": n, "fetched": len(rows)}
                 if not args.as_json:
-                    print(f"ingested derivatives_analytics: {coin} rows={n}")
+                    print(
+                        f"ingested derivatives_analytics: {coin} "
+                        f"versions={n} fetched={len(rows)}"
+                    )
             except Exception as exc:  # noqa: BLE001
                 errors.append(str(exc))
                 print(f"Error: {exc}", file=sys.stderr)
