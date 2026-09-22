@@ -58,7 +58,16 @@ def redis_get_json(key: str) -> Any:
             return None
         import json
 
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            preview = raw if len(raw) <= 240 else raw[:240] + "…"
+            return {
+                "ok": False,
+                "error": f"invalid JSON in Redis ({exc})",
+                "raw_preview": preview,
+                "hint": "Re-run jarvise rag refresh/index so publish_redis_status writes JSON",
+            }
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
 
