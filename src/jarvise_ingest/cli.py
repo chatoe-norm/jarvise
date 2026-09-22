@@ -6,16 +6,34 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from jarvise_ingest.db import open_db, upsert_derivatives, upsert_market_technicals
-from jarvise_ingest.providers.binance_klines import ALLOWED_INTERVALS, fetch_klines
+from jarvise_ingest.providers.binance_klines import (
+    MAX_PAGE_LIMIT,
+    fetch_klines,
+    fetch_klines_range,
+)
 from jarvise_ingest.providers.coinglass import fetch_derivatives, resolve_api_key
-from jarvise_ingest.series import recompute_indicators
+from jarvise_ingest.series import find_gaps, recompute_indicators
+from jarvise_ingest.timeframes import ALLOWED_INTERVALS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
+DEFAULT_LIMIT = 200
 EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 1h --skip-derivatives --json"
+BACKFILL_EXAMPLE = (
+    "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives"
+)
+
+
+def _parse_instant(raw: str) -> datetime:
+    """ISO-8601 date or datetime; a bare date means midnight UTC."""
+    value = datetime.fromisoformat(raw)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _parse_symbols(raw: list[str]) -> list[str]:
@@ -35,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Examples:\n  {EXAMPLE}\n"
         "  jarvise ingest --symbol BTCUSDT,ETHUSDT --dry-run --json\n"
-        "  jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 200",
+        f"  {BACKFILL_EXAMPLE}",
     )
     p.add_argument(
         "--symbol",
@@ -49,7 +67,23 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(ALLOWED_INTERVALS),
         help="Candle timeframe (default: 1h)",
     )
-    p.add_argument("--limit", type=int, default=200, help="Candles to fetch (1..1000)")
+    p.add_argument(
+        "--limit",
+        type=int,
+        help=(
+            f"Candles to fetch, 1..{MAX_PAGE_LIMIT} "
+            f"(default: {DEFAULT_LIMIT}; page size when --since is set, "
+            f"defaulting to {MAX_PAGE_LIMIT})"
+        ),
+    )
+    p.add_argument(
+        "--since",
+        help="Backfill from this ISO-8601 instant, paging past the request cap",
+    )
+    p.add_argument(
+        "--until",
+        help="Stop the backfill here (requires --since; default: now)",
+    )
     p.add_argument(
         "--skip-derivatives",
         action="store_true",
@@ -81,8 +115,41 @@ def run(argv: list[str] | None = None) -> int:
     if not symbols:
         print(f"Error: --symbol is required.\n  {EXAMPLE}", file=sys.stderr)
         return 2
-    if args.limit < 1 or args.limit > 1000:
-        print("Error: --limit must be 1..1000\n  " + EXAMPLE, file=sys.stderr)
+    if args.until and not args.since:
+        print(
+            f"Error: --until requires --since.\n  {BACKFILL_EXAMPLE}", file=sys.stderr
+        )
+        return 2
+    since: datetime | None = None
+    until: datetime | None = None
+    for flag, raw in (("--since", args.since), ("--until", args.until)):
+        if not raw:
+            continue
+        try:
+            parsed = _parse_instant(raw)
+        except ValueError:
+            print(
+                f"Error: {flag} must be ISO-8601, e.g. 2021-01-01 or "
+                f"2021-01-01T00:00:00Z.\n  {BACKFILL_EXAMPLE}",
+                file=sys.stderr,
+            )
+            return 2
+        if flag == "--since":
+            since = parsed
+        else:
+            until = parsed
+    if since and until and since >= until:
+        print(
+            f"Error: --since must be before --until.\n  {BACKFILL_EXAMPLE}",
+            file=sys.stderr,
+        )
+        return 2
+
+    limit = args.limit
+    if limit is None:
+        limit = MAX_PAGE_LIMIT if since else DEFAULT_LIMIT
+    if limit < 1 or limit > MAX_PAGE_LIMIT:
+        print(f"Error: --limit must be 1..{MAX_PAGE_LIMIT}\n  {EXAMPLE}", file=sys.stderr)
         return 2
 
     if not args.skip_derivatives and not resolve_api_key():
@@ -101,15 +168,23 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         for sym in symbols:
-            market_summary[sym] = {
-                "timeframe": args.timeframe,
-                "planned": args.limit,
-            }
+            if since:
+                market_summary[sym] = {
+                    "timeframe": args.timeframe,
+                    "since": since.isoformat(),
+                    "until": until.isoformat() if until else None,
+                    "page_limit": limit,
+                }
+            else:
+                market_summary[sym] = {
+                    "timeframe": args.timeframe,
+                    "planned": limit,
+                }
             if args.skip_derivatives:
                 skipped.append(f"derivatives:{sym}")
             else:
                 deriv_summary[sym.split("USDT")[0] if "USDT" in sym else sym] = {
-                    "planned": min(args.limit, 30)
+                    "planned": min(limit, 30)
                 }
         payload = {
             "ok": True,
@@ -129,19 +204,36 @@ def run(argv: list[str] | None = None) -> int:
     try:
         for sym in symbols:
             try:
-                candles = fetch_klines(sym, args.timeframe, args.limit)
+                if since:
+                    candles = fetch_klines_range(
+                        sym,
+                        args.timeframe,
+                        int(since.timestamp() * 1000),
+                        until_ms=int(until.timestamp() * 1000) if until else None,
+                        page_limit=limit,
+                    )
+                else:
+                    candles = fetch_klines(sym, args.timeframe, limit)
                 n = upsert_market_technicals(conn, candles)
                 derived = recompute_indicators(conn, sym, args.timeframe)
+                gaps = find_gaps(conn, sym, args.timeframe)
                 market_summary[sym] = {
                     "timeframe": args.timeframe,
                     "upserted": n,
                     "indicators_recomputed": derived,
+                    "gaps": len(gaps),
                 }
                 if not args.as_json:
                     print(
                         f"ingested market_technicals: {sym} {args.timeframe} rows={n} "
                         f"(indicators recomputed over {derived} stored candles)"
                     )
+                    if gaps:
+                        first = gaps[0]
+                        print(
+                            f"  warning: {len(gaps)} gap(s) in the stored series; "
+                            f"{first[2]} candles missing after {first[0]}"
+                        )
             except Exception as exc:  # noqa: BLE001 — surface provider errors
                 errors.append(str(exc))
                 print(f"Error: {exc}", file=sys.stderr)
@@ -189,9 +281,16 @@ def _emit(payload: dict, as_json: bool, *, dry_run: bool) -> None:
     if dry_run:
         print("dry-run: would ingest")
         for sym, info in payload["market_technicals"].items():
-            print(
-                f"  market_technicals {sym} {info['timeframe']} planned={info['planned']}"
-            )
+            if "since" in info:
+                print(
+                    f"  market_technicals {sym} {info['timeframe']} backfill "
+                    f"since={info['since']} until={info['until'] or 'now'} "
+                    f"page={info['page_limit']}"
+                )
+            else:
+                print(
+                    f"  market_technicals {sym} {info['timeframe']} planned={info['planned']}"
+                )
         for coin, info in payload["derivatives_analytics"].items():
             print(f"  derivatives_analytics {coin} planned={info['planned']}")
         print(f"db: {payload['db']}")

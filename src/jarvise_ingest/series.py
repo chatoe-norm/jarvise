@@ -11,6 +11,7 @@ import sqlite3
 
 from jarvise_ingest.db import load_candle_series, write_indicators
 from jarvise_ingest.indicators import indicator_series
+from jarvise_ingest.timeframes import INTERVAL_MS
 
 
 def recompute_indicators(
@@ -48,3 +49,24 @@ def recompute_indicators(
         for i, candle in enumerate(candles)
     ]
     return write_indicators(conn, updates)
+
+
+def find_gaps(
+    conn: sqlite3.Connection, symbol: str, timeframe: str
+) -> list[tuple[int, int, int]]:
+    """Missing stretches as (last before, first after, candles absent).
+
+    Indicators are computed across the stored series as if it were continuous, so
+    a hole silently shifts every value after it. Gaps are reported rather than
+    rejected: a venue outage is a data problem, but for stocks and ETFs a weekend
+    is not.
+    """
+    step = INTERVAL_MS[timeframe]
+    candles = load_candle_series(conn, symbol, timeframe)
+    gaps: list[tuple[int, int, int]] = []
+    for previous, following in zip(candles, candles[1:]):
+        distance = following["timestamp"] - previous["timestamp"]
+        if distance > step:
+            missing = distance // step - 1
+            gaps.append((previous["timestamp"], following["timestamp"], int(missing)))
+    return gaps
