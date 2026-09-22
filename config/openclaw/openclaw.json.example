@@ -18,24 +18,9 @@
       }
     }
   },
-  "plugins": {
+  "skills": {
     "load": {
-      "paths": ["/plugins/jarvise-openclaw"]
-    },
-    "entries": {
-      "jarvise": {
-        "enabled": true,
-        "config": {
-          "exportDir": "/home/node/.openclaw/exports",
-          "paperOnly": true
-        }
-      }
+      "extraDirs": ["/plugins/jarvise-openclaw/skills"]
     }
-  },
-  "_jarvise": {
-    "paper_only": true,
-    "no_order_placement": true,
-    "export_dir": "/home/node/.openclaw/exports",
-    "note": "Research/signal context only. Do not enable live execution tools. data/openclaw is Gateway state (~/.openclaw), not the agent workspace; write paper notes to export_dir for jarvise rag sync-openclaw."
   }
 }

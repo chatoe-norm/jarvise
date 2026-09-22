@@ -119,9 +119,9 @@ Open web `:8080`, n8n `:5678`, OpenClaw `:18789` only over Tailscale.
 ## OpenClaw plugin + RAG sync
 
 - **State mount:** `data/openclaw/` → `/home/node/.openclaw` (config, credentials, sessions). Backup already covers this tree. Jarvise paper path does **not** require seeding OpenClaw workspace persona files (`AGENTS.md` / `SOUL.md`); those are optional agent workspace, not state.
-- **Plugin:** `plugins/jarvise-openclaw` → `/plugins/jarvise-openclaw` (id `jarvise` via `plugins.load.paths`).
+- **Skills pack:** compose mounts `plugins/jarvise-openclaw` → `/plugins/jarvise-openclaw`. Load via `skills.load.extraDirs: ["/plugins/jarvise-openclaw/skills"]` (not `plugins.load.paths` — empty `openclaw.extensions` packages fail plugin install). Never put `_jarvise` in `openclaw.json` (Gateway rejects unknown root keys).
 - **Paper notes:** `data/openclaw/exports/*.md` → `jarvise rag sync-openclaw` → `jarvise_doctrine` (`kind=openclaw`).
-- **First boot:** re-seed from `config/openclaw/openclaw.json.example` only when `data/openclaw/openclaw.json` is missing. **Upgrade in place:** merge `plugins.load.paths` and `plugins.entries.jarvise` from the example into the live config.
+- **First boot:** re-seed from `config/openclaw/openclaw.json.example` only when `data/openclaw/openclaw.json` is missing. **Upgrade in place:** merge `skills.load.extraDirs` from the example into the live config.
 - **After editing mounted skills:** restart the gateway (`docker compose restart openclaw`) or start a new chat session (`/new`) so skills reload.
-- **Verify:** `docker compose exec openclaw openclaw plugins list` and `openclaw skills list`.
+- **Verify:** `docker compose exec openclaw openclaw skills list` (expect `jarvise-paper-research`, `jarvise-doctrine-rag`). Control UI is on Tailscale `:18789` when `OPENCLAW_GATEWAY_BIND=lan`.
 - **Cursor MCP:** `openclaw mcp serve --url ws://127.0.0.1:18789` (see `mcp/jarvise-mcp.json.example`); pass `OPENCLAW_GATEWAY_TOKEN` when the gateway requires auth.

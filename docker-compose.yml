@@ -158,10 +158,11 @@ services:
       qdrant:
         condition: service_healthy
     healthcheck:
+      # OPENCLAW_GATEWAY_BIND=lan does not listen on 127.0.0.1 — probe first non-loopback IPv4.
       test:
         [
           "CMD-SHELL",
-          "node -e \"require('http').get('http://127.0.0.1:18789/',r=>{r.resume();process.exit(r.statusCode&&r.statusCode<500?0:1)}).on('error',()=>process.exit(1))\"",
+          "node -e \"const http=require('http');const os=require('os');let ip='127.0.0.1';for(const list of Object.values(os.networkInterfaces()||{})){for(const i of list||[]){if((i.family==='IPv4'||i.family===4)&&!i.internal){ip=i.address;break;}}}http.get('http://'+ip+':18789/',r=>{r.resume();process.exit(r.statusCode&&r.statusCode<500?0:1)}).on('error',()=>process.exit(1));\"",
         ]
       interval: 30s
       timeout: 10s

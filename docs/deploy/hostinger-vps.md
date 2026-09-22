@@ -102,19 +102,17 @@ Deploy does **not** auto-seed or onboard OpenClaw (keeps secrets out of CI).
 Per [OpenClaw docs](https://docs.openclaw.ai/concepts/agent-workspace): agent **workspace** (persona files like `AGENTS.md` / `SOUL.md`) is separate from Gateway **state**.
 
 - Host `data/openclaw/` → container `/home/node/.openclaw` = OpenClaw **state** (`openclaw.json`, credentials, agent DB, managed skills). Not the agent workspace.
-- Plugin: compose mounts `plugins/jarvise-openclaw` → `/plugins/jarvise-openclaw`, loaded via `plugins.load.paths` + `plugins.entries.jarvise` in the seeded config.
+- Skills pack: compose mounts `plugins/jarvise-openclaw` → `/plugins/jarvise-openclaw`, loaded via `skills.load.extraDirs` in the seeded config (do not add undocumented root keys like `_jarvise`).
 - Jarvise paper drop-folder (convention, not an OpenClaw core path): `data/openclaw/exports/*.md` → container `/home/node/.openclaw/exports/` → `jarvise rag sync-openclaw`.
 
 ### Post-seed checks
 
 1. Open Control UI at `http://$TAILSCALE_IP:18789/` and paste the gateway token from `.env` (`OPENCLAW_GATEWAY_TOKEN`) into Settings.
-2. Confirm plugin + skills inside the container:
+2. Confirm skills inside the container:
 
 ```bash
-docker compose exec openclaw openclaw plugins list   # expect id jarvise
 docker compose exec openclaw openclaw skills list    # expect jarvise-paper-research, jarvise-doctrine-rag
 ```
-
 3. Sync paper notes into doctrine RAG:
 
 ```bash

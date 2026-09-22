@@ -10,7 +10,7 @@
 |-------|----------------|------|
 | OpenClaw container | `docker-compose.yml` service `openclaw` | Image `ghcr.io/openclaw/openclaw:2026.9.5`, port `18789`, Tailscale-only in prod |
 | Seed config | `config/openclaw/openclaw.json.example` → `data/openclaw/openclaw.json` via `infra/docker/seed-openclaw-config.sh` | OpenRouter model `openrouter/openrouter/auto`, paper-only env vars, `plugins.load.paths` |
-| Native plugin | `plugins/jarvise-openclaw/` | Skills `jarvise-paper-research`, `jarvise-doctrine-rag` |
+| Native plugin | `plugins/jarvise-openclaw/` | Skills via `skills.load.extraDirs` (not empty-extension `plugins.load`) |
 | Drop-folder sync | `jarvise rag sync-openclaw` / `jarvise rag refresh` | Exports → `sources/openclaw/` → `kind=openclaw` |
 | MCP example | `mcp/jarvise-mcp.json.example` | `openclaw mcp serve --url ws://127.0.0.1:18789` |
 | Guardrails | compose + example `_jarvise` | `OPENCLAW_PAPER_ONLY=true`, `JARVISE_PAPER_ONLY=true`, no live execution tools |
@@ -34,7 +34,7 @@ Aligned with [docs.openclaw.ai](https://docs.openclaw.ai/):
 - **Gateway** — single process (Control UI on `:18789`) for sessions, routing, and channel connections.
 - **State** — host `data/openclaw/` → `/home/node/.openclaw` (`openclaw.json`, credentials, per-agent SQLite). This is **not** the agent workspace.
 - **Workspace** — separate persona/bootstrap tree (`AGENTS.md`, `SOUL.md`, …). Optional for Jarvise paper path; not required to sync exports into RAG.
-- **Plugin skills** — loaded via `plugins.load.paths` (lowest skill precedence after workspace / managed / bundled). Jarvise ships skills in `plugins/jarvise-openclaw/skills/`.
+- **Plugin skills** — Jarvise ships skills under `plugins/jarvise-openclaw/skills/` and loads them with `skills.load.extraDirs` (extraDirs tier). Do not register this pack via `plugins.load.paths` unless it has a real `openclaw.extensions` entry; do not add undocumented root keys like `_jarvise` to `openclaw.json`.
 
 ```text
 OpenClaw (research notes)
@@ -69,16 +69,16 @@ OpenClaw (research notes)
 | Audit | this file |
 | Drop-folder sync | `jarvise rag sync-openclaw` / included in `jarvise rag refresh` |
 | Kind tag | `openclaw` in `src/jarvise/rag.py` `SOURCE_KINDS` |
-| Native plugin | `plugins/jarvise-openclaw/` (`openclaw.plugin.json` + skills) |
+| Native plugin | `plugins/jarvise-openclaw/` (`openclaw.plugin.json` + skills; load via `skills.load.extraDirs`) |
 | Compose mount | `./plugins/jarvise-openclaw:/plugins/jarvise-openclaw:ro` |
-| Seed example | `config/openclaw/openclaw.json.example` → `plugins.load.paths` |
+| Seed example | `config/openclaw/openclaw.json.example` → `skills.load.extraDirs` |
 | MCP | `mcp/jarvise-mcp.json.example` → `openclaw mcp serve --url ws://127.0.0.1:18789` |
 | Healthcheck | HTTP probe of gateway `:18789` |
 
 ### Verify plugin → RAG
 
-1. `bash infra/docker/seed-openclaw-config.sh` (fresh install) or merge `plugins` from the example into `data/openclaw/openclaw.json`.
-2. `docker compose up -d openclaw` — Control UI on `:18789` with gateway token; `openclaw plugins list` shows `jarvise`.
+1. `bash infra/docker/seed-openclaw-config.sh` (fresh install) or merge `skills.load.extraDirs` from the example into `data/openclaw/openclaw.json`.
+2. `docker compose up -d openclaw` — Control UI on Tailscale `:18789` with gateway token; `openclaw skills list` shows Jarvise skills.
 3. Write a note under `data/openclaw/exports/` (or via skill `jarvise-paper-research`).
 4. `jarvise rag sync-openclaw` then `jarvise rag index` (or `refresh`).
 5. Search Qdrant for payload `kind=openclaw`.
