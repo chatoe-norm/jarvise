@@ -77,3 +77,13 @@ CREATE TABLE IF NOT EXISTS analysis_output (
     size_pct_equity REAL,
     thesis TEXT
 );
+
+-- Point-in-time tradable set (listed_at / delisted_at = Unix ms UTC)
+CREATE TABLE IF NOT EXISTS universe_membership (
+    universe_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    asset_class TEXT NOT NULL,
+    listed_at INTEGER NOT NULL,
+    delisted_at INTEGER,
+    PRIMARY KEY (universe_id, symbol, listed_at)
+);

@@ -91,6 +91,18 @@ CREATE TABLE IF NOT EXISTS analysis_output (
     size_pct_equity REAL,
     thesis TEXT
 );
+
+-- Point-in-time tradable set. listed_at / delisted_at are event times (ms UTC).
+-- A symbol is eligible at as_of when listed_at <= as_of AND
+-- (delisted_at IS NULL OR delisted_at > as_of).
+CREATE TABLE IF NOT EXISTS universe_membership (
+    universe_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    asset_class TEXT NOT NULL,
+    listed_at INTEGER NOT NULL,
+    delisted_at INTEGER,
+    PRIMARY KEY (universe_id, symbol, listed_at)
+);
 """
 
 _DERIV_METRIC_KEYS = (
@@ -316,3 +328,49 @@ def count_derivatives(conn: sqlite3.Connection, symbol: str) -> int:
         (symbol,),
     )
     return int(cur.fetchone()[0])
+
+
+def record_membership(
+    conn: sqlite3.Connection,
+    *,
+    universe_id: str,
+    symbol: str,
+    asset_class: str,
+    listed_at: int,
+    delisted_at: int | None = None,
+) -> int:
+    """Insert one membership interval; return 1 if new, 0 if already present."""
+    existing = conn.execute(
+        "SELECT 1 FROM universe_membership "
+        "WHERE universe_id=? AND symbol=? AND listed_at=?",
+        (universe_id, symbol.upper(), listed_at),
+    ).fetchone()
+    if existing is not None:
+        return 0
+    conn.execute(
+        """
+        INSERT INTO universe_membership (
+            universe_id, symbol, asset_class, listed_at, delisted_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (universe_id, symbol.upper(), asset_class, listed_at, delisted_at),
+    )
+    conn.commit()
+    return 1
+
+
+def universe_as_of(
+    conn: sqlite3.Connection, universe_id: str, as_of_ms: int
+) -> list[str]:
+    """Symbols eligible in `universe_id` at knowledge/event cutoff `as_of_ms`."""
+    cur = conn.execute(
+        """
+        SELECT symbol FROM universe_membership
+        WHERE universe_id=?
+          AND listed_at <= ?
+          AND (delisted_at IS NULL OR delisted_at > ?)
+        ORDER BY symbol
+        """,
+        (universe_id, as_of_ms, as_of_ms),
+    )
+    return [str(row[0]) for row in cur.fetchall()]

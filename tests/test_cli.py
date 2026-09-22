@@ -14,6 +14,25 @@ def test_missing_symbol_exit_2():
     assert run([]) == 2
 
 
+def test_universe_dry_run_resolves_paper_core(tmp_path: Path, capsys):
+    db = tmp_path / "u.db"
+    code = run(
+        [
+            "--universe",
+            "paper_core",
+            "--skip-derivatives",
+            "--dry-run",
+            "--json",
+            "--db",
+            str(db),
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["universe"] == "paper_core"
+    assert set(payload["market_technicals"]) == {"BTCUSDT", "ETHUSDT"}
+
+
 def test_until_without_since_exit_2():
     assert run([*BACKFILL_BASE, "--until", "2026-01-01"]) == 2
 
