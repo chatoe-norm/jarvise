@@ -1,8 +1,8 @@
 ## Learned User Preferences
-- Trade worldwide (not locked to Binance TH); orient to positive, stable, trusted returns; paper-first, then live only when explicitly gated.
+- Trade worldwide (not locked to Binance or Binance TH); any venue/account is fine if Jarvise stays efficient, stable, and secure; paper-first, then live only when explicitly gated.
 - Cover crypto plus stocks/ETFs; prefer slow, steady gains over aggressive returns.
 - Be owner-protective: capital preservation, risk guardrails, kill-switch; live trading off by default.
-- End-state product goal is auto-trade plus an analytics UI plus exchange accounts (e.g. Binance); climb paper → manual approval → autonomy — do not jump to live orders.
+- End-state product goal is auto-trade plus an analytics UI plus exchange accounts (e.g. Binance as one option); climb paper → manual approval → autonomy — do not jump to live orders.
 - Treat the Gemini notebook as trading doctrine, not a live price or order-book feed.
 - Use fetch/Firecrawl subagents for historical and current market data; combine that with notebook rules before any trade call.
 - Prefer Auto/Composer for cost; do not switch to Claude/GPT unless asked or Auto/Composer fails.
@@ -14,8 +14,8 @@
 - Canonical app is the Python CLI (`pyproject.toml`, `src/jarvise`). On Windows use `.venv\Scripts\jarvise` or `.venv\Scripts\python.exe -m pytest`; npm `ask-repo` is secondary.
 - Shipped surface today: paper analytics + `/analytics` UI + local paper auto-trade (`jarvise paper`); still no live exchange order placement. Day-to-day invoke paths are in `docs/product-usage.md` (CLI, VPS n8n→jobs, agent/MCP); product phases P0–P5 are in `docs/superpowers/specs/2026-09-23-product-roadmap-design.md`.
 - Paper trading is a local multi-asset ledger filled from live market data; venue testnets are optional and not required.
-- Numeric market truth lives in SQLite/Parquet (`data/analytics/jarvise.db`, `jarvise_ingest`); indicators must be recomputed from the full stored series, not per-fetch windows; Obsidian/markdown vaults are not for OHLCV time series.
-- TradingView / tradingview-mcp is a research overlay only — do not replace Binance→SQLite numeric truth or fill the paper ledger from TV signals; use both layers. TV MCP is stronger for screener/MTF/chat backtest; Jarvise custom ingest is stronger for reproducible OHLCV, paper ledger, kill-switch, and audit — do not discard custom ingest to “migrate” to TV.
+- Numeric market truth lives in SQLite/Parquet (`data/analytics/jarvise.db`, `jarvise_ingest`); indicators must be recomputed from the full stored series, not per-fetch windows; Obsidian/markdown vaults are not for OHLCV time series. Current default OHLCV provider is Binance public klines — not a forever venue lock; new providers must meet efficient/stable/secure bars.
+- TradingView / tradingview-mcp is a research overlay only — do not silent-merge into `market_technicals` or fill the paper ledger from TV signals alone; use both layers. TV MCP is stronger for screener/MTF/chat backtest; Jarvise controlled ingest is stronger for reproducible OHLCV, paper ledger, kill-switch, and audit.
 - Deploy target is Hostinger KVM 2 ID `1269762` (`srv1269762.hstgr.cloud`, Ubuntu 24.04, 2 vCPU, 8 GB RAM, 100 GB, Malaysia). SSH user `root`. Tailscale IP `100.93.110.48`. Hostinger VPS is the 24/7 runtime; Tailscale is private ingress only — control plane (n8n, OpenClaw, web) binds to Tailscale, not the public IPv4.
 - Stack lives at `/opt/jarvise` on that VPS. OpenClaw uses OpenRouter model `openrouter/openrouter/auto`.
 - VPS NotebookLM/`nlm` session data for non-Cursor doctrine ops lives at `/opt/jarvise/data/nlm` (synced from local `%USERPROFILE%\.notebooklm-mcp-cli`).

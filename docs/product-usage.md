@@ -42,8 +42,9 @@ Entrypoint: `.venv\Scripts\jarvise` (see [`src/jarvise/cli.py`](../src/jarvise/c
 | Command | Purpose |
 |---------|---------|
 | `jarvise status` / `init` / `config` | Local workspace |
-| `jarvise ingest ...` | Fetch OHLCV (+ CoinGlass) → `data/analytics/jarvise.db` |
+| `jarvise ingest ...` | Fetch OHLCV (+ CoinGlass) → `data/analytics/jarvise.db` (Binance klines = current default provider; venue-agnostic later) |
 | `jarvise analyze ...` | Read DB → regime / confidence / size (paper) |
+| `jarvise paper ...` | Simulated fills into local ledger (no exchange orders) |
 | `jarvise rag ...` | Sync doctrine → Qdrant |
 
 Daily local examples:
@@ -51,7 +52,8 @@ Daily local examples:
 ```powershell
 .venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 200 --skip-derivatives --json
 .venv\Scripts\jarvise analyze --symbol BTCUSDT --timeframe 4h --json
-.venv\Scripts\jarvise analyze --universe paper_core --timeframe 4h --json
+.venv\Scripts\jarvise paper run --symbol BTCUSDT --timeframe 4h --json
+.venv\Scripts\jarvise paper status --json
 ```
 
 Compatibility aliases `jarvise-ingest` / `jarvise-analyze` still work; prefer `jarvise ...`.
@@ -78,8 +80,20 @@ UIs in this phase: n8n (`:5678`), control web health (`:8080`) — not a trading
 
 - Cursor agent runs `.venv\Scripts\jarvise ...` per skill / README
 - Doctrine: Gemini Notebook MCP + [`.cursor/skills/jarvise-notebook/SKILL.md`](../.cursor/skills/jarvise-notebook/SKILL.md) (`nlm` profile `chatoe`)
-- Paper-only MCP example: [`mcp/jarvise-mcp.json.example`](../mcp/jarvise-mcp.json.example)
+- Paper-only MCP example: [`mcp/jarvise-mcp.json.example`](../mcp/jarvise-mcp.json.example) (includes optional TradingView research MCP)
 - OpenClaw writes notes → `jarvise rag sync-openclaw` → Qdrant (no orders)
+
+### Research overlay vs controlled truth
+
+| Layer | Source | Role |
+|-------|--------|------|
+| Controlled numeric contract | `jarvise ingest` → SQLite (today: Binance public klines) | OHLCV + indicators that drive analyze/paper; **venue-agnostic** — any provider that is efficient, stable, and secure can be added later |
+| Doctrine | NotebookLM → `jarvise rag sync-notebook` → Qdrant | Rules / risk; not a price feed |
+| Research overlay | [tradingview-mcp](https://github.com/atilaahmettaner/tradingview-mcp) (Cursor MCP) | Screener / MTF / chat backtest — **do not** silent-merge into `market_technicals` or drive paper/live fills alone |
+
+Trade **worldwide** (not Binance-only). New venues/accounts must plug into Jarvise with efficiency, stability, and security (no withdrawal keys; live stays ladder-gated).
+
+Windows note for TradingView MCP: pin `uvx --python 3.13` (3.14 not supported yet). Optional official connector: `https://mcp.tradingview.com/mcp` if you have Essential+.
 
 ## 4. Owner day workflow
 
