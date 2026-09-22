@@ -74,7 +74,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml start redis
 Pin OpenClaw in the VPS `.env` (do not leave `:latest`):
 
 ```bash
-OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.2
+OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.5
 ```
 
 Then pull and recreate:
