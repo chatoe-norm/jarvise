@@ -330,6 +330,59 @@ def count_derivatives(conn: sqlite3.Connection, symbol: str) -> int:
     return int(cur.fetchone()[0])
 
 
+def load_latest_candle(
+    conn: sqlite3.Connection, symbol: str, timeframe: str
+) -> dict | None:
+    cur = conn.execute(
+        """
+        SELECT symbol, timestamp, timeframe, open, high, low, close, volume,
+               atr_14, rsi_14, ema_20, ema_200
+        FROM market_technicals
+        WHERE symbol=? AND timeframe=?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), timeframe),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def upsert_analysis_output(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO analysis_output (
+            analysis_id, timestamp, symbol, regime_state, confidence_score,
+            action, invalidation_price, size_pct_equity, thesis
+        ) VALUES (
+            :analysis_id, :timestamp, :symbol, :regime_state, :confidence_score,
+            :action, :invalidation_price, :size_pct_equity, :thesis
+        )
+        ON CONFLICT(analysis_id) DO UPDATE SET
+            timestamp=excluded.timestamp,
+            symbol=excluded.symbol,
+            regime_state=excluded.regime_state,
+            confidence_score=excluded.confidence_score,
+            action=excluded.action,
+            invalidation_price=excluded.invalidation_price,
+            size_pct_equity=excluded.size_pct_equity,
+            thesis=excluded.thesis
+        """,
+        {
+            "analysis_id": row["analysis_id"],
+            "timestamp": row["timestamp"],
+            "symbol": row["symbol"],
+            "regime_state": row["regime_state"],
+            "confidence_score": row["confidence_score"],
+            "action": row["action"],
+            "invalidation_price": row.get("invalidation_price"),
+            "size_pct_equity": row["size_pct_equity"],
+            "thesis": row.get("thesis"),
+        },
+    )
+    conn.commit()
+
+
 def record_membership(
     conn: sqlite3.Connection,
     *,

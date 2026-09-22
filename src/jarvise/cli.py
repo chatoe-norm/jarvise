@@ -17,6 +17,7 @@ ROOT_EPILOG = """Examples:
   jarvise init --yes
   jarvise config --help
   jarvise ingest --symbol BTCUSDT --skip-derivatives --dry-run --json
+  jarvise analyze --symbol BTCUSDT --timeframe 4h --json
 """
 
 STATUS_EPILOG = """Examples:
@@ -281,6 +282,18 @@ def ingest(ctx: typer.Context) -> None:
     from jarvise_ingest.cli import main as ingest_main
 
     code = ingest_main(ctx.args)
+    raise typer.Exit(code if isinstance(code, int) else 0)
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
+def analyze(ctx: typer.Context) -> None:
+    """Paper analyzer: regime / confidence / invalidation / size (no orders)."""
+    from jarvise_analyze.cli import main as analyze_main
+
+    code = analyze_main(ctx.args)
     raise typer.Exit(code if isinstance(code, int) else 0)
 
 

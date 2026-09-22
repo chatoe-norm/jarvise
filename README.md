@@ -4,9 +4,9 @@ Paper analytics for an intelligent crypto trader. **No order placement** in this
 
 Repository: https://github.com/chatoe-norm/jarvise
 
-## Quick start (Phase 1 — ingest)
+## Quick start (Phase 1 — ingest + paper analyze)
 
-One Typer entrypoint: `jarvise` (`status` / `init` / `config` / `ingest`). Paper ingest is delegated from that CLI; `jarvise-ingest` remains a compatibility alias.
+One Typer entrypoint: `jarvise` (`status` / `init` / `config` / `ingest` / `analyze`). Paper ingest and analyze are delegated from that CLI; `jarvise-ingest` / `jarvise-analyze` remain compatibility aliases.
 
 ```powershell
 # Python 3.11+ (repo uses 3.12 locally)
@@ -14,6 +14,7 @@ python -m venv .venv
 .venv\Scripts\pip install -e ".[dev]"
 
 .venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 50 --skip-derivatives --json
+.venv\Scripts\jarvise analyze --symbol BTCUSDT --timeframe 4h --json
 ```
 
 On macOS/Linux, use `.venv/bin/pip` and `.venv/bin/jarvise` instead.
