@@ -58,6 +58,45 @@ Manual fallback:
 sudo /opt/jarvise/infra/deploy/vps-deploy.sh
 ```
 
+### Dependency / image upgrades
+
+Before the first pull that bumps **Qdrant** (e.g. `v1.13.x` → `v1.19.x`) or **Redis** patch pins, take a volume backup (see [Backups](#backups)). Also snapshot Redis:
+
+```bash
+BACKUP_DIR=~/jarvise-backups/$(date +%F)
+mkdir -p "$BACKUP_DIR"
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop redis
+docker run --rm -v jarvise_redis:/data -v "$BACKUP_DIR":/backup alpine \
+  tar czf /backup/redis.tgz -C /data .
+docker compose -f docker-compose.yml -f docker-compose.prod.yml start redis
+```
+
+Pin OpenClaw in the VPS `.env` (do not leave `:latest`):
+
+```bash
+OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.2
+```
+
+Then pull and recreate:
+
+```bash
+cd /opt/jarvise
+docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+### Rollback tags
+
+If a bump misbehaves, restore the previous image tags in `docker-compose.yml` / `.env` and `up -d` again (restore volumes from backup if storage migrated badly):
+
+| Service | Previous pin (pre-2026-09-22 upgrade) |
+|---------|----------------------------------------|
+| Redis | `redis:7-alpine` |
+| Qdrant | `qdrant/qdrant:v1.13.4` |
+| n8n | `n8nio/n8n:2.39.10` |
+| OpenClaw | `ghcr.io/openclaw/openclaw:latest` (prefer last known good dated tag) |
+| Python base | `python:3.12-slim-bookworm` |
+
 ## Kill switch
 
 Control UI → Engage kill switch, or:
