@@ -1,8 +1,18 @@
-"""OHLC indicator helpers for paper analytics (ATR, RSI, EMA)."""
+"""OHLC indicator helpers for paper analytics (ATR, RSI, EMA).
+
+`ema`, `rsi` and `atr` are recursive: each value carries a share of the seed that
+started the recursion. `indicator_series` withholds values while that share is
+still material, so a stored number never depends on where the series happened to
+begin.
+"""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
+
+# Largest share of the seed an exported indicator value may still carry.
+SEED_INFLUENCE_FLOOR = 0.01
 
 
 def ema(values: Sequence[float], period: int) -> list[float | None]:
@@ -83,22 +93,29 @@ def atr(
     return out
 
 
-def enrich_candles(candles: list[dict]) -> list[dict]:
-    """Add atr_14, rsi_14, ema_20, ema_200 to candle dicts (in place + return)."""
-    if not candles:
-        return candles
-    highs = [float(c["high"]) for c in candles]
-    lows = [float(c["low"]) for c in candles]
-    closes = [float(c["close"]) for c in candles]
-    atrs = atr(highs, lows, closes, 14)
-    rsis = rsi(closes, 14)
-    ema20 = ema(closes, 20)
-    ema200 = ema(closes, 200)
-    for i, c in enumerate(candles):
-        c["atr_14"] = atrs[i]
-        c["rsi_14"] = rsis[i]
-        c["ema_20"] = ema20[i]
-        c["ema_200"] = ema200[i]
-        c["vwap"] = None
-        c["adx_14"] = None
-    return candles
+def warm_from(seed_index: int, alpha: float) -> int:
+    """First index whose value carries less than `SEED_INFLUENCE_FLOOR` of the seed."""
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be between 0 and 1")
+    bars = math.ceil(math.log(SEED_INFLUENCE_FLOOR) / math.log(1.0 - alpha))
+    return seed_index + bars
+
+
+def _withhold_until(values: list[float | None], first: int) -> list[float | None]:
+    return [value if i >= first else None for i, value in enumerate(values)]
+
+
+def indicator_series(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+) -> dict[str, list[float | None]]:
+    """Indicator columns for a whole series, warm-up values withheld as NULL."""
+    return {
+        "atr_14": _withhold_until(
+            atr(highs, lows, closes, 14), warm_from(13, 1 / 14)
+        ),
+        "rsi_14": _withhold_until(rsi(closes, 14), warm_from(14, 1 / 14)),
+        "ema_20": _withhold_until(ema(closes, 20), warm_from(19, 2 / 21)),
+        "ema_200": _withhold_until(ema(closes, 200), warm_from(199, 2 / 201)),
+    }

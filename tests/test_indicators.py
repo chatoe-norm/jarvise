@@ -1,4 +1,4 @@
-from jarvise_ingest.indicators import atr, ema, enrich_candles, rsi
+from jarvise_ingest.indicators import atr, ema, indicator_series, rsi, warm_from
 
 
 def test_ema_known_seed():
@@ -29,22 +29,31 @@ def test_atr_positive():
     assert out[14] is not None
 
 
-def test_enrich_candles_adds_fields():
-    candles = [
-        {
-            "symbol": "BTCUSDT",
-            "timestamp": 1_000 + i,
-            "timeframe": "1h",
-            "open": 100 + i,
-            "high": 101 + i,
-            "low": 99 + i,
-            "close": 100.5 + i,
-            "volume": 10.0,
-        }
-        for i in range(30)
-    ]
-    enrich_candles(candles)
-    assert candles[-1]["atr_14"] is not None
-    assert candles[-1]["rsi_14"] is not None
-    assert candles[-1]["ema_20"] is not None
-    assert candles[0]["ema_200"] is None
+def test_warm_from_counts_bars_until_the_seed_is_forgotten():
+    # EMA-200 seeds at index 199 and needs 461 more bars before the seed
+    # contributes under 1% of the value.
+    assert warm_from(199, 2 / 201) == 660
+
+
+def test_indicator_series_withholds_values_that_still_carry_their_seed():
+    closes = [100.0 + i * 0.5 for i in range(700)]
+    highs = [c + 1.0 for c in closes]
+    lows = [c - 1.0 for c in closes]
+
+    series = indicator_series(highs, lows, closes)
+
+    assert series["atr_14"][75] is None
+    assert series["atr_14"][76] is not None
+    assert series["ema_200"][659] is None
+    assert series["ema_200"][660] is not None
+
+
+def test_indicator_series_keys_match_the_stored_columns():
+    closes = [100.0 + i for i in range(30)]
+    highs = [c + 1.0 for c in closes]
+    lows = [c - 1.0 for c in closes]
+
+    series = indicator_series(highs, lows, closes)
+
+    assert set(series) == {"atr_14", "rsi_14", "ema_20", "ema_200"}
+    assert all(len(values) == 30 for values in series.values())

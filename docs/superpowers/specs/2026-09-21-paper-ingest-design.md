@@ -1,7 +1,7 @@
 # Jarvise paper ingest (SQLite + CLI) — design
 
 **Date:** 2026-09-21  
-**Status:** Phase 1+2 shipped on `main` (2026-09-21); see plan for CLI unify / notebook / ask-repo next slice  
+**Status:** Phase 1+2 shipped on `main` (2026-09-21); indicator reproducibility fixed 2026-09-22; see plan for CLI unify / notebook / ask-repo next slice  
 **Notebook:** [Jarvise : Crypto Trader](https://notebooklm.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e)  
 **Doctrine source:** `data/analytics/sources/jarvise-doctrine.txt`, `data/analytics/api-map.json`
 
@@ -40,7 +40,8 @@ bin/jarvise ingest
         ├─ providers/
         │     binance_klines.py   → OHLC klines (no API key)
         │     coinglass.py        → OI, funding, liquidations (CG-API-KEY)
-        ├─ indicators.py          → ATR-14, RSI-14, EMA-20/200 from OHLC
+        ├─ indicators.py          → ATR-14, RSI-14, EMA-20/200 math + warm-up rule
+        ├─ series.py              → recompute indicators over the whole stored series
         ├─ db.py                  → SQLite open, migrate, upsert
         └─ cli.py                 → argparse, dry-run plan, JSON summary
         │
@@ -81,8 +82,8 @@ Missing required `--symbol` → fail fast with the example invocation above (CLI
 
 | Provider | Auth | Writes | Notes |
 |---|---|---|---|
-| Binance public klines | none | `market_technicals` OHLC+volume | Base URL fixed to `https://api.binance.com` (`GET /api/v3/klines`). Paper OHLC only — not live Binance TH trading. Symbol stored as passed (e.g. `BTCUSDT`). |
-| Local indicators | n/a | ATR-14, RSI-14, EMA-20, EMA-200 | Computed after OHLC fetch. VWAP and ADX deferred (nullable columns stay NULL). |
+| Binance public klines | none | `market_technicals` OHLC+volume | Base URL fixed to `https://api.binance.com` (`GET /api/v3/klines`). Paper OHLC only — not live Binance TH trading. Symbol stored as passed (e.g. `BTCUSDT`). The still-forming final kline is dropped, so one fewer row than `--limit` is normal. |
+| Local indicators | n/a | ATR-14, RSI-14, EMA-20, EMA-200 | Recomputed over the **whole stored series** after each upsert, never from one fetch window. Warm-up values stay NULL until the recursion seed contributes under 1% (EMA-200 needs 660 candles). VWAP and ADX deferred. |
 | CoinGlass V4 | `COINGLASS_API_KEY` (alias `CG-API-KEY`) | `derivatives_analytics` | Base `https://open-api-v4.coinglass.com`. MVP: `/api/futures/openInterest/ohlc-history`, `/api/futures/fundingRate/oi-weight-ohlc-history`, `/api/futures/liquidation/aggregated-history`. If key missing and `--skip-derivatives` not set → exit 2 with example to set env or pass `--skip-derivatives`. |
 
 **Hard rule:** no provider may call any trade / order / account-balance-write endpoint. Ingest HTTP allowlist is GET-only market data.
@@ -124,7 +125,7 @@ Dry-run prints the same shape with planned counts and `dry_run: true`, zero writ
 ## Data flow
 
 1. Parse flags; resolve DB path; open SQLite; migrate.
-2. For each symbol: fetch klines → compute indicators → upsert `market_technicals`.
+2. For each symbol: fetch klines (closed candles only) → upsert OHLCV into `market_technicals` → recompute indicator columns from the full stored series.
 3. Unless `--skip-derivatives`: map `BTCUSDT` → `BTC`, fetch CoinGlass series → upsert `derivatives_analytics`.
 4. Print summary; exit 0 on full success. Partial provider failure: exit non-zero after writing whatever succeeded, and list failures in JSON `errors[]`.
 
