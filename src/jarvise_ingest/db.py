@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS analysis_output (
     analysis_id TEXT NOT NULL PRIMARY KEY,
     timestamp INTEGER NOT NULL,
     symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL DEFAULT '',
     regime_state TEXT NOT NULL,
     confidence_score REAL NOT NULL,
     action TEXT NOT NULL,
@@ -156,9 +157,20 @@ def _migrate_derivatives_bitemporal(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_analysis_timeframe(conn: sqlite3.Connection) -> None:
+    """Add timeframe column to legacy analysis_output tables."""
+    cols = _table_columns(conn, "analysis_output")
+    if not cols or "timeframe" in cols:
+        return
+    conn.execute(
+        "ALTER TABLE analysis_output ADD COLUMN timeframe TEXT NOT NULL DEFAULT ''"
+    )
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     _migrate_derivatives_bitemporal(conn)
+    _migrate_analysis_timeframe(conn)
     conn.commit()
 
 
@@ -352,15 +364,16 @@ def upsert_analysis_output(conn: sqlite3.Connection, row: dict) -> None:
     conn.execute(
         """
         INSERT INTO analysis_output (
-            analysis_id, timestamp, symbol, regime_state, confidence_score,
+            analysis_id, timestamp, symbol, timeframe, regime_state, confidence_score,
             action, invalidation_price, size_pct_equity, thesis
         ) VALUES (
-            :analysis_id, :timestamp, :symbol, :regime_state, :confidence_score,
+            :analysis_id, :timestamp, :symbol, :timeframe, :regime_state, :confidence_score,
             :action, :invalidation_price, :size_pct_equity, :thesis
         )
         ON CONFLICT(analysis_id) DO UPDATE SET
             timestamp=excluded.timestamp,
             symbol=excluded.symbol,
+            timeframe=excluded.timeframe,
             regime_state=excluded.regime_state,
             confidence_score=excluded.confidence_score,
             action=excluded.action,
@@ -372,6 +385,7 @@ def upsert_analysis_output(conn: sqlite3.Connection, row: dict) -> None:
             "analysis_id": row["analysis_id"],
             "timestamp": row["timestamp"],
             "symbol": row["symbol"],
+            "timeframe": row.get("timeframe") or "",
             "regime_state": row["regime_state"],
             "confidence_score": row["confidence_score"],
             "action": row["action"],
@@ -381,6 +395,39 @@ def upsert_analysis_output(conn: sqlite3.Connection, row: dict) -> None:
         },
     )
     conn.commit()
+
+
+def list_analysis_output(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Return latest analysis_output rows, newest first."""
+    clauses: list[str] = []
+    params: list[object] = []
+    if symbol:
+        clauses.append("symbol = ?")
+        params.append(symbol.upper())
+    if timeframe:
+        clauses.append("timeframe = ?")
+        params.append(timeframe)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    lim = max(1, min(int(limit), 500))
+    params.append(lim)
+    cur = conn.execute(
+        f"""
+        SELECT analysis_id, timestamp, symbol, timeframe, regime_state,
+               confidence_score, action, invalidation_price, size_pct_equity, thesis
+        FROM analysis_output
+        {where}
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        params,
+    )
+    return [dict(row) for row in cur.fetchall()]
 
 
 def record_membership(

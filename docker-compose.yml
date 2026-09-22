@@ -182,9 +182,12 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_URL=http://qdrant:6333
       - JARVISE_PAPER_ONLY=true
+      - JARVISE_DB=/data/analytics/jarvise.db
       - WEB_BASIC_AUTH_USER=${WEB_BASIC_AUTH_USER:-}
       - WEB_BASIC_AUTH_PASSWORD=${WEB_BASIC_AUTH_PASSWORD:-}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-jarvise_doctrine}
+    volumes:
+      - ./data/analytics:/data/analytics
     depends_on:
       redis:
         condition: service_healthy

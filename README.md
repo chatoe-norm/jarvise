@@ -4,6 +4,8 @@ Paper analytics for an intelligent crypto trader. **No order placement** in this
 
 Repository: https://github.com/chatoe-norm/jarvise
 
+How to run the shipped product day-to-day (CLI, VPS schedules, agent/MCP): [docs/product-usage.md](docs/product-usage.md).
+
 ## Quick start (Phase 1 — ingest + paper analyze)
 
 One Typer entrypoint: `jarvise` (`status` / `init` / `config` / `ingest` / `analyze`). Paper ingest and analyze are delegated from that CLI; `jarvise-ingest` / `jarvise-analyze` remain compatibility aliases.
@@ -121,5 +123,8 @@ Exit codes: `0` finished, `1` startup or missing config, `2` the agent ran and f
 
 ## Specs
 
+- [docs/product-usage.md](docs/product-usage.md) — product invoke paths (paper phase)
+- [docs/superpowers/specs/2026-09-23-product-roadmap-design.md](docs/superpowers/specs/2026-09-23-product-roadmap-design.md) — full product roadmap (P0–P5)
+- [docs/superpowers/plans/2026-09-23-p1-analytics-ui.md](docs/superpowers/plans/2026-09-23-p1-analytics-ui.md) — P1 Analytics UI implementation
 - [docs/superpowers/specs/2026-09-21-paper-ingest-design.md](docs/superpowers/specs/2026-09-21-paper-ingest-design.md)
 - [docs/superpowers/specs/2026-09-22-openclaw-intelligence-audit.md](docs/superpowers/specs/2026-09-22-openclaw-intelligence-audit.md)

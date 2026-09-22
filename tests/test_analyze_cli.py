@@ -73,9 +73,10 @@ def test_analyze_persists_analysis_output(tmp_path: Path, capsys):
 
     conn = open_db(db)
     row = conn.execute(
-        "SELECT action, regime_state FROM analysis_output WHERE analysis_id=?",
+        "SELECT action, regime_state, timeframe FROM analysis_output WHERE analysis_id=?",
         (analysis_id,),
     ).fetchone()
     conn.close()
     assert row is not None
     assert row[0] == payload["analyses"][0]["action"]
+    assert row[2] == "4h"
