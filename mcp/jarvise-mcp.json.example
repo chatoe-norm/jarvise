@@ -26,6 +26,20 @@
         "JARVISE_PAPER_ONLY": "true"
       }
     },
+    "tradingview": {
+      "command": "uvx",
+      "args": [
+        "--python",
+        "3.13",
+        "--from",
+        "tradingview-mcp-server",
+        "tradingview-mcp"
+      ],
+      "env": {
+        "JARVISE_PAPER_ONLY": "true",
+        "NOTE": "Research overlay only — screener/MTF/chat backtest. Do not write OHLCV into jarvise.db or drive paper/live fills from TV signals alone. Pin Python 3.13 (3.14 unsupported)."
+      }
+    },
     "openclaw": {
       "command": "openclaw",
       "args": [
@@ -50,7 +64,8 @@
       "Copy into Cursor MCP settings; replace ${...} placeholders.",
       "OpenClaw MCP: local `openclaw mcp serve --url ws://127.0.0.1:18789` (gateway must be up). Prefer command over OPENCLAW_MCP_URL.",
       "For a remote Tailscale gateway, change --url to ws://$TAILSCALE_IP:18789 and pass a token file.",
-      "Write path remains: jarvise ingest → data/analytics/jarvise.db",
+      "Write path remains: jarvise ingest → data/analytics/jarvise.db (venue-agnostic contract; Binance klines are the current default provider, not a forever lock)",
+      "TradingView MCP (community tradingview-mcp-server): research overlay only — never silent-merge into market_technicals",
       "RAG path: jarvise rag refresh → Qdrant jarvise_doctrine (includes sync-openclaw)",
       "OpenClaw paper notes: data/openclaw/exports → jarvise rag sync-openclaw"
     ]

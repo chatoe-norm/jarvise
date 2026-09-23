@@ -23,11 +23,12 @@ CREATE TABLE IF NOT EXISTS market_technicals (
 CREATE TABLE IF NOT EXISTS derivatives_analytics (
     symbol TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
+    ingested_at INTEGER NOT NULL,
     open_interest_usd REAL,
     funding_rate REAL,
     long_short_ratio REAL,
     liquidations_24h_usd REAL,
-    PRIMARY KEY (symbol, timestamp)
+    PRIMARY KEY (symbol, timestamp, ingested_at)
 );
 
 CREATE TABLE IF NOT EXISTS order_book_microstructure (
@@ -77,6 +78,16 @@ CREATE TABLE IF NOT EXISTS analysis_output (
     thesis TEXT
 );
 
+-- Point-in-time tradable set (listed_at / delisted_at = Unix ms UTC)
+CREATE TABLE IF NOT EXISTS universe_membership (
+    universe_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    asset_class TEXT NOT NULL,
+    listed_at INTEGER NOT NULL,
+    delisted_at INTEGER,
+    PRIMARY KEY (universe_id, symbol, listed_at)
+);
+
 -- Read-only exchange spot wallet snapshots (P3). Amounts as TEXT decimal strings.
 -- Timestamps: INTEGER Unix milliseconds (UTC)
 CREATE TABLE IF NOT EXISTS exchange_balances (
@@ -90,3 +101,4 @@ CREATE TABLE IF NOT EXISTS exchange_balances (
 );
 CREATE INDEX IF NOT EXISTS idx_exchange_balances_venue_fetched
     ON exchange_balances (venue, fetched_at_ms DESC);
+

@@ -1,7 +1,7 @@
 # Jarvise paper ingest (SQLite + CLI) — design
 
 **Date:** 2026-09-21  
-**Status:** Phase 1+2 shipped on `main` (2026-09-21); indicator reproducibility fixed 2026-09-22; see plan for CLI unify / notebook / ask-repo next slice  
+**Status:** Phase 1+2 shipped on `main` (2026-09-21); indicator reproducibility + backfill + bitemporal derivatives + point-in-time universe (2026-09-22); see plan for analyze / notebook / ask-repo next slice  
 **Notebook:** [Jarvise : Crypto Trader](https://notebooklm.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e)  
 **Doctrine source:** `data/analytics/sources/jarvise-doctrine.txt`, `data/analytics/api-map.json`
 
@@ -89,7 +89,7 @@ Missing required `--symbol` → fail fast with the example invocation above (CLI
 |---|---|---|---|
 | Binance public klines | none | `market_technicals` OHLC+volume | Base URL fixed to `https://api.binance.com` (`GET /api/v3/klines`). Paper OHLC only — not live Binance TH trading. Symbol stored as passed (e.g. `BTCUSDT`). The still-forming final kline is dropped, so one fewer row than `--limit` is normal. |
 | Local indicators | n/a | ATR-14, RSI-14, EMA-20, EMA-200 | Recomputed over the **whole stored series** after each upsert, never from one fetch window. Warm-up values stay NULL until the recursion seed contributes under 1% (EMA-200 needs 660 candles). VWAP and ADX deferred. |
-| CoinGlass V4 | `COINGLASS_API_KEY` (alias `CG-API-KEY`) | `derivatives_analytics` | Base `https://open-api-v4.coinglass.com`. MVP: `/api/futures/openInterest/ohlc-history`, `/api/futures/fundingRate/oi-weight-ohlc-history`, `/api/futures/liquidation/aggregated-history`. If key missing and `--skip-derivatives` not set → exit 2 with example to set env or pass `--skip-derivatives`. |
+| CoinGlass V4 | `COINGLASS_API_KEY` (alias `CG-API-KEY`) | `derivatives_analytics` | Base `https://open-api-v4.coinglass.com`. MVP: `/api/futures/openInterest/ohlc-history`, `/api/futures/fundingRate/oi-weight-ohlc-history`, `/api/futures/liquidation/aggregated-history`. Rows are **bitemporal**: `timestamp` = event time, `ingested_at` = knowledge time; revisions append a version (never overwrite). Query via `as_of_derivatives`. If key missing and `--skip-derivatives` not set → exit 2 with example to set env or pass `--skip-derivatives`. |
 
 **Hard rule:** no provider may call any trade / order / account-balance-write endpoint. Ingest HTTP allowlist is GET-only market data.
 

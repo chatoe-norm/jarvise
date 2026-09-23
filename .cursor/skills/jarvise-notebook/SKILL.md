@@ -32,7 +32,7 @@ Do not use the `default` profile (`normstudiox@gmail.com`) for this notebook —
 
 1. `notebook_get` / `source_list_drive` with `skip_freshness=true` if you need source inventory (Drive count is often 0; web/generated sources dominate).
 2. `notebook_query` with the notebook id. Ask for principles, risk rules, venue constraints, and anything matching the current symbol/setup.
-3. Combine notebook context with live chart/news data **and** local SQLite price-graph (OHLCV + ATR/RSI/EMA after ingest/backfill). Notebook is doctrine, not a price feed.
+3. Combine notebook context with local SQLite price-graph (OHLCV after ingest/backfill) **and** optional research overlays (e.g. TradingView MCP screener/MTF). Notebook is doctrine, not a price feed. Do **not** treat TV MCP output as the sole driver of paper fills or live orders.
 4. If query fails with auth errors, re-auth (above) and retry once.
 
 ## Hard guardrails (from doctrine)
@@ -42,7 +42,7 @@ Do not use the `default` profile (`normstudiox@gmail.com`) for this notebook —
 - Positive EV after fees/slippage before any live unlock; fractional Kelly only; stops ≥ ~1.5× ATR.
 - Kill-switch / daily drawdown halt: lock until a **written human review** (never auto-resume).
 - Structure first on charts; oscillators are context, never standalone triggers.
-- Venue: Binance TH spot costs (fees, spread, depth) are real EV drag.
+- **Venue-agnostic:** trade anywhere Jarvise can run efficiently, stably, and securely. Binance (incl. TH spot costs when relevant) is an example venue/cost model — not a forever lock.
 - Binance APIs for Jarvise = public market data (`GET /api/v3/klines`) plus planned read-only spot account (`GET /api/v3/account`, P3). Never order/withdraw endpoints; never keys with withdrawal/transfer permission. See `binance-api-intro-jarvise.txt` and `docs/exchange/binance-for-jarvise.md`.
 - Binance Skills Hub is used read-only through skill `jarvise-binance-intel` (public token info, token audit, rank/hype context, tokenized US stocks, Academy). Never install the hub, `binance-cli`, `baw`, the Agentic Wallet, or the Binance MCP Server. Token audit `HIGH` → FLAT; rank/hype is context, never a trigger. See `binance-skills-hub-jarvise.txt`.
 

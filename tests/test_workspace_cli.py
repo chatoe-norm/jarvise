@@ -225,7 +225,7 @@ def test_config_import_dry_run_does_not_write(tmp_path: Path) -> None:
 def test_ingest_missing_symbol_exit_2() -> None:
     result = invoke("ingest")
     assert result.exit_code == 2
-    assert "Error: --symbol is required." in combined(result)
+    assert "Error: --symbol or --universe is required." in combined(result)
 
 
 def test_ingest_dry_run_delegates(tmp_path: Path) -> None:

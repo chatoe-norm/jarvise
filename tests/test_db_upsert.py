@@ -1,9 +1,11 @@
 from pathlib import Path
 
 from jarvise_ingest.db import (
+    append_derivatives,
     count_market,
+    list_analysis_output,
     open_db,
-    upsert_derivatives,
+    upsert_analysis_output,
     upsert_market_technicals,
 )
 
@@ -40,7 +42,7 @@ def test_upsert_market_idempotent(tmp_path: Path):
     conn.close()
 
 
-def test_upsert_derivatives_idempotent(tmp_path: Path):
+def test_append_derivatives_skips_identical_payload(tmp_path: Path):
     db = tmp_path / "t.db"
     conn = open_db(db)
     row = {
@@ -51,11 +53,101 @@ def test_upsert_derivatives_idempotent(tmp_path: Path):
         "long_short_ratio": None,
         "liquidations_24h_usd": 1e6,
     }
-    upsert_derivatives(conn, [row])
-    upsert_derivatives(conn, [row])
+    assert append_derivatives(conn, [row], ingested_at=1_800_000_000_000) == 1
+    assert append_derivatives(conn, [row], ingested_at=1_800_000_100_000) == 0
     assert count_derivatives_rows(conn) == 1
     conn.close()
 
 
 def count_derivatives_rows(conn) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM derivatives_analytics").fetchone()[0])
+
+
+def test_list_analysis_output_filters(tmp_path: Path):
+    db = tmp_path / "a.db"
+    conn = open_db(db)
+    upsert_analysis_output(
+        conn,
+        {
+            "analysis_id": "a1",
+            "timestamp": 100,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+            "action": "long",
+            "invalidation_price": 90.0,
+            "size_pct_equity": 1.0,
+            "thesis": "btc 4h",
+        },
+    )
+    upsert_analysis_output(
+        conn,
+        {
+            "analysis_id": "a2",
+            "timestamp": 200,
+            "symbol": "ETHUSDT",
+            "timeframe": "1h",
+            "regime_state": "range",
+            "confidence_score": 0.4,
+            "action": "flat",
+            "invalidation_price": None,
+            "size_pct_equity": 0.0,
+            "thesis": "eth 1h",
+        },
+    )
+    upsert_analysis_output(
+        conn,
+        {
+            "analysis_id": "a3",
+            "timestamp": 150,
+            "symbol": "BTCUSDT",
+            "timeframe": "1h",
+            "regime_state": "trend_down",
+            "confidence_score": 0.6,
+            "action": "short",
+            "invalidation_price": 110.0,
+            "size_pct_equity": 1.2,
+            "thesis": "btc 1h",
+        },
+    )
+
+    all_rows = list_analysis_output(conn, limit=10)
+    assert [r["analysis_id"] for r in all_rows] == ["a2", "a3", "a1"]
+
+    btc = list_analysis_output(conn, symbol="btcusdt")
+    assert [r["analysis_id"] for r in btc] == ["a3", "a1"]
+
+    btc_4h = list_analysis_output(conn, symbol="BTCUSDT", timeframe="4h")
+    assert len(btc_4h) == 1
+    assert btc_4h[0]["analysis_id"] == "a1"
+    assert btc_4h[0]["timeframe"] == "4h"
+    conn.close()
+
+
+def test_migrate_adds_timeframe_to_legacy_analysis(tmp_path: Path):
+    db = tmp_path / "legacy.db"
+    conn = open_db(db)
+    conn.execute("DROP TABLE analysis_output")
+    conn.execute(
+        """
+        CREATE TABLE analysis_output (
+            analysis_id TEXT NOT NULL PRIMARY KEY,
+            timestamp INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            regime_state TEXT NOT NULL,
+            confidence_score REAL NOT NULL,
+            action TEXT NOT NULL,
+            invalidation_price REAL,
+            size_pct_equity REAL,
+            thesis TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    conn = open_db(db)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(analysis_output)")}
+    assert "timeframe" in cols
+    conn.close()
