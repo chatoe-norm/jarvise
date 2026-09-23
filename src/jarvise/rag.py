@@ -400,68 +400,88 @@ def index_sources(
         "chunks": 0,
     }
 
-    if not skip_index:
-        pending: list[dict[str, Any]] = []
-        for path in collect_source_files(root):
-            kind = "doctrine"
-            for part in SOURCE_KINDS:
-                if part in path.parts:
-                    kind = part
-                    break
-            raw = path.read_text(encoding="utf-8", errors="replace")
-            body = re.sub(r"<!--.*?-->\n?", "", raw, flags=re.DOTALL).strip()
-            url_meta = None
-            m = re.search(r"<!--\s*url:\s*(.*?)\s*-->", raw)
-            if m:
-                url_meta = m.group(1)
-            rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
-            for idx, chunk in enumerate(chunk_text(body)):
-                pending.append(
-                    {
-                        "id": int(
-                            hashlib.sha256(f"{path.as_posix()}:{idx}:{chunk[:40]}".encode()).hexdigest()[:15],
-                            16,
-                        ),
-                        "text": chunk,
-                        "source": path.name,
-                        "path": rel,
-                        "kind": kind,
-                        "url": url_meta,
-                    }
-                )
-        vectors = (
-            model.encode([item["text"] for item in pending], batch_size=32, show_progress_bar=False)
-            if pending
-            else []
-        )
-        ingested_at = utc_now_iso()
-        points = [
-            qm.PointStruct(
-                id=item["id"],
-                vector=vec.tolist(),
-                payload={
-                    "text": item["text"],
-                    "source": item["source"],
-                    "path": item["path"],
-                    "kind": item["kind"],
-                    "url": item["url"],
-                    "ingested_at": ingested_at,
-                    "paper_only": True,
-                    "note": "no order placement",
-                },
+    if skip_index:
+        try:
+            if client.collection_exists(collection):
+                info = client.get_collection(collection)
+                result["chunks"] = int(getattr(info, "points_count", None) or 0)
+        except Exception as exc:  # noqa: BLE001
+            result["ok"] = False
+            result["error"] = f"could not read collection count: {exc}"
+        if query:
+            qvec = model.encode(query).tolist()
+            hits = client.query_points(collection_name=collection, query=qvec, limit=3)
+            result["hits"] = [
+                {
+                    "score": hit.score,
+                    "source": (hit.payload or {}).get("source"),
+                    "text": ((hit.payload or {}).get("text") or "")[:240],
+                }
+                for hit in hits.points
+            ]
+        return result
+
+    pending: list[dict[str, Any]] = []
+    for path in collect_source_files(root):
+        kind = "doctrine"
+        for part in SOURCE_KINDS:
+            if part in path.parts:
+                kind = part
+                break
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        body = re.sub(r"<!--.*?-->\n?", "", raw, flags=re.DOTALL).strip()
+        url_meta = None
+        m = re.search(r"<!--\s*url:\s*(.*?)\s*-->", raw)
+        if m:
+            url_meta = m.group(1)
+        rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+        for idx, chunk in enumerate(chunk_text(body)):
+            pending.append(
+                {
+                    "id": int(
+                        hashlib.sha256(f"{path.as_posix()}:{idx}:{chunk[:40]}".encode()).hexdigest()[:15],
+                        16,
+                    ),
+                    "text": chunk,
+                    "source": path.name,
+                    "path": rel,
+                    "kind": kind,
+                    "url": url_meta,
+                }
             )
-            for item, vec in zip(pending, vectors, strict=True)
-        ]
-        if client.collection_exists(collection):
-            client.delete_collection(collection)
-        client.create_collection(
-            collection_name=collection,
-            vectors_config=qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
+    vectors = (
+        model.encode([item["text"] for item in pending], batch_size=32, show_progress_bar=False)
+        if pending
+        else []
+    )
+    ingested_at = utc_now_iso()
+    points = [
+        qm.PointStruct(
+            id=item["id"],
+            vector=vec.tolist(),
+            payload={
+                "text": item["text"],
+                "source": item["source"],
+                "path": item["path"],
+                "kind": item["kind"],
+                "url": item["url"],
+                "ingested_at": ingested_at,
+                "paper_only": True,
+                "note": "no order placement",
+            },
         )
-        batch = 64
-        for start in range(0, len(points), batch):
-            client.upsert(collection_name=collection, points=points[start : start + batch])
-        result["chunks"] = len(points)
+        for item, vec in zip(pending, vectors, strict=True)
+    ]
+    if client.collection_exists(collection):
+        client.delete_collection(collection)
+    client.create_collection(
+        collection_name=collection,
+        vectors_config=qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
+    )
+    batch = 64
+    for start in range(0, len(points), batch):
+        client.upsert(collection_name=collection, points=points[start : start + batch])
+    result["chunks"] = len(points)
 
     if query:
         qvec = model.encode(query).tolist()
