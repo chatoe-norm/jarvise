@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_credentials
+from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_ingest.db import (
     ensure_paper_account,
@@ -240,12 +240,15 @@ def dashboard(_: None = Depends(require_auth)) -> HTMLResponse:
 
 def _exchange_panel_html() -> str:
     """Soft-fail: return empty string when keys missing or sync fails."""
-    creds = resolve_binance_credentials()
-    if creds is None:
-        return ""
-    api_key, api_secret = creds
     try:
-        client = BinanceSpotClient(api_key, api_secret)
+        auth = resolve_binance_auth()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("exchange auth soft-fail: %s", type(exc).__name__)
+        return ""
+    if auth is None:
+        return ""
+    try:
+        client = BinanceSpotClient(auth)
         result = sync_spot_balances(client=client, db_path=db_path(), dry_run=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning("exchange sync soft-fail: %s", type(exc).__name__)

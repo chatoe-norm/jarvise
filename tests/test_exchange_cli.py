@@ -14,6 +14,7 @@ runner = CliRunner()
 def test_missing_keys_exit_2(monkeypatch):
     monkeypatch.delenv("BINANCE_API_KEY", raising=False)
     monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
+    monkeypatch.delenv("BINANCE_API_PRIVATE_KEY_PATH", raising=False)
     result = runner.invoke(app, ["exchange", "sync-balances", "--json"])
     assert result.exit_code == 2
     assert "BINANCE_API_KEY" in result.output

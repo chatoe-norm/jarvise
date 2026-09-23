@@ -25,7 +25,17 @@ Use this file when debugging signed reads / public klines. Prefer official [Spot
 
 ---
 
+---
+
 ## Truth-oriented Q&A (community consensus → Jarvise note)
+
+### Q: Where do Ed25519/RSA public and private keys go?
+
+**Community / Binance docs:** Upload the **public** PEM when creating an asymmetric API key on Binance. Keep the **private** PEM only on your machine. Binance then issues an API Key string for the `X-MBX-APIKEY` header. Signatures are Base64 (case-sensitive) and must be URL-encoded in the query string.
+
+**Jarvise note:** Put private PEM at e.g. `/opt/jarvise/secrets/binance-ed25519-prv.pem` (`chmod 600`). Set `BINANCE_API_KEY` + `BINANCE_API_PRIVATE_KEY_PATH`. Do not put private PEM in chat, git, or multiline `.env`. HMAC via `BINANCE_API_SECRET` still works as a fallback.
+
+---
 
 ### Q: Timestamp outside recvWindow (`-1021` / recvWindow errors)
 

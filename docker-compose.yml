@@ -85,6 +85,10 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_URL=http://qdrant:6333
       - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY:-}
+      - BINANCE_API_KEY=${BINANCE_API_KEY:-}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET:-}
+      - BINANCE_API_PRIVATE_KEY_PATH=${BINANCE_API_PRIVATE_KEY_PATH:-}
+      - BINANCE_API_PRIVATE_KEY_PASSPHRASE=${BINANCE_API_PRIVATE_KEY_PASSPHRASE:-}
       - JARVISE_PAPER_ONLY=true
       - JARVISE_ROOT=/app
       - NLM_PROFILE=${NLM_PROFILE:-chatoe}
@@ -92,6 +96,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
+      - ./secrets:/opt/jarvise/secrets:ro
       - ${NLM_HOME:-./data/nlm}:/root/.nlm
     depends_on:
       redis:
@@ -112,6 +117,10 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_URL=http://qdrant:6333
       - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY:-}
+      - BINANCE_API_KEY=${BINANCE_API_KEY:-}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET:-}
+      - BINANCE_API_PRIVATE_KEY_PATH=${BINANCE_API_PRIVATE_KEY_PATH:-}
+      - BINANCE_API_PRIVATE_KEY_PASSPHRASE=${BINANCE_API_PRIVATE_KEY_PASSPHRASE:-}
       - JARVISE_PAPER_ONLY=true
       - JARVISE_ROOT=/app
       - NLM_PROFILE=${NLM_PROFILE:-chatoe}
@@ -121,6 +130,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
+      - ./secrets:/opt/jarvise/secrets:ro
       - ${NLM_HOME:-./data/nlm}:/root/.nlm
     depends_on:
       redis:
@@ -188,8 +198,11 @@ services:
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-jarvise_doctrine}
       - BINANCE_API_KEY=${BINANCE_API_KEY:-}
       - BINANCE_API_SECRET=${BINANCE_API_SECRET:-}
+      - BINANCE_API_PRIVATE_KEY_PATH=${BINANCE_API_PRIVATE_KEY_PATH:-}
+      - BINANCE_API_PRIVATE_KEY_PASSPHRASE=${BINANCE_API_PRIVATE_KEY_PASSPHRASE:-}
     volumes:
       - ./data/analytics:/data/analytics
+      - ./secrets:/opt/jarvise/secrets:ro
     depends_on:
       redis:
         condition: service_healthy

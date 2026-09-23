@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_credentials
+from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -30,21 +30,27 @@ def sync_balances(
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    creds = resolve_binance_credentials()
-    if creds is None:
+    try:
+        auth = resolve_binance_auth()
+    except (OSError, ValueError, TypeError) as exc:
+        typer.echo(f"Binance auth config error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    if auth is None:
         typer.echo(
-            "Missing BINANCE_API_KEY / BINANCE_API_SECRET.\n"
-            "Example:\n"
+            "Missing Binance auth.\n"
+            "HMAC example:\n"
             "  export BINANCE_API_KEY=...\n"
             "  export BINANCE_API_SECRET=...\n"
+            "Ed25519/RSA example:\n"
+            "  export BINANCE_API_KEY=...\n"
+            "  export BINANCE_API_PRIVATE_KEY_PATH=/path/to/private.pem\n"
             "  jarvise exchange sync-balances --json",
             err=True,
         )
         raise typer.Exit(2)
-    api_key, api_secret = creds
     db_path = db or DEFAULT_DB
     try:
-        client = BinanceSpotClient(api_key, api_secret)
+        client = BinanceSpotClient(auth)
         result = sync_spot_balances(client=client, db_path=db_path, dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         msg = f"exchange sync failed: {exc}"
