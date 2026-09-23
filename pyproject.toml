@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
   "httpx>=0.28.1",
   "typer>=0.27.2",
+  "cryptography>=44",
 ]
 
 [project.optional-dependencies]

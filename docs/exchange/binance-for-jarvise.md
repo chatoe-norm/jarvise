@@ -24,7 +24,7 @@ Optional community Q&A (not SoT): [`binance-vision-qa-reference.md`](binance-vis
 |---------------------------------|---------|
 | REST market data | **Allowed** — `GET /api/v3/klines` via `jarvise_ingest` |
 | Web3 public token / rank / audit / tokenized-stock / Academy reads | **Allowed for agent research** — via `jarvise-binance-intel` (no keys); see [Skills Hub](#skills-hub) |
-| Account balances | **Planned (P3)** — signed `GET /api/v3/account` only; see [P3 design](../superpowers/specs/2026-09-23-p3-exchange-readonly-design.md) |
+| Account balances | **Allowed (P3)** — signed `GET /api/v3/account` (HMAC or Ed25519/RSA); see [P3 design](../superpowers/specs/2026-09-23-p3-exchange-readonly-design.md) |
 | Place / manage / cancel orders | **Forbidden** |
 | WebSocket / FIX / SBE trading | **Out of scope** |
 | Withdraw / transfer | **Forbidden** |
@@ -32,7 +32,10 @@ Optional community Q&A (not SoT): [`binance-vision-qa-reference.md`](binance-vis
 ## Auth and security
 
 - Public klines: no API key.
-- Planned account read: HMAC-SHA256 + `X-MBX-APIKEY` from `BINANCE_API_KEY` / `BINANCE_API_SECRET`.
+- Account read (P3): `X-MBX-APIKEY` = `BINANCE_API_KEY`, plus one of:
+  - **HMAC:** `BINANCE_API_SECRET` (hex HMAC-SHA256)
+  - **Ed25519 / RSA:** `BINANCE_API_PRIVATE_KEY_PATH` → PKCS#8 private PEM on disk (Base64 signature). Upload the **public** PEM on Binance API Management; Jarvise never stores the public key. Prefer private-key path when both HMAC and path are set.
+- Optional `BINANCE_API_PRIVATE_KEY_PASSPHRASE` if the PEM is encrypted.
 - Never create or use keys with **withdrawal** or **transfer** permissions.
 - Never log secrets; never put keys in HTML/JSON UI responses.
 - Soft-fail on `/analytics`: hide the exchange panel if keys are missing or the call fails (P3).

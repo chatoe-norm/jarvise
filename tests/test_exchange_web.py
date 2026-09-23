@@ -12,6 +12,7 @@ client = TestClient(app)
 def test_analytics_hides_panel_without_keys(monkeypatch):
     monkeypatch.delenv("BINANCE_API_KEY", raising=False)
     monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
+    monkeypatch.delenv("BINANCE_API_PRIVATE_KEY_PATH", raising=False)
     resp = client.get("/analytics")
     assert resp.status_code == 200
     assert "Exchange (spot)" not in resp.text
