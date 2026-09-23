@@ -62,12 +62,16 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
 
 def run_rag_refresh() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
-        return 3, _skipped()
+        payload = _skipped()
+        publish_redis_status("jarvise:rag:last", payload)
+        return 3, payload
     cmd = [sys.executable, "-m", "jarvise", "rag", "refresh", "--output", "json"]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     payload = _parse_stdout(proc)
     payload["paper_only"] = True
     payload["exit_code"] = proc.returncode
+    # CLI also publishes; mirror ingest so Redis stays JSON even if CLI publish is skipped.
+    publish_redis_status("jarvise:rag:last", payload)
     return proc.returncode, payload
 
 

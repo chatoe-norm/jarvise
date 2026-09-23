@@ -103,6 +103,48 @@ def test_analytics_and_api_with_rows(monkeypatch, tmp_path: Path) -> None:
     assert payload["rows"][0]["timeframe"] == "4h"
 
 
+def test_parse_status_payload_json_and_legacy_text() -> None:
+    from jarvise_web.app import format_status_pre, parse_status_payload
+
+    assert parse_status_payload('{"ok": true, "chunks": 3}') == {"ok": True, "chunks": 3}
+    legacy = "ok: True\npaper_only: True\nqdrant_url: http://qdrant:6333\nchunks: 4089\n"
+    parsed = parse_status_payload(legacy)
+    assert parsed["ok"] is True
+    assert parsed["paper_only"] is True
+    assert parsed["chunks"] == 4089
+    assert parsed["qdrant_url"] == "http://qdrant:6333"
+    pretty = format_status_pre(parsed)
+    assert '"chunks": 4089' in pretty
+
+
+def test_analytics_pipeline_status_pretty(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
+
+    def fake_redis_get(key: str):
+        return "0"
+
+    def fake_json(key: str):
+        if key == "jarvise:rag:last":
+            return {"ok": True, "chunks": 12, "collection": "jarvise_doctrine"}
+        return {"ok": True, "upserted": 1}
+
+    def fake_qdrant():
+        return {"exists": True, "points": 12}
+
+    monkeypatch.setattr("jarvise_web.app.redis_get", fake_redis_get)
+    monkeypatch.setattr("jarvise_web.app.redis_get_json", fake_json)
+    monkeypatch.setattr("jarvise_web.app.qdrant_info", fake_qdrant)
+    monkeypatch.setenv("JARVISE_DB", str(tmp_path / "missing.db"))
+
+    client = TestClient(app)
+    resp = client.get("/analytics")
+    assert resp.status_code == 200
+    assert b"Pipeline status" in resp.content
+    assert b"&quot;chunks&quot;: 12" in resp.content
+    assert b"invalid JSON" not in resp.content
+
+
 def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
     _stub_control_deps(monkeypatch)
     db = tmp_path / "jarvise.db"

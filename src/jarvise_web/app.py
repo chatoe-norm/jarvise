@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import os
 import secrets
@@ -72,16 +73,54 @@ def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -
         )
 
 
+def parse_status_payload(raw: str) -> Any:
+    """Parse Redis status: prefer JSON, fall back to CLI text emit (`key: value` lines)."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Legacy: jarvise CLI --output text was sometimes stored instead of JSON.
+    if ":" not in raw:
+        raise json.JSONDecodeError("not JSON and not text status", raw, 0)
+    parsed: dict[str, Any] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        lowered = value.lower()
+        if lowered == "true":
+            parsed[key] = True
+        elif lowered == "false":
+            parsed[key] = False
+        elif lowered == "none" or lowered == "null":
+            parsed[key] = None
+        else:
+            try:
+                if "." in value:
+                    parsed[key] = float(value)
+                else:
+                    parsed[key] = int(value)
+            except ValueError:
+                parsed[key] = value
+    if not parsed:
+        raise json.JSONDecodeError("empty text status", raw, 0)
+    return parsed
+
+
 def redis_get_json(key: str) -> Any:
     try:
         r = _redis()
         raw = r.get(key)
         if not raw:
             return None
-        import json
-
         try:
-            return json.loads(raw)
+            return parse_status_payload(raw)
         except json.JSONDecodeError as exc:
             preview = raw if len(raw) <= 240 else raw[:240] + "…"
             return {
@@ -92,6 +131,15 @@ def redis_get_json(key: str) -> Any:
             }
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
+
+
+def format_status_pre(payload: Any) -> str:
+    if payload is None:
+        return "null"
+    try:
+        return json.dumps(payload, indent=2, sort_keys=True, default=str)
+    except TypeError:
+        return str(payload)
 
 
 def redis_get(key: str) -> str | None:
@@ -389,8 +437,11 @@ def analytics(
     {_paper_ledger_html()}
     <div class="card">
       <strong>Pipeline status</strong>
-      <pre>ingest={html.escape(str(ingest))}
-rag={html.escape(str(rag))}</pre>
+      <pre>ingest:
+{html.escape(format_status_pre(ingest))}
+
+rag:
+{html.escape(format_status_pre(rag))}</pre>
     </div>
     """
 
