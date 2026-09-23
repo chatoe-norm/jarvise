@@ -11,7 +11,7 @@
     "name": "Binance TH",
     "market": "spot",
     "regulator": "Thai SEC",
-    "notes": "Fees, spread, and book depth are real EV costs. BTC thicker books; ETH thinner with more wicks/spoof walls."
+    "notes": "Fees, spread, and book depth are real EV costs. BTC thicker books; ETH thinner with more wicks/spoof walls. Paper OHLC uses global public api.binance.com; TH remains the preferred live venue when trading is ever gated on."
   },
   "analyzer_layers": [
     {
@@ -36,6 +36,94 @@
     }
   ],
   "providers": [
+    {
+      "name": "Binance Spot",
+      "role": "Paper OHLC market data; planned read-only spot account balances (P3). No order placement.",
+      "base_url": "https://api.binance.com",
+      "venue_preference": "Binance TH spot (Thai SEC) for live trading when gated; paper klines use global public REST",
+      "auth": {
+        "klines": "none",
+        "account_read": "HMAC-SHA256 + X-MBX-APIKEY (BINANCE_API_KEY / BINANCE_API_SECRET)"
+      },
+      "docs": [
+        "https://developers.binance.com/en/docs/introduction",
+        "https://developers.binance.com/en/docs/products/spot/rest-api",
+        "https://developers.binance.com/en/docs/llms.txt"
+      ],
+      "local_digest": "data/analytics/sources/binance-api-intro-jarvise.txt",
+      "mvp_endpoints": [
+        {
+          "method": "GET",
+          "path": "/api/v3/klines",
+          "status": "shipped",
+          "package": "jarvise_ingest"
+        },
+        {
+          "method": "GET",
+          "path": "/api/v3/account",
+          "status": "planned_p3_read_only",
+          "package": "jarvise_exchange"
+        }
+      ],
+      "forbidden": [
+        "place/manage/cancel orders",
+        "withdraw/transfer",
+        "futures/margin trading APIs",
+        "keys with withdrawal or transfer permissions",
+        "Binance Agent MCP/REST for execution",
+        "Binance MCP Server (Agentic sub-account trading)",
+        "binance-cli (Skills Hub `binance` skill)",
+        "baw CLI / Binance Agentic Wallet",
+        "npx skills add binance-skills-hub (installs write skills)"
+      ]
+    },
+    {
+      "name": "Binance Web3 public (Skills Hub read-only)",
+      "role": "Agent research context: token search/meta/dynamic, token security audit, market rank / social hype / smart-money inflow, Ondo tokenized US stocks, Binance Academy. No order placement.",
+      "status": "agent_research_only",
+      "skill": "plugins/jarvise-openclaw/skills/jarvise-binance-intel/SKILL.md",
+      "base_urls": ["https://web3.binance.com", "https://www.binance.com"],
+      "auth": "none",
+      "docs": [
+        "https://developers.binance.com/en/docs/sdks-tools/integrations/skills-hub",
+        "https://github.com/binance/binance-skills-hub"
+      ],
+      "local_digest": "data/analytics/sources/binance-skills-hub-jarvise.txt",
+      "endpoints": [
+        {"method": "GET", "path": "/bapi/defi/v5/public/wallet-direct/buw/wallet/market/token/search/ai", "use": "token search"},
+        {"method": "GET", "path": "/bapi/defi/v1/public/wallet-direct/buw/wallet/dex/market/token/meta/info/ai", "use": "token metadata"},
+        {"method": "GET", "path": "/bapi/defi/v4/public/wallet-direct/buw/wallet/market/token/dynamic/info/ai", "use": "token price/volume/holders/liquidity"},
+        {"method": "POST", "path": "/bapi/defi/v1/public/wallet-direct/security/token/audit", "use": "token security audit (veto input)"},
+        {"method": "POST", "path": "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/unified/rank/list/ai", "use": "trending / top-search / alpha / stock rank (context)"},
+        {"method": "GET", "path": "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/social/hype/rank/leaderboard/ai", "use": "social hype (context)"},
+        {"method": "POST", "path": "/bapi/defi/v1/public/wallet-direct/tracker/wallet/token/inflow/rank/query/ai", "use": "smart-money net inflow (context)"},
+        {"method": "GET", "path": "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai", "use": "tokenized stock list", "host": "www.binance.com"},
+        {"method": "GET", "path": "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/meta/ai", "use": "tokenized stock metadata", "host": "www.binance.com"},
+        {"method": "GET", "path": "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/market/status/ai", "use": "tokenized stock market status", "host": "www.binance.com"},
+        {"method": "GET", "path": "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/asset/market/status/ai", "use": "per-asset status / corporate actions", "host": "www.binance.com"},
+        {"method": "GET", "path": "/bapi/defi/v2/public/wallet-direct/buw/wallet/market/token/rwa/dynamic/ai", "use": "on-chain price + US fundamentals", "host": "www.binance.com"},
+        {"method": "GET", "path": "/bapi/defi/v1/public/wallet-direct/buw/wallet/dex/market/token/kline/ai", "use": "tokenized stock kline", "host": "www.binance.com"},
+        {"method": "POST", "path": "/bapi/bigdata/v1/public/bigdata/academy-skill/searchGlossary", "use": "Academy glossary", "host": "www.binance.com"},
+        {"method": "POST", "path": "/bapi/bigdata/v1/public/bigdata/academy-skill/searchResource", "use": "Academy courses", "host": "www.binance.com"},
+        {"method": "POST", "path": "/bapi/bigdata/v1/public/bigdata/academy-skill/searchLearnEarn", "use": "Academy Learn & Earn", "host": "www.binance.com"},
+        {"method": "POST", "path": "/bapi/bigdata/v1/public/bigdata/academy-skill/searchArticles", "use": "Academy articles / risk education", "host": "www.binance.com"}
+      ],
+      "rules": [
+        "Context only; never a standalone trigger",
+        "Audit HIGH / honeypot / non-zero sell tax → FLAT",
+        "Unauthenticated query POSTs allowed for agent research only; jarvise_ingest stays GET-only",
+        "Numbers arrive as strings (use Decimal); timestamps are Unix ms"
+      ],
+      "excluded": [
+        "query-token-info kline via dquery.sintral.io (third-party host)",
+        "meme-rank, address-pnl-rank, trading-signal, wallet-tracker, query-address-info, leaderboard"
+      ],
+      "forbidden": [
+        "binance-agentic-wallet, binance-trading-signal (baw), onchain-copy-trader, meme-rush",
+        "fiat, p2p, payment, onchain-pay, square-post",
+        "any signed or keyed call from this provider"
+      ]
+    },
     {
       "name": "CoinGlass",
       "role": "Derivatives, liquidations, funding, OI, ETF flows, spot order-book heatmaps",

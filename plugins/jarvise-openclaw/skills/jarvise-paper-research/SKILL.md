@@ -12,7 +12,7 @@ metadata:
 
 # Jarvise paper research (exports)
 
-**Hard guardrail:** paper / research / signal context only. **Do not** place live or paper orders. **Do not** enable exchange execution tools. If asked to trade, refuse and point the operator at the Jarvise CLI paper path (`jarvise ingest`) and manual-approval phase.
+**Hard guardrail:** paper / research / signal context only. **Do not** place live or paper orders. **Do not** enable exchange execution tools. Binance (and other venue) usage for Jarvise is market-data / research context only — never order, withdraw, or transfer endpoints. If asked to trade, refuse and point the operator at the Jarvise CLI paper path (`jarvise ingest`) and manual-approval phase.
 
 Invoke with `/skill jarvise-paper-research` or by asking in natural language. After operators edit this skill file on the host mount, they must restart the gateway or start a new chat (`/new`) so the skill reloads.
 
@@ -38,6 +38,7 @@ regime: trend|range|chaotic
 confidence: 0.0-1.0
 invalidation: what would kill the thesis (price or structure; prefer >= 1.5x ATR when using volatility stops)
 paper_only: true
+intel_sources: optional list of jarvise-binance-intel endpoints used, each with fetched_at (UTC)
 ---
 
 Narrative body (structure-first levels, risks, BTC vs ETH book notes if relevant).
@@ -45,6 +46,8 @@ Scenarios: 2-3 with invalidation. No order instructions. Below confidence thresh
 ```
 
 Also set `paper_only: true` in the body if frontmatter is omitted.
+
+If the note uses `jarvise-binance-intel` data: a token audit of `HIGH`, any hit with `riskType: RISK` (honeypot etc.), or a non-zero sell tax means the note's bias is **FLAT**. Rank, hype, and smart-money inflow are context only and cannot be the thesis on their own.
 
 ## After writing
 

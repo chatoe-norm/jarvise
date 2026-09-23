@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+
+from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_credentials
+from jarvise_exchange.sync import sync_spot_balances
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Jarvise Control", docs_url=None, redoc_url=None)
 security = HTTPBasic(auto_error=False)
@@ -21,6 +28,10 @@ PAPER_ONLY = os.environ.get("JARVISE_PAPER_ONLY", "true").lower() in {"1", "true
 KILL_SWITCH_KEY = "jarvise:kill_switch"
 INGEST_KEY = "jarvise:ingest:last"
 RAG_KEY = "jarvise:rag:last"
+DEFAULT_DB = Path(
+    os.environ.get("JARVISE_DB")
+    or str(Path(__file__).resolve().parents[2] / "data" / "analytics" / "jarvise.db")
+)
 
 
 def _redis():
@@ -168,8 +179,63 @@ def dashboard(_: None = Depends(require_auth)) -> HTMLResponse:
       <pre>{rag}</pre>
     </div>
     <p class="muted">Perimeter: Tailscale. Optional basic auth via WEB_BASIC_AUTH_*.</p>
+    <p class="muted"><a class="btn" href="/analytics">Analytics</a></p>
     """
     return page(body)
+
+
+def _exchange_panel_html() -> str:
+    """Soft-fail: return empty string when keys missing or sync fails."""
+    creds = resolve_binance_credentials()
+    if creds is None:
+        return ""
+    api_key, api_secret = creds
+    db_path = Path(os.environ.get("JARVISE_DB") or DEFAULT_DB)
+    try:
+        client = BinanceSpotClient(api_key, api_secret)
+        result = sync_spot_balances(client=client, db_path=db_path, dry_run=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("exchange sync soft-fail: %s", type(exc).__name__)
+        return ""
+    if not result.ok:
+        return ""
+    if not result.balances:
+        rows_html = "<p class=\"muted\">no non-zero assets</p>"
+    else:
+        lines = [
+            "<tr><th>Asset</th><th>Free</th><th>Locked</th><th>Total</th></tr>"
+        ]
+        for b in result.balances:
+            lines.append(
+                f"<tr><td>{b.asset}</td><td>{b.free}</td>"
+                f"<td>{b.locked}</td><td>{b.total}</td></tr>"
+            )
+        rows_html = (
+            "<table style=\"width:100%;border-collapse:collapse;font-size:.9rem\">"
+            + "".join(lines)
+            + "</table>"
+        )
+    return f"""
+    <div class="card">
+      <strong>Exchange (spot)</strong>
+      <span class="muted">binance · fetched_at_ms={result.fetched_at_ms} · read-only</span>
+      {rows_html}
+    </div>
+    """
+
+
+@app.get("/analytics", response_class=HTMLResponse)
+def analytics(_: None = Depends(require_auth)) -> HTMLResponse:
+    exchange = _exchange_panel_html()
+    body = f"""
+    <p class="muted"><a href="/">← Control</a></p>
+    <div class="card">
+      <strong>Analytics</strong>
+      <p class="muted">Paper analytics surface. Exchange panel appears only when Binance keys work.</p>
+    </div>
+    {exchange}
+    """
+    return page(body, title="Jarvise Analytics")
 
 
 @app.post("/kill-switch")

@@ -1,8 +1,8 @@
 {
   "name": "@jarvise/openclaw-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Jarvise paper-only OpenClaw skills for research exports and doctrine RAG",
+  "description": "Jarvise paper-only OpenClaw skills for research exports, doctrine RAG, and read-only Binance public intel",
   "openclaw": {
     "extensions": [],
     "compat": {

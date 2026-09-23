@@ -5,7 +5,7 @@ description: Queries the Jarvise Gemini Notebook (crypto trading knowledge base)
 
 # Jarvise Notebook
 
-Trading knowledge lives in Gemini Notebook **Jarvise : Crypto Trader**. Read [`config/notebook.json`](../../../config/notebook.json) for id, alias, and profile. Query it before analyzing markets or recommending trades. Local extracts: `data/analytics/sources/jarvise-doctrine.txt`, `jarvise-analyzer-stack.txt`, `api-map.json` (synced 2026-09-22).
+Trading knowledge lives in Gemini Notebook **Jarvise : Crypto Trader**. Read [`config/notebook.json`](../../../config/notebook.json) for id, alias, and profile. Query it before analyzing markets or recommending trades. Local extracts: `data/analytics/sources/jarvise-doctrine.txt`, `jarvise-analyzer-stack.txt`, `binance-api-intro-jarvise.txt`, `binance-skills-hub-jarvise.txt`, `api-map.json` (synced 2026-09-22; Binance digests 2026-09-23). Agent map: [`docs/exchange/binance-for-jarvise.md`](../../../docs/exchange/binance-for-jarvise.md).
 
 ## Notebook
 
@@ -43,6 +43,8 @@ Do not use the `default` profile (`normstudiox@gmail.com`) for this notebook —
 - Kill-switch / daily drawdown halt: lock until a **written human review** (never auto-resume).
 - Structure first on charts; oscillators are context, never standalone triggers.
 - Venue: Binance TH spot costs (fees, spread, depth) are real EV drag.
+- Binance APIs for Jarvise = public market data (`GET /api/v3/klines`) plus planned read-only spot account (`GET /api/v3/account`, P3). Never order/withdraw endpoints; never keys with withdrawal/transfer permission. See `binance-api-intro-jarvise.txt` and `docs/exchange/binance-for-jarvise.md`.
+- Binance Skills Hub is used read-only through skill `jarvise-binance-intel` (public token info, token audit, rank/hype context, tokenized US stocks, Academy). Never install the hub, `binance-cli`, `baw`, the Agentic Wallet, or the Binance MCP Server. Token audit `HIGH` → FLAT; rank/hype is context, never a trigger. See `binance-skills-hub-jarvise.txt`.
 
 ## Query style
 
@@ -60,4 +62,5 @@ Cite notebook guidance in the decision (`BUY` / `SELL` / `FLAT`) so the owner ca
 - Treat notebook answers as live prices or order-book state.
 - Skip risk/paper-first rules from the sources to chase a trade.
 - Place live or paper exchange orders from this skill.
+- Call Binance (or any venue) order, withdraw, or transfer APIs; treat Binance Agent MCP/REST as execution tooling.
 - Delete sources, run studio generation, or switch the default `nlm` profile away from `chatoe` without the owner asking.

@@ -76,3 +76,17 @@ CREATE TABLE IF NOT EXISTS analysis_output (
     size_pct_equity REAL,
     thesis TEXT
 );
+
+-- Read-only exchange spot wallet snapshots (P3). Amounts as TEXT decimal strings.
+-- Timestamps: INTEGER Unix milliseconds (UTC)
+CREATE TABLE IF NOT EXISTS exchange_balances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    free TEXT NOT NULL,
+    locked TEXT NOT NULL,
+    total TEXT NOT NULL,
+    fetched_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_balances_venue_fetched
+    ON exchange_balances (venue, fetched_at_ms DESC);
