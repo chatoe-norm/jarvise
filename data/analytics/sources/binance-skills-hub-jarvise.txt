@@ -1,0 +1,138 @@
+Jarvise digest — Binance Skills Hub (agent skills marketplace)
+===============================================================
+paper_only: true
+no_order_placement: true
+source: https://developers.binance.com/en/docs/sdks-tools/integrations/skills-hub.md
+repo: https://github.com/binance/binance-skills-hub
+related: https://developers.binance.com/en/docs/agent-native/mcp-server/agentic.md
+scraped_at: 2026-09-23
+purpose: Decide which Binance Skills Hub skills Jarvise agents may use, and how.
+  Jarvise does NOT install hub skills. Jarvise authors its own read-only skill
+  (jarvise-binance-intel) that calls a small allowlist of public, unauthenticated
+  endpoints. Venue preference remains Binance TH spot; deployment ladder unchanged.
+
+What the Skills Hub is
+----------------------
+- Open, community-extensible marketplace of AI agent skills (SKILL.md + scripts)
+  for Claude Code, OpenClaw, LangChain, CrewAI, custom agents. Node.js 22+.
+- Upstream install is `npx skills add https://github.com/binance/binance-skills-hub`.
+  Jarvise never runs this: it pulls every skill, including trading/wallet ones.
+- Two categories:
+  - Read-only: market data, token info, audits, rankings, signals, wallet views
+  - Read + Write: transfers, swaps, limit orders (Agentic Wallet), CEX trading
+- Binance MCP Server (Agent Native) trades Spot / Margin / Convert / Futures
+  inside a dedicated Agentic sub-account. It is execution tooling.
+- Upstream disclaimer: informational only, not investment advice, may be
+  inaccurate or outdated. Jarvise treats every hub output as context, not signal.
+
+Adoption matrix
+---------------
+ADOPT (read-only, no API key; via jarvise-binance-intel only)
+- query-token-info: search, meta, dynamic (price, volume, holders, liquidity)
+- query-token-audit: honeypot / rug / tax / contract-risk scan
+- crypto-market-rank: token-rank, social-hype, smart-money-inflow
+  (crowding / sentiment context only; never a trigger)
+- binance-tokenized-securities-info: Ondo tokenized US stocks — list, meta,
+  market status, per-asset status (earnings/dividend/split halts), dynamic
+  (on-chain price + US fundamentals), kline. Covers the stocks/ETFs goal.
+- academy-skill: Binance Academy glossary / courses / articles; risk
+  education for leverage / borrowing / all-in intents. Never advice.
+
+EXCLUDE (read-only but poor fit for slow, steady, capital-preserving doctrine)
+- query-token-info kline: proxies through third-party host dquery.sintral.io.
+  Use Binance Spot GET /api/v3/klines via `jarvise ingest` (SQLite) for CEX
+  pairs, or the tokenized-securities kline for Ondo stock tokens.
+- crypto-market-rank meme-rank and address-pnl-rank
+- trading-signal (per-trade smart-money buy/sell events, BSC/Solana memes)
+- binance-wallet-tracker, query-address-info, binance-leaderboard
+
+DENY (can write, execute, move funds, or post publicly)
+- binance (binance-cli: Spot, USD-S Futures, Convert, margin, earn, wallet)
+- binance-agentic-wallet (transfers, swaps, limit orders, DeFi, x402 payments)
+- binance-trading-signal (baw CLI strategy create/update/delete/backtest)
+- binance-onchain-copy-trader
+- meme-rush
+- fiat, p2p, payment, onchain-pay
+- square-post (public posting to Binance Square)
+- sports-ai-analyzer (off-domain)
+- Binance MCP Server / Agent REST (Agentic sub-account trading)
+
+Endpoint allowlist (jarvise-binance-intel)
+-----------------------------------------
+Auth: none. No API key, no signature, no cookies.
+Headers: Accept-Encoding: identity; User-Agent as documented upstream
+  (binance-web3/<version> (Skill)). POST bodies: Content-Type: application/json.
+Unauthenticated query POSTs below are allowed for agent research only.
+jarvise_ingest stays GET-only (Binance klines, CoinGlass).
+
+Token info (host web3.binance.com)
+- GET  /bapi/defi/v5/public/wallet-direct/buw/wallet/market/token/search/ai
+       ?keyword=&chainIds=1,56,8453,CT_501
+- GET  /bapi/defi/v1/public/wallet-direct/buw/wallet/dex/market/token/meta/info/ai
+       ?chainId=&contractAddress=
+- GET  /bapi/defi/v4/public/wallet-direct/buw/wallet/market/token/dynamic/info/ai
+       ?chainId=&contractAddress=
+Token audit (host web3.binance.com)
+- POST /bapi/defi/v1/public/wallet-direct/security/token/audit
+       {"binanceChainId","contractAddress","requestId":"<uuid v4>"}
+Market rank (host web3.binance.com)
+- POST /bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/unified/rank/list/ai
+       {"rankType":10|11|20|40,"chainId","period","page","size", filters...}
+- GET  /bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/social/hype/rank/leaderboard/ai
+       ?chainId=&targetLanguage=en&timeRange=1
+- POST /bapi/defi/v1/public/wallet-direct/tracker/wallet/token/inflow/rank/query/ai
+       {"chainId","period":"24h","tagType":2}
+Tokenized US stocks (host www.binance.com)
+- GET  /bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai?type=1
+- GET  /bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/meta/ai?chainId=&contractAddress=
+- GET  /bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/market/status/ai
+- GET  /bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/asset/market/status/ai?chainId=&contractAddress=
+- GET  /bapi/defi/v2/public/wallet-direct/buw/wallet/market/token/rwa/dynamic/ai?chainId=&contractAddress=
+- GET  /bapi/defi/v1/public/wallet-direct/buw/wallet/dex/market/token/kline/ai?chainId=&contractAddress=&interval=1d&limit=
+Binance Academy (host www.binance.com)
+- POST /bapi/bigdata/v1/public/bigdata/academy-skill/searchGlossary  {"query","lang","limit"}
+- POST /bapi/bigdata/v1/public/bigdata/academy-skill/searchResource  {"query","lang","limit"}
+- POST /bapi/bigdata/v1/public/bigdata/academy-skill/searchLearnEarn {"query","lang","limit"}
+- POST /bapi/bigdata/v1/public/bigdata/academy-skill/searchArticles  {"query","language","docCount"}
+
+Chains: Ethereum 1, BSC 56, Base 8453, Solana CT_501 (tokenized stocks: 1, 56).
+
+Parsing rules
+-------------
+- Numeric fields arrive as strings; convert with Decimal before arithmetic.
+- All timestamps are Unix milliseconds UTC.
+- Tokenized stocks: 1 token = multiplier shares. referencePrice = price / multiplier.
+  US stock volume is in shares, not USD.
+- Relative icon/report paths: prepend https://bin.bnbstatic.com.
+- Search returns look-alike tickers (e.g. "BTCB" also matches "BTCBSC" at a
+  tiny price). Always confirm chainId + contractAddress, then audit.
+
+Doctrine mapping
+----------------
+- Audit riskLevelEnum HIGH, any hit detail with riskType RISK (honeypot etc.),
+  or non-zero sell tax → veto → FLAT. LOW risk is "no known red flags", never "safe".
+- Audit riskLevelEnum MID (upstream docs say MEDIUM; live API returns MID, e.g.
+  BSC USDT = MID from a single "Mintable Detected" CAUTION hit) is not a veto
+  alone: list each isHit detail; CAUTION hits lower confidence only.
+- Rank / hype / smart-money inflow = crowding + sentiment context. Same rule as
+  oscillators: never a standalone trigger. Extreme hype raises caution.
+- Tokenized stocks: respect market status and per-asset pause/limit reason codes
+  (earnings, dividends, splits, mergers). No thesis across a halt.
+- Leverage / borrowing / all-in intents → Academy risk education + doctrine
+  (fractional Kelly, stops >= 1.5x ATR, kill-switch). Jarvise is spot paper only.
+- Structure first: hub data never replaces SQLite price-graph (OHLCV + ATR/EMA)
+  or Gemini Notebook doctrine. Below confidence threshold → FLAT.
+
+Secrets and env names
+---------------------
+- The hub `binance` skill reads BINANCE_API_KEY + BINANCE_SECRET_KEY and
+  BINANCE_API_ENV. Jarvise uses BINANCE_API_KEY + BINANCE_API_SECRET for the
+  P3 read-only GET /api/v3/account path only. Do not rename; do not use binance-cli.
+- Hub auth rules worth keeping: never printenv/env or source secrets files,
+  never echo credentials, never disclose key file locations.
+- jarvise-binance-intel needs no keys at all.
+
+Deployment ladder (unchanged)
+-----------------------------
+paper → manual_approval → autonomy
+Current phase: paper_analytics_only — no order placement.

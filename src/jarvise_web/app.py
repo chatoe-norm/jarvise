@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import os
 import secrets
 from pathlib import Path
@@ -13,6 +14,8 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_credentials
+from jarvise_exchange.sync import sync_spot_balances
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_paper_account,
@@ -21,6 +24,8 @@ from jarvise_ingest.db import (
     list_paper_positions,
     open_db,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Jarvise Control", docs_url=None, redoc_url=None)
 security = HTTPBasic(auto_error=False)
@@ -228,8 +233,48 @@ def dashboard(_: None = Depends(require_auth)) -> HTMLResponse:
       <pre>{html.escape(str(rag))}</pre>
     </div>
     <p class="muted">Perimeter: Tailscale. Optional basic auth via WEB_BASIC_AUTH_*.</p>
+    <p class="muted"><a class="btn" href="/analytics">Analytics</a></p>
     """
     return page(body, title="Jarvise control", active="control")
+
+
+def _exchange_panel_html() -> str:
+    """Soft-fail: return empty string when keys missing or sync fails."""
+    creds = resolve_binance_credentials()
+    if creds is None:
+        return ""
+    api_key, api_secret = creds
+    try:
+        client = BinanceSpotClient(api_key, api_secret)
+        result = sync_spot_balances(client=client, db_path=db_path(), dry_run=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("exchange sync soft-fail: %s", type(exc).__name__)
+        return ""
+    if not result.ok:
+        return ""
+    if not result.balances:
+        rows_html = "<p class=\"muted\">no non-zero assets</p>"
+    else:
+        lines = [
+            "<tr><th>Asset</th><th>Free</th><th>Locked</th><th>Total</th></tr>"
+        ]
+        for b in result.balances:
+            lines.append(
+                f"<tr><td>{html.escape(b.asset)}</td><td>{html.escape(str(b.free))}</td>"
+                f"<td>{html.escape(str(b.locked))}</td><td>{html.escape(str(b.total))}</td></tr>"
+            )
+        rows_html = (
+            "<table>"
+            + "".join(lines)
+            + "</table>"
+        )
+    return f"""
+    <div class="card">
+      <strong>Exchange (spot)</strong>
+      <span class="muted">binance · fetched_at_ms={result.fetched_at_ms} · read-only</span>
+      {rows_html}
+    </div>
+    """
 
 
 @app.post("/kill-switch")
@@ -337,6 +382,7 @@ def analytics(
       </form>
       <p class="muted" style="margin:.75rem 0 0">DB: <code>{html.escape(str(db_path()))}</code></p>
     </div>
+    {_exchange_panel_html()}
     {_paper_ledger_html()}
     <div class="card">
       <strong>Pipeline status</strong>

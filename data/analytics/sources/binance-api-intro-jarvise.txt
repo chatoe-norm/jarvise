@@ -1,0 +1,96 @@
+Jarvise digest — Binance Developer Documentation introduction
+================================================================
+paper_only: true
+no_order_placement: true
+source: https://developers.binance.com/en/docs/introduction
+llms_index: https://developers.binance.com/en/docs/llms.txt
+scraped_at: 2026-09-23
+purpose: Map official Binance API onboarding concepts into Jarvise allowlists.
+  This is NOT a rebrand of Binance as Jarvise. Venue preference remains Binance TH spot;
+  paper OHLC uses global https://api.binance.com.
+
+Official portal layout (from Binance intro)
+------------------------------------------
+1. Documentation — conceptual guides, environments, ops guidance
+2. API Reference — endpoints, params, payloads
+3. SDKs & Tools — connectors, Postman, samples
+
+Jarvise agents: start with this digest + docs/exchange/binance-for-jarvise.md,
+then spot REST reference — not Binance order/trading tutorials.
+
+API types (Binance offers; Jarvise filter)
+-----------------------------------------
+- REST APIs — ALLOWED for Jarvise (market data now; signed account read planned P3)
+- WebSocket APIs — out of scope
+- WebSocket Streams — out of scope
+- FIX APIs — out of scope
+- SBE — out of scope
+
+Authentication and security (Binance intro → Jarvise)
+-----------------------------------------------------
+Binance supports HMAC signing, RSA/Ed25519, and session auth for some WS/FIX flows.
+Jarvise today:
+- Public market data: no API key (GET /api/v3/klines)
+- Planned private read (P3): HMAC-SHA256 + X-MBX-APIKEY for GET /api/v3/account only
+- Never create or use keys with withdrawal / transfer permissions
+- Never call place/manage/cancel order endpoints
+- Do not wire Binance Agent REST / MCP / order-capable agent tools into Jarvise
+
+Rate limits and reliability
+---------------------------
+Binance enforces request weights and endpoint limits; excess → throttle/ban.
+Jarvise integrations must: respect weights, use backoff, avoid hot loops on /analytics
+page load (one sync per request is enough), monitor errors without logging secrets.
+
+Environments
+------------
+Binance: Production, Testnet (where supported), Demo (product-specific).
+Jarvise paper phase:
+- Live public market data from production REST for paper analytics (OHLC)
+- Venue testnets are optional and NOT required for paper ledger / analytics
+- Signed balance read (P3), when shipped, uses env BINANCE_API_KEY/SECRET;
+  soft-fail hide UI panel if keys missing
+
+Agent Native (reference only)
+-----------------------------
+Binance publishes llms.txt, Agent REST API, and an MCP server for agent tooling.
+Jarvise may READ documentation (llms.txt / intro / spot REST) for doctrine RAG.
+Jarvise must NOT enable Binance MCP or Agent REST for order placement or live trading.
+The docs site renders client-side: fetch llms.txt or the page's .md variant
+(e.g. /en/docs/introduction.md), not the HTML URL.
+Binance Skills Hub (agent skills marketplace): see binance-skills-hub-jarvise.txt.
+Jarvise uses only a read-only public subset via skill jarvise-binance-intel.
+
+Canonical spot docs (from llms.txt)
+-----------------------------------
+- https://developers.binance.com/en/docs/products/spot/rest-api
+- https://developers.binance.com/en/docs/products/spot/errors
+- https://developers.binance.com/en/docs/products/spot/CHANGELOG
+- Spot testnet docs exist under /en/docs/products/spot/testnet/ — optional, not required
+
+Jarvise ALLOWLIST
+-----------------
+- GET /api/v3/klines — paper OHLC ingest (jarvise_ingest)
+- GET /api/v3/account — planned P3 read-only spot balances (jarvise_exchange design)
+- Fetch/RAG of official docs URLs on the Jarvise allowlist
+
+Jarvise DENYLIST
+----------------
+- Place, manage, or cancel orders (any product)
+- Withdraw / transfer / universal transfer endpoints
+- Futures / margin / options trading APIs
+- WebSocket user-data trading streams for execution
+- FIX / SBE trading workflows
+- API keys with withdrawal or transfer permission
+- Binance Agent Native MCP/REST used to place trades
+
+Package map
+-----------
+- jarvise_ingest.providers.binance_klines — public GET klines only
+- jarvise_exchange (P3 design) — signed GET account only; no order APIs
+- Control UI /analytics — soft-fail exchange panel when keys fail (P3)
+
+Deployment ladder (unchanged)
+-----------------------------
+paper → manual_approval → autonomy
+Current phase: paper_analytics_only — no order placement.

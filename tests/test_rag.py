@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 from jarvise import rag
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_chunk_text_overlap() -> None:
@@ -31,6 +34,19 @@ def test_ingest_fetch_dry_run(tmp_path: Path, monkeypatch) -> None:
     assert result["ok"] is True
     assert result["dry_run"] is True
     assert result["count"] == 1
+
+
+def test_binance_docs_fetch_urls_are_markdown() -> None:
+    # developers.binance.com renders client-side; HTML URLs fetch an empty shell.
+    cfg = json.loads((ROOT / "config" / "rag-sources.json").read_text(encoding="utf-8"))
+    binance = [
+        e["url"]
+        for e in cfg["fetch"]
+        if urlparse(e["url"]).hostname == "developers.binance.com"
+    ]
+    assert binance
+    for url in binance:
+        assert urlparse(url).path.endswith((".md", ".txt")), url
 
 
 def test_sync_notebook_dry_run(monkeypatch, tmp_path: Path) -> None:

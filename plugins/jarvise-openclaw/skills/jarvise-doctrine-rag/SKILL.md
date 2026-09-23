@@ -39,6 +39,8 @@ When summarizing hits, prioritize:
 - Structure-first charts; oscillators as context; stops ≥ ~1.5× ATR
 - Fractional Kelly only; EV after fees/slippage
 - Binance TH spot costs and BTC vs ETH microstructure differences
+- Binance API allowlist only: public klines + planned read-only `GET /api/v3/account` (P3); never orders/withdraw; cite `binance-api-intro-jarvise.txt` / `docs/exchange/binance-for-jarvise.md` when surfacing venue/API constraints
+- Binance Skills Hub adopt/exclude/deny matrix: read-only public intel via `jarvise-binance-intel` only; hub trading/wallet skills, `binance-cli`, `baw`, and the Binance MCP Server are denied; cite `binance-skills-hub-jarvise.txt`
 
 ## Response style
 

@@ -4,8 +4,33 @@
   "note": "Trusted RAG allowlist only. No order placement.",
   "fetch": [
     {
+      "id": "binance-intro",
+      "url": "https://developers.binance.com/en/docs/introduction.md",
+      "kind": "fetch"
+    },
+    {
       "id": "binance-spot-docs",
-      "url": "https://developers.binance.com/docs/binance-spot-api-docs",
+      "url": "https://developers.binance.com/en/docs/products/spot/rest-api.md",
+      "kind": "fetch"
+    },
+    {
+      "id": "binance-llms-index",
+      "url": "https://developers.binance.com/en/docs/llms.txt",
+      "kind": "fetch"
+    },
+    {
+      "id": "binance-skills-hub",
+      "url": "https://developers.binance.com/en/docs/sdks-tools/integrations/skills-hub.md",
+      "kind": "fetch"
+    },
+    {
+      "id": "binance-agent-mcp",
+      "url": "https://developers.binance.com/en/docs/agent-native/mcp-server/agentic.md",
+      "kind": "fetch"
+    },
+    {
+      "id": "binance-skills-hub-readme",
+      "url": "https://raw.githubusercontent.com/binance/binance-skills-hub/main/README.md",
       "kind": "fetch"
     }
   ],

@@ -11,6 +11,7 @@ import typer
 
 from jarvise import config as store
 from jarvise import __version__
+from jarvise_exchange.cli import exchange_app
 
 ROOT_EPILOG = """Examples:
   jarvise status
@@ -20,6 +21,7 @@ ROOT_EPILOG = """Examples:
   jarvise analyze --symbol BTCUSDT --timeframe 4h --json
   jarvise paper run --symbol BTCUSDT --timeframe 4h --json
   jarvise paper status --json
+  jarvise exchange sync-balances --json
 """
 
 STATUS_EPILOG = """Examples:
@@ -85,6 +87,7 @@ rag_app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 app.add_typer(rag_app, name="rag")
+app.add_typer(exchange_app, name="exchange")
 
 
 class OutputFormat(str, Enum):

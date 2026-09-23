@@ -186,6 +186,8 @@ services:
       - WEB_BASIC_AUTH_USER=${WEB_BASIC_AUTH_USER:-}
       - WEB_BASIC_AUTH_PASSWORD=${WEB_BASIC_AUTH_PASSWORD:-}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-jarvise_doctrine}
+      - BINANCE_API_KEY=${BINANCE_API_KEY:-}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET:-}
     volumes:
       - ./data/analytics:/data/analytics
     depends_on:
