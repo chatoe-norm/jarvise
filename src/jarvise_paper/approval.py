@@ -86,6 +86,20 @@ def approve_approval(
             "error": "kill_switch engaged",
             "paper_only": True,
         }
+    if int(row["expires_at_ms"]) <= ts:
+        updated = resolve_approval(
+            conn,
+            approval_id,
+            status="timed_out",
+            resolved_at_ms=ts,
+        )
+        return {
+            "ok": False,
+            "approval": updated or get_approval(conn, approval_id),
+            "fills": [],
+            "error": "approval expired",
+            "paper_only": True,
+        }
     candle = load_latest_candle(conn, row["symbol"], row["timeframe"])
     if candle is None:
         updated = resolve_approval(
@@ -125,6 +139,14 @@ def approve_approval(
         resolved_at_ms=ts,
         paper_order_ids_json=json.dumps(order_ids) if order_ids else None,
     )
+    if updated is None:
+        return {
+            "ok": False,
+            "approval": get_approval(conn, approval_id),
+            "fills": applied.get("fills") or [],
+            "error": "approval resolved concurrently",
+            "paper_only": True,
+        }
     return {
         "ok": True,
         "approval": updated,
