@@ -122,4 +122,6 @@ CREATE INDEX IF NOT EXISTS idx_approval_queue_status_expires
     ON approval_queue (status, expires_at_ms);
 CREATE INDEX IF NOT EXISTS idx_approval_queue_symbol_tf_status
     ON approval_queue (symbol, timeframe, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_queue_pending_symbol_tf
+    ON approval_queue (symbol, timeframe) WHERE status = 'pending';
 

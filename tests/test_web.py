@@ -211,6 +211,7 @@ def test_analytics_shows_pending_approval(monkeypatch, tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert b"Approval queue" in resp.content
     assert b"BTCUSDT" in resp.content
+    assert b"3600000" in resp.content
     assert b"simulated" in resp.content.lower() or b"paper" in resp.content.lower()
 
 

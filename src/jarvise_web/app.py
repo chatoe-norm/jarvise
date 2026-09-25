@@ -447,6 +447,7 @@ def _approval_queue_html() -> str:
             f"<td>{html.escape(str(r.get('action') or ''))}</td>"
             f"<td>{html.escape(str(r.get('confidence_score') or ''))}</td>"
             f"<td>{html.escape(str(r.get('size_pct_equity') or ''))}</td>"
+            f"<td>{html.escape(str(r.get('expires_at_ms') or ''))}</td>"
             "<td>"
             '<form method="post" action="/approvals/approve" style="display:inline">'
             f'<input type="hidden" name="id" value="{aid}"/>'
@@ -461,7 +462,8 @@ def _approval_queue_html() -> str:
         )
     table = (
         "<table><thead><tr>"
-        "<th>Symbol</th><th>TF</th><th>Action</th><th>Conf</th><th>Size%</th><th></th>"
+        "<th>Symbol</th><th>TF</th><th>Action</th><th>Conf</th><th>Size%</th>"
+        "<th>Expires (ms)</th><th></th>"
         "</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody></table>"
     )
@@ -483,7 +485,7 @@ def approvals_approve(
     try:
         engaged = (_redis().get(KILL_SWITCH_KEY) or "0") in {"1", "true", "on", "yes"}
     except Exception:
-        engaged = False
+        engaged = True
     conn = open_db(db_path())
     try:
         approve_approval(conn, id, kill_switch=engaged)

@@ -57,7 +57,7 @@ def kill_switch_engaged() -> bool:
         val = redis.Redis.from_url(url, decode_responses=True).get("jarvise:kill_switch")
         return val in {"1", "true", "on", "yes"}
     except Exception:
-        return False
+        return True
 
 
 def build_parser() -> argparse.ArgumentParser:

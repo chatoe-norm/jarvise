@@ -155,6 +155,8 @@ CREATE INDEX IF NOT EXISTS idx_approval_queue_status_expires
     ON approval_queue (status, expires_at_ms);
 CREATE INDEX IF NOT EXISTS idx_approval_queue_symbol_tf_status
     ON approval_queue (symbol, timeframe, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_queue_pending_symbol_tf
+    ON approval_queue (symbol, timeframe) WHERE status = 'pending';
 """
 
 _DERIV_METRIC_KEYS = (
@@ -751,45 +753,143 @@ def upsert_pending_approval(conn: sqlite3.Connection, row: dict) -> dict:
         (symbol, timeframe),
     ).fetchone()
     approval_id = existing["id"] if existing else str(row["id"])
-    conn.execute(
-        """
-        INSERT INTO approval_queue (
-            id, created_at_ms, expires_at_ms, symbol, timeframe, analysis_id,
-            action, regime_state, confidence_score, size_pct_equity, status,
-            resolved_at_ms, resolve_reason, paper_order_ids_json
-        ) VALUES (
-            :id, :created_at_ms, :expires_at_ms, :symbol, :timeframe, :analysis_id,
-            :action, :regime_state, :confidence_score, :size_pct_equity, 'pending',
-            NULL, NULL, NULL
+    payload = {
+        "id": approval_id,
+        "created_at_ms": int(row["created_at_ms"]),
+        "expires_at_ms": int(row["expires_at_ms"]),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "analysis_id": row.get("analysis_id"),
+        "action": str(row["action"]),
+        "regime_state": row.get("regime_state"),
+        "confidence_score": row.get("confidence_score"),
+        "size_pct_equity": row.get("size_pct_equity"),
+    }
+    try:
+        conn.execute(
+            """
+            INSERT INTO approval_queue (
+                id, created_at_ms, expires_at_ms, symbol, timeframe, analysis_id,
+                action, regime_state, confidence_score, size_pct_equity, status,
+                resolved_at_ms, resolve_reason, paper_order_ids_json
+            ) VALUES (
+                :id, :created_at_ms, :expires_at_ms, :symbol, :timeframe, :analysis_id,
+                :action, :regime_state, :confidence_score, :size_pct_equity, 'pending',
+                NULL, NULL, NULL
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                created_at_ms=excluded.created_at_ms,
+                expires_at_ms=excluded.expires_at_ms,
+                analysis_id=excluded.analysis_id,
+                action=excluded.action,
+                regime_state=excluded.regime_state,
+                confidence_score=excluded.confidence_score,
+                size_pct_equity=excluded.size_pct_equity,
+                status='pending',
+                resolved_at_ms=NULL,
+                resolve_reason=NULL,
+                paper_order_ids_json=NULL
+            """,
+            payload,
         )
-        ON CONFLICT(id) DO UPDATE SET
-            created_at_ms=excluded.created_at_ms,
-            expires_at_ms=excluded.expires_at_ms,
-            analysis_id=excluded.analysis_id,
-            action=excluded.action,
-            regime_state=excluded.regime_state,
-            confidence_score=excluded.confidence_score,
-            size_pct_equity=excluded.size_pct_equity,
-            status='pending',
-            resolved_at_ms=NULL,
-            resolve_reason=NULL,
-            paper_order_ids_json=NULL
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        existing = conn.execute(
+            """
+            SELECT id FROM approval_queue
+            WHERE symbol = ? AND timeframe = ? AND status = 'pending'
+            LIMIT 1
+            """,
+            (symbol, timeframe),
+        ).fetchone()
+        if existing is None:
+            raise
+        approval_id = existing["id"]
+        conn.execute(
+            """
+            UPDATE approval_queue SET
+                created_at_ms=:created_at_ms,
+                expires_at_ms=:expires_at_ms,
+                analysis_id=:analysis_id,
+                action=:action,
+                regime_state=:regime_state,
+                confidence_score=:confidence_score,
+                size_pct_equity=:size_pct_equity,
+                status='pending',
+                resolved_at_ms=NULL,
+                resolve_reason=NULL,
+                paper_order_ids_json=NULL
+            WHERE id = :id
+            """,
+            {**payload, "id": approval_id},
+        )
+        conn.commit()
+    return dict(get_approval(conn, approval_id))
+
+
+def claim_approval_for_fill(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    *,
+    now_ms: int,
+) -> dict | None:
+    """Atomically claim a pending, unexpired row before paper fill."""
+    ts = int(now_ms)
+    cur = conn.execute(
+        """
+        UPDATE approval_queue SET
+            status = 'approved',
+            resolved_at_ms = ?,
+            resolve_reason = 'paper_fill'
+        WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
         """,
-        {
-            "id": approval_id,
-            "created_at_ms": int(row["created_at_ms"]),
-            "expires_at_ms": int(row["expires_at_ms"]),
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "analysis_id": row.get("analysis_id"),
-            "action": str(row["action"]),
-            "regime_state": row.get("regime_state"),
-            "confidence_score": row.get("confidence_score"),
-            "size_pct_equity": row.get("size_pct_equity"),
-        },
+        (ts, approval_id, ts),
     )
     conn.commit()
-    return dict(get_approval(conn, approval_id))
+    if cur.rowcount == 0:
+        return None
+    row = get_approval(conn, approval_id)
+    return dict(row) if row is not None else None
+
+
+def set_approval_paper_order_ids(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    paper_order_ids_json: str | None,
+) -> dict | None:
+    conn.execute(
+        """
+        UPDATE approval_queue SET paper_order_ids_json = ?
+        WHERE id = ?
+        """,
+        (paper_order_ids_json, approval_id),
+    )
+    conn.commit()
+    row = get_approval(conn, approval_id)
+    return dict(row) if row is not None else None
+
+
+def mark_approval_failed(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    *,
+    resolve_reason: str,
+    resolved_at_ms: int,
+) -> dict | None:
+    conn.execute(
+        """
+        UPDATE approval_queue SET
+            status = 'failed',
+            resolve_reason = ?,
+            resolved_at_ms = ?
+        WHERE id = ?
+        """,
+        (resolve_reason, int(resolved_at_ms), approval_id),
+    )
+    conn.commit()
+    row = get_approval(conn, approval_id)
+    return dict(row) if row is not None else None
 
 
 def resolve_approval(

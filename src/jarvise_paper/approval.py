@@ -9,10 +9,13 @@ import time
 from typing import Any
 
 from jarvise_ingest.db import (
+    claim_approval_for_fill,
     expire_pending_approvals,
     get_approval,
     load_latest_candle,
+    mark_approval_failed,
     resolve_approval,
+    set_approval_paper_order_ids,
     upsert_pending_approval,
 )
 from jarvise_paper.engine import apply_signal
@@ -59,6 +62,32 @@ def enqueue_approval(
             "status": "pending",
         },
     )
+
+
+def _claim_failure(conn: Any, approval_id: str, *, ts: int) -> dict[str, Any]:
+    row = get_approval(conn, approval_id)
+    if row is None:
+        error = "approval not found"
+    elif row["status"] != "pending":
+        error = "approval not pending"
+    elif int(row["expires_at_ms"]) <= ts:
+        updated = resolve_approval(
+            conn,
+            approval_id,
+            status="timed_out",
+            resolved_at_ms=ts,
+        )
+        row = updated or row
+        error = "approval expired"
+    else:
+        error = "approval not pending"
+    return {
+        "ok": False,
+        "approval": row,
+        "fills": [],
+        "error": error,
+        "paper_only": True,
+    }
 
 
 def approve_approval(
@@ -116,40 +145,48 @@ def approve_approval(
             "error": "no stored candles",
             "paper_only": True,
         }
+    claimed = claim_approval_for_fill(conn, approval_id, now_ms=ts)
+    if claimed is None:
+        return _claim_failure(conn, approval_id, ts=ts)
     analysis = {
-        "analysis_id": row.get("analysis_id"),
-        "symbol": row["symbol"],
-        "action": row["action"],
-        "regime_state": row.get("regime_state"),
-        "confidence_score": row.get("confidence_score"),
-        "size_pct_equity": row.get("size_pct_equity"),
+        "analysis_id": claimed.get("analysis_id"),
+        "symbol": claimed["symbol"],
+        "action": claimed["action"],
+        "regime_state": claimed.get("regime_state"),
+        "confidence_score": claimed.get("confidence_score"),
+        "size_pct_equity": claimed.get("size_pct_equity"),
     }
-    applied = apply_signal(
-        conn,
-        analysis=analysis,
-        mid_price=float(candle["close"]),
-        timeframe=str(row["timeframe"]),
-        now_ms=ts,
-    )
-    order_ids = [f.get("order_id") for f in applied.get("fills") or [] if f.get("order_id")]
-    updated = resolve_approval(
-        conn,
-        approval_id,
-        status="approved",
-        resolved_at_ms=ts,
-        paper_order_ids_json=json.dumps(order_ids) if order_ids else None,
-    )
-    if updated is None:
+    try:
+        applied = apply_signal(
+            conn,
+            analysis=analysis,
+            mid_price=float(candle["close"]),
+            timeframe=str(claimed["timeframe"]),
+            now_ms=ts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        failed = mark_approval_failed(
+            conn,
+            approval_id,
+            resolve_reason=str(exc),
+            resolved_at_ms=ts,
+        )
         return {
             "ok": False,
-            "approval": get_approval(conn, approval_id),
-            "fills": applied.get("fills") or [],
-            "error": "approval resolved concurrently",
+            "approval": failed or get_approval(conn, approval_id),
+            "fills": [],
+            "error": str(exc),
             "paper_only": True,
         }
+    order_ids = [f.get("order_id") for f in applied.get("fills") or [] if f.get("order_id")]
+    updated = set_approval_paper_order_ids(
+        conn,
+        approval_id,
+        json.dumps(order_ids) if order_ids else None,
+    )
     return {
         "ok": True,
-        "approval": updated,
+        "approval": updated or claimed,
         "fills": applied.get("fills") or [],
         "error": None,
         "paper_only": True,

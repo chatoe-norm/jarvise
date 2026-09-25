@@ -3,11 +3,11 @@ from unittest.mock import patch
 
 from jarvise_ingest.db import (
     ensure_paper_account,
+    get_approval,
     get_paper_position,
     list_approvals,
     list_paper_orders,
     open_db,
-    resolve_approval as db_resolve_approval,
     upsert_market_technicals,
 )
 from jarvise_paper.approval import (
@@ -157,7 +157,7 @@ def test_approve_after_expiry_refuses_no_position(tmp_path: Path) -> None:
     assert not list_paper_orders(conn)
 
 
-def test_approve_concurrent_resolve_reports_failure(tmp_path: Path) -> None:
+def test_double_approve_cannot_double_fill(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "p5.db")
     ensure_paper_account(conn)
     _seed_candle(conn, "BTCUSDT", "4h", 100.0)
@@ -174,15 +174,42 @@ def test_approve_concurrent_resolve_reports_failure(tmp_path: Path) -> None:
         timeframe="4h",
         now_ms=1_000,
     )
-    def resolve_approved_once(*args, **kwargs):
-        if kwargs.get("status") == "approved":
-            return None
-        return db_resolve_approval(*args, **kwargs)
+    first = approve_approval(conn, row["id"], kill_switch=False, now_ms=2_000)
+    assert first["ok"] is True
+    orders_after_first = list_paper_orders(conn)
+    second = approve_approval(conn, row["id"], kill_switch=False, now_ms=2_100)
+    assert second["ok"] is False
+    assert second["error"] == "approval not pending"
+    assert list_paper_orders(conn) == orders_after_first
 
-    with patch("jarvise_paper.approval.resolve_approval", side_effect=resolve_approved_once):
+
+def test_claim_before_fill_and_apply_failure_marks_failed(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "p6.db")
+    ensure_paper_account(conn)
+    _seed_candle(conn, "BTCUSDT", "4h", 100.0)
+    row = enqueue_approval(
+        conn,
+        analysis={
+            "analysis_id": "a1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "size_pct_equity": 10.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        timeframe="4h",
+        now_ms=1_000,
+    )
+    seen_status: list[str] = []
+
+    def apply_and_check(*args, **kwargs):
+        cur = get_approval(conn, row["id"])
+        seen_status.append(cur["status"] if cur else "")
+        raise RuntimeError("engine blew up")
+
+    with patch("jarvise_paper.approval.apply_signal", side_effect=apply_and_check):
         result = approve_approval(conn, row["id"], kill_switch=False, now_ms=2_000)
     assert result["ok"] is False
-    assert result["error"] == "approval resolved concurrently"
-    assert result["fills"]
-    assert result["approval"]["status"] == "pending"
-    assert get_paper_position(conn, "BTCUSDT") is not None
+    assert seen_status == ["approved"]
+    assert get_approval(conn, row["id"])["status"] == "failed"
+    assert get_paper_position(conn, "BTCUSDT") is None
