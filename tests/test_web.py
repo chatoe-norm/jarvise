@@ -8,6 +8,8 @@ from jarvise_ingest.db import (
     ensure_paper_account,
     open_db,
     upsert_analysis_output,
+    upsert_market_technicals,
+    upsert_pending_approval,
 )
 from jarvise_paper.engine import apply_signal
 from jarvise_web.app import app
@@ -179,3 +181,83 @@ def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
     assert payload["paper_only"] is True
     assert payload["equity"] is not None
     assert any(p["symbol"] == "BTCUSDT" for p in payload["positions"])
+
+
+def test_analytics_shows_pending_approval(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    upsert_pending_approval(
+        conn,
+        {
+            "id": "appr-web-1",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 3_600_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": "a1",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+            "size_pct_equity": 5.0,
+            "status": "pending",
+        },
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/analytics")
+    assert resp.status_code == 200
+    assert b"Approval queue" in resp.content
+    assert b"BTCUSDT" in resp.content
+    assert b"simulated" in resp.content.lower() or b"paper" in resp.content.lower()
+
+
+def test_post_approve_redirects(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": 1_700_000_000_000,
+                "timeframe": "4h",
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0,
+                "volume": 1.0,
+            }
+        ],
+    )
+    row = upsert_pending_approval(
+        conn,
+        {
+            "id": "appr-web-approve",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 3_600_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": "a1",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+            "size_pct_equity": 5.0,
+            "status": "pending",
+        },
+    )
+    approval_id = row["id"]
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.post(
+        "/approvals/approve",
+        data={"id": approval_id},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers.get("location") == "/analytics"
