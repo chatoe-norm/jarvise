@@ -21,10 +21,12 @@ from jarvise_ingest.db import (
     ensure_paper_account,
     get_paper_account,
     list_analysis_output,
+    list_approvals,
     list_paper_orders,
     list_paper_positions,
     open_db,
 )
+from jarvise_paper.approval import approve_approval, reject_approval
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +413,100 @@ def _paper_ledger_html() -> str:
     """
 
 
+def _approval_queue_html() -> str:
+    path = db_path()
+    if not path.exists():
+        return (
+            '<div class="card"><strong>Approval queue</strong>'
+            '<p class="muted">No database.</p></div>'
+        )
+    try:
+        conn = open_db(path)
+        try:
+            rows = list_approvals(conn, status="pending", limit=20)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f'<div class="card"><strong>Approval queue</strong>'
+            f'<p class="muted">{html.escape(str(exc))}</p></div>'
+        )
+    if not rows:
+        return (
+            '<div class="card"><strong>Approval queue</strong>'
+            '<p class="muted">Paper only — simulated fills on approve; no exchange orders.</p>'
+            '<p class="muted">No pending approvals</p></div>'
+        )
+    body_rows = []
+    for r in rows:
+        aid = html.escape(str(r.get("id") or ""))
+        body_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(r.get('symbol') or ''))}</td>"
+            f"<td>{html.escape(str(r.get('timeframe') or ''))}</td>"
+            f"<td>{html.escape(str(r.get('action') or ''))}</td>"
+            f"<td>{html.escape(str(r.get('confidence_score') or ''))}</td>"
+            f"<td>{html.escape(str(r.get('size_pct_equity') or ''))}</td>"
+            f"<td>{html.escape(str(r.get('expires_at_ms') or ''))}</td>"
+            "<td>"
+            '<form method="post" action="/approvals/approve" style="display:inline">'
+            f'<input type="hidden" name="id" value="{aid}"/>'
+            '<button type="submit">Approve</button>'
+            "</form> "
+            '<form method="post" action="/approvals/reject" style="display:inline">'
+            f'<input type="hidden" name="id" value="{aid}"/>'
+            '<button type="submit">Reject</button>'
+            "</form>"
+            "</td>"
+            "</tr>"
+        )
+    table = (
+        "<table><thead><tr>"
+        "<th>Symbol</th><th>TF</th><th>Action</th><th>Conf</th><th>Size%</th>"
+        "<th>Expires (ms)</th><th></th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody></table>"
+    )
+    return f"""
+    <div class="card">
+      <strong>Approval queue</strong>
+      <p class="muted">Paper only — simulated fills on approve; no exchange orders.</p>
+      {table}
+    </div>
+    """
+
+
+@app.post("/approvals/approve")
+def approvals_approve(
+    id: str = Form(...),
+    _: None = Depends(require_auth),
+) -> RedirectResponse:
+    engaged = False
+    try:
+        engaged = (_redis().get(KILL_SWITCH_KEY) or "0") in {"1", "true", "on", "yes"}
+    except Exception:
+        engaged = True
+    conn = open_db(db_path())
+    try:
+        approve_approval(conn, id, kill_switch=engaged)
+    finally:
+        conn.close()
+    return RedirectResponse("/analytics", status_code=303)
+
+
+@app.post("/approvals/reject")
+def approvals_reject(
+    id: str = Form(...),
+    _: None = Depends(require_auth),
+) -> RedirectResponse:
+    conn = open_db(db_path())
+    try:
+        reject_approval(conn, id, reason="ui")
+    finally:
+        conn.close()
+    return RedirectResponse("/analytics", status_code=303)
+
+
 @app.get("/analytics", response_class=HTMLResponse)
 def analytics(
     _: None = Depends(require_auth),
@@ -435,6 +531,7 @@ def analytics(
     </div>
     {_exchange_panel_html()}
     {_paper_ledger_html()}
+    {_approval_queue_html()}
     <div class="card">
       <strong>Pipeline status</strong>
       <pre>ingest:

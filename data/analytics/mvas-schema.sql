@@ -102,3 +102,26 @@ CREATE TABLE IF NOT EXISTS exchange_balances (
 CREATE INDEX IF NOT EXISTS idx_exchange_balances_venue_fetched
     ON exchange_balances (venue, fetched_at_ms DESC);
 
+CREATE TABLE IF NOT EXISTS approval_queue (
+    id TEXT NOT NULL PRIMARY KEY,
+    created_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    analysis_id TEXT,
+    action TEXT NOT NULL,
+    regime_state TEXT,
+    confidence_score REAL,
+    size_pct_equity REAL,
+    status TEXT NOT NULL,
+    resolved_at_ms INTEGER,
+    resolve_reason TEXT,
+    paper_order_ids_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approval_queue_status_expires
+    ON approval_queue (status, expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_approval_queue_symbol_tf_status
+    ON approval_queue (symbol, timeframe, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_queue_pending_symbol_tf
+    ON approval_queue (symbol, timeframe) WHERE status = 'pending';
+

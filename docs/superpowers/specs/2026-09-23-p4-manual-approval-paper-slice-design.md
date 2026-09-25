@@ -1,10 +1,10 @@
 # Jarvise P4 — manual approval (paper slice A→B) — design
 
 **Date:** 2026-09-23  
-**Status:** Design approved in chat; awaiting owner review of this file, then implementation plan (writing-plans)  
+**Status:** Implementation plan ready — [../plans/2026-09-23-p4-manual-approval-paper-slice.md](../plans/2026-09-23-p4-manual-approval-paper-slice.md)  
 **Depends on:** P2 paper ledger + `/analytics`; P3 exchange read-only remains orthogonal (no trade POSTs)  
 **Roadmap:** [`2026-09-23-product-roadmap-design.md`](2026-09-23-product-roadmap-design.md) P4 (thin slice before live submit)  
-**Plan:** TBD — `docs/superpowers/plans/2026-09-23-p4-manual-approval-paper-slice.md` after this spec is accepted
+**Plan:** [../plans/2026-09-23-p4-manual-approval-paper-slice.md](../plans/2026-09-23-p4-manual-approval-paper-slice.md)
 
 ## Goal
 

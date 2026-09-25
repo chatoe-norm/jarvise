@@ -58,6 +58,23 @@ Daily local examples:
 
 Compatibility aliases `jarvise-ingest` / `jarvise-analyze` still work; prefer `jarvise ...`.
 
+### Paper + approval (P2/P4 paper slice)
+
+`.venv/bin/jarvise paper run --symbol BTCUSDT --timeframe 4h --json`
+→ enqueues `approval_queue` (default). Approve on `/analytics` or:
+
+`.venv/bin/jarvise paper approve <id> --json`
+
+Immediate fill escape hatch:
+
+`.venv/bin/jarvise paper run --symbol BTCUSDT --timeframe 4h --auto-fill --json`
+
+Expire timed-out pendings (no position change):
+
+`.venv/bin/jarvise paper expire --json`
+
+On Windows use `.venv\Scripts\jarvise` instead of `.venv/bin/jarvise`. Set `JARVISE_APPROVAL_TIMEOUT_MIN` in `.env` (see `.env.example`).
+
 ## 2. VPS product (24/7) — scheduled, not click-driven
 
 Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`, Tailscale only.
@@ -99,11 +116,11 @@ Windows note for TradingView MCP: pin `uvx --python 3.13` (3.14 not supported ye
 
 1. **Market data fresh** — n8n ingest on VPS, or `jarvise ingest` by hand
 2. **Paper signal** — `jarvise analyze --json` (or `--universe paper_core`)
-3. **Paper fills (P2)** — `jarvise paper run --symbol BTCUSDT --timeframe 4h --json` (simulated ledger; no exchange orders)
+3. **Paper candidate (P2/P4)** — `jarvise paper run ...` enqueues approval by default; approve on `/analytics` or `jarvise paper approve <id>` (or `--auto-fill` for immediate simulated fill; no exchange orders)
 4. **Check doctrine** — Notebook / RAG before any human decision
-5. **Kill switch** — Redis `jarvise:kill_switch` per [ops.md](deploy/ops.md) to stop background work
+5. **Kill switch** — Redis `jarvise:kill_switch` per [ops.md](deploy/ops.md) to stop background work and block enqueue/approve
 
-**Not in this product yet:** live order entry, manual-approval gate (later deployment-ladder phases). Full path to auto-trade + analytics UI + exchange accounts: [product roadmap](superpowers/specs/2026-09-23-product-roadmap-design.md).
+**Not in this product yet:** live order entry (P4-C+). Full path to auto-trade + analytics UI + exchange accounts: [product roadmap](superpowers/specs/2026-09-23-product-roadmap-design.md).
 
 ## Related
 
@@ -111,5 +128,6 @@ Windows note for TradingView MCP: pin `uvx --python 3.13` (3.14 not supported ye
 - [Product roadmap (P0–P5)](superpowers/specs/2026-09-23-product-roadmap-design.md)
 - [P1 Analytics UI plan](superpowers/plans/2026-09-23-p1-analytics-ui.md) — `/analytics` on VPS (`http://$TAILSCALE_IP:8080/analytics`)
 - [P2 Paper auto-trade plan](superpowers/plans/2026-09-23-p2-paper-auto-trade.md) — `jarvise paper run|status`
+- [P4 Manual approval paper slice plan](superpowers/plans/2026-09-23-p4-manual-approval-paper-slice.md) — queue, CLI approve/reject/expire, `/analytics` card
 - [Paper ingest design](superpowers/specs/2026-09-21-paper-ingest-design.md)
 - [OpenClaw intelligence audit](superpowers/specs/2026-09-22-openclaw-intelligence-audit.md)
