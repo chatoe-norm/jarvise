@@ -32,6 +32,33 @@ def test_ingest_respects_kill_switch(monkeypatch) -> None:
     assert body["paper_only"] is True
 
 
+def test_ingest_also_fetches_paper_timeframe(monkeypatch) -> None:
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: False)
+    monkeypatch.delenv("JARVISE_PAPER_TIMEFRAME", raising=False)
+    captured: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{"ok": true}'
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr("jarvise.jobs.subprocess.run", fake_run)
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
+    code, body = run_ingest()
+    assert code == 0
+    assert body["ok"] is True
+    assert "1h" in body["timeframes"] and "4h" in body["timeframes"]
+    tfs = []
+    for cmd in captured:
+        assert "--timeframe" in cmd
+        tfs.append(cmd[cmd.index("--timeframe") + 1])
+    assert tfs == ["1h", "4h"]
+
+
 def test_jobs_healthz() -> None:
     handler = _Handler()
     handler.command = "GET"
