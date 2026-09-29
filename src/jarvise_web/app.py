@@ -40,6 +40,8 @@ PAPER_ONLY = os.environ.get("JARVISE_PAPER_ONLY", "true").lower() in {"1", "true
 KILL_SWITCH_KEY = "jarvise:kill_switch"
 INGEST_KEY = "jarvise:ingest:last"
 RAG_KEY = "jarvise:rag:last"
+PAPER_KEY = "jarvise:paper:last"
+PAPER_EXPIRE_KEY = "jarvise:paper:expire:last"
 DEFAULT_DB = Path("data/analytics/jarvise.db")
 
 
@@ -518,6 +520,8 @@ def analytics(
     rows, err = load_analysis_rows(symbol=sym, timeframe=tf, limit=50)
     ingest = redis_get_json(INGEST_KEY)
     rag = redis_get_json(RAG_KEY)
+    paper = redis_get_json(PAPER_KEY)
+    paper_expire = redis_get_json(PAPER_EXPIRE_KEY)
 
     form = f"""
     <div class="card">
@@ -538,7 +542,13 @@ def analytics(
 {html.escape(format_status_pre(ingest))}
 
 rag:
-{html.escape(format_status_pre(rag))}</pre>
+{html.escape(format_status_pre(rag))}
+
+paper:
+{html.escape(format_status_pre(paper))}
+
+paper_expire:
+{html.escape(format_status_pre(paper_expire))}</pre>
     </div>
     """
 
@@ -632,5 +642,7 @@ def api_status(_: None = Depends(require_auth)) -> dict[str, Any]:
         "kill_switch": kill in {"1", "true", "on", "yes"},
         "ingest": redis_get_json(INGEST_KEY),
         "rag": redis_get_json(RAG_KEY),
+        "paper": redis_get_json(PAPER_KEY),
+        "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
         "qdrant": qdrant_info(),
     }

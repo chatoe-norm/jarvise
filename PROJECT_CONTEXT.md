@@ -2,7 +2,7 @@
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
 **Generated:** 2026-09-25; **status refreshed:** 2026-09-28.
-**Snapshot:** syncing via docs PR; base includes `main` @ `6f7f5a2` (P4-B shipped + P4-C design draft #24). **Implement next:** paper jobs 24/7 (plan ready). P4-C design exists for owner review — no live code yet.
+**Snapshot:** paper jobs 24/7 **implemented on branch** `feat/paper-jobs-24h` (merge + VPS activate still required). P4-C design draft on `main` — review only; no live code.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
 ### Status at a glance (2026-09-28)
@@ -13,8 +13,8 @@
 | Live trading | **Off** — no order/trade POST code in repo. |
 | Shipped UX | `/analytics`: analysis, paper ledger, exchange spot (RO), approval queue, pipeline ingest/rag. |
 | Paper path | `paper run` → enqueue → Approve → paper fill; `--auto-fill` escape hatch. |
-| VPS schedules | n8n: ingest ~15m, rag ~6h. **Paper run/expire not scheduled yet.** |
-| Next implement | §5.2 paper jobs 24/7 — **plan ready** (`plans/2026-09-26-paper-jobs-24h.md`). |
+| VPS schedules | Code: ingest/rag + paper-run 4h / paper-expire 1h. **Activate paper workflows after Deploy.** |
+| Next | Merge/Deploy paper jobs → VPS import/activate (§5.2 Task 5) → expectancy metrics. |
 | P4-C | Design draft on `main` (`specs/2026-09-27-p4c-live-submit-design.md`) — owner review; **no code** until §5.2–5.5 gates. |
 | VPS | Paper approval smoke-proven 2026-09-27 (per AGENTS). |
 
@@ -156,7 +156,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - **Performance metrics**: `performance_risk_metrics` receives only `daily_pnl_usd`; `expected_value_ev`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown_pct` are written as `NULL`. Doctrine's "EV clearly positive on paper" gate therefore cannot be evaluated from the DB yet.
 - **Analyzer inputs**: uses only close/ATR/RSI/EMA20/EMA200. Derivatives are ingested but **not consumed**; no volume or multi-timeframe confirmation. Schema columns `vwap`, `adx_14` exist but are never computed.
 - **Historical replay**: `analyze` classifies the latest closed candle only; there is no backtest/replay command producing an expectancy report, although the data layer (closed candles, warm-up, gaps, `--since`) was built to make one reproducible.
-- **24/7 paper operation**: n8n schedules ingest and RAG only. `paper run` / `paper expire` are **CLI/manual** until jobs land. Design drafted: [`docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md`](docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md) (enqueue-only 4h run + 1h expire; Redis `jarvise:paper:*`; Approach 1 = subprocess jobs). **No implementation plan or code yet.**
+- **24/7 paper operation**: jobs routes + n8n workflow JSON + Pipeline keys landed in `feat/paper-jobs-24h`. **VPS:** import/activate `Jarvise paper run` + `Jarvise paper expire` after Deploy (Task 5). Until then, CLI still works.
 - **Timeout semantics**: roadmap P4 says timeout → FLAT; slice B deliberately implements timeout → `timed_out` only (no position change). Decision still open.
 - **Exchange panel**: raw asset balances only; no USD valuation and no reconciliation against the paper ledger.
 - **OpenClaw paper-only**: `OPENCLAW_PAPER_ONLY` is a convention enforced by config/docs, not by Python code.
@@ -281,7 +281,7 @@ Console scripts: `jarvise` (canonical), `jarvise-ingest`, `jarvise-analyze`, `ja
 Repo convention: **spec → plan → TDD implementation → review → PR to `main`**; the VPS redeploys automatically on green `main`. Each step below is one PR-sized slice. Do not start a lower item before the one above is merged or explicitly deferred.
 
 - [x] **1. Land P4 paper slice B.** Merged [PR #23](https://github.com/chatoe-norm/jarvise/pull/23) (`def1f8f`); Deploy green 2026-09-25. Owner smoke (when on Tailscale): `jarvise paper run --universe paper_core --timeframe 4h --json`, Approve/Reject once on `/analytics` + CLI, confirm kill-switch blocks enqueue and approve.
-- [ ] **2. Make paper trading run 24/7.** Spec + plan ready: [`2026-09-26-paper-jobs-24h-design.md`](docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md) · [`plans/2026-09-26-paper-jobs-24h.md`](docs/superpowers/plans/2026-09-26-paper-jobs-24h.md). **Next: implement Tasks 1–5** (jobs routes, n8n workflows, web Pipeline, docs, VPS activate). Enqueue-only 4h + expire 1h; env `JARVISE_PAPER_UNIVERSE` / `JARVISE_PAPER_TIMEFRAME`.
+- [x] **2. Make paper trading run 24/7 (code).** Tasks 1–4 on `feat/paper-jobs-24h`. [ ] **Task 5 VPS:** Deploy → import workflows → activate paper run/expire → smoke `POST /jobs/paper-run` + expire + kill-switch 409.
 - [ ] **3. Performance / expectancy metrics (doctrine gate).** From `paper_orders`/`paper_positions` compute realized PnL per closed trade → win rate, avg win/loss, **EV after fees/slippage**, max drawdown %, and (once ≥ 30 trades) Sharpe/Sortino; fill the `NULL` columns in `performance_risk_metrics`; add `jarvise paper metrics --json` and a metrics card on `/analytics`. Without this the "EV clearly positive before live" rule cannot be checked.
 - [ ] **4. Historical replay for paper signals.** `jarvise analyze --replay --since … --until …` (or `jarvise paper backtest`) that walks stored closed candles in order, writes `analysis_output` per candle, and feeds the step-3 metrics — reproducible because of closed-candle/warm-up/gap guarantees already in place. No new data sources.
 - [ ] **5. Risk caps module (venue-agnostic, shared by paper and later live).** New `jarvise_risk` (or module in `jarvise_paper`) with `max_notional_per_order`, `max_daily_loss_usd`, `drawdown_lock_pct` from env (defaults conservative); enforce on paper approve first; on breach mark `failed` with reason and **engage the kill-switch**; surface caps on `/analytics`. Decide and implement **timeout → FLAT** here (roadmap says FLAT; slice B left it open).

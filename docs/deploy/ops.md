@@ -105,7 +105,17 @@ Control UI → Engage kill switch, or:
 docker compose exec redis redis-cli set jarvise:kill_switch 1
 ```
 
-`jarvise rag refresh` exits with code 3 when engaged.
+`jarvise rag refresh` / paper-run / paper-expire exit with code 3 (HTTP 409 from jobs) when engaged.
+
+Redis status keys (JSON via jobs → `publish_redis_status`):
+
+| Key | Writer |
+|-----|--------|
+| `jarvise:ingest:last` | `POST /jobs/ingest` |
+| `jarvise:rag:last` | `POST /jobs/rag-refresh` |
+| `jarvise:paper:last` | `POST /jobs/paper-run` |
+| `jarvise:paper:expire:last` | `POST /jobs/paper-expire` |
+| `jarvise:kill_switch` | control UI / redis-cli |
 
 ## Verify Tailscale path (laptop)
 

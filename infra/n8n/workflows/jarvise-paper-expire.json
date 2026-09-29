@@ -1,0 +1,55 @@
+{
+  "name": "Jarvise paper expire",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "cron-paper-expire",
+      "name": "Every 1h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/paper-expire",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "http-paper-expire",
+      "name": "POST paper expire",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Marks timed_out pending approvals only (no FLAT). No exchange orders. Jobs writes jarvise:paper:expire:last."
+    }
+  ],
+  "connections": {
+    "Every 1h": {
+      "main": [[{ "node": "POST paper expire", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "n8n UI → Workflows → Import from File → infra/n8n/workflows/jarvise-paper-expire.json"
+    }
+  },
+  "pinData": {},
+  "active": false
+}

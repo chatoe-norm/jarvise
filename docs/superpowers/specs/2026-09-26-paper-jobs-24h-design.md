@@ -1,7 +1,7 @@
 # Jarvise — paper jobs 24/7 (enqueue + expire) — design
 
 **Date:** 2026-09-26  
-**Status:** Design approved; **implementation plan ready** — [`../plans/2026-09-26-paper-jobs-24h.md`](../plans/2026-09-26-paper-jobs-24h.md)  
+**Status:** Implementing on `feat/paper-jobs-24h` (Tasks 1–4); VPS activate = Task 5 after merge/Deploy — [`../plans/2026-09-26-paper-jobs-24h.md`](../plans/2026-09-26-paper-jobs-24h.md)  
 **Depends on:** P4 paper approval slice B shipped (`jarvise paper run` enqueue default, `paper expire`)  
 **Plan:** [`../plans/2026-09-26-paper-jobs-24h.md`](../plans/2026-09-26-paper-jobs-24h.md)  
 **Related:** [`PROJECT_CONTEXT.md`](../../../PROJECT_CONTEXT.md) §5.2; ingest/rag jobs pattern in `src/jarvise/jobs.py`
