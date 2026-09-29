@@ -1,6 +1,6 @@
 # Jarvise product usage (paper phase)
 
-**Status:** No live order placement yet. Shipped through **§5.4 analyze replay**. Next: risk caps → P4-C review-only until gates.
+**Status:** No live order placement yet. Shipped through **§5.5 risk caps** (timeout → FLAT). Next: P4-C design review — no live code until approved.
 
 ```mermaid
 flowchart LR

@@ -28,6 +28,7 @@ from jarvise_ingest.db import (
 )
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
+from jarvise_risk import load_risk_caps
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,20 @@ def _paper_ledger_html() -> str:
     """
 
 
+def _risk_caps_html() -> str:
+    caps = load_risk_caps().as_dict()
+    return f"""
+    <div class="card">
+      <strong>Risk caps</strong>
+      <p class="muted">Venue-agnostic paper enforcement (env). Breach → fail approval + kill-switch.</p>
+      <pre>max_notional_per_order={html.escape(str(caps['max_notional_per_order']))}
+max_daily_loss_usd={html.escape(str(caps['max_daily_loss_usd']))}
+drawdown_lock_pct={html.escape(str(caps['drawdown_lock_pct']))}
+timeout → FLAT on open paper positions</pre>
+    </div>
+    """
+
+
 def _paper_metrics_html() -> str:
     path = db_path()
     if not path.exists():
@@ -577,6 +592,7 @@ def analytics(
     </div>
     {_exchange_panel_html()}
     {_paper_ledger_html()}
+    {_risk_caps_html()}
     {_paper_metrics_html()}
     {_approval_queue_html()}
     <div class="card">
@@ -716,5 +732,6 @@ def api_status(_: None = Depends(require_auth)) -> dict[str, Any]:
         "rag": redis_get_json(RAG_KEY),
         "paper": redis_get_json(PAPER_KEY),
         "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
+        "risk_caps": load_risk_caps().as_dict(),
         "qdrant": qdrant_info(),
     }
