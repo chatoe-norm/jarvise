@@ -207,6 +207,58 @@ def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
     assert any(p["symbol"] == "BTCUSDT" for p in payload["positions"])
 
 
+def test_api_paper_metrics_and_card(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    apply_signal(
+        conn,
+        analysis={
+            "analysis_id": "m1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "size_pct_equity": 5.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        mid_price=100.0,
+        timeframe="4h",
+        now_ms=1_700_000_000_000,
+    )
+    apply_signal(
+        conn,
+        analysis={
+            "analysis_id": "m2",
+            "symbol": "BTCUSDT",
+            "action": "flat",
+            "size_pct_equity": 0.0,
+            "regime_state": "range",
+            "confidence_score": 0.4,
+        },
+        mid_price=110.0,
+        timeframe="4h",
+        now_ms=1_700_000_100_000,
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+
+    client = TestClient(app)
+    html = client.get("/analytics")
+    assert html.status_code == 200
+    assert b"Paper expectancy" in html.content
+
+    api = client.get("/api/paper/metrics")
+    assert api.status_code == 200
+    payload = api.json()
+    assert payload["ok"] is True
+    assert payload["closed_trades"] == 1
+    assert payload["expected_value_ev"] is not None
+
+    persist = client.post("/paper/metrics/persist", follow_redirects=False)
+    assert persist.status_code == 303
+
+
 def test_analytics_shows_pending_approval(monkeypatch, tmp_path: Path) -> None:
     _stub_control_deps(monkeypatch)
     db = tmp_path / "jarvise.db"
