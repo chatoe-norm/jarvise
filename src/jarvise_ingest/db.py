@@ -994,3 +994,18 @@ def expire_pending_approvals(conn: sqlite3.Connection, *, now_ms: int) -> int:
     )
     conn.commit()
     return int(cur.rowcount)
+
+
+def list_expired_pending_approvals(
+    conn: sqlite3.Connection, *, now_ms: int
+) -> list[dict]:
+    cur = conn.execute(
+        f"""
+        SELECT {_APPROVAL_COLUMNS}
+        FROM approval_queue
+        WHERE status = 'pending' AND expires_at_ms <= ?
+        ORDER BY expires_at_ms ASC
+        """,
+        (int(now_ms),),
+    )
+    return [dict(row) for row in cur.fetchall()]

@@ -125,7 +125,10 @@ def build_parser() -> argparse.ArgumentParser:
     rj.add_argument("--db", type=Path, default=DEFAULT_DB)
     rj.add_argument("--json", action="store_true", dest="as_json")
 
-    ex = sub.add_parser("expire", help="Mark timed-out pendings (no FLAT)")
+    ex = sub.add_parser(
+        "expire",
+        help="Mark timed-out pendings and FLAT open paper positions",
+    )
     ex.add_argument("--db", type=Path, default=DEFAULT_DB)
     ex.add_argument("--json", action="store_true", dest="as_json")
 
@@ -283,8 +286,20 @@ def cmd_run(args: argparse.Namespace) -> int:
                     queued = enqueue_approval(
                         conn, analysis=analysis, timeframe=args.timeframe
                     )
+                    if queued.get("error") or queued.get("skipped"):
+                        errors.append(
+                            f"{sym}: {queued.get('error') or 'risk cap blocked enqueue'}"
+                        )
+                        if not args.as_json:
+                            print(
+                                f"Error: {sym} enqueue blocked: {queued.get('error')}",
+                                file=sys.stderr,
+                            )
                 results.append({"queued": queued, "analysis": summary})
-                if not args.as_json:
+                if not args.as_json and not (
+                    isinstance(queued, dict)
+                    and (queued.get("error") or queued.get("skipped"))
+                ):
                     print(f"{sym}: {analysis.get('action')} queued for approval")
     finally:
         conn.close()

@@ -169,6 +169,8 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
     data = resp.json()
     assert "paper" in data
     assert "paper_expire" in data
+    assert "risk_caps" in data
+    assert "max_notional_per_order" in data["risk_caps"]
 
 
 def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
