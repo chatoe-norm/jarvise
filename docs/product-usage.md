@@ -1,6 +1,6 @@
 # Jarvise product usage (paper phase)
 
-**Status:** No live order placement yet. Shipped: **P0–P3 + P4 paper-approval + paper jobs 24/7**. Next: **expectancy metrics** (in progress) → risk caps → P4-C review-only until gates.
+**Status:** No live order placement yet. Shipped through **§5.4 analyze replay**. Next: risk caps → P4-C review-only until gates.
 
 ```mermaid
 flowchart LR
@@ -80,6 +80,18 @@ Expectancy (round-trips after fees):
 `.venv/bin/jarvise paper metrics --persist --json`  # optional upsert into `performance_risk_metrics`
 
 Also on `/analytics` → **Paper expectancy** card + `GET /api/paper/metrics`.
+
+Historical replay (stored candles only):
+
+```bash
+# analysis-only (may use default DB)
+.venv/bin/jarvise analyze --replay --since 2024-01-01 --universe paper_core --timeframe 4h --json
+
+# paper fills require an isolated DB copy (refuses default live ledger)
+cp data/analytics/jarvise.db /tmp/jarvise-bt.db
+.venv/bin/jarvise analyze --replay --since 2024-01-01 --until 2024-06-01 \
+  --universe paper_core --timeframe 4h --db /tmp/jarvise-bt.db --apply-paper --json
+```
 
 On Windows use `.venv\Scripts\jarvise` instead of `.venv/bin/jarvise`. Set `JARVISE_APPROVAL_TIMEOUT_MIN` in `.env` (see `.env.example`).
 
