@@ -38,26 +38,47 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
         payload = _skipped()
         publish_redis_status("jarvise:ingest:last", payload)
         return 3, payload
-    cmd = [
-        sys.executable,
-        "-m",
-        "jarvise",
-        "ingest",
-        "--symbol",
-        os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT"),
-        "--timeframe",
-        "1h",
-        "--limit",
-        "200",
-        "--skip-derivatives",
-        "--json",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    payload = _parse_stdout(proc)
-    payload["paper_only"] = True
-    payload["exit_code"] = proc.returncode
+    symbols = os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")
+    paper_tf = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    timeframes = ["1h"]
+    if paper_tf != "1h":
+        timeframes.append(paper_tf)
+
+    by_tf: dict[str, Any] = {}
+    exit_code = 0
+    for tf in timeframes:
+        cmd = [
+            sys.executable,
+            "-m",
+            "jarvise",
+            "ingest",
+            "--symbol",
+            symbols,
+            "--timeframe",
+            tf,
+            "--limit",
+            "200",
+            "--skip-derivatives",
+            "--json",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        by_tf[tf] = _parse_stdout(proc)
+        if proc.returncode != 0:
+            exit_code = proc.returncode
+
+    payload: dict[str, Any] = {
+        "ok": exit_code == 0,
+        "paper_only": True,
+        "exit_code": exit_code,
+        "timeframes": by_tf,
+    }
+    # Prefer primary 1h shape at top-level for older Pipeline readers when single-tf.
+    if "1h" in by_tf and isinstance(by_tf["1h"], dict):
+        for key in ("db", "market_technicals", "errors", "duration_s"):
+            if key in by_tf["1h"]:
+                payload[key] = by_tf["1h"][key]
     publish_redis_status("jarvise:ingest:last", payload)
-    return proc.returncode, payload
+    return exit_code, payload
 
 
 def run_rag_refresh() -> tuple[int, dict[str, Any]]:

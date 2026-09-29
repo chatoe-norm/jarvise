@@ -161,7 +161,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tools 
 
 ## 7. Schedules
 
-n8n workflow `jarvise-ingest-schedule` posts to `http://jobs:8090/jobs/ingest` every 15 minutes. The jobs service writes `jarvise:ingest:last`. Do not also cron that same ingest.
+n8n workflow `jarvise-ingest-schedule` posts to `http://jobs:8090/jobs/ingest` every 15 minutes. The jobs service writes `jarvise:ingest:last` and refreshes **`1h` plus `JARVISE_PAPER_TIMEFRAME`** (default `4h`) so paper enqueue has candles.
 
 Paper enqueue / expire (after Deploy that includes `feat/paper-jobs-24h`):
 
