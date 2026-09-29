@@ -129,6 +129,10 @@ def test_analytics_pipeline_status_pretty(monkeypatch, tmp_path: Path) -> None:
     def fake_json(key: str):
         if key == "jarvise:rag:last":
             return {"ok": True, "chunks": 12, "collection": "jarvise_doctrine"}
+        if key == "jarvise:paper:last":
+            return {"ok": True, "enqueued": 2}
+        if key == "jarvise:paper:expire:last":
+            return {"ok": True, "expired": 1}
         return {"ok": True, "upserted": 1}
 
     def fake_qdrant():
@@ -144,7 +148,27 @@ def test_analytics_pipeline_status_pretty(monkeypatch, tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert b"Pipeline status" in resp.content
     assert b"&quot;chunks&quot;: 12" in resp.content
+    assert b"paper:" in resp.content
+    assert b"paper_expire:" in resp.content
     assert b"invalid JSON" not in resp.content
+
+
+def test_api_status_includes_paper_keys(monkeypatch) -> None:
+    monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
+
+    def fake_json(key: str):
+        return {"ok": True, "key": key}
+
+    monkeypatch.setattr("jarvise_web.app.redis_get_json", fake_json)
+    monkeypatch.setattr("jarvise_web.app.redis_get", lambda k: "0")
+    monkeypatch.setattr("jarvise_web.app.qdrant_info", lambda: {"exists": True, "points": 0})
+    client = TestClient(app)
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "paper" in data
+    assert "paper_expire" in data
 
 
 def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:

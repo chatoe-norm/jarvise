@@ -75,6 +75,47 @@ def run_rag_refresh() -> tuple[int, dict[str, Any]]:
     return proc.returncode, payload
 
 
+def run_paper_run() -> tuple[int, dict[str, Any]]:
+    if kill_switch_engaged():
+        payload = _skipped()
+        publish_redis_status("jarvise:paper:last", payload)
+        return 3, payload
+    universe = os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_core"
+    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    cmd = [
+        sys.executable,
+        "-m",
+        "jarvise",
+        "paper",
+        "run",
+        "--universe",
+        universe,
+        "--timeframe",
+        timeframe,
+        "--json",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    payload = _parse_stdout(proc)
+    payload["paper_only"] = True
+    payload["exit_code"] = proc.returncode
+    publish_redis_status("jarvise:paper:last", payload)
+    return proc.returncode, payload
+
+
+def run_paper_expire() -> tuple[int, dict[str, Any]]:
+    if kill_switch_engaged():
+        payload = _skipped()
+        publish_redis_status("jarvise:paper:expire:last", payload)
+        return 3, payload
+    cmd = [sys.executable, "-m", "jarvise", "paper", "expire", "--json"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    payload = _parse_stdout(proc)
+    payload["paper_only"] = True
+    payload["exit_code"] = proc.returncode
+    publish_redis_status("jarvise:paper:expire:last", payload)
+    return proc.returncode, payload
+
+
 def _parse_stdout(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     text = (proc.stdout or "").strip()
     if text:
@@ -95,6 +136,8 @@ ROUTES = {
     ("GET", "/healthz"): "health",
     ("POST", "/jobs/ingest"): "ingest",
     ("POST", "/jobs/rag-refresh"): "rag",
+    ("POST", "/jobs/paper-run"): "paper_run",
+    ("POST", "/jobs/paper-expire"): "paper_expire",
 }
 
 
@@ -129,6 +172,14 @@ class JobHandler(BaseHTTPRequestHandler):
             return
         if action == "rag":
             code, body = run_rag_refresh()
+            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
+            return
+        if action == "paper_run":
+            code, body = run_paper_run()
+            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
+            return
+        if action == "paper_expire":
+            code, body = run_paper_expire()
             self._send(200 if code == 0 else 409 if code == 3 else 500, body)
             return
         self._send(404, {"ok": False, "error": "not found"})

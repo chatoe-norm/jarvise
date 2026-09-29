@@ -1,6 +1,6 @@
 # Jarvise product usage (paper phase)
 
-**Status:** No live order placement yet. Shipped: **P0–P3 + P4 paper-approval slice** — CLI + VPS jobs + `/analytics` (paper ledger, approval queue, read-only exchange spot balances) + agent/MCP. Next: owner-review **[P4-C design draft](superpowers/specs/2026-09-27-p4c-live-submit-design.md)** then implementation plan (no live code until approved).
+**Status:** No live order placement yet. Shipped: **P0–P3 + P4 paper-approval slice** — CLI + VPS jobs + `/analytics` (paper ledger, approval queue, read-only exchange spot balances) + agent/MCP. Next implement: **paper jobs 24/7** (n8n → enqueue/expire); then expectancy/risk; P4-C design draft is review-only until those gates.
 
 ```mermaid
 flowchart LR
@@ -84,6 +84,10 @@ Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`,
 
 - Every ~15 minutes: `POST /jobs/ingest` → refresh market data
 - Every ~6 hours: `POST /jobs/rag-refresh` → refresh doctrine RAG
+- Every ~4 hours: `POST /jobs/paper-run` → enqueue paper candidates (`paper_core` @ `4h` by default; **no** `--auto-fill`)
+- Every ~1 hour: `POST /jobs/paper-expire` → mark timed-out approvals (no FLAT)
+
+Approve/Reject still happens on `/analytics` (or `jarvise paper approve|reject`).
 
 **Manual on VPS when needed:**
 

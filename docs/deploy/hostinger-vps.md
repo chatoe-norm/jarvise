@@ -163,6 +163,13 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tools 
 
 n8n workflow `jarvise-ingest-schedule` posts to `http://jobs:8090/jobs/ingest` every 15 minutes. The jobs service writes `jarvise:ingest:last`. Do not also cron that same ingest.
 
+Paper enqueue / expire (after Deploy that includes `feat/paper-jobs-24h`):
+
+1. **n8n** `Jarvise paper run` — every 4h → `POST http://jobs:8090/jobs/paper-run` (enqueue only; no `--auto-fill`). Redis: `jarvise:paper:last`.
+2. **n8n** `Jarvise paper expire` — every 1h → `POST http://jobs:8090/jobs/paper-expire`. Redis: `jarvise:paper:expire:last`.
+
+Optional env (compose defaults): `JARVISE_PAPER_UNIVERSE=paper_core`, `JARVISE_PAPER_TIMEFRAME=4h`, `JARVISE_APPROVAL_TIMEOUT_MIN=60`. Approve still happens on `/analytics`.
+
 After NotebookLM auth works, enable **both**:
 
 1. **n8n** workflow `Jarvise RAG refresh` (every 6h → `POST http://jobs:8090/jobs/rag-refresh`)
@@ -174,7 +181,7 @@ Import workflows once inside the n8n container:
 docker exec jarvise-n8n-1 n8n import:workflow --separate --input=/workflows
 ```
 
-Activate ingest + RAG in the n8n UI (`http://$TAILSCALE_IP:5678/`), or:
+Activate ingest + RAG + **paper run** + **paper expire** in the n8n UI (`http://$TAILSCALE_IP:5678/`), or:
 
 ```bash
 # Example: list then activate by id after import

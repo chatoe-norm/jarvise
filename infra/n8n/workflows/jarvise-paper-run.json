@@ -1,0 +1,55 @@
+{
+  "name": "Jarvise paper run",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 4
+            }
+          ]
+        }
+      },
+      "id": "cron-paper-run",
+      "name": "Every 4h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/paper-run",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "http-paper-run",
+      "name": "POST paper run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Enqueue-only paper candidates (no --auto-fill, no exchange orders). Jobs writes jarvise:paper:last. Approve still required on /analytics."
+    }
+  ],
+  "connections": {
+    "Every 4h": {
+      "main": [[{ "node": "POST paper run", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "n8n UI → Workflows → Import from File → infra/n8n/workflows/jarvise-paper-run.json"
+    }
+  },
+  "pinData": {},
+  "active": false
+}
