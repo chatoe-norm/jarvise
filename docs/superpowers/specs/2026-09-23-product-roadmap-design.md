@@ -139,6 +139,8 @@ Extend [`src/jarvise_web/app.py`](../../../src/jarvise_web/app.py) (Tailscale-bo
 
 Paper slice (queue + `/analytics` approve, no live submit): [P4 paper slice design](2026-09-23-p4-manual-approval-paper-slice-design.md) and [implementation plan](../plans/2026-09-23-p4-manual-approval-paper-slice.md).
 
+Live submit on Approve (P4-C, design draft): [P4-C live submit design](2026-09-27-p4c-live-submit-design.md) — **no product code until approved + plan**.
+
 - Eligible signals enter `approval_queue`  
 - UI: Approve / Reject; timeout → FLAT  
 - On Approve: place size-capped live order; record in `live_orders`  

@@ -192,7 +192,7 @@ No interactive prompts.
 
 ## Follow-ups (explicitly out of B)
 
-- **P4-C:** On Approve, size-capped **live** spot order + `live_orders` audit (only after B is stable)
+- **P4-C:** On Approve, size-capped **live** spot order + `live_orders` audit — design draft: [2026-09-27-p4c-live-submit-design.md](2026-09-27-p4c-live-submit-design.md) (only after B is stable; no code until approved + plan)
 - Roadmap timeout → FLAT behavior
 - n8n / jobs schedule for `paper expire`
 - Hard notional / daily-loss caps on live path (needed for P4-C; optional display-only caps later)

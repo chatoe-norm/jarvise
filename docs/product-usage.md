@@ -1,6 +1,6 @@
 # Jarvise product usage (paper phase)
 
-**Status:** There is no trading GUI and no live order placement. The shipped product is a **CLI + VPS background jobs + agent/MCP** surface for paper analytics only.
+**Status:** No live order placement yet. Shipped: **P0–P3 + P4 paper-approval slice** — CLI + VPS jobs + `/analytics` (paper ledger, approval queue, read-only exchange spot balances) + agent/MCP. Next: owner-review **[P4-C design draft](superpowers/specs/2026-09-27-p4c-live-submit-design.md)** then implementation plan (no live code until approved).
 
 ```mermaid
 flowchart LR
@@ -44,7 +44,8 @@ Entrypoint: `.venv\Scripts\jarvise` (see [`src/jarvise/cli.py`](../src/jarvise/c
 | `jarvise status` / `init` / `config` | Local workspace |
 | `jarvise ingest ...` | Fetch OHLCV (+ CoinGlass) → `data/analytics/jarvise.db` (Binance klines = current default provider; venue-agnostic later) |
 | `jarvise analyze ...` | Read DB → regime / confidence / size (paper) |
-| `jarvise paper ...` | Simulated fills into local ledger (no exchange orders) |
+| `jarvise paper ...` | Enqueue / approve paper fills into local ledger (no exchange orders) |
+| `jarvise exchange ...` | Read-only spot balance sync (Binance first; no order placement) |
 | `jarvise rag ...` | Sync doctrine → Qdrant |
 
 Daily local examples:
@@ -120,7 +121,7 @@ Windows note for TradingView MCP: pin `uvx --python 3.13` (3.14 not supported ye
 4. **Check doctrine** — Notebook / RAG before any human decision
 5. **Kill switch** — Redis `jarvise:kill_switch` per [ops.md](deploy/ops.md) to stop background work and block enqueue/approve
 
-**Not in this product yet:** live order entry (P4-C+). Full path to auto-trade + analytics UI + exchange accounts: [product roadmap](superpowers/specs/2026-09-23-product-roadmap-design.md).
+**Not in this product yet:** live order entry (P4-C+). Design draft: [P4-C live submit](superpowers/specs/2026-09-27-p4c-live-submit-design.md). Full path: [product roadmap](superpowers/specs/2026-09-23-product-roadmap-design.md).
 
 ## Related
 
@@ -128,6 +129,8 @@ Windows note for TradingView MCP: pin `uvx --python 3.13` (3.14 not supported ye
 - [Product roadmap (P0–P5)](superpowers/specs/2026-09-23-product-roadmap-design.md)
 - [P1 Analytics UI plan](superpowers/plans/2026-09-23-p1-analytics-ui.md) — `/analytics` on VPS (`http://$TAILSCALE_IP:8080/analytics`)
 - [P2 Paper auto-trade plan](superpowers/plans/2026-09-23-p2-paper-auto-trade.md) — `jarvise paper run|status`
+- [P3 Exchange read-only plan](superpowers/plans/2026-09-23-p3-exchange-readonly.md) — `jarvise exchange sync-balances`, `/analytics` spot panel
 - [P4 Manual approval paper slice plan](superpowers/plans/2026-09-23-p4-manual-approval-paper-slice.md) — queue, CLI approve/reject/expire, `/analytics` card
+- [P4-C live submit design (draft)](superpowers/specs/2026-09-27-p4c-live-submit-design.md) — size-capped live spot on Approve; review before plan/code
 - [Paper ingest design](superpowers/specs/2026-09-21-paper-ingest-design.md)
 - [OpenClaw intelligence audit](superpowers/specs/2026-09-22-openclaw-intelligence-audit.md)

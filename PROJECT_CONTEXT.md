@@ -2,7 +2,7 @@
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
 **Generated:** 2026-09-25; **status refreshed:** 2026-09-28.
-**Snapshot:** branch `main` @ `def1f8f` (PR [#23](https://github.com/chatoe-norm/jarvise/pull/23) merged); P0–P3 + **P4 paper slice B** shipped and Deployed; next work = paper jobs 24/7 (design drafted, not coded).
+**Snapshot:** syncing via docs PR; base includes `main` @ `6f7f5a2` (P4-B shipped + P4-C design draft #24). **Implement next:** paper jobs 24/7 (plan ready). P4-C design exists for owner review — no live code yet.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
 ### Status at a glance (2026-09-28)
@@ -14,8 +14,9 @@
 | Shipped UX | `/analytics`: analysis, paper ledger, exchange spot (RO), approval queue, pipeline ingest/rag. |
 | Paper path | `paper run` → enqueue → Approve → paper fill; `--auto-fill` escape hatch. |
 | VPS schedules | n8n: ingest ~15m, rag ~6h. **Paper run/expire not scheduled yet.** |
-| Next MVP | §5.2 paper jobs 24/7 — design file exists; need accept → plan → code. |
-| Docs sync | Status refresh + paper-jobs design landed via docs PR (see git history). |
+| Next implement | §5.2 paper jobs 24/7 — **plan ready** (`plans/2026-09-26-paper-jobs-24h.md`). |
+| P4-C | Design draft on `main` (`specs/2026-09-27-p4c-live-submit-design.md`) — owner review; **no code** until §5.2–5.5 gates. |
+| VPS | Paper approval smoke-proven 2026-09-27 (per AGENTS). |
 
 ---
 
@@ -284,7 +285,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - [ ] **3. Performance / expectancy metrics (doctrine gate).** From `paper_orders`/`paper_positions` compute realized PnL per closed trade → win rate, avg win/loss, **EV after fees/slippage**, max drawdown %, and (once ≥ 30 trades) Sharpe/Sortino; fill the `NULL` columns in `performance_risk_metrics`; add `jarvise paper metrics --json` and a metrics card on `/analytics`. Without this the "EV clearly positive before live" rule cannot be checked.
 - [ ] **4. Historical replay for paper signals.** `jarvise analyze --replay --since … --until …` (or `jarvise paper backtest`) that walks stored closed candles in order, writes `analysis_output` per candle, and feeds the step-3 metrics — reproducible because of closed-candle/warm-up/gap guarantees already in place. No new data sources.
 - [ ] **5. Risk caps module (venue-agnostic, shared by paper and later live).** New `jarvise_risk` (or module in `jarvise_paper`) with `max_notional_per_order`, `max_daily_loss_usd`, `drawdown_lock_pct` from env (defaults conservative); enforce on paper approve first; on breach mark `failed` with reason and **engage the kill-switch**; surface caps on `/analytics`. Decide and implement **timeout → FLAT** here (roadmap says FLAT; slice B left it open).
-- [ ] **6. P4-C design + plan (documents only).** Spec `live_orders` schema, `VenueClient.place_spot_order()` boundary in `jarvise_exchange`, pre-flight key-permission check (reject withdrawal/transfer scope), `JARVISE_LIVE_ENABLED=false` default, dust/min-notional handling, idempotency keys, full attempt audit. Gate: step 5 merged **and** slice B stable on the VPS for an owner-chosen period.
+- [ ] **6. P4-C design + plan.** Design draft already on `main`: [`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md) — owner review, then writing-plans. Gate before **code**: steps 2–5 progress + slice B stable (smoke done 2026-09-27).
 - [ ] **7. P4-C implementation (owner-gated).** Approve → caps check → kill-switch check → live spot order → `live_orders` row → paper ledger mirror. Explicit owner OK required before this PR is opened; live flag stays off by default in every environment.
 - [ ] **8. Ops hygiene before any live trade.** Pending-approval notification (n8n → Slack/Telegram/email); `/analytics` USD valuation of exchange balances; re-sync doctrine extract (remove Binance-TH-only wording); confirm VPS `.env` Binance key has **no** withdrawal permission.
 
@@ -300,7 +301,8 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - **2026-09-23** — Product roadmap P0–P5 written; **P1 `/analytics` UI**; **P2 paper ledger + `jarvise paper`**; venue-agnostic/TradingView-overlay docs; **P3 read-only Binance balances** (HMAC, then Ed25519/RSA); Redis status robustness; **P4 paper-slice design**. (PRs #17–#22)
 - **2026-09-25** — P4 implementation plan; approval queue schema, engine, CLI, `/analytics` card, docs; atomic claim + fail-closed kill-switch. **PR #23 merged to `main`; Deploy green.**
 - **2026-09-26** — Brainstorm + design for **paper jobs 24/7** (enqueue + expire schedules); file `docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md` (local; plan/code not started).
-- **2026-09-28** — Status refresh in this file + `AGENTS.md`; ladder P0–P4-B shipped; active next = §5.2 paper jobs.
+- **2026-09-27** — P4 paper approval smoke on VPS; **P4-C live-submit design draft** (PR #24).
+- **2026-09-28–29** — `PROJECT_CONTEXT.md` + paper jobs 24/7 design/plan; handoff: **implement §5.2** before P4-C code.
 
 Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature has landed via spec/plan first.
 
@@ -320,7 +322,8 @@ Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature 
 - `docs/superpowers/specs/2026-09-23-product-roadmap-design.md` — P0–P5 ladder (authoritative for scope)
 - `docs/product-usage.md` — how to run the shipped product today
 - `docs/superpowers/specs/2026-09-23-p4-manual-approval-paper-slice-design.md` + `plans/…p4-manual-approval-paper-slice.md` — **P4-B shipped**
-- `docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md` — **next slice** (design; awaiting accept → plan → code)
+- `docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md` + `plans/2026-09-26-paper-jobs-24h.md` — **next implement**
+- `docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md` — P4-C draft (review only; no code yet)
 - `docs/exchange/binance-for-jarvise.md` — allowed vs forbidden exchange capabilities
 - `docs/deploy/hostinger-vps.md`, `docs/deploy/ops.md` — VPS bring-up and kill-switch ops
 - `data/analytics/mvas-schema.sql` — full SQLite schema
