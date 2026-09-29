@@ -603,6 +603,19 @@ def list_paper_orders(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict
     return [dict(row) for row in cur.fetchall()]
 
 
+def list_paper_orders_asc(conn: sqlite3.Connection) -> list[dict]:
+    """All paper fills oldest-first (for round-trip reconstruction)."""
+    cur = conn.execute(
+        """
+        SELECT order_id, ts, symbol, timeframe, side, qty, price,
+               fee_usd, slip_bps, analysis_id, reason
+        FROM paper_orders
+        ORDER BY ts ASC, order_id ASC
+        """
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
 def load_latest_analysis(
     conn: sqlite3.Connection, symbol: str, timeframe: str
 ) -> dict | None:

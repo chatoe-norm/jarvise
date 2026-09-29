@@ -199,3 +199,37 @@ def test_paper_run_auto_fill_writes_orders(tmp_path, monkeypatch):
         assert list_paper_orders(conn)
     finally:
         conn.close()
+
+
+def test_paper_metrics_json(tmp_path: Path, capsys, monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    db = tmp_path / "metrics.db"
+    _seed(db)
+    _seed_long_analysis(db)
+    assert (
+        main(
+            [
+                "run",
+                "--symbol",
+                "BTCUSDT",
+                "--timeframe",
+                "4h",
+                "--db",
+                str(db),
+                "--json",
+                "--skip-analyze",
+                "--auto-fill",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()  # discard run JSON
+    # flat via analyze would need different seed; open-only still valid for metrics shape
+    code = main(["metrics", "--db", str(db), "--json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["paper_only"] is True
+    assert "closed_trades" in payload
+    assert "expected_value_ev" in payload
+    assert payload["persisted"] is False

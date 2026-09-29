@@ -1,6 +1,6 @@
 # Jarvise product usage (paper phase)
 
-**Status:** No live order placement yet. Shipped: **P0–P3 + P4 paper-approval slice** — CLI + VPS jobs + `/analytics` (paper ledger, approval queue, read-only exchange spot balances) + agent/MCP. Next implement: **paper jobs 24/7** (n8n → enqueue/expire); then expectancy/risk; P4-C design draft is review-only until those gates.
+**Status:** No live order placement yet. Shipped: **P0–P3 + P4 paper-approval + paper jobs 24/7**. Next: **expectancy metrics** (in progress) → risk caps → P4-C review-only until gates.
 
 ```mermaid
 flowchart LR
@@ -73,6 +73,13 @@ Immediate fill escape hatch:
 Expire timed-out pendings (no position change):
 
 `.venv/bin/jarvise paper expire --json`
+
+Expectancy (round-trips after fees):
+
+`.venv/bin/jarvise paper metrics --json`  
+`.venv/bin/jarvise paper metrics --persist --json`  # optional upsert into `performance_risk_metrics`
+
+Also on `/analytics` → **Paper expectancy** card + `GET /api/paper/metrics`.
 
 On Windows use `.venv\Scripts\jarvise` instead of `.venv/bin/jarvise`. Set `JARVISE_APPROVAL_TIMEOUT_MIN` in `.env` (see `.env.example`).
 

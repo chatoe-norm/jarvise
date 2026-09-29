@@ -31,6 +31,7 @@ from jarvise_paper.approval import (
     reject_approval,
 )
 from jarvise_paper.engine import apply_signal
+from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
@@ -71,7 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             f"Examples:\n  {EXAMPLE}\n"
             "  jarvise paper run --universe paper_core --timeframe 4h --json\n"
-            "  jarvise paper status --json"
+            "  jarvise paper status --json\n"
+            "  jarvise paper metrics --json"
         ),
     )
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -131,6 +133,15 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--db", type=Path, default=DEFAULT_DB)
     st.add_argument("--json", action="store_true", dest="as_json")
     st.add_argument("--limit", type=int, default=20)
+
+    mt = sub.add_parser("metrics", help="Paper expectancy from closed round-trips")
+    mt.add_argument("--db", type=Path, default=DEFAULT_DB)
+    mt.add_argument("--json", action="store_true", dest="as_json")
+    mt.add_argument(
+        "--persist",
+        action="store_true",
+        help="Upsert snapshot into performance_risk_metrics",
+    )
     return p
 
 
@@ -389,6 +400,40 @@ def cmd_expire(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_metrics(args: argparse.Namespace) -> int:
+    conn = open_db(args.db)
+    try:
+        ensure_paper_account(conn)
+        report = compute_paper_metrics(conn)
+        if args.persist:
+            persist_metrics_snapshot(conn, report)
+            report = {**report, "persisted": True}
+        else:
+            report = {**report, "persisted": False}
+    finally:
+        conn.close()
+    report["db"] = str(args.db.resolve())
+    if args.as_json:
+        # Keep payload lean for default JSON consumers; trades still included.
+        print(json.dumps(report, separators=(",", ":")))
+    else:
+        ev = report.get("expected_value_ev")
+        wr = report.get("win_rate")
+        mdd = report.get("max_drawdown_pct")
+        print(
+            f"closed={report['closed_trades']} open={report['open_count']} "
+            f"EV={ev} win_rate={wr} MDD%={mdd} "
+            f"sharpe={report.get('sharpe_ratio')} sortino={report.get('sortino_ratio')}"
+        )
+        if not report.get("ratios_ready"):
+            print(
+                f"(Sharpe/Sortino need ≥{report.get('need_trades_for_ratios')} closed trades)"
+            )
+        if report.get("persisted"):
+            print("persisted performance_risk_metrics snapshot")
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -404,6 +449,8 @@ def run(argv: list[str] | None = None) -> int:
         return cmd_reject(args)
     if args.cmd == "expire":
         return cmd_expire(args)
+    if args.cmd == "metrics":
+        return cmd_metrics(args)
     return 2
 
 

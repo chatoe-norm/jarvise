@@ -27,6 +27,7 @@ from jarvise_ingest.db import (
     open_db,
 )
 from jarvise_paper.approval import approve_approval, reject_approval
+from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +416,47 @@ def _paper_ledger_html() -> str:
     """
 
 
+def _paper_metrics_html() -> str:
+    path = db_path()
+    if not path.exists():
+        return (
+            '<div class="card"><strong>Paper expectancy</strong>'
+            '<p class="muted">No database.</p></div>'
+        )
+    try:
+        conn = open_db(path)
+        try:
+            ensure_paper_account(conn)
+            report = compute_paper_metrics(conn)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f'<div class="card"><strong>Paper expectancy</strong>'
+            f'<p class="muted">{html.escape(str(exc))}</p></div>'
+        )
+    ratios = (
+        f"sharpe={report.get('sharpe_ratio')} sortino={report.get('sortino_ratio')}"
+        if report.get("ratios_ready")
+        else f"sharpe/sortino need ≥{report.get('need_trades_for_ratios')} trades"
+    )
+    return f"""
+    <div class="card">
+      <strong>Paper expectancy</strong>
+      <p class="muted">Round-trips after fees/slippage — doctrine EV gate (paper only).</p>
+      <pre>closed={html.escape(str(report.get('closed_trades')))}
+wins={html.escape(str(report.get('wins')))} losses={html.escape(str(report.get('losses')))} scratches={html.escape(str(report.get('scratches')))}
+EV={html.escape(str(report.get('expected_value_ev')))} win_rate={html.escape(str(report.get('win_rate')))}
+MDD%={html.escape(str(report.get('max_drawdown_pct')))}
+{html.escape(ratios)}
+unmatched_orders={html.escape(str(report.get('unmatched_orders')))}</pre>
+      <form method="post" action="/paper/metrics/persist" style="margin-top:.75rem">
+        <button type="submit">Persist metrics snapshot</button>
+      </form>
+    </div>
+    """
+
+
 def _approval_queue_html() -> str:
     path = db_path()
     if not path.exists():
@@ -535,6 +577,7 @@ def analytics(
     </div>
     {_exchange_panel_html()}
     {_paper_ledger_html()}
+    {_paper_metrics_html()}
     {_approval_queue_html()}
     <div class="card">
       <strong>Pipeline status</strong>
@@ -632,6 +675,35 @@ def api_paper(_: None = Depends(require_auth)) -> dict[str, Any]:
     else:
         payload["ok"] = True
     return payload
+
+
+@app.get("/api/paper/metrics")
+def api_paper_metrics(_: None = Depends(require_auth)) -> dict[str, Any]:
+    path = db_path()
+    if not path.exists():
+        return {"ok": False, "paper_only": PAPER_ONLY, "error": "no database"}
+    conn = open_db(path)
+    try:
+        ensure_paper_account(conn)
+        report = compute_paper_metrics(conn)
+    finally:
+        conn.close()
+    report["db"] = str(path)
+    return report
+
+
+@app.post("/paper/metrics/persist")
+def paper_metrics_persist(_: None = Depends(require_auth)) -> RedirectResponse:
+    path = db_path()
+    if path.exists():
+        conn = open_db(path)
+        try:
+            ensure_paper_account(conn)
+            report = compute_paper_metrics(conn)
+            persist_metrics_snapshot(conn, report)
+        finally:
+            conn.close()
+    return RedirectResponse("/analytics", status_code=303)
 
 
 @app.get("/api/status")
