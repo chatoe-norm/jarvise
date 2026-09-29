@@ -2,7 +2,7 @@
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
 **Generated:** 2026-09-25; **status refreshed:** 2026-09-28.
-**Snapshot:** paper jobs 24/7 + **expectancy metrics** on branch/PR. Next: historical replay (§5.4) → risk caps → P4-C review (no live code).
+**Snapshot:** paper jobs + expectancy + **analyze replay** (§5.4). Next: risk caps (§5.5) → P4-C review (no live code).
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
 ### Status at a glance (2026-09-28)
@@ -14,8 +14,8 @@
 | Shipped UX | `/analytics`: analysis, paper ledger, exchange spot (RO), approval queue, pipeline ingest/rag. |
 | Paper path | `paper run` → enqueue → Approve → paper fill; `--auto-fill` escape hatch. |
 | VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**. |
-| Next | §5.4 historical replay → risk caps → P4-C owner review. |
-| Expectancy | `jarvise paper metrics` + `/analytics` Paper expectancy card. |
+| Next | §5.5 risk caps → P4-C owner review (no live code). |
+| Replay | `jarvise analyze --replay --since …` (+ optional `--apply-paper` on isolated `--db`). |
 | P4-C | Design draft on `main` (`specs/2026-09-27-p4c-live-submit-design.md`) — owner review; **no code** until §5.2–5.5 gates. |
 | VPS | Paper approval smoke-proven 2026-09-27 (per AGENTS). |
 
@@ -156,7 +156,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 
 - **Performance metrics**: `jarvise paper metrics` / `/api/paper/metrics` compute EV, win rate, MDD from closed round-trips; Sharpe/Sortino after ≥30; optional persist into `performance_risk_metrics`.
 - **Analyzer inputs**: uses only close/ATR/RSI/EMA20/EMA200. Derivatives are ingested but **not consumed**; no volume or multi-timeframe confirmation. Schema columns `vwap`, `adx_14` exist but are never computed.
-- **Historical replay**: `analyze` classifies the latest closed candle only; there is no backtest/replay command producing an expectancy report, although the data layer (closed candles, warm-up, gaps, `--since`) was built to make one reproducible.
+- **Historical replay**: `jarvise analyze --replay --since …` walks stored closed candles; `--apply-paper` fills only on an isolated `--db` (refuses default live ledger).
 - **24/7 paper operation**: VPS n8n **activated** 2026-09-29 (`Jarvise paper run` / `Jarvise paper expire`). Jobs ingest refreshes `1h` plus paper timeframe (`4h` default) so enqueue has candles.
 - **Timeout semantics**: roadmap P4 says timeout → FLAT; slice B deliberately implements timeout → `timed_out` only (no position change). Decision still open.
 - **Exchange panel**: raw asset balances only; no USD valuation and no reconciliation against the paper ledger.
@@ -284,7 +284,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - [x] **1. Land P4 paper slice B.** Merged [PR #23](https://github.com/chatoe-norm/jarvise/pull/23) (`def1f8f`); Deploy green 2026-09-25. Owner smoke (when on Tailscale): `jarvise paper run --universe paper_core --timeframe 4h --json`, Approve/Reject once on `/analytics` + CLI, confirm kill-switch blocks enqueue and approve.
 - [x] **2. Make paper trading run 24/7.** Code + Deploy + VPS activate (2026-09-29): import/activate paper run/expire; smoke paper-run enqueue, expire 200, kill-switch 409. Ingest also refreshes paper timeframe candles.
 - [x] **3. Performance / expectancy metrics (doctrine gate).** `jarvise paper metrics` + `/analytics` expectancy card + `/api/paper/metrics`; round-trips → EV/win rate/MDD; Sharpe/Sortino ≥30; `--persist` / Persist button. Spec: [`2026-09-29-paper-expectancy-metrics-design.md`](docs/superpowers/specs/2026-09-29-paper-expectancy-metrics-design.md).
-- [ ] **4. Historical replay for paper signals.** `jarvise analyze --replay --since … --until …` (or `jarvise paper backtest`) that walks stored closed candles in order, writes `analysis_output` per candle, and feeds the step-3 metrics — reproducible because of closed-candle/warm-up/gap guarantees already in place. No new data sources.
+- [x] **4. Historical replay for paper signals.** `jarvise analyze --replay --since … [--until …] [--apply-paper]` — walk closed candles, upsert analysis; optional isolated-db paper fills + metrics. Spec: [`2026-09-29-analyze-replay-design.md`](docs/superpowers/specs/2026-09-29-analyze-replay-design.md).
 - [ ] **5. Risk caps module (venue-agnostic, shared by paper and later live).** New `jarvise_risk` (or module in `jarvise_paper`) with `max_notional_per_order`, `max_daily_loss_usd`, `drawdown_lock_pct` from env (defaults conservative); enforce on paper approve first; on breach mark `failed` with reason and **engage the kill-switch**; surface caps on `/analytics`. Decide and implement **timeout → FLAT** here (roadmap says FLAT; slice B left it open).
 - [ ] **6. P4-C design + plan.** Design draft already on `main`: [`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md) — owner review, then writing-plans. Gate before **code**: steps 2–5 progress + slice B stable (smoke done 2026-09-27).
 - [ ] **7. P4-C implementation (owner-gated).** Approve → caps check → kill-switch check → live spot order → `live_orders` row → paper ledger mirror. Explicit owner OK required before this PR is opened; live flag stays off by default in every environment.

@@ -413,6 +413,29 @@ def load_latest_candle(
     return dict(row) if row is not None else None
 
 
+def load_candles_in_range(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    since_ms: int,
+    until_ms: int,
+) -> list[dict]:
+    """Closed candles with indicators in [since_ms, until_ms], oldest first."""
+    cur = conn.execute(
+        """
+        SELECT symbol, timestamp, timeframe, open, high, low, close, volume,
+               atr_14, rsi_14, ema_20, ema_200
+        FROM market_technicals
+        WHERE symbol=? AND timeframe=?
+          AND timestamp >= ? AND timestamp <= ?
+        ORDER BY timestamp ASC
+        """,
+        (symbol.upper(), timeframe, int(since_ms), int(until_ms)),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
 def upsert_analysis_output(conn: sqlite3.Connection, row: dict) -> None:
     conn.execute(
         """
@@ -484,6 +507,28 @@ def list_analysis_output(
 
 
 STARTING_PAPER_EQUITY = 10_000.0
+
+
+def reset_paper_ledger(
+    conn: sqlite3.Connection, *, starting_equity: float = STARTING_PAPER_EQUITY
+) -> None:
+    """Wipe paper fills/positions and reset cash/equity (for isolated backtests)."""
+    conn.execute("DELETE FROM paper_orders")
+    conn.execute("DELETE FROM paper_positions")
+    start = float(starting_equity)
+    for key, value in (
+        ("starting_equity", start),
+        ("cash", start),
+        ("equity", start),
+    ):
+        conn.execute(
+            """
+            INSERT INTO paper_account (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (key, value),
+        )
+    conn.commit()
 
 
 def ensure_paper_account(

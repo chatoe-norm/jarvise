@@ -6,9 +6,11 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
+from jarvise_analyze.replay import replay_range
 from jarvise_ingest.db import (
     load_latest_candle,
     open_db,
@@ -20,8 +22,10 @@ from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
-EXAMPLE = (
-    "jarvise analyze --symbol BTCUSDT --timeframe 4h --json"
+EXAMPLE = "jarvise analyze --symbol BTCUSDT --timeframe 4h --json"
+REPLAY_EXAMPLE = (
+    "jarvise analyze --replay --since 2024-01-01 --universe paper_core "
+    "--timeframe 4h --db /tmp/jarvise-bt.db --apply-paper --json"
 )
 
 
@@ -35,6 +39,20 @@ def _parse_symbols(raw: list[str] | None) -> list[str]:
     return symbols
 
 
+def _parse_instant(raw: str) -> datetime:
+    value = datetime.fromisoformat(raw)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _is_default_live_db(path: Path) -> bool:
+    try:
+        return path.resolve() == DEFAULT_DB.resolve()
+    except OSError:
+        return False
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jarvise analyze",
@@ -45,7 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             f"Examples:\n  {EXAMPLE}\n"
-            "  jarvise analyze --universe paper_core --timeframe 4h --dry-run --json"
+            "  jarvise analyze --universe paper_core --timeframe 4h --dry-run --json\n"
+            f"  {REPLAY_EXAMPLE}"
         ),
     )
     p.add_argument(
@@ -73,7 +92,51 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite path")
     p.add_argument("--dry-run", action="store_true", help="Compute; do not write")
     p.add_argument("--json", action="store_true", dest="as_json", help="JSON summary")
+    p.add_argument(
+        "--replay",
+        action="store_true",
+        help="Walk stored candles in [--since, --until] (requires --since)",
+    )
+    p.add_argument(
+        "--since",
+        help="Replay start ISO-8601 (UTC if bare date)",
+    )
+    p.add_argument(
+        "--until",
+        help="Replay end ISO-8601 (default: now; requires --replay)",
+    )
+    p.add_argument(
+        "--apply-paper",
+        action="store_true",
+        help=(
+            "With --replay: apply_signal each bar into isolated --db "
+            "(refuses default live ledger path)"
+        ),
+    )
     return p
+
+
+def _resolve_symbols(conn, args) -> list[str] | int:
+    symbols = _parse_symbols(args.symbols)
+    if args.universe:
+        if args.universe == PAPER_CORE:
+            seed_paper_core(conn)
+        as_of_ms = int(time.time() * 1000)
+        from_universe = universe_as_of(conn, args.universe, as_of_ms)
+        seen: set[str] = set()
+        merged: list[str] = []
+        for sym in symbols + from_universe:
+            if sym not in seen:
+                seen.add(sym)
+                merged.append(sym)
+        symbols = merged
+    if not symbols:
+        print(
+            f"Error: no symbols to analyze.\n  {EXAMPLE}",
+            file=sys.stderr,
+        )
+        return 2
+    return symbols
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -91,29 +154,89 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.until and not args.replay:
+        print(
+            "Error: --until requires --replay.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
+    if args.apply_paper and not args.replay:
+        print(
+            "Error: --apply-paper requires --replay.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
+    if args.replay and not args.since:
+        print(
+            "Error: --replay requires --since.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
+    if args.apply_paper and _is_default_live_db(args.db):
+        print(
+            "Error: --apply-paper refuses the default live ledger DB. "
+            f"Copy the DB and pass --db <isolated path>.\n  {REPLAY_EXAMPLE}",
+            file=sys.stderr,
+        )
+        return 2
 
     started = time.perf_counter()
     conn = open_db(args.db)
     try:
-        symbols = _parse_symbols(args.symbols)
-        if args.universe:
-            if args.universe == PAPER_CORE:
-                seed_paper_core(conn)
-            as_of_ms = int(time.time() * 1000)
-            from_universe = universe_as_of(conn, args.universe, as_of_ms)
-            seen: set[str] = set()
-            merged: list[str] = []
-            for sym in symbols + from_universe:
-                if sym not in seen:
-                    seen.add(sym)
-                    merged.append(sym)
-            symbols = merged
-        if not symbols:
-            print(
-                f"Error: no symbols to analyze.\n  {EXAMPLE}",
-                file=sys.stderr,
+        symbols = _resolve_symbols(conn, args)
+        if isinstance(symbols, int):
+            return symbols
+
+        if args.replay:
+            since = _parse_instant(args.since)
+            until = (
+                _parse_instant(args.until)
+                if args.until
+                else datetime.now(timezone.utc)
             )
-            return 2
+            if since >= until:
+                print(
+                    "Error: --since must be before --until.\n  " + REPLAY_EXAMPLE,
+                    file=sys.stderr,
+                )
+                return 2
+            since_ms = int(since.timestamp() * 1000)
+            until_ms = int(until.timestamp() * 1000)
+            report = replay_range(
+                conn,
+                symbols=symbols,
+                timeframe=args.timeframe,
+                since_ms=since_ms,
+                until_ms=until_ms,
+                confidence_threshold=args.confidence_threshold,
+                apply_paper=args.apply_paper,
+                dry_run=args.dry_run,
+            )
+            report["db"] = str(args.db.resolve())
+            report["universe"] = args.universe
+            report["duration_s"] = round(time.perf_counter() - started, 3)
+            report["note"] = (
+                "replay + paper fills (isolated db); no exchange orders"
+                if args.apply_paper
+                else "replay analysis only; no order placement"
+            )
+            if args.as_json:
+                print(json.dumps(report, separators=(",", ":")))
+            else:
+                print(
+                    f"replay bars={report['bars']} analyses={report['analyses']} "
+                    f"fills={report['fills']} apply_paper={report['apply_paper']}"
+                )
+                for err in report.get("errors") or []:
+                    print(f"Error: {err}", file=sys.stderr)
+                metrics = report.get("metrics") or {}
+                if metrics:
+                    print(
+                        f"metrics closed={metrics.get('closed_trades')} "
+                        f"EV={metrics.get('expected_value_ev')} "
+                        f"win_rate={metrics.get('win_rate')}"
+                    )
+            return 0 if report.get("ok") else 1
 
         analyses: list[dict] = []
         errors: list[str] = []
