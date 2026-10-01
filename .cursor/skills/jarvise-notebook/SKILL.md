@@ -5,7 +5,7 @@ description: Queries the Jarvise Gemini Notebook (crypto trading knowledge base)
 
 # Jarvise Notebook
 
-Trading knowledge lives in Gemini Notebook **Jarvise : Crypto Trader**. Read [`config/notebook.json`](../../../config/notebook.json) for id, alias, and profile. Query it before analyzing markets or recommending trades. Local extracts: `data/analytics/sources/jarvise-doctrine.txt`, `jarvise-analyzer-stack.txt`, `binance-api-intro-jarvise.txt`, `binance-skills-hub-jarvise.txt`, `api-map.json` (synced 2026-09-22; Binance digests 2026-09-23). Agent map: [`docs/exchange/binance-for-jarvise.md`](../../../docs/exchange/binance-for-jarvise.md).
+Trading knowledge lives in Gemini Notebook **Jarvise : Crypto Trader**. Read [`config/notebook.json`](../../../config/notebook.json) for id, alias, and profile. Query it before analyzing markets or recommending trades. Local extracts: `data/analytics/sources/jarvise-doctrine.txt`, `jarvise-analyzer-stack.txt`, `binance-api-intro-jarvise.txt`, `binance-skills-hub-jarvise.txt`, `shadcn-ui-installation-jarvise.txt`, `api-map.json` (synced 2026-09-22; Binance digests 2026-09-23; shadcn digest 2026-09-29). Agent maps: [`docs/exchange/binance-for-jarvise.md`](../../../docs/exchange/binance-for-jarvise.md), [`docs/ux-ui/shadcn-for-jarvise.md`](../../../docs/ux-ui/shadcn-for-jarvise.md).
 
 ## Notebook
 
@@ -45,6 +45,7 @@ Do not use the `default` profile (`normstudiox@gmail.com`) for this notebook —
 - **Venue-agnostic:** trade anywhere Jarvise can run efficiently, stably, and securely. Binance (incl. TH spot costs when relevant) is an example venue/cost model — not a forever lock.
 - Binance APIs for Jarvise = public market data (`GET /api/v3/klines`) plus planned read-only spot account (`GET /api/v3/account`, P3). Never order/withdraw endpoints; never keys with withdrawal/transfer permission. See `binance-api-intro-jarvise.txt` and `docs/exchange/binance-for-jarvise.md`.
 - Binance Skills Hub is used read-only through skill `jarvise-binance-intel` (public token info, token audit, rank/hype context, tokenized US stocks, Academy). Never install the hub, `binance-cli`, `baw`, the Agentic Wallet, or the Binance MCP Server. Token audit `HIGH` → FLAT; rank/hype is context, never a trigger. See `binance-skills-hub-jarvise.txt`.
+- Analytics / control UI is FastAPI HTML (`/analytics`). shadcn/ui Installation knowledge is for a future rewrite only — use skill `jarvise-ux-ui` and `docs/ux-ui/shadcn-for-jarvise.md`. Never `npx shadcn@latest init` in-repo without an owner-approved UI plan.
 
 ## Query style
 
@@ -63,4 +64,5 @@ Cite notebook guidance in the decision (`BUY` / `SELL` / `FLAT`) so the owner ca
 - Skip risk/paper-first rules from the sources to chase a trade.
 - Place live or paper exchange orders from this skill.
 - Call Binance (or any venue) order, withdraw, or transfer APIs; treat Binance Agent MCP/REST as execution tooling.
+- Scaffold React/shadcn over FastAPI `/analytics` without an owner-approved rewrite (see `jarvise-ux-ui`).
 - Delete sources, run studio generation, or switch the default `nlm` profile away from `chatoe` without the owner asking.

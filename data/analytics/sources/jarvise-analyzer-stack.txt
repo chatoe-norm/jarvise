@@ -1,5 +1,6 @@
 Jarvise analytics / analyzer stack (use these as the analysis layer; notebook is doctrine, live APIs/charts are the feed).
 Synced from NotebookLM on 2026-09-22 (Core Protocol + analyzer stack + microstructure notes).
+Venue wording aligned with AGENTS on 2026-10-01 (worldwide; Binance first adapter).
 
 Price-graph analyzer
 Structure first: trend vs range, swing high/low, support/resistance, break and retest.
@@ -13,7 +14,7 @@ Intraday fair value: VWAP as magnet and S/R; TradeStation VWAP notes apply to se
 Order-book / microstructure analyzer
 Bid/ask, spread, depth, slippage, buy/sell walls. Validate walls with actual prints (spoofing is common).
 BTC book usually thicker/institutional, smoother absorption; ETH thinner, more wicks, wider slippage, faster spoof walls — tighter execution discipline and wider structural stops.
-Venue for this project: Binance TH spot (Thai SEC). Fees + spread are part of EV.
+Venue: worldwide / venue-agnostic for Jarvise; Binance spot is the current first OHLCV and balance adapter (not a forever lock). Fees + spread are part of EV.
 
 On-chain / market-data analyzer (when APIs available)
 Glassnode: network, supply, realized cap, entity-adjusted flows.
