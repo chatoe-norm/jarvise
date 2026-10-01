@@ -294,7 +294,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - [x] **7. P4-C implementation (owner-gated).** Approve → caps → kill-switch → `jarvise_trade` spot MARKET → `live_orders` (no paper mirror). Flag default **false** in repo/compose; VPS stays paper-only until owner enables keys.
 - [ ] **8. Ops hygiene before any live trade.**
   - [x] **8a.** `/analytics` USD valuation of exchange balances (public USDT prices).
-  - [ ] Pending-approval notification (n8n → Slack/Telegram/email)
+  - [x] **8b.** Pending-approval Telegram (enqueue + hourly digest; soft-fail).
   - [ ] Re-sync doctrine extract (remove Binance-TH-only wording)
   - [ ] Confirm VPS trade key has **spot trade only, no withdraw**; then optional `JARVISE_LIVE_TRADING=true`.
 

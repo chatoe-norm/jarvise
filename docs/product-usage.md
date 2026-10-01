@@ -107,6 +107,7 @@ Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`,
 - Every ~1 hour: `POST /jobs/paper-expire` → mark timed-out approvals (no FLAT)
 
 Approve/Reject still happens on `/analytics` (or `jarvise paper approve|reject`).
+Optional Telegram alerts when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set (enqueue + hourly pending digest via n8n `Jarvise paper pending digest`). Soft-fail if unset.
 
 **Manual on VPS when needed:**
 

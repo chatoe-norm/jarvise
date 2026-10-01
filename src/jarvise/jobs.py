@@ -7,9 +7,12 @@ import os
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from jarvise.rag import publish_redis_status
+from jarvise_ingest.db import list_approvals, open_db
+from jarvise_notify import notify_pending_digest
 
 
 def kill_switch_engaged() -> bool:
@@ -137,6 +140,31 @@ def run_paper_expire() -> tuple[int, dict[str, Any]]:
     return proc.returncode, payload
 
 
+def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
+    """Hourly soft-fail Telegram digest of pending approvals. Never blocks on kill-switch."""
+    raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+    path = Path(raw)
+    if not path.exists():
+        payload = {
+            "ok": True,
+            "sent": False,
+            "reason": "no_database",
+            "count": 0,
+            "paper_only": True,
+        }
+        publish_redis_status("jarvise:paper:digest:last", payload)
+        return 0, payload
+    conn = open_db(path)
+    try:
+        rows = list_approvals(conn, status="pending", limit=100)
+    finally:
+        conn.close()
+    result = notify_pending_digest(rows)
+    payload = {**result, "paper_only": True}
+    publish_redis_status("jarvise:paper:digest:last", payload)
+    return 0, payload
+
+
 def _parse_stdout(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     text = (proc.stdout or "").strip()
     if text:
@@ -159,6 +187,7 @@ ROUTES = {
     ("POST", "/jobs/rag-refresh"): "rag",
     ("POST", "/jobs/paper-run"): "paper_run",
     ("POST", "/jobs/paper-expire"): "paper_expire",
+    ("POST", "/jobs/paper-pending-digest"): "paper_pending_digest",
 }
 
 
@@ -202,6 +231,10 @@ class JobHandler(BaseHTTPRequestHandler):
         if action == "paper_expire":
             code, body = run_paper_expire()
             self._send(200 if code == 0 else 409 if code == 3 else 500, body)
+            return
+        if action == "paper_pending_digest":
+            code, body = run_paper_pending_digest()
+            self._send(200 if code == 0 else 500, body)
             return
         self._send(404, {"ok": False, "error": "not found"})
 

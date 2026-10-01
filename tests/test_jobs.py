@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from io import BytesIO
 
-from jarvise.jobs import JobHandler, run_ingest, run_paper_expire, run_paper_run
+from jarvise.jobs import (
+    JobHandler,
+    run_ingest,
+    run_paper_expire,
+    run_paper_pending_digest,
+    run_paper_run,
+)
 
 
 class _Handler(JobHandler):
@@ -147,5 +153,30 @@ def test_paper_expire_route(monkeypatch) -> None:
     )
     handler = _Handler()
     handler.path = "/jobs/paper-expire"
+    handler._dispatch()
+    assert handler._status == 200
+
+
+def test_paper_pending_digest_empty_db(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("JARVISE_DB", str(tmp_path / "missing.db"))
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "jarvise.jobs.publish_redis_status",
+        lambda key, payload: published.append((key, payload)),
+    )
+    code, body = run_paper_pending_digest()
+    assert code == 0
+    assert body["sent"] is False
+    assert body["reason"] == "no_database"
+    assert published[0][0] == "jarvise:paper:digest:last"
+
+
+def test_paper_pending_digest_route(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "jarvise.jobs.run_paper_pending_digest",
+        lambda: (0, {"ok": True, "sent": False, "paper_only": True}),
+    )
+    handler = _Handler()
+    handler.path = "/jobs/paper-pending-digest"
     handler._dispatch()
     assert handler._status == 200
