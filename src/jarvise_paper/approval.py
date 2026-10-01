@@ -1,4 +1,4 @@
-"""Paper approval queue — simulated fills only. No exchange order APIs."""
+"""Approval queue — paper fills by default; optional gated live submit."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from jarvise_ingest.db import (
 )
 from jarvise_paper.engine import apply_signal
 from jarvise_risk import check_caps, engage_kill_switch, load_risk_caps
+from jarvise_trade import live_trading_enabled, submit_live_for_approval
 
 DEFAULT_TIMEOUT_MIN = 60
 
@@ -209,6 +210,9 @@ def approve_approval(
     if breach:
         return _fail_risk(conn, approval_id, reason=breach, ts=ts, row=row)
 
+    if live_trading_enabled():
+        return _approve_live(conn, approval_id, row=row, ts=ts)
+
     candle = load_latest_candle(conn, row["symbol"], row["timeframe"])
     if candle is None:
         updated = resolve_approval(
@@ -271,6 +275,63 @@ def approve_approval(
         "error": None,
         "paper_only": True,
         "equity": applied.get("equity"),
+    }
+
+
+def _approve_live(
+    conn: Any,
+    approval_id: str,
+    *,
+    row: dict[str, Any],
+    ts: int,
+) -> dict[str, Any]:
+    """Live path: claim → jarvise_trade submit → audit. No paper ledger mirror."""
+    claimed = claim_approval_for_fill(
+        conn,
+        approval_id,
+        now_ms=ts,
+        resolve_reason="live_submit",
+    )
+    if claimed is None:
+        return _claim_failure(conn, approval_id, ts=ts)
+
+    result = submit_live_for_approval(conn, approval=claimed, now_ms=ts)
+    live_order = result.get("live_order")
+    if not result.get("ok"):
+        reason = str(result.get("error") or "live submit failed")
+        failed = mark_approval_failed(
+            conn,
+            approval_id,
+            resolve_reason=reason,
+            resolved_at_ms=ts,
+        )
+        return {
+            "ok": False,
+            "approval": failed or get_approval(conn, approval_id),
+            "fills": [],
+            "live_order": live_order,
+            "error": reason,
+            "paper_only": False,
+        }
+
+    if result.get("skipped"):
+        conn.execute(
+            """
+            UPDATE approval_queue SET resolve_reason = ?
+            WHERE id = ?
+            """,
+            ("live_skipped", approval_id),
+        )
+        conn.commit()
+
+    return {
+        "ok": True,
+        "approval": get_approval(conn, approval_id) or claimed,
+        "fills": [],
+        "live_order": live_order,
+        "error": None,
+        "paper_only": False,
+        "skipped": bool(result.get("skipped")),
     }
 
 

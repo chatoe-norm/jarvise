@@ -29,6 +29,7 @@ from jarvise_ingest.db import (
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_risk import load_risk_caps
+from jarvise_trade import live_trading_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +185,14 @@ def nav_html(active: str) -> str:
 
 
 def page(body: str, title: str = "Jarvise", *, active: str = "control") -> HTMLResponse:
+    if live_trading_enabled():
+        banner = (
+            '<div class="banner" style="border-color:var(--danger);color:var(--danger)">'
+            "LIVE APPROVAL ENABLED — Approve may place size-capped spot orders"
+            "</div>"
+        )
+    else:
+        banner = '<div class="banner">PAPER ONLY — no order placement</div>'
     html_doc = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -215,7 +224,7 @@ def page(body: str, title: str = "Jarvise", *, active: str = "control") -> HTMLR
 <body>
 <main>
   <h1>{html.escape(title)}</h1>
-  <div class="banner">PAPER ONLY — no order placement</div>
+  {banner}
   {nav_html(active)}
   {body}
 </main>
@@ -251,7 +260,12 @@ def load_analysis_rows(
 
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
-    return {"ok": True, "paper_only": PAPER_ONLY}
+    live = live_trading_enabled()
+    return {
+        "ok": True,
+        "paper_only": PAPER_ONLY and not live,
+        "live_trading": live,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -725,8 +739,10 @@ def paper_metrics_persist(_: None = Depends(require_auth)) -> RedirectResponse:
 @app.get("/api/status")
 def api_status(_: None = Depends(require_auth)) -> dict[str, Any]:
     kill = redis_get(KILL_SWITCH_KEY) or "0"
+    live = live_trading_enabled()
     return {
-        "paper_only": PAPER_ONLY,
+        "paper_only": PAPER_ONLY and not live,
+        "live_trading": live,
         "kill_switch": kill in {"1", "true", "on", "yes"},
         "ingest": redis_get_json(INGEST_KEY),
         "rag": redis_get_json(RAG_KEY),

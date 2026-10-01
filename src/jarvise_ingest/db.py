@@ -157,6 +157,27 @@ CREATE INDEX IF NOT EXISTS idx_approval_queue_symbol_tf_status
     ON approval_queue (symbol, timeframe, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_queue_pending_symbol_tf
     ON approval_queue (symbol, timeframe) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS live_orders (
+    id TEXT NOT NULL PRIMARY KEY,
+    created_at_ms INTEGER NOT NULL,
+    approval_id TEXT,
+    venue TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    order_type TEXT NOT NULL,
+    requested_qty REAL,
+    requested_notional_usd REAL,
+    status TEXT NOT NULL,
+    venue_order_id TEXT,
+    venue_response_json TEXT,
+    error TEXT,
+    kill_switch_clear INTEGER NOT NULL,
+    caps_ok INTEGER NOT NULL,
+    realized_pnl_usd REAL
+);
+CREATE INDEX IF NOT EXISTS idx_live_orders_created
+    ON live_orders (created_at_ms);
 """
 
 _DERIV_METRIC_KEYS = (
@@ -891,18 +912,19 @@ def claim_approval_for_fill(
     approval_id: str,
     *,
     now_ms: int,
+    resolve_reason: str = "paper_fill",
 ) -> dict | None:
-    """Atomically claim a pending, unexpired row before paper fill."""
+    """Atomically claim a pending, unexpired row before paper or live fill."""
     ts = int(now_ms)
     cur = conn.execute(
         """
         UPDATE approval_queue SET
             status = 'approved',
             resolved_at_ms = ?,
-            resolve_reason = 'paper_fill'
+            resolve_reason = ?
         WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
         """,
-        (ts, approval_id, ts),
+        (ts, resolve_reason, approval_id, ts),
     )
     conn.commit()
     if cur.rowcount == 0:
@@ -1009,3 +1031,68 @@ def list_expired_pending_approvals(
         (int(now_ms),),
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+_LIVE_ORDER_COLUMNS = (
+    "id, created_at_ms, approval_id, venue, symbol, side, order_type, "
+    "requested_qty, requested_notional_usd, status, venue_order_id, "
+    "venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd"
+)
+
+
+def insert_live_order(conn: sqlite3.Connection, row: dict) -> dict:
+    """Insert one live order audit row. Returns the stored dict."""
+    conn.execute(
+        """
+        INSERT INTO live_orders (
+            id, created_at_ms, approval_id, venue, symbol, side, order_type,
+            requested_qty, requested_notional_usd, status, venue_order_id,
+            venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            row["id"],
+            int(row["created_at_ms"]),
+            row.get("approval_id"),
+            row["venue"],
+            row["symbol"],
+            row["side"],
+            row["order_type"],
+            row.get("requested_qty"),
+            row.get("requested_notional_usd"),
+            row["status"],
+            row.get("venue_order_id"),
+            row.get("venue_response_json"),
+            row.get("error"),
+            int(row.get("kill_switch_clear", 0)),
+            int(row.get("caps_ok", 0)),
+            row.get("realized_pnl_usd"),
+        ),
+    )
+    conn.commit()
+    return get_live_order(conn, row["id"]) or dict(row)
+
+
+def get_live_order(conn: sqlite3.Connection, order_id: str) -> dict | None:
+    cur = conn.execute(
+        f"SELECT {_LIVE_ORDER_COLUMNS} FROM live_orders WHERE id = ?",
+        (order_id,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def sum_live_realized_pnl_utc_day(
+    conn: sqlite3.Connection, *, day_start_ms: int, day_end_ms: int
+) -> float:
+    """Sum realized_pnl_usd for live_orders created in [day_start_ms, day_end_ms)."""
+    cur = conn.execute(
+        """
+        SELECT COALESCE(SUM(realized_pnl_usd), 0)
+        FROM live_orders
+        WHERE created_at_ms >= ? AND created_at_ms < ?
+          AND realized_pnl_usd IS NOT NULL
+        """,
+        (int(day_start_ms), int(day_end_ms)),
+    )
+    return float(cur.fetchone()[0] or 0.0)
