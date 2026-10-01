@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
+from jarvise_risk import apply_safety_to_analysis, evaluate_from_db
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_paper_account,
@@ -256,6 +257,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 analysis = analyze_snapshot(
                     candle, confidence_threshold=args.confidence_threshold
                 )
+                safety = evaluate_from_db(conn, sym)
+                analysis = apply_safety_to_analysis(analysis, safety)
                 if not args.dry_run:
                     upsert_analysis_output(conn, analysis)
 

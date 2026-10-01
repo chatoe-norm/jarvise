@@ -19,6 +19,7 @@ from jarvise_ingest.db import (
 )
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
 from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_risk import apply_safety_to_analysis, evaluate_from_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
@@ -248,6 +249,8 @@ def run(argv: list[str] | None = None) -> int:
             result = analyze_snapshot(
                 candle, confidence_threshold=args.confidence_threshold
             )
+            safety = evaluate_from_db(conn, sym)
+            result = apply_safety_to_analysis(result, safety)
             if not args.dry_run:
                 upsert_analysis_output(conn, result)
             analyses.append(result)
@@ -259,6 +262,8 @@ def run(argv: list[str] | None = None) -> int:
                     f"size={result['size_pct_equity']}% "
                     f"inv={result['invalidation_price']}"
                 )
+                if safety.force_flat:
+                    print(f"  market_safety: {'; '.join(safety.reasons)}")
     finally:
         conn.close()
 

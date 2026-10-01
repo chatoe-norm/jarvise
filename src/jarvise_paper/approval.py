@@ -24,7 +24,13 @@ from jarvise_ingest.db import (
 )
 from jarvise_notify import notify_pending_enqueue
 from jarvise_paper.engine import apply_signal
-from jarvise_risk import check_caps, engage_kill_switch, load_risk_caps
+from jarvise_risk import (
+    apply_safety_to_analysis,
+    check_caps,
+    engage_kill_switch,
+    evaluate_from_db,
+    load_risk_caps,
+)
 from jarvise_trade import live_trading_enabled, submit_live_for_approval
 
 DEFAULT_TIMEOUT_MIN = 60
@@ -100,7 +106,22 @@ def enqueue_approval(
 ) -> dict[str, Any]:
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
     symbol = str(analysis["symbol"]).upper()
+    safety = evaluate_from_db(conn, symbol, now_ms=ts)
+    analysis = apply_safety_to_analysis(analysis, safety)
     action = str(analysis.get("action") or "flat")
+    if safety.force_flat:
+        if safety.critical:
+            engage_kill_switch(reason="market_safety:" + ";".join(safety.reasons)[:400])
+        return {
+            "ok": False,
+            "skipped": True,
+            "error": "market_safety: " + ("; ".join(safety.reasons) or "unsafe"),
+            "kill_switch_engaged": bool(safety.critical),
+            "paper_only": True,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "market_safety": safety.as_dict(),
+        }
     size = analysis.get("size_pct_equity")
     breach = _risk_breach(
         conn,
@@ -188,6 +209,18 @@ def approve_approval(
             "fills": [],
             "error": "kill_switch engaged",
             "paper_only": True,
+        }
+    safety = evaluate_from_db(conn, str(row["symbol"]), now_ms=ts)
+    if safety.force_flat:
+        if safety.critical:
+            engage_kill_switch(reason="market_safety:" + ";".join(safety.reasons)[:400])
+        return {
+            "ok": False,
+            "approval": row,
+            "fills": [],
+            "error": "market_safety: " + ("; ".join(safety.reasons) or "unsafe"),
+            "paper_only": True,
+            "market_safety": safety.as_dict(),
         }
     if int(row["expires_at_ms"]) <= ts:
         updated = resolve_approval(

@@ -97,6 +97,28 @@ def fetch_derivatives(
         key,
         client=client,
     )
+    # Best-effort L/S; older keys / plans may 404 — treat as empty series.
+    ls_by_ts: dict[int, float | None] = {}
+    try:
+        ls_raw = _get(
+            "/api/futures/global-long-short-account-ratio/history",
+            params,
+            key,
+            client=client,
+        )
+        for item in _series_from_payload(ls_raw):
+            ts = _ts(item)
+            if ts is None:
+                continue
+            ratio = (
+                item.get("longShortRatio")
+                or item.get("long_short_ratio")
+                or item.get("c")
+                or item.get("close")
+            )
+            ls_by_ts[ts] = float(ratio) if ratio is not None else None
+    except RuntimeError:
+        ls_by_ts = {}
 
     oi_by_ts: dict[int, float | None] = {}
     for item in _series_from_payload(oi_raw):
@@ -135,7 +157,7 @@ def fetch_derivatives(
                 total += float(short)
         liq_by_ts[ts] = total
 
-    timestamps = sorted(set(oi_by_ts) | set(fr_by_ts) | set(liq_by_ts))
+    timestamps = sorted(set(oi_by_ts) | set(fr_by_ts) | set(liq_by_ts) | set(ls_by_ts))
     rows: list[dict] = []
     for ts in timestamps[-limit:]:
         rows.append(
@@ -144,7 +166,7 @@ def fetch_derivatives(
                 "timestamp": ts,
                 "open_interest_usd": oi_by_ts.get(ts),
                 "funding_rate": fr_by_ts.get(ts),
-                "long_short_ratio": None,
+                "long_short_ratio": ls_by_ts.get(ts),
                 "liquidations_24h_usd": liq_by_ts.get(ts),
             }
         )

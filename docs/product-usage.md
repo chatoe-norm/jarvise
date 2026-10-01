@@ -42,7 +42,7 @@ Entrypoint: `.venv\Scripts\jarvise` (see [`src/jarvise/cli.py`](../src/jarvise/c
 | Command | Purpose |
 |---------|---------|
 | `jarvise status` / `init` / `config` | Local workspace |
-| `jarvise ingest ...` | Fetch OHLCV (+ CoinGlass) → `data/analytics/jarvise.db` (Binance klines = current default provider; venue-agnostic later) |
+| `jarvise ingest ...` | Fetch OHLCV (+ CoinGlass derivatives + Binance book + CoinGecko macro) → `data/analytics/jarvise.db` (Binance klines = current default OHLCV provider; venue-agnostic later) |
 | `jarvise analyze ...` | Read DB → regime / confidence / size (paper) |
 | `jarvise paper ...` | Enqueue / approve paper fills into local ledger (no exchange orders) |
 | `jarvise exchange ...` | Read-only spot balance sync (Binance first; no order placement). `/analytics` shows ~USD via public USDT tickers. |
@@ -51,7 +51,7 @@ Entrypoint: `.venv\Scripts\jarvise` (see [`src/jarvise/cli.py`](../src/jarvise/c
 Daily local examples:
 
 ```powershell
-.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 200 --skip-derivatives --json
+.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 200 --skip-derivatives --skip-book --skip-macro --json
 .venv\Scripts\jarvise analyze --symbol BTCUSDT --timeframe 4h --json
 .venv\Scripts\jarvise paper run --symbol BTCUSDT --timeframe 4h --json
 .venv\Scripts\jarvise paper status --json

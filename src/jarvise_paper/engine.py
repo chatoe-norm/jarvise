@@ -13,6 +13,7 @@ from jarvise_ingest.db import (
     get_paper_account,
     get_paper_position,
     insert_paper_order,
+    latest_order_book,
     list_paper_positions,
     set_paper_account_value,
     upsert_paper_position,
@@ -24,12 +25,36 @@ SLIP_BPS = 5.0
 STRATEGY_ID = "paper"
 
 
-def fill_price(mid: float, *, side: str, slip_bps: float = SLIP_BPS) -> float:
-    """Adverse slippage: buy pays more, sell receives less."""
-    slip = slip_bps / 10_000.0
+def fill_price(
+    mid: float,
+    *,
+    side: str,
+    slip_bps: float = SLIP_BPS,
+    bid_ask_spread: float | None = None,
+) -> float:
+    """Adverse slippage: buy pays more, sell receives less.
+
+    When bid_ask_spread is a fraction of mid (e.g. 0.001 = 10 bps), use
+    max(fixed slip, half-spread in bps) so EV reflects scraped microstructure.
+    """
+    effective = float(slip_bps)
+    if bid_ask_spread is not None and bid_ask_spread >= 0:
+        half_spread_bps = float(bid_ask_spread) * 10_000.0 / 2.0
+        effective = max(effective, half_spread_bps)
+    slip = effective / 10_000.0
     if side == "buy":
         return mid * (1.0 + slip)
     return mid * (1.0 - slip)
+
+
+def effective_slip_bps(
+    *,
+    slip_bps: float = SLIP_BPS,
+    bid_ask_spread: float | None = None,
+) -> float:
+    if bid_ask_spread is None or bid_ask_spread < 0:
+        return float(slip_bps)
+    return max(float(slip_bps), float(bid_ask_spread) * 10_000.0 / 2.0)
 
 
 def fee_usd(notional: float, *, fee_bps: float = FEE_BPS) -> float:
@@ -83,6 +108,10 @@ def apply_signal(
     cash = float(account["cash"])
     realized_delta = 0.0
 
+    book = latest_order_book(conn, symbol)
+    spread = None if book is None else book.get("bid_ask_spread")
+    use_slip = effective_slip_bps(slip_bps=slip_bps, bid_ask_spread=spread)
+
     # Working copy of positions for dry-run
     working: dict[str, dict] = {
         str(p["symbol"]).upper(): dict(p) for p in list_paper_positions(conn)
@@ -105,7 +134,7 @@ def apply_signal(
             "qty": qty,
             "price": price,
             "fee_usd": round(fee, 8),
-            "slip_bps": slip_bps,
+            "slip_bps": use_slip,
             "analysis_id": analysis_id,
             "reason": reason,
         }
@@ -118,7 +147,9 @@ def apply_signal(
         want = None if action == "flat" else action
         if want != pos_side:
             close_side = "sell" if pos_side == "long" else "buy"
-            px = fill_price(mid_price, side=close_side, slip_bps=slip_bps)
+            px = fill_price(
+                mid_price, side=close_side, slip_bps=slip_bps, bid_ask_spread=spread
+            )
             qty = float(pos["qty"])
             entry = float(pos["entry_price"])
             if pos_side == "long":
@@ -135,7 +166,9 @@ def apply_signal(
         equity_now = mark_equity(cash, list(working.values()), {symbol: mid_price})
         target_notional = max(0.0, equity_now) * (size_pct / 100.0)
         open_side = "buy" if action == "long" else "sell"
-        px = fill_price(mid_price, side=open_side, slip_bps=slip_bps)
+        px = fill_price(
+            mid_price, side=open_side, slip_bps=slip_bps, bid_ask_spread=spread
+        )
         if px > 0 and target_notional > 0:
             qty = target_notional / px
             _record_fill(open_side, qty, px, f"open_{action}")
