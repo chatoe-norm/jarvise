@@ -2,7 +2,7 @@
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
 **Generated:** 2026-09-25; **status refreshed:** 2026-09-28.
-**Snapshot:** through §5.5 risk caps (paper). Next: P4-C design owner review (§5.6) — **no live order code** until approved.
+**Snapshot:** §5.1–5.5 shipped. **Next:** owner **APPROVE** P4-C design ([`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md)) + plan — **no live order code** until then.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
 ### Status at a glance (2026-09-28)
@@ -286,7 +286,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - [x] **3. Performance / expectancy metrics (doctrine gate).** `jarvise paper metrics` + `/analytics` expectancy card + `/api/paper/metrics`; round-trips → EV/win rate/MDD; Sharpe/Sortino ≥30; `--persist` / Persist button. Spec: [`2026-09-29-paper-expectancy-metrics-design.md`](docs/superpowers/specs/2026-09-29-paper-expectancy-metrics-design.md).
 - [x] **4. Historical replay for paper signals.** `jarvise analyze --replay --since … [--until …] [--apply-paper]` — walk closed candles, upsert analysis; optional isolated-db paper fills + metrics. Spec: [`2026-09-29-analyze-replay-design.md`](docs/superpowers/specs/2026-09-29-analyze-replay-design.md).
 - [x] **5. Risk caps module (venue-agnostic, shared by paper and later live).** `jarvise_risk`: env caps `JARVISE_MAX_NOTIONAL_PER_ORDER` / `JARVISE_MAX_DAILY_LOSS_USD` / `JARVISE_DRAWDOWN_LOCK_PCT`; enforce on enqueue + approve; breach → fail + kill-switch; `/analytics` Risk caps card. **Timeout → FLAT** on open paper positions (`resolve_reason=timeout_flat`).
-- [ ] **6. P4-C design + plan.** Design draft already on `main`: [`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md) — owner review, then writing-plans. Gate before **code**: steps 2–5 progress + slice B stable (smoke done 2026-09-27).
+- [ ] **6. P4-C design + plan.** Design refreshed 2026-10-01 for owner review: [`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md) · plan stub [`plans/2026-10-01-p4c-live-submit.md`](docs/superpowers/plans/2026-10-01-p4c-live-submit.md). **Reply APPROVED** (or request edits) before any live code. Gates 2–5 done.
 - [ ] **7. P4-C implementation (owner-gated).** Approve → caps check → kill-switch check → live spot order → `live_orders` row → paper ledger mirror. Explicit owner OK required before this PR is opened; live flag stays off by default in every environment.
 - [ ] **8. Ops hygiene before any live trade.** Pending-approval notification (n8n → Slack/Telegram/email); `/analytics` USD valuation of exchange balances; re-sync doctrine extract (remove Binance-TH-only wording); confirm VPS `.env` Binance key has **no** withdrawal permission.
 
@@ -326,5 +326,6 @@ Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature 
 - `docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md` + `plans/2026-09-26-paper-jobs-24h.md` — **next implement**
 - `docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md` — P4-C draft (review only; no code yet)
 - `docs/exchange/binance-for-jarvise.md` — allowed vs forbidden exchange capabilities
+- `docs/ux-ui/shadcn-for-jarvise.md` — shadcn/ui install → Jarvise UX adopt/defer (FastAPI `/analytics` SoT today)
 - `docs/deploy/hostinger-vps.md`, `docs/deploy/ops.md` — VPS bring-up and kill-switch ops
 - `data/analytics/mvas-schema.sql` — full SQLite schema
