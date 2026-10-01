@@ -90,7 +90,7 @@ Multi-tenant SaaS; mobile apps; public HTTPS UI (Tailscale-only for now); Binanc
 
 Per doctrine these are **context that lowers/raises confidence or vetoes**, never a trigger. The roadmap defers on-chain *writers* to "later" (§7), so the MVP minimum is small:
 
-- Derivatives context via CoinGlass (already stored) — funding/OI/liquidations as crowding context.
+- Derivatives context — funding/OI (and liquidations when CoinGlass keyed) as crowding context for market safety.
 - Order-book microstructure + BTC dominance / global mcap writers (Binance public book + CoinGecko global) with `jarvise_risk.market_safety` FLAT/kill-switch gate — see `docs/superpowers/specs/2026-10-01-market-safety-ingest-design.md`.
 - Agent-side **Binance Web3 intel** (`jarvise-binance-intel` skill, no keys): token search/meta, **security audit** (audit `HIGH`, `riskType: RISK`, or sell tax → **FLAT veto**), market rank, social hype, smart-money inflow, tokenized US stocks info, Academy risk education.
 - Doctrine RAG + OpenClaw research notes as the "sentiment/narrative" layer.
@@ -118,8 +118,8 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 **Data / ingest** (`src/jarvise_ingest/`)
 - `jarvise ingest`: Binance public klines (`GET /api/v3/klines`), timeframes `15m/1h/4h/1d`, `--limit`, paged `--since/--until` backfill, closed candles only, gap report, `--universe paper_core`, `--dry-run`, `--json`. GET-only, no auth.
 - Indicators (`indicators.py`): ATR-14, RSI-14, EMA-20, EMA-200 recomputed over the full stored series; values withheld until seed influence < 1%.
-- CoinGlass v4 derivatives (`providers/coinglass.py`, needs `COINGLASS_API_KEY`): OI OHLC, OI-weighted funding, aggregated liquidations (+ best-effort L/S) → `derivatives_analytics` keyed by `(symbol, timestamp, ingested_at)` (bitemporal).
-- Binance public book (`providers/binance_book.py`): `bookTicker` + `depth` → `order_book_microstructure` (spread, ±1% depth USD).
+- Derivatives router (`providers/derivatives.py`): **Binance Futures public** funding + OI hist by default (no key); CoinGlass v4 when `COINGLASS_API_KEY` set (OI/funding/liquidations + best-effort L/S) → `derivatives_analytics` bitemporal.
+- Binance public book (`providers/binance_book.py`): `ticker/bookTicker` + `depth` → `order_book_microstructure` (spread, ±1% depth USD).
 - CoinGecko global (`providers/coingecko_global.py`): BTC dominance + total market cap → `macro_onchain_sentiment`.
 - Market-safety gate (`jarvise_risk.market_safety`): FLAT + block enqueue/approve on unsafe/stale/anomalous data; kill-switch on critical failures when `JARVISE_MARKET_SAFETY=1` (default on). Flags: `--skip-book`, `--skip-macro`, `--skip-derivatives`.
 - Point-in-time universe (`universe.py`): `paper_core` = BTCUSDT, ETHUSDT (listed 2021-01-01) → `universe_membership`; blocks survivorship bias.

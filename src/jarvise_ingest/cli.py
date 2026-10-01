@@ -24,7 +24,7 @@ from jarvise_ingest.providers.binance_klines import (
     fetch_klines_range,
 )
 from jarvise_ingest.providers.coingecko_global import fetch_global_macro
-from jarvise_ingest.providers.coinglass import fetch_derivatives, resolve_api_key
+from jarvise_ingest.providers.derivatives import fetch_derivatives, select_provider
 from jarvise_ingest.series import find_gaps, recompute_indicators
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
 from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
@@ -184,14 +184,6 @@ def run(argv: list[str] | None = None) -> int:
         print(f"Error: --limit must be 1..{MAX_PAGE_LIMIT}\n  {EXAMPLE}", file=sys.stderr)
         return 2
 
-    if not args.skip_derivatives and not resolve_api_key():
-        print(
-            "Error: COINGLASS_API_KEY not set.\n"
-            "  export COINGLASS_API_KEY=... or jarvise ingest --symbol BTCUSDT --skip-derivatives",
-            file=sys.stderr,
-        )
-        return 2
-
     universe_id = args.universe
     if universe_id:
         resolve_conn = open_db(args.db)
@@ -250,8 +242,10 @@ def run(argv: list[str] | None = None) -> int:
             if args.skip_derivatives:
                 skipped.append(f"derivatives:{sym}")
             else:
-                deriv_summary[sym.split("USDT")[0] if "USDT" in sym else sym] = {
-                    "planned": min(limit, 30)
+                coin = sym.split("USDT")[0] if "USDT" in sym else sym
+                deriv_summary[coin] = {
+                    "planned": min(limit, 30),
+                    "provider": select_provider(),
                 }
             if args.skip_book:
                 skipped.append(f"book:{sym}")
@@ -367,14 +361,20 @@ def run(argv: list[str] | None = None) -> int:
                 skipped.append(f"derivatives:{sym}")
             else:
                 try:
-                    rows = fetch_derivatives(sym, args.timeframe, limit=min(30, limit))
+                    rows, provider = fetch_derivatives(
+                        sym, args.timeframe, limit=min(30, limit)
+                    )
                     n = append_derivatives(conn, rows)
                     coin = rows[0]["symbol"] if rows else sym
-                    deriv_summary[coin] = {"versions_appended": n, "fetched": len(rows)}
+                    deriv_summary[coin] = {
+                        "versions_appended": n,
+                        "fetched": len(rows),
+                        "derivatives_provider": provider,
+                    }
                     if not args.as_json:
                         print(
                             f"ingested derivatives_analytics: {coin} "
-                            f"versions={n} fetched={len(rows)}"
+                            f"provider={provider} versions={n} fetched={len(rows)}"
                         )
                 except Exception as exc:  # noqa: BLE001
                     errors.append(str(exc))
