@@ -147,6 +147,9 @@ def test_analytics_pipeline_status_pretty(monkeypatch, tmp_path: Path) -> None:
     resp = client.get("/analytics")
     assert resp.status_code == 200
     assert b"Pipeline status" in resp.content
+    assert b"<details>" in resp.content
+    assert b"<summary>" in resp.content
+    assert b"<details open" not in resp.content
     assert b"&quot;chunks&quot;: 12" in resp.content
     assert b"paper:" in resp.content
     assert b"paper_expire:" in resp.content
