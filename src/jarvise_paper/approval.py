@@ -22,6 +22,7 @@ from jarvise_ingest.db import (
     set_approval_paper_order_ids,
     upsert_pending_approval,
 )
+from jarvise_notify import notify_pending_enqueue
 from jarvise_paper.engine import apply_signal
 from jarvise_risk import check_caps, engage_kill_switch, load_risk_caps
 from jarvise_trade import live_trading_enabled, submit_live_for_approval
@@ -117,7 +118,7 @@ def enqueue_approval(
             "symbol": symbol,
             "timeframe": timeframe,
         }
-    return upsert_pending_approval(
+    row = upsert_pending_approval(
         conn,
         {
             "id": _new_id(symbol, timeframe, analysis.get("analysis_id"), ts),
@@ -133,6 +134,8 @@ def enqueue_approval(
             "status": "pending",
         },
     )
+    notify_pending_enqueue(row)
+    return row
 
 
 def _claim_failure(conn: Any, approval_id: str, *, ts: int) -> dict[str, Any]:

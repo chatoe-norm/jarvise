@@ -1,0 +1,56 @@
+{
+  "id": "jrvsPaperDig1h001",
+  "name": "Jarvise paper pending digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "cron-paper-digest",
+      "name": "Every 1h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/paper-pending-digest",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "http-paper-digest",
+      "name": "POST paper pending digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Soft-fail Telegram digest of pending approvals. No exchange orders. Needs TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID on jobs."
+    }
+  ],
+  "connections": {
+    "Every 1h": {
+      "main": [[{ "node": "POST paper pending digest", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "n8n UI → Workflows → Import from File → infra/n8n/workflows/jarvise-paper-pending-digest.json"
+    }
+  },
+  "pinData": {},
+  "active": false
+}
