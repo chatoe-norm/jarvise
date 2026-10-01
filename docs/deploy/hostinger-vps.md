@@ -81,7 +81,7 @@ From your laptop (on Tailscale):
 
 | Service | URL |
 |---------|-----|
-| Control web | `http://$TAILSCALE_IP:8080/` |
+| Command Dashboard | `http://$TAILSCALE_IP:8080/` (Home / Paper / Decisions / Exchange / Ops) |
 | n8n | `http://$TAILSCALE_IP:5678/` |
 | OpenClaw | `http://$TAILSCALE_IP:18789/` |
 
@@ -168,7 +168,7 @@ Paper enqueue / expire (after Deploy that includes `feat/paper-jobs-24h`):
 1. **n8n** `Jarvise paper run` — every 4h → `POST http://jobs:8090/jobs/paper-run` (enqueue only; no `--auto-fill`). Redis: `jarvise:paper:last`.
 2. **n8n** `Jarvise paper expire` — every 1h → `POST http://jobs:8090/jobs/paper-expire`. Redis: `jarvise:paper:expire:last`.
 
-Optional env (compose defaults): `JARVISE_PAPER_UNIVERSE=paper_core`, `JARVISE_PAPER_TIMEFRAME=4h`, `JARVISE_APPROVAL_TIMEOUT_MIN=60`. Approve still happens on `/analytics`.
+Optional env (compose defaults): `JARVISE_PAPER_UNIVERSE=paper_core`, `JARVISE_PAPER_TIMEFRAME=4h`, `JARVISE_APPROVAL_TIMEOUT_MIN=60`. Approve still happens on Command Dashboard Home (`:8080/`).
 
 After NotebookLM auth works, enable **both**:
 
