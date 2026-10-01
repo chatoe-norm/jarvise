@@ -13,6 +13,25 @@ class SpotBalance:
     total: Decimal
 
 
+@dataclass(frozen=True)
+class ValuedBalance:
+    """One spot balance with optional ~USD (None = unpriced)."""
+
+    balance: SpotBalance
+    usd: Decimal | None
+    price_usd: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class ValuationResult:
+    """Valued rows plus total of priced assets only."""
+
+    rows: list[ValuedBalance]
+    total_usd: Decimal
+    priced_count: int
+    unpriced_count: int
+
+
 @dataclass
 class SyncResult:
     ok: bool

@@ -162,7 +162,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - **Historical replay**: `jarvise analyze --replay --since …` walks stored closed candles; `--apply-paper` fills only on an isolated `--db` (refuses default live ledger).
 - **24/7 paper operation**: VPS n8n **activated** 2026-09-29 (`Jarvise paper run` / `Jarvise paper expire`). Jobs ingest refreshes `1h` plus paper timeframe (`4h` default) so enqueue has candles.
 - **Timeout semantics**: paper timeout → `timed_out` + FLAT open positions (`resolve_reason=timeout_flat`). Live venue flatten is out of P4-C.
-- **Exchange panel**: raw asset balances only; no USD valuation and no reconciliation against the paper ledger.
+- **Exchange panel**: raw balances + **~USD** (Binance public USDT ticker; stables face value; unpriced shown as —).
 - **OpenClaw paper-only**: `OPENCLAW_PAPER_ONLY` is a convention enforced by config/docs, not by Python code.
 - **Doctrine text drift**: `data/analytics/sources/jarvise-doctrine.txt` still says "Binance TH is a regulated Thai spot venue"; `AGENTS.md` (newer) says trade worldwide, Binance is one option. Re-sync the notebook extract when doctrine is next refreshed.
 - **Live enablement**: code present but flag off; trade keys unset; no withdraw; ops checklist §5.8 before turning on.
@@ -292,7 +292,11 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - [x] **5. Risk caps module (venue-agnostic, shared by paper and later live).** `jarvise_risk`: env caps `JARVISE_MAX_NOTIONAL_PER_ORDER` / `JARVISE_MAX_DAILY_LOSS_USD` / `JARVISE_DRAWDOWN_LOCK_PCT`; enforce on enqueue + approve; breach → fail + kill-switch; `/analytics` Risk caps card. **Timeout → FLAT** on open paper positions (`resolve_reason=timeout_flat`).
 - [x] **6. P4-C design + plan.** Owner APPROVED 2026-10-01: [`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md) · [`plans/2026-10-01-p4c-live-submit.md`](docs/superpowers/plans/2026-10-01-p4c-live-submit.md).
 - [x] **7. P4-C implementation (owner-gated).** Approve → caps → kill-switch → `jarvise_trade` spot MARKET → `live_orders` (no paper mirror). Flag default **false** in repo/compose; VPS stays paper-only until owner enables keys.
-- [ ] **8. Ops hygiene before any live trade.** Pending-approval notification (n8n → Slack/Telegram/email); `/analytics` USD valuation of exchange balances; re-sync doctrine extract (remove Binance-TH-only wording); confirm VPS trade key has **spot trade only, no withdraw**; then optional `JARVISE_LIVE_TRADING=true`.
+- [ ] **8. Ops hygiene before any live trade.**
+  - [x] **8a.** `/analytics` USD valuation of exchange balances (public USDT prices).
+  - [ ] Pending-approval notification (n8n → Slack/Telegram/email)
+  - [ ] Re-sync doctrine extract (remove Binance-TH-only wording)
+  - [ ] Confirm VPS trade key has **spot trade only, no withdraw**; then optional `JARVISE_LIVE_TRADING=true`.
 
 **Post-MVP backlog (do not start without a roadmap update):** P5 autonomy flag + scheduler; `macro_onchain_sentiment` writer (fear/greed, BTC dominance) and derivatives/ADX/MTF inputs to the analyzer; order-book microstructure; stocks/ETFs providers; additional venues/routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
 
