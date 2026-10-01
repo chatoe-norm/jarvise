@@ -1,0 +1,10 @@
+.git
+.venv
+node_modules
+web/node_modules
+web/dist
+**/__pycache__
+*.pyc
+data
+.tmp*
+.firecrawl

@@ -9,16 +9,18 @@ from jarvise_web.app import app
 client = TestClient(app)
 
 
-def test_analytics_hides_panel_without_keys(monkeypatch):
+def test_exchange_api_hides_without_keys(monkeypatch):
     monkeypatch.delenv("BINANCE_API_KEY", raising=False)
     monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
     monkeypatch.delenv("BINANCE_API_PRIVATE_KEY_PATH", raising=False)
-    resp = client.get("/analytics")
+    resp = client.get("/api/exchange")
     assert resp.status_code == 200
-    assert "Exchange (spot)" not in resp.text
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["available"] is False
 
 
-def test_analytics_shows_panel_on_successful_sync(monkeypatch, tmp_path):
+def test_exchange_api_shows_on_successful_sync(monkeypatch, tmp_path):
     monkeypatch.setenv("BINANCE_API_KEY", "k")
     monkeypatch.setenv("BINANCE_API_SECRET", "s")
     monkeypatch.setenv("JARVISE_DB", str(tmp_path / "a.db"))
@@ -41,11 +43,10 @@ def test_analytics_shows_panel_on_successful_sync(monkeypatch, tmp_path):
     with patch("jarvise_web.app.sync_spot_balances", return_value=fake):
         with patch("jarvise_web.app.BinanceSpotClient"):
             with patch("jarvise_web.app.value_spot_balances", return_value=valued):
-                resp = client.get("/analytics")
+                resp = client.get("/api/exchange")
     assert resp.status_code == 200
-    assert "Exchange (spot)" in resp.text
-    assert "BTC" in resp.text
-    assert "~USD" in resp.text
-    assert "60000.00" in resp.text
-    assert "Total ~USD" in resp.text
-    assert "BINANCE_API" not in resp.text
+    data = resp.json()
+    assert data["available"] is True
+    assert data["balances"][0]["asset"] == "BTC"
+    assert data["balances"][0]["usd"] == 60000.0
+    assert data["total_usd"] == 60000.0

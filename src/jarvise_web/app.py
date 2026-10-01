@@ -1,8 +1,7 @@
-"""Thin private control + paper analytics UI for Jarvise Docker stack."""
+"""Private control + Command Dashboard API for Jarvise Docker stack."""
 
 from __future__ import annotations
 
-import html
 import json
 import logging
 import os
@@ -11,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
 
 from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
@@ -48,6 +48,26 @@ PAPER_KEY = "jarvise:paper:last"
 PAPER_EXPIRE_KEY = "jarvise:paper:expire:last"
 DEFAULT_DB = Path("data/analytics/jarvise.db")
 
+_PKG_DIR = Path(__file__).resolve().parent
+_STATIC_CANDIDATES = [
+    Path(os.environ["JARVISE_WEB_DIST"]) if os.environ.get("JARVISE_WEB_DIST") else None,
+    _PKG_DIR / "static",
+    Path(__file__).resolve().parents[2] / "web" / "dist",
+]
+
+
+def static_dir() -> Path | None:
+    """Prefer a built SPA (has assets/), else any index.html fallback."""
+    found: Path | None = None
+    for candidate in _STATIC_CANDIDATES:
+        if candidate is None or not (candidate / "index.html").is_file():
+            continue
+        if (candidate / "assets").is_dir():
+            return candidate
+        if found is None:
+            found = candidate
+    return found
+
 
 def db_path() -> Path:
     raw = os.environ.get("JARVISE_DB") or str(DEFAULT_DB)
@@ -81,6 +101,13 @@ def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -
         )
 
 
+def wants_json(request: Request) -> bool:
+    accept = (request.headers.get("accept") or "").lower()
+    if "application/json" in accept:
+        return True
+    return (request.query_params.get("format") or "").lower() == "json"
+
+
 def parse_status_payload(raw: str) -> Any:
     """Parse Redis status: prefer JSON, fall back to CLI text emit (`key: value` lines)."""
     try:
@@ -88,7 +115,6 @@ def parse_status_payload(raw: str) -> Any:
     except json.JSONDecodeError:
         pass
 
-    # Legacy: jarvise CLI --output text was sometimes stored instead of JSON.
     if ":" not in raw:
         raise json.JSONDecodeError("not JSON and not text status", raw, 0)
     parsed: dict[str, Any] = {}
@@ -101,13 +127,9 @@ def parse_status_payload(raw: str) -> Any:
         value = value.strip()
         if not key:
             continue
-        lowered = value.lower()
-        if lowered == "true":
-            parsed[key] = True
-        elif lowered == "false":
-            parsed[key] = False
-        elif lowered == "none" or lowered == "null":
-            parsed[key] = None
+        low = value.lower()
+        if low in {"true", "false"}:
+            parsed[key] = low == "true"
         else:
             try:
                 if "." in value:
@@ -116,38 +138,13 @@ def parse_status_payload(raw: str) -> Any:
                     parsed[key] = int(value)
             except ValueError:
                 parsed[key] = value
-    if not parsed:
-        raise json.JSONDecodeError("empty text status", raw, 0)
     return parsed
 
 
-def redis_get_json(key: str) -> Any:
-    try:
-        r = _redis()
-        raw = r.get(key)
-        if not raw:
-            return None
-        try:
-            return parse_status_payload(raw)
-        except json.JSONDecodeError as exc:
-            preview = raw if len(raw) <= 240 else raw[:240] + "…"
-            return {
-                "ok": False,
-                "error": f"invalid JSON in Redis ({exc})",
-                "raw_preview": preview,
-                "hint": "Re-run jarvise rag refresh/index so publish_redis_status writes JSON",
-            }
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
-
-
 def format_status_pre(payload: Any) -> str:
-    if payload is None:
-        return "null"
-    try:
-        return json.dumps(payload, indent=2, sort_keys=True, default=str)
-    except TypeError:
-        return str(payload)
+    if isinstance(payload, (dict, list)):
+        return json.dumps(payload, indent=2, default=str)
+    return str(payload)
 
 
 def redis_get(key: str) -> str | None:
@@ -155,6 +152,16 @@ def redis_get(key: str) -> str | None:
         return _redis().get(key)
     except Exception:
         return None
+
+
+def redis_get_json(key: str) -> Any:
+    raw = redis_get(key)
+    if raw is None:
+        return None
+    try:
+        return parse_status_payload(raw)
+    except Exception:
+        return {"raw": raw}
 
 
 def qdrant_info() -> dict[str, Any]:
@@ -172,68 +179,6 @@ def qdrant_info() -> dict[str, Any]:
             }
     except Exception as exc:  # noqa: BLE001
         return {"exists": False, "error": str(exc)}
-
-
-def nav_html(active: str) -> str:
-    control_cls = "active" if active == "control" else ""
-    analytics_cls = "active" if active == "analytics" else ""
-    return f"""
-    <nav class="row" style="margin-bottom:1rem;gap:1rem">
-      <a class="btn {control_cls}" href="/">Control</a>
-      <a class="btn {analytics_cls}" href="/analytics">Analytics</a>
-    </nav>
-    """
-
-
-def page(body: str, title: str = "Jarvise", *, active: str = "control") -> HTMLResponse:
-    if live_trading_enabled():
-        banner = (
-            '<div class="banner" style="border-color:var(--danger);color:var(--danger)">'
-            "LIVE APPROVAL ENABLED — Approve may place size-capped spot orders"
-            "</div>"
-        )
-    else:
-        banner = '<div class="banner">PAPER ONLY — no order placement</div>'
-    html_doc = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>{html.escape(title)}</title>
-  <style>
-    :root {{ --bg:#0f1419; --fg:#e7ecf1; --muted:#8b9aab; --accent:#3d9cf0; --danger:#e35d6a; --ok:#3ecf8e; }}
-    body {{ margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--fg); }}
-    main {{ max-width:960px; margin:0 auto; padding:2rem 1.25rem; }}
-    h1 {{ font-size:1.5rem; margin:0 0 .25rem; }}
-    .banner {{ display:inline-block; padding:.2rem .55rem; border:1px solid var(--ok); color:var(--ok); border-radius:4px; font-size:.8rem; margin-bottom:1.25rem; }}
-    .card {{ border:1px solid #243041; border-radius:8px; padding:1rem 1.1rem; margin-bottom:1rem; }}
-    .muted {{ color:var(--muted); font-size:.9rem; }}
-    .row {{ display:flex; gap:.75rem; flex-wrap:wrap; align-items:center; }}
-    button, .btn {{ background:var(--accent); color:#041018; border:0; border-radius:6px; padding:.5rem .9rem; font-weight:600; cursor:pointer; text-decoration:none; }}
-    a.btn.active {{ outline:2px solid var(--ok); }}
-    button.danger {{ background:var(--danger); color:#fff; }}
-    button.ok {{ background:var(--ok); color:#041018; }}
-    code {{ font-size:.85rem; }}
-    pre {{ white-space:pre-wrap; word-break:break-word; background:#161d27; padding:.75rem; border-radius:6px; font-size:.8rem; }}
-    details > summary {{ cursor:pointer; list-style-position:outside; }}
-    details > pre {{ margin-top:.75rem; }}
-    table {{ width:100%; border-collapse:collapse; font-size:.85rem; }}
-    th, td {{ text-align:left; padding:.45rem .4rem; border-bottom:1px solid #243041; vertical-align:top; }}
-    th {{ color:var(--muted); font-weight:600; }}
-    input, select {{ background:#161d27; color:var(--fg); border:1px solid #243041; border-radius:4px; padding:.35rem .5rem; }}
-    label {{ font-size:.85rem; color:var(--muted); }}
-  </style>
-</head>
-<body>
-<main>
-  <h1>{html.escape(title)}</h1>
-  {banner}
-  {nav_html(active)}
-  {body}
-</main>
-</body>
-</html>"""
-    return HTMLResponse(html_doc)
 
 
 def load_analysis_rows(
@@ -261,135 +206,6 @@ def load_analysis_rows(
         return [], str(exc)
 
 
-@app.get("/healthz")
-def healthz() -> dict[str, Any]:
-    live = live_trading_enabled()
-    return {
-        "ok": True,
-        "paper_only": PAPER_ONLY and not live,
-        "live_trading": live,
-    }
-
-
-@app.get("/", response_class=HTMLResponse)
-def dashboard(_: None = Depends(require_auth)) -> HTMLResponse:
-    kill = redis_get(KILL_SWITCH_KEY) or "0"
-    ingest = redis_get_json(INGEST_KEY)
-    rag = redis_get_json(RAG_KEY)
-    qd = qdrant_info()
-    kill_on = kill in {"1", "true", "on", "yes"}
-
-    body = f"""
-    <div class="card">
-      <div class="row">
-        <strong>Kill switch:</strong>
-        <span style="color:{'var(--danger)' if kill_on else 'var(--ok)'}">{'ENGAGED' if kill_on else 'clear'}</span>
-      </div>
-      <form class="row" method="post" action="/kill-switch" style="margin-top:.75rem">
-        <button class="danger" name="state" value="on" type="submit">Engage kill switch</button>
-        <button class="ok" name="state" value="off" type="submit">Clear kill switch</button>
-      </form>
-      <p class="muted">Halts automated paper schedules that respect <code>{KILL_SWITCH_KEY}</code>. Live trading stays gated off.</p>
-    </div>
-    <div class="card">
-      <strong>Qdrant</strong> <span class="muted">{html.escape(COLLECTION)}</span>
-      <pre>{html.escape(str(qd))}</pre>
-    </div>
-    <div class="card">
-      <strong>Last ingest</strong> <span class="muted">{html.escape(INGEST_KEY)}</span>
-      <pre>{html.escape(str(ingest))}</pre>
-    </div>
-    <div class="card">
-      <strong>Last RAG</strong> <span class="muted">{html.escape(RAG_KEY)}</span>
-      <pre>{html.escape(str(rag))}</pre>
-    </div>
-    <p class="muted">Perimeter: Tailscale. Optional basic auth via WEB_BASIC_AUTH_*.</p>
-    <p class="muted"><a class="btn" href="/analytics">Analytics</a></p>
-    """
-    return page(body, title="Jarvise control", active="control")
-
-
-def _exchange_panel_html() -> str:
-    """Soft-fail: return empty string when keys missing or sync fails."""
-    try:
-        auth = resolve_binance_auth()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("exchange auth soft-fail: %s", type(exc).__name__)
-        return ""
-    if auth is None:
-        return ""
-    try:
-        client = BinanceSpotClient(auth)
-        result = sync_spot_balances(client=client, db_path=db_path(), dry_run=False)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("exchange sync soft-fail: %s", type(exc).__name__)
-        return ""
-    if not result.ok:
-        return ""
-    if not result.balances:
-        rows_html = "<p class=\"muted\">no non-zero assets</p>"
-        total_html = ""
-    else:
-        try:
-            valued = value_spot_balances(result.balances)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("exchange value soft-fail: %s", type(exc).__name__)
-            valued = None
-        lines = [
-            "<tr><th>Asset</th><th>Free</th><th>Locked</th><th>Total</th><th>~USD</th></tr>"
-        ]
-        if valued is None:
-            for b in result.balances:
-                lines.append(
-                    f"<tr><td>{html.escape(b.asset)}</td>"
-                    f"<td>{html.escape(str(b.free))}</td>"
-                    f"<td>{html.escape(str(b.locked))}</td>"
-                    f"<td>{html.escape(str(b.total))}</td>"
-                    f"<td>—</td></tr>"
-                )
-            total_html = ""
-        else:
-            for row in valued.rows:
-                b = row.balance
-                usd_cell = (
-                    html.escape(f"{row.usd:.2f}") if row.usd is not None else "—"
-                )
-                lines.append(
-                    f"<tr><td>{html.escape(b.asset)}</td>"
-                    f"<td>{html.escape(str(b.free))}</td>"
-                    f"<td>{html.escape(str(b.locked))}</td>"
-                    f"<td>{html.escape(str(b.total))}</td>"
-                    f"<td>{usd_cell}</td></tr>"
-                )
-            total_html = (
-                f'<p><strong>Total ~USD</strong> '
-                f"{html.escape(f'{valued.total_usd:.2f}')}"
-                f' <span class="muted">(USDT proxy; unpriced excluded)</span></p>'
-            )
-        rows_html = "<table>" + "".join(lines) + "</table>"
-    return f"""
-    <div class="card">
-      <strong>Exchange (spot)</strong>
-      <span class="muted">binance · fetched_at_ms={result.fetched_at_ms} · read-only</span>
-      {rows_html}
-      {total_html}
-    </div>
-    """
-
-
-@app.post("/kill-switch")
-def set_kill_switch(
-    state: str = Form(...),
-    _: None = Depends(require_auth),
-) -> RedirectResponse:
-    value = "1" if state.lower() in {"on", "1", "true", "engage"} else "0"
-    try:
-        _redis().set(KILL_SWITCH_KEY, value)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return RedirectResponse("/", status_code=303)
-
-
 def load_paper_ledger() -> tuple[dict[str, Any], str | None]:
     path = db_path()
     if not path.exists():
@@ -410,292 +226,113 @@ def load_paper_ledger() -> tuple[dict[str, Any], str | None]:
         return {"account": None, "positions": [], "orders": []}, str(exc)
 
 
-def _paper_ledger_html() -> str:
-    ledger, err = load_paper_ledger()
-    if err and ledger.get("account") is None:
-        return (
-            f'<div class="card"><strong>Paper ledger</strong>'
-            f'<p class="muted">{html.escape(err)}</p></div>'
-        )
-    acct = ledger.get("account") or {}
-    positions = ledger.get("positions") or []
-    orders = ledger.get("orders") or []
-    pos_rows = []
-    for p in positions:
-        pos_rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(p.get('symbol') or ''))}</td>"
-            f"<td>{html.escape(str(p.get('side') or ''))}</td>"
-            f"<td>{html.escape(str(p.get('qty') or ''))}</td>"
-            f"<td>{html.escape(str(p.get('entry_price') or ''))}</td>"
-            f"<td>{html.escape(str(p.get('unrealized_pnl') or ''))}</td>"
-            "</tr>"
-        )
-    pos_table = (
-        "<p class='muted'>No open paper positions. Run <code>jarvise paper run</code>.</p>"
-        if not pos_rows
-        else (
-            "<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th>"
-            "<th>Entry</th><th>uPnL</th></tr></thead>"
-            f"<tbody>{''.join(pos_rows)}</tbody></table>"
-        )
-    )
-    order_bits = []
-    for o in orders[:10]:
-        order_bits.append(
-            f"{o.get('ts')} {o.get('symbol')} {o.get('side')} "
-            f"qty={o.get('qty')} @ {o.get('price')} ({o.get('reason')})"
-        )
-    orders_pre = html.escape("\n".join(order_bits) if order_bits else "(no fills yet)")
-    return f"""
-    <div class="card">
-      <strong>Paper ledger</strong>
-      <p class="muted">Simulated only — no exchange orders.
-        equity={html.escape(str(acct.get('equity', '')))}
-        cash={html.escape(str(acct.get('cash', '')))}
-      </p>
-      {pos_table}
-      <pre>{orders_pre}</pre>
-    </div>
-    """
-
-
-def _risk_caps_html() -> str:
-    caps = load_risk_caps().as_dict()
-    return f"""
-    <div class="card">
-      <strong>Risk caps</strong>
-      <p class="muted">Venue-agnostic paper enforcement (env). Breach → fail approval + kill-switch.</p>
-      <pre>max_notional_per_order={html.escape(str(caps['max_notional_per_order']))}
-max_daily_loss_usd={html.escape(str(caps['max_daily_loss_usd']))}
-drawdown_lock_pct={html.escape(str(caps['drawdown_lock_pct']))}
-timeout → FLAT on open paper positions</pre>
-    </div>
-    """
-
-
-def _paper_metrics_html() -> str:
-    path = db_path()
-    if not path.exists():
-        return (
-            '<div class="card"><strong>Paper expectancy</strong>'
-            '<p class="muted">No database.</p></div>'
-        )
+def kill_switch_engaged() -> bool:
     try:
-        conn = open_db(path)
-        try:
-            ensure_paper_account(conn)
-            report = compute_paper_metrics(conn)
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001
-        return (
-            f'<div class="card"><strong>Paper expectancy</strong>'
-            f'<p class="muted">{html.escape(str(exc))}</p></div>'
-        )
-    ratios = (
-        f"sharpe={report.get('sharpe_ratio')} sortino={report.get('sortino_ratio')}"
-        if report.get("ratios_ready")
-        else f"sharpe/sortino need ≥{report.get('need_trades_for_ratios')} trades"
-    )
-    return f"""
-    <div class="card">
-      <strong>Paper expectancy</strong>
-      <p class="muted">Round-trips after fees/slippage — doctrine EV gate (paper only).</p>
-      <pre>closed={html.escape(str(report.get('closed_trades')))}
-wins={html.escape(str(report.get('wins')))} losses={html.escape(str(report.get('losses')))} scratches={html.escape(str(report.get('scratches')))}
-EV={html.escape(str(report.get('expected_value_ev')))} win_rate={html.escape(str(report.get('win_rate')))}
-MDD%={html.escape(str(report.get('max_drawdown_pct')))}
-{html.escape(ratios)}
-unmatched_orders={html.escape(str(report.get('unmatched_orders')))}</pre>
-      <form method="post" action="/paper/metrics/persist" style="margin-top:.75rem">
-        <button type="submit">Persist metrics snapshot</button>
-      </form>
-    </div>
-    """
-
-
-def _approval_queue_html() -> str:
-    path = db_path()
-    if not path.exists():
-        return (
-            '<div class="card"><strong>Approval queue</strong>'
-            '<p class="muted">No database.</p></div>'
-        )
-    try:
-        conn = open_db(path)
-        try:
-            rows = list_approvals(conn, status="pending", limit=20)
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001
-        return (
-            f'<div class="card"><strong>Approval queue</strong>'
-            f'<p class="muted">{html.escape(str(exc))}</p></div>'
-        )
-    if not rows:
-        return (
-            '<div class="card"><strong>Approval queue</strong>'
-            '<p class="muted">Paper only — simulated fills on approve; no exchange orders.</p>'
-            '<p class="muted">No pending approvals</p></div>'
-        )
-    body_rows = []
-    for r in rows:
-        aid = html.escape(str(r.get("id") or ""))
-        body_rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(r.get('symbol') or ''))}</td>"
-            f"<td>{html.escape(str(r.get('timeframe') or ''))}</td>"
-            f"<td>{html.escape(str(r.get('action') or ''))}</td>"
-            f"<td>{html.escape(str(r.get('confidence_score') or ''))}</td>"
-            f"<td>{html.escape(str(r.get('size_pct_equity') or ''))}</td>"
-            f"<td>{html.escape(str(r.get('expires_at_ms') or ''))}</td>"
-            "<td>"
-            '<form method="post" action="/approvals/approve" style="display:inline">'
-            f'<input type="hidden" name="id" value="{aid}"/>'
-            '<button type="submit">Approve</button>'
-            "</form> "
-            '<form method="post" action="/approvals/reject" style="display:inline">'
-            f'<input type="hidden" name="id" value="{aid}"/>'
-            '<button type="submit">Reject</button>'
-            "</form>"
-            "</td>"
-            "</tr>"
-        )
-    table = (
-        "<table><thead><tr>"
-        "<th>Symbol</th><th>TF</th><th>Action</th><th>Conf</th><th>Size%</th>"
-        "<th>Expires (ms)</th><th></th>"
-        "</tr></thead>"
-        f"<tbody>{''.join(body_rows)}</tbody></table>"
-    )
-    return f"""
-    <div class="card">
-      <strong>Approval queue</strong>
-      <p class="muted">Paper only — simulated fills on approve; no exchange orders.</p>
-      {table}
-    </div>
-    """
-
-
-@app.post("/approvals/approve")
-def approvals_approve(
-    id: str = Form(...),
-    _: None = Depends(require_auth),
-) -> RedirectResponse:
-    engaged = False
-    try:
-        engaged = (_redis().get(KILL_SWITCH_KEY) or "0") in {"1", "true", "on", "yes"}
+        return (redis_get(KILL_SWITCH_KEY) or "0") in {"1", "true", "on", "yes"}
     except Exception:
-        engaged = True
-    conn = open_db(db_path())
+        return True
+
+
+def status_payload() -> dict[str, Any]:
+    live = live_trading_enabled()
+    return {
+        "paper_only": PAPER_ONLY and not live,
+        "live_trading": live,
+        "kill_switch": kill_switch_engaged(),
+        "ingest": redis_get_json(INGEST_KEY),
+        "rag": redis_get_json(RAG_KEY),
+        "paper": redis_get_json(PAPER_KEY),
+        "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
+        "risk_caps": load_risk_caps().as_dict(),
+        "qdrant": qdrant_info(),
+    }
+
+
+def load_metrics() -> dict[str, Any]:
+    path = db_path()
+    if not path.exists():
+        return {"ok": False, "paper_only": PAPER_ONLY, "error": "no database"}
+    conn = open_db(path)
     try:
-        approve_approval(conn, id, kill_switch=engaged)
+        ensure_paper_account(conn)
+        report = compute_paper_metrics(conn)
     finally:
         conn.close()
-    return RedirectResponse("/analytics", status_code=303)
+    report["db"] = str(path)
+    return report
 
 
-@app.post("/approvals/reject")
-def approvals_reject(
-    id: str = Form(...),
-    _: None = Depends(require_auth),
-) -> RedirectResponse:
-    conn = open_db(db_path())
+def exchange_payload() -> dict[str, Any]:
     try:
-        reject_approval(conn, id, reason="ui")
-    finally:
-        conn.close()
-    return RedirectResponse("/analytics", status_code=303)
+        auth = resolve_binance_auth()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("exchange auth soft-fail: %s", type(exc).__name__)
+        return {"ok": True, "available": False, "error": "auth"}
+    if auth is None:
+        return {"ok": True, "available": False}
+    try:
+        client = BinanceSpotClient(auth)
+        result = sync_spot_balances(client=client, db_path=db_path(), dry_run=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("exchange sync soft-fail: %s", type(exc).__name__)
+        return {"ok": True, "available": False, "error": type(exc).__name__}
+    if not result.ok:
+        return {"ok": True, "available": False, "error": result.error or "sync failed"}
+    balances_out: list[dict[str, Any]] = []
+    total_usd: float | None = None
+    if result.balances:
+        try:
+            valued = value_spot_balances(result.balances)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("exchange value soft-fail: %s", type(exc).__name__)
+            valued = None
+        if valued is None:
+            for b in result.balances:
+                balances_out.append(
+                    {
+                        "asset": b.asset,
+                        "free": str(b.free),
+                        "locked": str(b.locked),
+                        "total": str(b.total),
+                        "usd": None,
+                    }
+                )
+        else:
+            total_usd = float(valued.total_usd)
+            for row in valued.rows:
+                b = row.balance
+                balances_out.append(
+                    {
+                        "asset": b.asset,
+                        "free": str(b.free),
+                        "locked": str(b.locked),
+                        "total": str(b.total),
+                        "usd": float(row.usd) if row.usd is not None else None,
+                    }
+                )
+    return {
+        "ok": True,
+        "available": True,
+        "venue": result.venue,
+        "fetched_at_ms": result.fetched_at_ms,
+        "balances": balances_out,
+        "total_usd": total_usd,
+    }
 
 
-@app.get("/analytics", response_class=HTMLResponse)
-def analytics(
-    _: None = Depends(require_auth),
-    symbol: str = Query(""),
-    timeframe: str = Query(""),
-) -> HTMLResponse:
-    sym = symbol.strip().upper() or None
-    tf = timeframe.strip() or None
-    rows, err = load_analysis_rows(symbol=sym, timeframe=tf, limit=50)
-    ingest = redis_get_json(INGEST_KEY)
-    rag = redis_get_json(RAG_KEY)
-    paper = redis_get_json(PAPER_KEY)
-    paper_expire = redis_get_json(PAPER_EXPIRE_KEY)
+@app.get("/healthz")
+def healthz() -> dict[str, Any]:
+    live = live_trading_enabled()
+    return {
+        "ok": True,
+        "paper_only": PAPER_ONLY and not live,
+        "live_trading": live,
+    }
 
-    form = f"""
-    <div class="card">
-      <form class="row" method="get" action="/analytics">
-        <label>Symbol <input name="symbol" value="{html.escape(symbol.strip())}" placeholder="BTCUSDT"/></label>
-        <label>Timeframe <input name="timeframe" value="{html.escape(timeframe.strip())}" placeholder="4h"/></label>
-        <button type="submit">Filter</button>
-        <a class="btn" href="/analytics">Clear</a>
-      </form>
-      <p class="muted" style="margin:.75rem 0 0">DB: <code>{html.escape(str(db_path()))}</code></p>
-    </div>
-    {_exchange_panel_html()}
-    {_paper_ledger_html()}
-    {_risk_caps_html()}
-    {_paper_metrics_html()}
-    {_approval_queue_html()}
-    """
 
-    pipeline = f"""
-    <div class="card">
-      <details>
-        <summary><strong>Pipeline status</strong></summary>
-        <pre>ingest:
-{html.escape(format_status_pre(ingest))}
-
-rag:
-{html.escape(format_status_pre(rag))}
-
-paper:
-{html.escape(format_status_pre(paper))}
-
-paper_expire:
-{html.escape(format_status_pre(paper_expire))}</pre>
-      </details>
-    </div>
-    """
-
-    if err:
-        table = f'<div class="card"><p class="muted">{html.escape(err)}</p></div>'
-    elif not rows:
-        table = '<div class="card"><p class="muted">No analysis rows. Run <code>jarvise analyze</code> first.</p></div>'
-    else:
-        cells = []
-        for r in rows:
-            cells.append(
-                "<tr>"
-                f"<td>{html.escape(str(r.get('symbol') or ''))}</td>"
-                f"<td>{html.escape(str(r.get('timeframe') or ''))}</td>"
-                f"<td>{html.escape(str(r.get('regime_state') or ''))}</td>"
-                f"<td>{html.escape(str(r.get('action') or ''))}</td>"
-                f"<td>{html.escape(str(r.get('confidence_score') or ''))}</td>"
-                f"<td>{html.escape(str(r.get('invalidation_price') if r.get('invalidation_price') is not None else ''))}</td>"
-                f"<td>{html.escape(str(r.get('size_pct_equity') if r.get('size_pct_equity') is not None else ''))}</td>"
-                f"<td>{html.escape(str(r.get('timestamp') or ''))}</td>"
-                f"<td>{html.escape(str(r.get('thesis') or ''))}</td>"
-                "</tr>"
-            )
-        table = f"""
-        <div class="card" style="overflow-x:auto">
-          <table>
-            <thead>
-              <tr>
-                <th>Symbol</th><th>TF</th><th>Regime</th><th>Action</th>
-                <th>Conf</th><th>Invalidation</th><th>Size%</th><th>Ts</th><th>Thesis</th>
-              </tr>
-            </thead>
-            <tbody>
-              {''.join(cells)}
-            </tbody>
-          </table>
-        </div>
-        """
-
-    return page(form + table + pipeline, title="Jarvise analytics", active="analytics")
+@app.get("/api/status")
+def api_status(_: None = Depends(require_auth)) -> dict[str, Any]:
+    return status_payload()
 
 
 @app.get("/api/analysis")
@@ -743,22 +380,108 @@ def api_paper(_: None = Depends(require_auth)) -> dict[str, Any]:
 
 @app.get("/api/paper/metrics")
 def api_paper_metrics(_: None = Depends(require_auth)) -> dict[str, Any]:
+    return load_metrics()
+
+
+@app.get("/api/approvals")
+def api_approvals(
+    _: None = Depends(require_auth),
+    status_filter: str = Query("pending", alias="status"),
+    limit: int = Query(20, ge=1, le=100),
+) -> dict[str, Any]:
     path = db_path()
     if not path.exists():
-        return {"ok": False, "paper_only": PAPER_ONLY, "error": "no database"}
+        return {"ok": True, "rows": []}
     conn = open_db(path)
     try:
-        ensure_paper_account(conn)
-        report = compute_paper_metrics(conn)
+        rows = list_approvals(conn, status=status_filter or None, limit=limit)
     finally:
         conn.close()
-    report["db"] = str(path)
-    return report
+    return {"ok": True, "rows": rows}
+
+
+@app.get("/api/exchange")
+def api_exchange(_: None = Depends(require_auth)) -> dict[str, Any]:
+    return exchange_payload()
+
+
+@app.get("/api/dashboard")
+def api_dashboard(_: None = Depends(require_auth)) -> dict[str, Any]:
+    path = db_path()
+    approvals: list[dict[str, Any]] = []
+    if path.exists():
+        conn = open_db(path)
+        try:
+            approvals = list_approvals(conn, status="pending", limit=20)
+        finally:
+            conn.close()
+    paper_payload = api_paper()
+    return {
+        "ok": True,
+        "status": status_payload(),
+        "pending_count": len(approvals),
+        "approvals": approvals,
+        "paper": paper_payload,
+        "metrics": load_metrics(),
+    }
+
+
+@app.post("/kill-switch")
+async def set_kill_switch(
+    request: Request,
+    state: str = Form(...),
+    _: None = Depends(require_auth),
+) -> Any:
+    value = "1" if state.lower() in {"on", "1", "true", "engage"} else "0"
+    try:
+        _redis().set(KILL_SWITCH_KEY, value)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if wants_json(request):
+        return JSONResponse({"ok": True, "kill_switch": value == "1"})
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/approvals/approve")
+async def approvals_approve(
+    request: Request,
+    id: str = Form(...),
+    _: None = Depends(require_auth),
+) -> Any:
+    engaged = kill_switch_engaged()
+    conn = open_db(db_path())
+    try:
+        result = approve_approval(conn, id, kill_switch=engaged)
+    finally:
+        conn.close()
+    if wants_json(request):
+        return JSONResponse({"ok": True, "result": result if isinstance(result, dict) else {"id": id}})
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/approvals/reject")
+async def approvals_reject(
+    request: Request,
+    id: str = Form(...),
+    _: None = Depends(require_auth),
+) -> Any:
+    conn = open_db(db_path())
+    try:
+        reject_approval(conn, id, reason="ui")
+    finally:
+        conn.close()
+    if wants_json(request):
+        return JSONResponse({"ok": True, "id": id})
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/paper/metrics/persist")
-def paper_metrics_persist(_: None = Depends(require_auth)) -> RedirectResponse:
+async def paper_metrics_persist(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
     path = db_path()
+    report: dict[str, Any] | None = None
     if path.exists():
         conn = open_db(path)
         try:
@@ -767,21 +490,41 @@ def paper_metrics_persist(_: None = Depends(require_auth)) -> RedirectResponse:
             persist_metrics_snapshot(conn, report)
         finally:
             conn.close()
-    return RedirectResponse("/analytics", status_code=303)
+    if wants_json(request):
+        return JSONResponse({"ok": True, "metrics": report})
+    return RedirectResponse("/", status_code=303)
 
 
-@app.get("/api/status")
-def api_status(_: None = Depends(require_auth)) -> dict[str, Any]:
-    kill = redis_get(KILL_SWITCH_KEY) or "0"
-    live = live_trading_enabled()
-    return {
-        "paper_only": PAPER_ONLY and not live,
-        "live_trading": live,
-        "kill_switch": kill in {"1", "true", "on", "yes"},
-        "ingest": redis_get_json(INGEST_KEY),
-        "rag": redis_get_json(RAG_KEY),
-        "paper": redis_get_json(PAPER_KEY),
-        "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
-        "risk_caps": load_risk_caps().as_dict(),
-        "qdrant": qdrant_info(),
-    }
+def spa_index(_: None = Depends(require_auth)) -> FileResponse:
+    root = static_dir()
+    if root is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Command Dashboard assets missing — build web/ and set JARVISE_WEB_DIST",
+        )
+    return FileResponse(root / "index.html")
+
+
+@app.get("/")
+def home(_: None = Depends(require_auth)) -> FileResponse:
+    return spa_index()
+
+
+@app.get("/analytics")
+def analytics_legacy(_: None = Depends(require_auth)) -> FileResponse:
+    return spa_index()
+
+
+@app.get("/paper")
+@app.get("/decisions")
+@app.get("/exchange")
+@app.get("/ops")
+def spa_routes(_: None = Depends(require_auth)) -> FileResponse:
+    return spa_index()
+
+
+_static = static_dir()
+if _static is not None:
+    assets = _static / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")

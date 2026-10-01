@@ -106,7 +106,7 @@ Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`,
 - Every ~4 hours: `POST /jobs/paper-run` → enqueue paper candidates (`paper_core` @ `4h` by default; **no** `--auto-fill`)
 - Every ~1 hour: `POST /jobs/paper-expire` → mark timed-out approvals (no FLAT)
 
-Approve/Reject still happens on `/analytics` (or `jarvise paper approve|reject`).
+Approve/Reject on the Command Dashboard Home (`http://$TAILSCALE_IP:8080/`) or `jarvise paper approve|reject`. Legacy `/analytics` serves the same SPA.
 Optional Telegram alerts when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set (enqueue + hourly pending digest via n8n `Jarvise paper pending digest`). Soft-fail if unset.
 
 **Manual on VPS when needed:**
@@ -116,7 +116,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tools 
   jarvise analyze --symbol BTCUSDT --timeframe 4h --json
 ```
 
-UIs in this phase: n8n (`:5678`), control web health (`:8080`) — not a trading terminal.
+UIs in this phase: n8n (`:5678`), Command Dashboard (`:8080` — Home / Paper / Decisions / Exchange / Ops) — not a public trading terminal.
 
 ## 3. Agent / Cursor path (chat, not app buttons)
 
@@ -141,7 +141,7 @@ Windows note for TradingView MCP: pin `uvx --python 3.13` (3.14 not supported ye
 
 1. **Market data fresh** — n8n ingest on VPS, or `jarvise ingest` by hand
 2. **Paper signal** — `jarvise analyze --json` (or `--universe paper_core`)
-3. **Paper candidate (P2/P4)** — `jarvise paper run ...` enqueues approval by default; approve on `/analytics` or `jarvise paper approve <id>` (or `--auto-fill` for immediate simulated fill; no exchange orders)
+3. **Paper candidate (P2/P4)** — `jarvise paper run ...` enqueues approval by default; approve on Command Dashboard Home (`:8080/`) or `jarvise paper approve <id>` (or `--auto-fill` for immediate simulated fill; no exchange orders)
 4. **Check doctrine** — Notebook / RAG before any human decision
 5. **Kill switch** — Redis `jarvise:kill_switch` per [ops.md](deploy/ops.md) to stop background work and block enqueue/approve
 

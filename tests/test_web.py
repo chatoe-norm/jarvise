@@ -41,25 +41,22 @@ def _stub_control_deps(monkeypatch) -> None:
     monkeypatch.setattr("jarvise_web.app.qdrant_info", fake_qdrant)
 
 
-def test_dashboard_renders_without_auth(monkeypatch) -> None:
+def test_dashboard_serves_spa(monkeypatch) -> None:
     _stub_control_deps(monkeypatch)
     client = TestClient(app)
     resp = client.get("/")
     assert resp.status_code == 200
-    assert b"PAPER ONLY" in resp.content
-    assert b'href="/analytics"' in resp.content
+    assert b"Jarvise" in resp.content
 
 
-def test_analytics_empty_db(monkeypatch, tmp_path: Path) -> None:
+def test_analytics_redirects_to_spa_shell(monkeypatch, tmp_path: Path) -> None:
     _stub_control_deps(monkeypatch)
     missing = tmp_path / "missing.db"
     monkeypatch.setenv("JARVISE_DB", str(missing))
     client = TestClient(app)
     resp = client.get("/analytics")
     assert resp.status_code == 200
-    assert b"Database not found" in resp.content or b"No analysis rows" in resp.content
-    assert b"PAPER ONLY" in resp.content
-    assert b'href="/"' in resp.content
+    assert b"Jarvise" in resp.content
 
 
 def test_analytics_and_api_with_rows(monkeypatch, tmp_path: Path) -> None:
@@ -85,16 +82,6 @@ def test_analytics_and_api_with_rows(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("JARVISE_DB", str(db))
 
     client = TestClient(app)
-    html = client.get("/analytics")
-    assert html.status_code == 200
-    assert b"BTCUSDT" in html.content
-    assert b"trend_up" in html.content
-    assert b"paper long" in html.content
-
-    filtered = client.get("/analytics", params={"symbol": "ETHUSDT"})
-    assert filtered.status_code == 200
-    assert b"No analysis rows" in filtered.content
-
     api = client.get("/api/analysis", params={"symbol": "BTCUSDT", "timeframe": "4h"})
     assert api.status_code == 200
     payload = api.json()
@@ -103,6 +90,11 @@ def test_analytics_and_api_with_rows(monkeypatch, tmp_path: Path) -> None:
     assert len(payload["rows"]) == 1
     assert payload["rows"][0]["action"] == "long"
     assert payload["rows"][0]["timeframe"] == "4h"
+
+    filtered = client.get("/api/analysis", params={"symbol": "ETHUSDT"})
+    assert filtered.status_code == 200
+    assert filtered.json()["ok"] is True
+    assert filtered.json()["rows"] == []
 
 
 def test_parse_status_payload_json_and_legacy_text() -> None:
@@ -117,48 +109,6 @@ def test_parse_status_payload_json_and_legacy_text() -> None:
     assert parsed["qdrant_url"] == "http://qdrant:6333"
     pretty = format_status_pre(parsed)
     assert '"chunks": 4089' in pretty
-
-
-def test_analytics_pipeline_status_pretty(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
-    monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
-
-    def fake_redis_get(key: str):
-        return "0"
-
-    def fake_json(key: str):
-        if key == "jarvise:rag:last":
-            return {"ok": True, "chunks": 12, "collection": "jarvise_doctrine"}
-        if key == "jarvise:paper:last":
-            return {"ok": True, "enqueued": 2}
-        if key == "jarvise:paper:expire:last":
-            return {"ok": True, "expired": 1}
-        return {"ok": True, "upserted": 1}
-
-    def fake_qdrant():
-        return {"exists": True, "points": 12}
-
-    monkeypatch.setattr("jarvise_web.app.redis_get", fake_redis_get)
-    monkeypatch.setattr("jarvise_web.app.redis_get_json", fake_json)
-    monkeypatch.setattr("jarvise_web.app.qdrant_info", fake_qdrant)
-    monkeypatch.setenv("JARVISE_DB", str(tmp_path / "missing.db"))
-
-    client = TestClient(app)
-    resp = client.get("/analytics")
-    assert resp.status_code == 200
-    assert b"Pipeline status" in resp.content
-    assert b"<details>" in resp.content
-    assert b"<summary>" in resp.content
-    assert b"<details open" not in resp.content
-    # Pipeline accordion is rendered after the analysis table / empty-or-error card.
-    pipe_at = resp.content.find(b"Pipeline status")
-    assert pipe_at > resp.content.find(b'name="timeframe"')
-    if b"</table>" in resp.content:
-        assert pipe_at > resp.content.rfind(b"</table>")
-    assert b"&quot;chunks&quot;: 12" in resp.content
-    assert b"paper:" in resp.content
-    assert b"paper_expire:" in resp.content
-    assert b"invalid JSON" not in resp.content
 
 
 def test_api_status_includes_paper_keys(monkeypatch) -> None:
@@ -179,6 +129,41 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
     assert "paper_expire" in data
     assert "risk_caps" in data
     assert "max_notional_per_order" in data["risk_caps"]
+
+
+def test_api_dashboard_bundle(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    upsert_pending_approval(
+        conn,
+        {
+            "id": "appr-dash-1",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 3_600_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": "a1",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+            "size_pct_equity": 5.0,
+            "status": "pending",
+        },
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/dashboard")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["pending_count"] == 1
+    assert data["approvals"][0]["symbol"] == "BTCUSDT"
+    assert "status" in data
+    assert "paper" in data
+    assert "metrics" in data
 
 
 def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
@@ -204,10 +189,6 @@ def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("JARVISE_DB", str(db))
 
     client = TestClient(app)
-    html = client.get("/analytics")
-    assert html.status_code == 200
-    assert b"Paper ledger" in html.content
-
     api = client.get("/api/paper")
     assert api.status_code == 200
     payload = api.json()
@@ -217,7 +198,7 @@ def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
     assert any(p["symbol"] == "BTCUSDT" for p in payload["positions"])
 
 
-def test_api_paper_metrics_and_card(monkeypatch, tmp_path: Path) -> None:
+def test_api_paper_metrics_and_persist_json(monkeypatch, tmp_path: Path) -> None:
     _stub_control_deps(monkeypatch)
     db = tmp_path / "jarvise.db"
     conn = open_db(db)
@@ -254,10 +235,6 @@ def test_api_paper_metrics_and_card(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("JARVISE_DB", str(db))
 
     client = TestClient(app)
-    html = client.get("/analytics")
-    assert html.status_code == 200
-    assert b"Paper expectancy" in html.content
-
     api = client.get("/api/paper/metrics")
     assert api.status_code == 200
     payload = api.json()
@@ -265,11 +242,19 @@ def test_api_paper_metrics_and_card(monkeypatch, tmp_path: Path) -> None:
     assert payload["closed_trades"] == 1
     assert payload["expected_value_ev"] is not None
 
-    persist = client.post("/paper/metrics/persist", follow_redirects=False)
-    assert persist.status_code == 303
+    persist = client.post(
+        "/paper/metrics/persist",
+        headers={"Accept": "application/json"},
+        follow_redirects=False,
+    )
+    assert persist.status_code == 200
+    assert persist.json()["ok"] is True
+
+    legacy = client.post("/paper/metrics/persist", follow_redirects=False)
+    assert legacy.status_code == 303
 
 
-def test_analytics_shows_pending_approval(monkeypatch, tmp_path: Path) -> None:
+def test_api_approvals_pending(monkeypatch, tmp_path: Path) -> None:
     _stub_control_deps(monkeypatch)
     db = tmp_path / "jarvise.db"
     conn = open_db(db)
@@ -293,15 +278,15 @@ def test_analytics_shows_pending_approval(monkeypatch, tmp_path: Path) -> None:
     conn.close()
     monkeypatch.setenv("JARVISE_DB", str(db))
     client = TestClient(app)
-    resp = client.get("/analytics")
+    resp = client.get("/api/approvals")
     assert resp.status_code == 200
-    assert b"Approval queue" in resp.content
-    assert b"BTCUSDT" in resp.content
-    assert b"3600000" in resp.content
-    assert b"simulated" in resp.content.lower() or b"paper" in resp.content.lower()
+    rows = resp.json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "BTCUSDT"
+    assert rows[0]["expires_at_ms"] == 3_600_000
 
 
-def test_post_approve_redirects(monkeypatch, tmp_path: Path) -> None:
+def test_post_approve_json_and_redirect(monkeypatch, tmp_path: Path) -> None:
     _stub_control_deps(monkeypatch)
     db = tmp_path / "jarvise.db"
     conn = open_db(db)
@@ -347,4 +332,4 @@ def test_post_approve_redirects(monkeypatch, tmp_path: Path) -> None:
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert resp.headers.get("location") == "/analytics"
+    assert resp.headers.get("location") == "/"
