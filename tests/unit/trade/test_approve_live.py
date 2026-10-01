@@ -117,7 +117,16 @@ def test_approve_live_mocked_submit(
 
     with patch("jarvise_trade.submit.place_spot_market_order") as place:
         place.return_value = {"orderId": 777, "status": "FILLED"}
-        result = approve_approval(conn, row["id"], kill_switch=False, now_ms=2_000)
+        with patch(
+            "jarvise_trade.submit.fetch_api_restrictions",
+            return_value={
+                "enableWithdrawals": False,
+                "enableInternalTransfer": False,
+                "permitsUniversalTransfer": False,
+                "enableSpotAndMarginTrading": True,
+            },
+        ):
+            result = approve_approval(conn, row["id"], kill_switch=False, now_ms=2_000)
 
     assert result["ok"] is True
     assert result["paper_only"] is False
@@ -126,6 +135,40 @@ def test_approve_live_mocked_submit(
     assert list_paper_orders(conn) == []
     assert get_approval(conn, row["id"])["status"] == "approved"
     assert place.call_count == 1
+
+
+def test_approve_live_blocks_withdraw_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_LIVE_TRADING", "true")
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "tk")
+    monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "ts")
+    monkeypatch.setenv("JARVISE_LIVE_EQUITY_USD", "10000")
+    conn = open_db(tmp_path / "p.db")
+    ensure_paper_account(conn)
+    row = enqueue_approval(
+        conn,
+        analysis={
+            "analysis_id": "a5",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "size_pct_equity": 5.0,
+        },
+        timeframe="4h",
+        now_ms=1_000,
+    )
+    with patch(
+        "jarvise_trade.submit.fetch_api_restrictions",
+        return_value={
+            "enableWithdrawals": True,
+            "enableSpotAndMarginTrading": True,
+        },
+    ):
+        with patch("jarvise_trade.submit.place_spot_market_order") as place:
+            result = approve_approval(conn, row["id"], kill_switch=False, now_ms=2_000)
+    assert result["ok"] is False
+    assert "withdraw" in (result["error"] or "").lower()
+    assert place.call_count == 0
 
 
 def test_approve_live_flat_skips_http(
