@@ -71,7 +71,8 @@ def fetch_order_book_snapshot(
     own = client is None
     http = client or httpx.Client(timeout=30.0)
     try:
-        ticker = _get("/api/v3/bookTicker", {"symbol": sym}, client=http)
+        # Public symbol book ticker (not /api/v3/bookTicker — that 404s on some edges).
+        ticker = _get("/api/v3/ticker/bookTicker", {"symbol": sym}, client=http)
         depth = _get(
             "/api/v3/depth",
             {"symbol": sym, "limit": depth_limit},

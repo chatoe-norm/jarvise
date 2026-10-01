@@ -42,7 +42,7 @@ def test_depth_notional_within_1pct() -> None:
 
 def test_fetch_order_book_snapshot_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_get(path: str, params: dict, *, client=None):
-        if path.endswith("bookTicker"):
+        if path.endswith("/ticker/bookTicker") or path.endswith("bookTicker"):
             return {"bidPrice": "100.0", "askPrice": "100.2"}
         return {
             "bids": [["99.9", "5"], ["98.0", "1"]],
