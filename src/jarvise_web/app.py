@@ -638,6 +638,9 @@ def analytics(
     {_risk_caps_html()}
     {_paper_metrics_html()}
     {_approval_queue_html()}
+    """
+
+    pipeline = f"""
     <div class="card">
       <details>
         <summary><strong>Pipeline status</strong></summary>
@@ -692,7 +695,7 @@ paper_expire:
         </div>
         """
 
-    return page(form + table, title="Jarvise analytics", active="analytics")
+    return page(form + table + pipeline, title="Jarvise analytics", active="analytics")
 
 
 @app.get("/api/analysis")
