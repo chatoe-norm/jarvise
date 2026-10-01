@@ -296,7 +296,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
   - [x] **8a.** `/analytics` USD valuation of exchange balances (public USDT prices).
   - [x] **8b.** Pending-approval Telegram (enqueue + hourly digest; soft-fail).
   - [x] **8c.** Re-sync doctrine extracts (worldwide venue; drop Binance-TH-only lock).
-  - [ ] Confirm VPS trade key has **spot trade only, no withdraw**; then optional `JARVISE_LIVE_TRADING=true`.
+  - [x] **8d.** Key permission probe (`jarvise exchange check-key`) + live submit refuses withdraw-scoped keys. Checklist: [`docs/ops/live-enable-checklist.md`](docs/ops/live-enable-checklist.md). **Live flag still false** until owner adds `BINANCE_TRADE_*` and flips `JARVISE_LIVE_TRADING`.
 
 **Post-MVP backlog (do not start without a roadmap update):** P5 autonomy flag + scheduler; `macro_onchain_sentiment` writer (fear/greed, BTC dominance) and derivatives/ADX/MTF inputs to the analyzer; order-book microstructure; stocks/ETFs providers; additional venues/routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
 

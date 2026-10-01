@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from jarvise_exchange.permissions import audit_key_permissions, fetch_api_restrictions
 from jarvise_ingest.db import (
     get_paper_account,
     insert_live_order,
@@ -226,6 +227,59 @@ def submit_live_for_approval(
 
     if auth is None:
         err = "missing BINANCE_TRADE_API_KEY credentials"
+        row = insert_live_order(
+            conn,
+            {
+                "id": _order_id(approval_id, ts),
+                "created_at_ms": ts,
+                "approval_id": approval_id,
+                "venue": "binance",
+                "symbol": symbol,
+                "side": side,
+                "order_type": "MARKET",
+                "requested_notional_usd": notional,
+                "status": "error",
+                "error": err,
+                "kill_switch_clear": 1,
+                "caps_ok": 1,
+            },
+        )
+        return {
+            "ok": False,
+            "live_order": row,
+            "error": err,
+            "paper_only": False,
+        }
+
+    try:
+        audit = audit_key_permissions(fetch_api_restrictions(auth, client=http_client))
+        if not audit["ok_for_trade"]:
+            err = "trade key permissions unsafe: " + ", ".join(audit["block_reasons"] or ["unknown"])
+            row = insert_live_order(
+                conn,
+                {
+                    "id": _order_id(approval_id, ts),
+                    "created_at_ms": ts,
+                    "approval_id": approval_id,
+                    "venue": "binance",
+                    "symbol": symbol,
+                    "side": side,
+                    "order_type": "MARKET",
+                    "requested_notional_usd": notional,
+                    "status": "blocked",
+                    "error": err,
+                    "kill_switch_clear": 1,
+                    "caps_ok": 1,
+                },
+            )
+            return {
+                "ok": False,
+                "live_order": row,
+                "error": err,
+                "paper_only": False,
+            }
+    except Exception as exc:  # noqa: BLE001
+        err = f"trade key permission check failed: {exc}"
         row = insert_live_order(
             conn,
             {
