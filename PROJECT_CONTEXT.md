@@ -1,23 +1,23 @@
 # PROJECT_CONTEXT.md — Jarvise
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
-**Generated:** 2026-09-25; **status refreshed:** 2026-09-28.
-**Snapshot:** §5.1–5.5 shipped. **Next:** owner **APPROVE** P4-C design ([`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md)) + plan — **no live order code** until then.
+**Generated:** 2026-09-25; **status refreshed:** 2026-10-01.
+**Snapshot:** §5.1–5.6 shipped (P4-C live submit **code** gated off). **Next:** §5.7 owner VPS enablement only when ready — keep `JARVISE_LIVE_TRADING=false` until explicit keys + ops step. Do not start P5 until P4-C stable.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
-### Status at a glance (2026-09-28)
+### Status at a glance (2026-10-01)
 
 | Area | State |
 |------|--------|
-| Ladder | **P0–P3 + P4-B shipped** on `main` (`def1f8f`). **P4-C / P5** not started. |
-| Live trading | **Off** — no order/trade POST code in repo. |
-| Shipped UX | `/analytics`: analysis, paper ledger, exchange spot (RO), approval queue, pipeline ingest/rag. |
-| Paper path | `paper run` → enqueue → Approve → paper fill; `--auto-fill` escape hatch. |
+| Ladder | **P0–P3 + P4-B + P4-C (gated)** on branch → merge to `main`. |
+| Live trading | **Off by default** — `jarvise_trade` + `live_orders`; flag `JARVISE_LIVE_TRADING=false`. |
+| Shipped UX | `/analytics`: analysis, paper ledger, exchange spot (RO), approval queue, LIVE banner when flag on. |
+| Paper path | `paper run` → enqueue → Approve → paper fill when flag off. |
 | VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**. |
-| Next | §5.6 P4-C design owner review (no live code until approved). |
-| Risk | `jarvise_risk` caps on enqueue/approve; timeout → FLAT. |
-| P4-C | Design draft on `main` (`specs/2026-09-27-p4c-live-submit-design.md`) — owner review; **no code** until §5.2–5.5 gates. |
-| VPS | Paper approval smoke-proven 2026-09-27 (per AGENTS). |
+| Next | §5.7 owner-gated VPS live enable (optional); then stabilize before P5. |
+| Risk | `jarvise_risk` caps on enqueue/approve + live-day PnL; timeout → FLAT (paper). |
+| P4-C | Implemented: Approve → caps → `jarvise_trade` MARKET POST → `live_orders`; no paper mirror when live. |
+| VPS | Paper approval smoke-proven 2026-09-27 (per AGENTS). Live flag stays false. |
 
 ---
 
@@ -83,7 +83,7 @@ Multi-tenant SaaS; mobile apps; public HTTPS UI (Tailscale-only for now); Binanc
 - **Kill-switch** (Redis `jarvise:kill_switch`) honored by schedules, paper run/approve, and the web toggle.
 - **Exchange read-only**: Binance spot balances (`GET /api/v3/account`, HMAC or Ed25519/RSA) → `exchange_balances`, shown beside the paper ledger; secrets only in VPS `.env`; soft-fail hides the panel.
 - **Performance gate**: expectancy / drawdown metrics from the paper ledger sufficient to judge "clearly positive EV" (doctrine prerequisite for live).
-- **P4-C live path (last MVP rung, owner-gated)**: on Approve, size-capped live **spot** order via `jarvise_exchange` → `live_orders` audit; hard caps (max notional per order, max daily loss, drawdown lock) and kill-switch enforced *before* submit; timeout/reject → FLAT; live flag default **off**.
+- **P4-C live path (last MVP rung, owner-gated)**: on Approve when `JARVISE_LIVE_TRADING=true`, size-capped live **spot** MARKET via `jarvise_trade` → `live_orders` audit; hard caps + kill-switch before submit; live flag default **off**.
 - 24/7 operation on the VPS: n8n → jobs API for ingest, RAG refresh, **and** paper run/expire.
 
 ### 2.3 On-chain / Sentiment features — minimum
@@ -109,7 +109,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 | P2 | Paper auto-trade ledger + `jarvise paper run\|status` | **Shipped on `main`** | `7df0643`, PR #17 |
 | P3 | Exchange read-only (Binance spot balances, HMAC + Ed25519/RSA) | **Shipped on `main`** | PRs #19, #20 |
 | P4-A/B | Manual approval **paper slice** (queue, approve/reject/expire, UI card) | **Shipped on `main`** | PR [#23](https://github.com/chatoe-norm/jarvise/pull/23) merged `def1f8f`; VPS Deploy green |
-| P4-C | Size-capped **live** spot order on Approve + `live_orders` + hard caps | **Not started** (spec defers until B stable + risk caps) | — |
+| P4-C | Size-capped **live** spot order on Approve + `live_orders` + hard caps | **Shipped gated off** (`JARVISE_LIVE_TRADING=false`) | `jarvise_trade` + approve branch |
 | P5 | Autonomy (auto live orders behind default-off flag) | **Not started, by design** | — |
 
 ### 3.2 Built and working
@@ -130,7 +130,10 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - CLI: `jarvise paper run [--auto-fill] | queue [--all] | approve <id> | reject <id> [--reason] | expire | status`. Default `run` **enqueues** (no fill); `--auto-fill` is the escape hatch. Kill-switch → exit 3, nothing written.
 
 **Exchange read-only** (`src/jarvise_exchange/`)
-- `VenueClient` protocol; `BinanceSpotClient.list_spot_balances()` (signed GET only); `resolve_binance_auth()` prefers PEM private key over HMAC secret; zero balances filtered; `exchange_balances` snapshots; `jarvise exchange sync-balances [--dry-run] --json`; panel on `/analytics` with soft-fail. **No order/trade/cancel/withdraw code exists anywhere in the repo.**
+- `VenueClient` protocol; `BinanceSpotClient.list_spot_balances()` (signed GET only); `resolve_binance_auth()` prefers PEM private key over HMAC secret; zero balances filtered; `exchange_balances` snapshots; `jarvise exchange sync-balances [--dry-run] --json`; panel on `/analytics` with soft-fail. **No order POSTs in this package.**
+
+**Live trade (gated)** (`src/jarvise_trade/`)
+- Spot MARKET POST allowlist only (`POST /api/v3/order`); trade keys `BINANCE_TRADE_*` distinct from read keys; wired from `approve_approval` when `JARVISE_LIVE_TRADING=true`; audits `live_orders`; no paper ledger mirror on live path.
 
 **Web** (`src/jarvise_web/app.py`, FastAPI, port 8080, optional basic auth, Tailscale-bound in prod)
 - `GET /` control dashboard (kill-switch toggle, Redis/Qdrant health); `POST /kill-switch`.
@@ -158,20 +161,21 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - **Analyzer inputs**: uses only close/ATR/RSI/EMA20/EMA200. Derivatives are ingested but **not consumed**; no volume or multi-timeframe confirmation. Schema columns `vwap`, `adx_14` exist but are never computed.
 - **Historical replay**: `jarvise analyze --replay --since …` walks stored closed candles; `--apply-paper` fills only on an isolated `--db` (refuses default live ledger).
 - **24/7 paper operation**: VPS n8n **activated** 2026-09-29 (`Jarvise paper run` / `Jarvise paper expire`). Jobs ingest refreshes `1h` plus paper timeframe (`4h` default) so enqueue has candles.
-- **Timeout semantics**: roadmap P4 says timeout → FLAT; slice B deliberately implements timeout → `timed_out` only (no position change). Decision still open.
+- **Timeout semantics**: paper timeout → `timed_out` + FLAT open positions (`resolve_reason=timeout_flat`). Live venue flatten is out of P4-C.
 - **Exchange panel**: raw asset balances only; no USD valuation and no reconciliation against the paper ledger.
 - **OpenClaw paper-only**: `OPENCLAW_PAPER_ONLY` is a convention enforced by config/docs, not by Python code.
 - **Doctrine text drift**: `data/analytics/sources/jarvise-doctrine.txt` still says "Binance TH is a regulated Thai spot venue"; `AGENTS.md` (newer) says trade worldwide, Binance is one option. Re-sync the notebook extract when doctrine is next refreshed.
+- **Live enablement**: code present but flag off; trade keys unset; no withdraw; ops checklist §5.8 before turning on.
 
 ### 3.4 Missing entirely
 
-- **P4-C live order path**: `live_orders` table, place-order adapter in `jarvise_exchange` (spot only), pre-submit permission check (reject keys with withdrawal/transfer scope), explicit live flag (default off), audit of every attempt.
-- **Hard caps / risk module**: max notional per order, max daily loss, drawdown lock that engages the kill-switch — none exist in code (paper sizing is only `MAX_SIZE_PCT = 2.0`).
+- **Live timeout / venue flatten** (paper timeout→FLAT only).
 - **P5 autonomy** flag and scheduler path (correctly absent).
 - **On-chain / sentiment writers** for `macro_onchain_sentiment`; **order-book microstructure** writer.
 - **Stocks/ETFs** data or execution providers.
 - **Multi-venue routing**; venues beyond Binance spot.
 - **Alerts/notifications** for pending approvals (owner currently has to open `/analytics` or run `paper queue`).
+- **Trade-key permission probe** (reject withdraw-scoped keys) — ops manual checklist for now.
 
 ---
 
@@ -286,9 +290,9 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - [x] **3. Performance / expectancy metrics (doctrine gate).** `jarvise paper metrics` + `/analytics` expectancy card + `/api/paper/metrics`; round-trips → EV/win rate/MDD; Sharpe/Sortino ≥30; `--persist` / Persist button. Spec: [`2026-09-29-paper-expectancy-metrics-design.md`](docs/superpowers/specs/2026-09-29-paper-expectancy-metrics-design.md).
 - [x] **4. Historical replay for paper signals.** `jarvise analyze --replay --since … [--until …] [--apply-paper]` — walk closed candles, upsert analysis; optional isolated-db paper fills + metrics. Spec: [`2026-09-29-analyze-replay-design.md`](docs/superpowers/specs/2026-09-29-analyze-replay-design.md).
 - [x] **5. Risk caps module (venue-agnostic, shared by paper and later live).** `jarvise_risk`: env caps `JARVISE_MAX_NOTIONAL_PER_ORDER` / `JARVISE_MAX_DAILY_LOSS_USD` / `JARVISE_DRAWDOWN_LOCK_PCT`; enforce on enqueue + approve; breach → fail + kill-switch; `/analytics` Risk caps card. **Timeout → FLAT** on open paper positions (`resolve_reason=timeout_flat`).
-- [ ] **6. P4-C design + plan.** Design refreshed 2026-10-01 for owner review: [`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md) · plan stub [`plans/2026-10-01-p4c-live-submit.md`](docs/superpowers/plans/2026-10-01-p4c-live-submit.md). **Reply APPROVED** (or request edits) before any live code. Gates 2–5 done.
-- [ ] **7. P4-C implementation (owner-gated).** Approve → caps check → kill-switch check → live spot order → `live_orders` row → paper ledger mirror. Explicit owner OK required before this PR is opened; live flag stays off by default in every environment.
-- [ ] **8. Ops hygiene before any live trade.** Pending-approval notification (n8n → Slack/Telegram/email); `/analytics` USD valuation of exchange balances; re-sync doctrine extract (remove Binance-TH-only wording); confirm VPS `.env` Binance key has **no** withdrawal permission.
+- [x] **6. P4-C design + plan.** Owner APPROVED 2026-10-01: [`2026-09-27-p4c-live-submit-design.md`](docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md) · [`plans/2026-10-01-p4c-live-submit.md`](docs/superpowers/plans/2026-10-01-p4c-live-submit.md).
+- [x] **7. P4-C implementation (owner-gated).** Approve → caps → kill-switch → `jarvise_trade` spot MARKET → `live_orders` (no paper mirror). Flag default **false** in repo/compose; VPS stays paper-only until owner enables keys.
+- [ ] **8. Ops hygiene before any live trade.** Pending-approval notification (n8n → Slack/Telegram/email); `/analytics` USD valuation of exchange balances; re-sync doctrine extract (remove Binance-TH-only wording); confirm VPS trade key has **spot trade only, no withdraw**; then optional `JARVISE_LIVE_TRADING=true`.
 
 **Post-MVP backlog (do not start without a roadmap update):** P5 autonomy flag + scheduler; `macro_onchain_sentiment` writer (fear/greed, BTC dominance) and derivatives/ADX/MTF inputs to the analyzer; order-book microstructure; stocks/ETFs providers; additional venues/routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
 
@@ -303,7 +307,8 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - **2026-09-25** — P4 implementation plan; approval queue schema, engine, CLI, `/analytics` card, docs; atomic claim + fail-closed kill-switch. **PR #23 merged to `main`; Deploy green.**
 - **2026-09-26** — Brainstorm + design for **paper jobs 24/7** (enqueue + expire schedules); file `docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md` (local; plan/code not started).
 - **2026-09-27** — P4 paper approval smoke on VPS; **P4-C live-submit design draft** (PR #24).
-- **2026-09-28–29** — `PROJECT_CONTEXT.md` + paper jobs 24/7 design/plan; handoff: **implement §5.2** before P4-C code.
+- **2026-09-28–29** — `PROJECT_CONTEXT.md` + paper jobs 24/7; expectancy; replay; risk caps + timeout→FLAT.
+- **2026-10-01** — P4-C APPROVED + implemented (`jarvise_trade`, `live_orders`, Approve branch); `JARVISE_LIVE_TRADING` default false.
 
 Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature has landed via spec/plan first.
 

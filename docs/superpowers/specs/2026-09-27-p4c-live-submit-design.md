@@ -1,7 +1,7 @@
 # Jarvise P4-C — live submit on Approve — design
 
 **Date:** 2026-09-27; **refreshed:** 2026-10-01  
-**Status:** Ready for owner review — **no implementation until APPROVED + plan accepted**  
+**Status:** APPROVED 2026-10-01 — implementing gated live submit (`JARVISE_LIVE_TRADING` default false).
 **Depends on:** §5.1–5.5 shipped (paper approval, jobs 24/7, expectancy, replay, risk caps + timeout→FLAT paper)  
 **Roadmap:** [`2026-09-23-product-roadmap-design.md`](2026-09-23-product-roadmap-design.md) P4 (live leg)  
 **Prior slice:** [`2026-09-23-p4-manual-approval-paper-slice-design.md`](2026-09-23-p4-manual-approval-paper-slice-design.md)  
