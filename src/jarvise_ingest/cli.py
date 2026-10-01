@@ -13,17 +13,22 @@ from jarvise_ingest.db import (
     append_derivatives,
     open_db,
     universe_as_of,
+    upsert_macro_sentiment,
     upsert_market_technicals,
+    upsert_order_book,
 )
+from jarvise_ingest.providers.binance_book import fetch_order_book_snapshot
 from jarvise_ingest.providers.binance_klines import (
     MAX_PAGE_LIMIT,
     fetch_klines,
     fetch_klines_range,
 )
+from jarvise_ingest.providers.coingecko_global import fetch_global_macro
 from jarvise_ingest.providers.coinglass import fetch_derivatives, resolve_api_key
 from jarvise_ingest.series import find_gaps, recompute_indicators
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
 from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_risk import evaluate_from_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
@@ -107,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip CoinGlass derivatives ingest",
     )
     p.add_argument(
+        "--skip-book",
+        action="store_true",
+        help="Skip Binance order-book microstructure ingest",
+    )
+    p.add_argument(
+        "--skip-macro",
+        action="store_true",
+        help="Skip CoinGecko global macro ingest",
+    )
+    p.add_argument(
         "--db",
         type=Path,
         default=DEFAULT_DB,
@@ -177,8 +192,6 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # Resolve --universe against membership at the end of the window (or now).
-    # Opens the DB briefly to seed paper_core and query; closed before ingest.
     universe_id = args.universe
     if universe_id:
         resolve_conn = open_db(args.db)
@@ -213,8 +226,12 @@ def run(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     market_summary: dict = {}
     deriv_summary: dict = {}
+    book_summary: dict = {}
+    macro_summary: dict = {}
+    safety_summary: dict = {}
     skipped: list[str] = []
     errors: list[str] = []
+    provider_errors: dict[str, list[str]] = {sym: [] for sym in symbols}
 
     if args.dry_run:
         for sym in symbols:
@@ -236,6 +253,14 @@ def run(argv: list[str] | None = None) -> int:
                 deriv_summary[sym.split("USDT")[0] if "USDT" in sym else sym] = {
                     "planned": min(limit, 30)
                 }
+            if args.skip_book:
+                skipped.append(f"book:{sym}")
+            else:
+                book_summary[sym] = {"planned": 1}
+        if args.skip_macro:
+            skipped.append("macro:global")
+        else:
+            macro_summary["global"] = {"planned": 1}
         payload = {
             "ok": True,
             "dry_run": True,
@@ -243,6 +268,9 @@ def run(argv: list[str] | None = None) -> int:
             "universe": universe_id,
             "market_technicals": market_summary,
             "derivatives_analytics": deriv_summary,
+            "order_book_microstructure": book_summary,
+            "macro_onchain_sentiment": macro_summary,
+            "market_safety": {},
             "skipped": skipped,
             "errors": errors,
             "duration_s": round(time.perf_counter() - started, 3),
@@ -253,6 +281,29 @@ def run(argv: list[str] | None = None) -> int:
 
     conn = open_db(args.db)
     try:
+        if args.skip_macro:
+            skipped.append("macro:global")
+        else:
+            try:
+                macro_row = fetch_global_macro()
+                n = upsert_macro_sentiment(conn, macro_row)
+                macro_summary["global"] = {
+                    "upserted": n,
+                    "btc_dominance_pct": macro_row.get("btc_dominance_pct"),
+                    "global_market_cap_usd": macro_row.get("global_market_cap_usd"),
+                }
+                if not args.as_json:
+                    print(
+                        "ingested macro_onchain_sentiment: "
+                        f"btc_dom={macro_row.get('btc_dominance_pct')} "
+                        f"mcap={macro_row.get('global_market_cap_usd')}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+                for sym in symbols:
+                    provider_errors[sym].append(f"macro:{exc}")
+                print(f"Error: {exc}", file=sys.stderr)
+
         for sym in symbols:
             try:
                 if since:
@@ -289,23 +340,62 @@ def run(argv: list[str] | None = None) -> int:
                 errors.append(str(exc))
                 print(f"Error: {exc}", file=sys.stderr)
 
+            if args.skip_book:
+                skipped.append(f"book:{sym}")
+            else:
+                try:
+                    book_row = fetch_order_book_snapshot(sym)
+                    n = upsert_order_book(conn, book_row)
+                    book_summary[sym] = {
+                        "upserted": n,
+                        "bid_ask_spread": book_row.get("bid_ask_spread"),
+                        "bid_depth_1pct_usd": book_row.get("bid_depth_1pct_usd"),
+                        "ask_depth_1pct_usd": book_row.get("ask_depth_1pct_usd"),
+                    }
+                    if not args.as_json:
+                        spread_bps = float(book_row["bid_ask_spread"]) * 10_000
+                        print(
+                            f"ingested order_book_microstructure: {sym} "
+                            f"spread_bps={spread_bps:.2f}"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(str(exc))
+                    provider_errors[sym].append(f"book:{exc}")
+                    print(f"Error: {exc}", file=sys.stderr)
+
             if args.skip_derivatives:
                 skipped.append(f"derivatives:{sym}")
-                continue
-            try:
-                rows = fetch_derivatives(sym, args.timeframe, limit=min(30, args.limit))
-                # One knowledge-time stamp per ingest run so the batch is a unit.
-                n = append_derivatives(conn, rows)
-                coin = rows[0]["symbol"] if rows else sym
-                deriv_summary[coin] = {"versions_appended": n, "fetched": len(rows)}
-                if not args.as_json:
-                    print(
-                        f"ingested derivatives_analytics: {coin} "
-                        f"versions={n} fetched={len(rows)}"
-                    )
-            except Exception as exc:  # noqa: BLE001
-                errors.append(str(exc))
-                print(f"Error: {exc}", file=sys.stderr)
+            else:
+                try:
+                    rows = fetch_derivatives(sym, args.timeframe, limit=min(30, limit))
+                    n = append_derivatives(conn, rows)
+                    coin = rows[0]["symbol"] if rows else sym
+                    deriv_summary[coin] = {"versions_appended": n, "fetched": len(rows)}
+                    if not args.as_json:
+                        print(
+                            f"ingested derivatives_analytics: {coin} "
+                            f"versions={n} fetched={len(rows)}"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(str(exc))
+                    provider_errors[sym].append(f"derivatives:{exc}")
+                    print(f"Error: {exc}", file=sys.stderr)
+
+            safety = evaluate_from_db(
+                conn,
+                sym,
+                skip_book=args.skip_book,
+                skip_derivatives=args.skip_derivatives,
+                skip_macro=args.skip_macro,
+                provider_errors=provider_errors.get(sym) or None,
+                engage_ks=True,
+            )
+            safety_summary[sym] = safety.as_dict()
+            if safety.force_flat and not args.as_json:
+                print(
+                    f"market_safety {sym}: FLAT reasons={safety.reasons} "
+                    f"critical={safety.critical} ks={safety.kill_switch_engaged}"
+                )
     finally:
         conn.close()
 
@@ -318,6 +408,9 @@ def run(argv: list[str] | None = None) -> int:
         "universe": universe_id,
         "market_technicals": market_summary,
         "derivatives_analytics": deriv_summary,
+        "order_book_microstructure": book_summary,
+        "macro_onchain_sentiment": macro_summary,
+        "market_safety": safety_summary,
         "skipped": skipped,
         "errors": errors,
         "duration_s": duration,
@@ -349,6 +442,10 @@ def _emit(payload: dict, as_json: bool, *, dry_run: bool) -> None:
                 )
         for coin, info in payload["derivatives_analytics"].items():
             print(f"  derivatives_analytics {coin} planned={info['planned']}")
+        for sym, info in payload.get("order_book_microstructure", {}).items():
+            print(f"  order_book_microstructure {sym} planned={info['planned']}")
+        if payload.get("macro_onchain_sentiment"):
+            print("  macro_onchain_sentiment global planned=1")
         print(f"db: {payload['db']}")
         print("paper ingest only; no order placement")
 

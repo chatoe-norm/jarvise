@@ -1,0 +1,57 @@
+"""CoinGecko global macro — GET only. No order placement."""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+import httpx
+
+COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
+
+
+def fetch_global_macro(
+    *,
+    client: httpx.Client | None = None,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    """BTC dominance + total crypto market cap → macro_onchain_sentiment row."""
+    own = client is None
+    http = client or httpx.Client(timeout=30.0)
+    try:
+        try:
+            resp = http.get(COINGECKO_GLOBAL, headers={"Accept": "application/json"})
+            resp.raise_for_status()
+            payload = resp.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"coingecko global failed: {exc}. "
+                "Retry: jarvise ingest --skip-macro"
+            ) from exc
+    finally:
+        if own:
+            http.close()
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise RuntimeError("coingecko global: missing data object")
+
+    mcap_pct = data.get("market_cap_percentage") or {}
+    btc_dom = mcap_pct.get("btc") if isinstance(mcap_pct, dict) else None
+    total = data.get("total_market_cap") or {}
+    global_usd = total.get("usd") if isinstance(total, dict) else None
+
+    if btc_dom is None and global_usd is None:
+        raise RuntimeError("coingecko global: empty dominance and market cap")
+
+    ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    return {
+        "timestamp": ts,
+        "fear_greed_index": None,
+        "altcoin_season_index": None,
+        "btc_dominance_pct": float(btc_dom) if btc_dom is not None else None,
+        "exchange_netflow_btc": None,
+        "exchange_reserve_btc": None,
+        "etf_net_flow_usd": None,
+        "global_market_cap_usd": float(global_usd) if global_usd is not None else None,
+    }

@@ -74,7 +74,7 @@ Multi-tenant SaaS; mobile apps; public HTTPS UI (Tailscale-only for now); Binanc
 - Derivatives context (open interest, funding, liquidations) stored bitemporally (revisions never overwrite what was known earlier).
 - Doctrine RAG (NotebookLM + allowlisted fetch/Firecrawl + OpenClaw notes → Qdrant `jarvise_doctrine`) consulted before any trade call.
 
-*Not required for MVP (post-MVP):* ADX/VWAP, multi-timeframe confirmation, volume confirmation, derivatives feeding the analyzer, order-book microstructure.
+*Not required for MVP (post-MVP):* ADX/VWAP, multi-timeframe confirmation, volume confirmation, derivatives as analyzer *triggers* (they already feed safety context).
 
 ### 2.2 Trading / Execution features — minimum
 
@@ -91,10 +91,11 @@ Multi-tenant SaaS; mobile apps; public HTTPS UI (Tailscale-only for now); Binanc
 Per doctrine these are **context that lowers/raises confidence or vetoes**, never a trigger. The roadmap defers on-chain *writers* to "later" (§7), so the MVP minimum is small:
 
 - Derivatives context via CoinGlass (already stored) — funding/OI/liquidations as crowding context.
+- Order-book microstructure + BTC dominance / global mcap writers (Binance public book + CoinGecko global) with `jarvise_risk.market_safety` FLAT/kill-switch gate — see `docs/superpowers/specs/2026-10-01-market-safety-ingest-design.md`.
 - Agent-side **Binance Web3 intel** (`jarvise-binance-intel` skill, no keys): token search/meta, **security audit** (audit `HIGH`, `riskType: RISK`, or sell tax → **FLAT veto**), market rank, social hype, smart-money inflow, tokenized US stocks info, Academy risk education.
 - Doctrine RAG + OpenClaw research notes as the "sentiment/narrative" layer.
 
-*Post-MVP (schema already reserved, no writers):* `macro_onchain_sentiment` (fear/greed, altcoin season, BTC dominance, exchange netflow/reserve, ETF flows) and `order_book_microstructure`. Adding a writer for fear/greed + BTC dominance is a reasonable first post-MVP step, **not** an MVP blocker.
+*Post-MVP (schema reserved):* remaining `macro_onchain_sentiment` fields (fear/greed, altcoin season, exchange netflow/reserve, ETF flows) and spoof-wall heuristics on `order_book_microstructure`.
 
 ---
 
@@ -117,7 +118,10 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 **Data / ingest** (`src/jarvise_ingest/`)
 - `jarvise ingest`: Binance public klines (`GET /api/v3/klines`), timeframes `15m/1h/4h/1d`, `--limit`, paged `--since/--until` backfill, closed candles only, gap report, `--universe paper_core`, `--dry-run`, `--json`. GET-only, no auth.
 - Indicators (`indicators.py`): ATR-14, RSI-14, EMA-20, EMA-200 recomputed over the full stored series; values withheld until seed influence < 1%.
-- CoinGlass v4 derivatives (`providers/coinglass.py`, needs `COINGLASS_API_KEY`): OI OHLC, OI-weighted funding, aggregated liquidations → `derivatives_analytics` keyed by `(symbol, timestamp, ingested_at)` (bitemporal).
+- CoinGlass v4 derivatives (`providers/coinglass.py`, needs `COINGLASS_API_KEY`): OI OHLC, OI-weighted funding, aggregated liquidations (+ best-effort L/S) → `derivatives_analytics` keyed by `(symbol, timestamp, ingested_at)` (bitemporal).
+- Binance public book (`providers/binance_book.py`): `bookTicker` + `depth` → `order_book_microstructure` (spread, ±1% depth USD).
+- CoinGecko global (`providers/coingecko_global.py`): BTC dominance + total market cap → `macro_onchain_sentiment`.
+- Market-safety gate (`jarvise_risk.market_safety`): FLAT + block enqueue/approve on unsafe/stale/anomalous data; kill-switch on critical failures when `JARVISE_MARKET_SAFETY=1` (default on). Flags: `--skip-book`, `--skip-macro`, `--skip-derivatives`.
 - Point-in-time universe (`universe.py`): `paper_core` = BTCUSDT, ETHUSDT (listed 2021-01-01) → `universe_membership`; blocks survivorship bias.
 - SQLite schema + migrations (`db.py`, documented in `data/analytics/mvas-schema.sql`).
 
@@ -171,7 +175,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 
 - **Live timeout / venue flatten** (paper timeout→FLAT only).
 - **P5 autonomy** flag and scheduler path (correctly absent).
-- **On-chain / sentiment writers** for `macro_onchain_sentiment`; **order-book microstructure** writer.
+- **On-chain / sentiment writers** for remaining `macro_onchain_sentiment` fields (fear/greed, ETF, netflow); spoof-wall heuristics.
 - **Stocks/ETFs** data or execution providers.
 - **Multi-venue routing**; venues beyond Binance spot.
 - **Alerts/notifications** for pending approvals (owner currently has to open `/analytics` or run `paper queue`).
@@ -298,7 +302,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
   - [x] **8c.** Re-sync doctrine extracts (worldwide venue; drop Binance-TH-only lock).
   - [x] **8d.** Key permission probe (`jarvise exchange check-key`) + live submit refuses withdraw-scoped keys. Checklist: [`docs/ops/live-enable-checklist.md`](docs/ops/live-enable-checklist.md). **Live flag still false** until owner adds `BINANCE_TRADE_*` and flips `JARVISE_LIVE_TRADING`.
 
-**Post-MVP backlog (do not start without a roadmap update):** P5 autonomy flag + scheduler; `macro_onchain_sentiment` writer (fear/greed, BTC dominance) and derivatives/ADX/MTF inputs to the analyzer; order-book microstructure; stocks/ETFs providers; additional venues/routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
+**Post-MVP backlog (do not start without a roadmap update):** P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (fear/greed, ETF flows, netflow) and ADX/MTF inputs to the analyzer; stocks/ETFs providers; additional venues/routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
 
 ---
 

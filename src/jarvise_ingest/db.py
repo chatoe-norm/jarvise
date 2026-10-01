@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS macro_onchain_sentiment (
     btc_dominance_pct REAL,
     exchange_netflow_btc REAL,
     exchange_reserve_btc REAL,
-    etf_net_flow_usd REAL
+    etf_net_flow_usd REAL,
+    global_market_cap_usd REAL
 );
 
 CREATE TABLE IF NOT EXISTS performance_risk_metrics (
@@ -241,10 +242,21 @@ def _migrate_analysis_timeframe(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_macro_global_mcap(conn: sqlite3.Connection) -> None:
+    """Add global_market_cap_usd to legacy macro_onchain_sentiment tables."""
+    cols = _table_columns(conn, "macro_onchain_sentiment")
+    if not cols or "global_market_cap_usd" in cols:
+        return
+    conn.execute(
+        "ALTER TABLE macro_onchain_sentiment ADD COLUMN global_market_cap_usd REAL"
+    )
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     _migrate_derivatives_bitemporal(conn)
     _migrate_analysis_timeframe(conn)
+    _migrate_macro_global_mcap(conn)
     conn.commit()
 
 
@@ -414,6 +426,124 @@ def count_derivatives(conn: sqlite3.Connection, symbol: str) -> int:
         (symbol,),
     )
     return int(cur.fetchone()[0])
+
+
+def upsert_order_book(conn: sqlite3.Connection, row: dict) -> int:
+    """Insert or replace one order_book_microstructure snapshot."""
+    sql = """
+    INSERT INTO order_book_microstructure (
+        symbol, timestamp, bid_ask_spread, bid_depth_1pct_usd, ask_depth_1pct_usd,
+        largest_buy_wall_price, largest_sell_wall_price, spoof_wall_detected
+    ) VALUES (
+        :symbol, :timestamp, :bid_ask_spread, :bid_depth_1pct_usd, :ask_depth_1pct_usd,
+        :largest_buy_wall_price, :largest_sell_wall_price, :spoof_wall_detected
+    )
+    ON CONFLICT(symbol, timestamp) DO UPDATE SET
+        bid_ask_spread=excluded.bid_ask_spread,
+        bid_depth_1pct_usd=excluded.bid_depth_1pct_usd,
+        ask_depth_1pct_usd=excluded.ask_depth_1pct_usd,
+        largest_buy_wall_price=excluded.largest_buy_wall_price,
+        largest_sell_wall_price=excluded.largest_sell_wall_price,
+        spoof_wall_detected=excluded.spoof_wall_detected
+    """
+    conn.execute(
+        sql,
+        {
+            "symbol": str(row["symbol"]).upper(),
+            "timestamp": int(row["timestamp"]),
+            "bid_ask_spread": row.get("bid_ask_spread"),
+            "bid_depth_1pct_usd": row.get("bid_depth_1pct_usd"),
+            "ask_depth_1pct_usd": row.get("ask_depth_1pct_usd"),
+            "largest_buy_wall_price": row.get("largest_buy_wall_price"),
+            "largest_sell_wall_price": row.get("largest_sell_wall_price"),
+            "spoof_wall_detected": int(row.get("spoof_wall_detected") or 0),
+        },
+    )
+    conn.commit()
+    return 1
+
+
+def latest_order_book(conn: sqlite3.Connection, symbol: str) -> dict | None:
+    cur = conn.execute(
+        """
+        SELECT symbol, timestamp, bid_ask_spread, bid_depth_1pct_usd, ask_depth_1pct_usd,
+               largest_buy_wall_price, largest_sell_wall_price, spoof_wall_detected
+        FROM order_book_microstructure
+        WHERE symbol=?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol.upper(),),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def upsert_macro_sentiment(conn: sqlite3.Connection, row: dict) -> int:
+    """Insert or replace one macro_onchain_sentiment snapshot."""
+    sql = """
+    INSERT INTO macro_onchain_sentiment (
+        timestamp, fear_greed_index, altcoin_season_index, btc_dominance_pct,
+        exchange_netflow_btc, exchange_reserve_btc, etf_net_flow_usd,
+        global_market_cap_usd
+    ) VALUES (
+        :timestamp, :fear_greed_index, :altcoin_season_index, :btc_dominance_pct,
+        :exchange_netflow_btc, :exchange_reserve_btc, :etf_net_flow_usd,
+        :global_market_cap_usd
+    )
+    ON CONFLICT(timestamp) DO UPDATE SET
+        fear_greed_index=excluded.fear_greed_index,
+        altcoin_season_index=excluded.altcoin_season_index,
+        btc_dominance_pct=excluded.btc_dominance_pct,
+        exchange_netflow_btc=excluded.exchange_netflow_btc,
+        exchange_reserve_btc=excluded.exchange_reserve_btc,
+        etf_net_flow_usd=excluded.etf_net_flow_usd,
+        global_market_cap_usd=excluded.global_market_cap_usd
+    """
+    conn.execute(
+        sql,
+        {
+            "timestamp": int(row["timestamp"]),
+            "fear_greed_index": row.get("fear_greed_index"),
+            "altcoin_season_index": row.get("altcoin_season_index"),
+            "btc_dominance_pct": row.get("btc_dominance_pct"),
+            "exchange_netflow_btc": row.get("exchange_netflow_btc"),
+            "exchange_reserve_btc": row.get("exchange_reserve_btc"),
+            "etf_net_flow_usd": row.get("etf_net_flow_usd"),
+            "global_market_cap_usd": row.get("global_market_cap_usd"),
+        },
+    )
+    conn.commit()
+    return 1
+
+
+def latest_macro_sentiment(conn: sqlite3.Connection) -> dict | None:
+    cur = conn.execute(
+        """
+        SELECT timestamp, fear_greed_index, altcoin_season_index, btc_dominance_pct,
+               exchange_netflow_btc, exchange_reserve_btc, etf_net_flow_usd,
+               global_market_cap_usd
+        FROM macro_onchain_sentiment
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def latest_derivatives_as_of(
+    conn: sqlite3.Connection, symbol: str, *, as_of_ms: int | None = None
+) -> dict | None:
+    """Newest CoinGlass coin row known by as_of (pair symbol → base coin)."""
+    coin = symbol.upper()
+    for quote in ("USDT", "USD", "BUSD", "USDC"):
+        if coin.endswith(quote) and len(coin) > len(quote):
+            coin = coin[: -len(quote)]
+            break
+    cutoff = int(as_of_ms if as_of_ms is not None else time.time() * 1000)
+    rows = as_of_derivatives(conn, coin, cutoff)
+    return rows[-1] if rows else None
 
 
 def load_latest_candle(
