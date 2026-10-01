@@ -215,6 +215,8 @@ def page(body: str, title: str = "Jarvise", *, active: str = "control") -> HTMLR
     button.ok {{ background:var(--ok); color:#041018; }}
     code {{ font-size:.85rem; }}
     pre {{ white-space:pre-wrap; word-break:break-word; background:#161d27; padding:.75rem; border-radius:6px; font-size:.8rem; }}
+    details > summary {{ cursor:pointer; list-style-position:outside; }}
+    details > pre {{ margin-top:.75rem; }}
     table {{ width:100%; border-collapse:collapse; font-size:.85rem; }}
     th, td {{ text-align:left; padding:.45rem .4rem; border-bottom:1px solid #243041; vertical-align:top; }}
     th {{ color:var(--muted); font-weight:600; }}
@@ -637,8 +639,9 @@ def analytics(
     {_paper_metrics_html()}
     {_approval_queue_html()}
     <div class="card">
-      <strong>Pipeline status</strong>
-      <pre>ingest:
+      <details>
+        <summary><strong>Pipeline status</strong></summary>
+        <pre>ingest:
 {html.escape(format_status_pre(ingest))}
 
 rag:
@@ -649,6 +652,7 @@ paper:
 
 paper_expire:
 {html.escape(format_status_pre(paper_expire))}</pre>
+      </details>
     </div>
     """
 
