@@ -61,7 +61,6 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
             tf,
             "--limit",
             "200",
-            "--skip-derivatives",
             "--json",
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)

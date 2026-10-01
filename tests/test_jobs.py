@@ -61,6 +61,7 @@ def test_ingest_also_fetches_paper_timeframe(monkeypatch) -> None:
     tfs = []
     for cmd in captured:
         assert "--timeframe" in cmd
+        assert "--skip-derivatives" not in cmd
         tfs.append(cmd[cmd.index("--timeframe") + 1])
     assert tfs == ["1h", "4h"]
 
