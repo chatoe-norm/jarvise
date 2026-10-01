@@ -150,6 +150,11 @@ def test_analytics_pipeline_status_pretty(monkeypatch, tmp_path: Path) -> None:
     assert b"<details>" in resp.content
     assert b"<summary>" in resp.content
     assert b"<details open" not in resp.content
+    # Pipeline accordion is rendered after the analysis table / empty-or-error card.
+    pipe_at = resp.content.find(b"Pipeline status")
+    assert pipe_at > resp.content.find(b'name="timeframe"')
+    if b"</table>" in resp.content:
+        assert pipe_at > resp.content.rfind(b"</table>")
     assert b"&quot;chunks&quot;: 12" in resp.content
     assert b"paper:" in resp.content
     assert b"paper_expire:" in resp.content
