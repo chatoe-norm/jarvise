@@ -1,56 +1,56 @@
 # Jarvise P4-C — live submit on Approve — design
 
-**Date:** 2026-09-27  
-**Status:** Draft for owner review — **no implementation until this spec is approved and an implementation plan exists**  
-**Depends on:** P4 paper approval slice B stable (enqueue → Approve → paper fill path proven on VPS 2026-09-27)  
+**Date:** 2026-09-27; **refreshed:** 2026-10-01  
+**Status:** Ready for owner review — **no implementation until APPROVED + plan accepted**  
+**Depends on:** §5.1–5.5 shipped (paper approval, jobs 24/7, expectancy, replay, risk caps + timeout→FLAT paper)  
 **Roadmap:** [`2026-09-23-product-roadmap-design.md`](2026-09-23-product-roadmap-design.md) P4 (live leg)  
 **Prior slice:** [`2026-09-23-p4-manual-approval-paper-slice-design.md`](2026-09-23-p4-manual-approval-paper-slice-design.md)  
+**Risk (paper, shared):** [`2026-09-29-paper-risk-caps-design.md`](2026-09-29-paper-risk-caps-design.md) → package `jarvise_risk`  
 **Related:** [`2026-09-23-p3-exchange-readonly-design.md`](2026-09-23-p3-exchange-readonly-design.md) (read-only stays; trade module is separate)
 
 ## Goal
 
-On **Approve** of a pending `approval_queue` row, optionally place a **size-capped live Binance spot order** and record it in `live_orders`, while keeping autonomy **off** and paper fills available as the default/safe path until explicitly gated.
+On **Approve** of a pending `approval_queue` row, optionally place a **size-capped live Binance spot order** and record it in `live_orders`, while keeping autonomy **off** and paper fills as the default path until explicitly gated.
 
 Climb: paper → **manual approval with live submit** → (later) autonomy. Do not enable P5 in this slice.
 
 ## Non-goals (this slice)
 
 - P5 autonomy / unattended live submit
-- Timeout → FLAT (auto-close open live or paper positions)
+- Live position timeout → FLAT / auto-close on venue (paper timeout→FLAT already shipped in §5.5)
 - Futures / margin / OCO / cancel / withdraw APIs
-- Multi-venue live routing (Binance spot only)
+- Multi-venue live routing (Binance spot only for C)
 - Changing ingest, RAG, or read-only balance sync allowlists
-- Replacing the paper ledger — paper Approve path remains for `--paper-only` / when live flag is off
+- Replacing the paper ledger — paper Approve path remains when live flag is off
 
-## Locked decisions (from roadmap + P4-B follow-ups + owner prefs)
+## Locked decisions
 
-1. **Gate:** Live submit only when `JARVISE_LIVE_TRADING=true` (default **false**). When false, Approve behaves exactly as P4-B (paper `apply_signal` only).
-2. **Separate trade module:** New package `jarvise_trade` — **do not** add order POSTs into `jarvise_exchange.binance_spot`. Review gate: read package stays GET-only account/balance.
-3. **Trade keys:** `BINANCE_TRADE_API_KEY` + `BINANCE_TRADE_API_SECRET` (HMAC) or PEM pair via `BINANCE_TRADE_PRIVATE_KEY_PATH` (same signing patterns as P3 read path). Distinct from read-only balance keys. Never render in HTML/logs.
-4. **Venue / order type:** Binance global **spot MARKET** order for the approved `symbol`; side from queue `action` (`long`→BUY, `flat`/`reduce`→SELL as sized by plan). No limit/IOC in C.
-5. **Sizing:** Cap notional by `min(size_pct_equity × configured_live_equity, JARVISE_MAX_ORDER_NOTIONAL_USD)`; reject Approve if caps fail (queue → `failed`, no partial live leave).
-6. **Daily loss:** Before submit, if realized day PnL from `live_orders` that UTC day ≤ `-JARVISE_MAX_DAILY_LOSS_USD`, block live Approve.
-7. **Kill-switch:** Engaged → no enqueue (already) and no live or paper Approve fills.
-8. **Audit:** Every attempt writes `live_orders` (requested, submitted, venue ack / error, timestamps, approval_id).
-9. **UI:** `/analytics` keeps Approve/Reject; when live flag on, banner must **not** say PAPER ONLY alone — show explicit **LIVE APPROVAL ENABLED** warning. No autonomy controls.
-10. **Paper still first:** `--auto-fill` and live-off Approve remain paper-only simulated fills. Live Approve does **not** also write paper fills (no double ledger); paper and live stay separate.
+1. **Gate:** Live submit only when `JARVISE_LIVE_TRADING=true` (default **false**). When false, Approve = paper `apply_signal` only (P4-B + risk caps).
+2. **Separate trade module:** New package `jarvise_trade` — **do not** add order POSTs into `jarvise_exchange.binance_spot`. Read package stays GET-only.
+3. **Trade keys:** `BINANCE_TRADE_API_KEY` + `BINANCE_TRADE_API_SECRET` (HMAC) or PEM via `BINANCE_TRADE_PRIVATE_KEY_PATH`. Distinct from read-only balance keys. Never render in HTML/logs.
+4. **Venue / order type:** Binance global **spot MARKET**; side from queue `action` (`long`→BUY; `flat` with open live inventory → SELL sized by plan — details in plan). No limit/IOC in C.
+5. **Sizing / caps:** Reuse **`jarvise_risk`** (`JARVISE_MAX_NOTIONAL_PER_ORDER`, `JARVISE_MAX_DAILY_LOSS_USD`, `JARVISE_DRAWDOWN_LOCK_PCT`) plus live-day PnL from `live_orders`. Optional tighter live override env only if needed; prefer one shared cap surface.
+6. **Kill-switch:** Engaged → no enqueue and no live or paper Approve fills (already).
+7. **Audit:** Every attempt writes `live_orders` (requested, submitted, venue ack/error, timestamps, approval_id).
+8. **UI:** When live flag on, `/analytics` shows **LIVE APPROVAL ENABLED** (not PAPER ONLY alone). No autonomy controls.
+9. **Paper still first:** Live Approve does **not** also write paper fills (no double ledger).
 
 ## Architecture
 
 ```text
                  JARVISE_LIVE_TRADING?
-Approve ──────────── false ──► apply_signal (paper) ──► paper_* tables
+Approve ──────────── false ──► jarvise_risk → apply_signal (paper)
    │
-   └── true ──► risk caps + kill-switch
+   └── true ──► jarvise_risk + kill-switch
                   │
-                  ├── fail → approval status=failed; live_orders attempt=error
-                  └── ok → signed spot MARKET POST
+                  ├── fail → approval failed; live_orders attempt=error
+                  └── ok → jarvise_trade spot MARKET POST
                               │
                               ▼
                          live_orders (audit only; no paper mirror)
 ```
 
-**Boundary:** Read-only sync path unchanged. Trade HTTP lives only in `jarvise_trade` with an explicit allowlist (`POST /api/v3/order` only for this slice).
+**Boundary:** Trade HTTP only in `jarvise_trade` allowlist (`POST /api/v3/order` for this slice).
 
 ## Data model (contract)
 
@@ -74,46 +74,45 @@ CREATE TABLE IF NOT EXISTS live_orders (
 );
 ```
 
-Exact columns land in the implementation plan; names above are the roadmap contract.
-
 ## Caps (env)
 
-| Env | Default (proposal) | Role |
-|-----|--------------------|------|
+| Env | Default | Role |
+|-----|---------|------|
 | `JARVISE_LIVE_TRADING` | `false` | Master live gate |
-| `JARVISE_MAX_ORDER_NOTIONAL_USD` | `50` | Per-order notional cap |
-| `JARVISE_MAX_DAILY_LOSS_USD` | `50` | Block further live Approves that day |
+| `JARVISE_MAX_NOTIONAL_PER_ORDER` | `2000` | Shared with paper (`jarvise_risk`) — consider tighter live default in plan |
+| `JARVISE_MAX_DAILY_LOSS_USD` | `100` | Paper equity + live day PnL checks |
+| `JARVISE_DRAWDOWN_LOCK_PCT` | `5` | Shared drawdown lock |
 | Trade API key/secret (or PEM) | unset | Required only when live flag true |
 
 ## Error handling
 
-- Missing trade keys with live flag on → Approve fails closed (`failed`), no paper fill unless owner uses explicit paper path
+- Missing trade keys with live flag on → Approve fails closed (`failed`); no silent paper fill
 - Venue reject / network → `live_orders` row + approval `failed`
-- Flat / zero size actions → no live HTTP (same as paper: no-op fill)
+- Flat / zero size → no live HTTP
 
-## Testing (plan will expand)
+## Testing (plan expands)
 
-- Unit: caps block oversize and daily-loss
-- Unit: live flag off → zero trade HTTP (mock)
-- Unit: kill-switch blocks
-- Integration mock: signed POST allowlist only
-- Regression: P3 read-only package still has no order functions; P4-B paper tests pass
+- Unit: live flag off → zero trade HTTP
+- Unit: caps + kill-switch block
+- Mock: signed POST allowlist only
+- Regression: `jarvise_exchange` still GET-only; paper suite green
 
 ## Success criteria
 
 1. Spec + implementation plan accepted before product code
 2. Default deploy: Approve remains paper-only
-3. With live flag + keys + caps: one Approve places at most one size-capped spot order and audits it
-4. No autonomy flag, no withdraw, no futures
-5. Code review: read-only exchange package unchanged for trade POSTs
+3. With live flag + keys + caps: one Approve → at most one size-capped spot order + audit
+4. No autonomy, no withdraw, no futures
+5. Review: read-only exchange package unchanged for trade POSTs
 
 ## Follow-ups (out of C)
 
-- Timeout → FLAT
+- Live timeout / venue flatten
 - P5 autonomy
-- n8n schedules for enqueue/expire
 - Multi-venue live adapters
+- Ops hygiene (§5.8): notifications, USD balance valuation, key permission audit
 
 ## Stabilization evidence (pre-req)
 
-VPS smoke 2026-09-27 (`def1f8f`): ingest BTCUSDT 4h → analyze → `paper run` enqueue → `paper approve` → status `approved` (action was `flat`, fills empty, equity 10000). Paper approval loop works; live not exercised.
+- VPS smoke 2026-09-27: paper approval loop
+- 2026-09-29: paper jobs, expectancy, replay, risk caps + paper timeout→FLAT on `main` (`aa79a40`+)
