@@ -17,6 +17,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
+from jarvise_exchange.value import value_spot_balances
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_paper_account,
@@ -325,25 +326,51 @@ def _exchange_panel_html() -> str:
         return ""
     if not result.balances:
         rows_html = "<p class=\"muted\">no non-zero assets</p>"
+        total_html = ""
     else:
+        try:
+            valued = value_spot_balances(result.balances)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("exchange value soft-fail: %s", type(exc).__name__)
+            valued = None
         lines = [
-            "<tr><th>Asset</th><th>Free</th><th>Locked</th><th>Total</th></tr>"
+            "<tr><th>Asset</th><th>Free</th><th>Locked</th><th>Total</th><th>~USD</th></tr>"
         ]
-        for b in result.balances:
-            lines.append(
-                f"<tr><td>{html.escape(b.asset)}</td><td>{html.escape(str(b.free))}</td>"
-                f"<td>{html.escape(str(b.locked))}</td><td>{html.escape(str(b.total))}</td></tr>"
+        if valued is None:
+            for b in result.balances:
+                lines.append(
+                    f"<tr><td>{html.escape(b.asset)}</td>"
+                    f"<td>{html.escape(str(b.free))}</td>"
+                    f"<td>{html.escape(str(b.locked))}</td>"
+                    f"<td>{html.escape(str(b.total))}</td>"
+                    f"<td>—</td></tr>"
+                )
+            total_html = ""
+        else:
+            for row in valued.rows:
+                b = row.balance
+                usd_cell = (
+                    html.escape(f"{row.usd:.2f}") if row.usd is not None else "—"
+                )
+                lines.append(
+                    f"<tr><td>{html.escape(b.asset)}</td>"
+                    f"<td>{html.escape(str(b.free))}</td>"
+                    f"<td>{html.escape(str(b.locked))}</td>"
+                    f"<td>{html.escape(str(b.total))}</td>"
+                    f"<td>{usd_cell}</td></tr>"
+                )
+            total_html = (
+                f'<p><strong>Total ~USD</strong> '
+                f"{html.escape(f'{valued.total_usd:.2f}')}"
+                f' <span class="muted">(USDT proxy; unpriced excluded)</span></p>'
             )
-        rows_html = (
-            "<table>"
-            + "".join(lines)
-            + "</table>"
-        )
+        rows_html = "<table>" + "".join(lines) + "</table>"
     return f"""
     <div class="card">
       <strong>Exchange (spot)</strong>
       <span class="muted">binance · fetched_at_ms={result.fetched_at_ms} · read-only</span>
       {rows_html}
+      {total_html}
     </div>
     """
 

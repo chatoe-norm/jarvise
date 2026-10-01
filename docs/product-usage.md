@@ -45,7 +45,7 @@ Entrypoint: `.venv\Scripts\jarvise` (see [`src/jarvise/cli.py`](../src/jarvise/c
 | `jarvise ingest ...` | Fetch OHLCV (+ CoinGlass) → `data/analytics/jarvise.db` (Binance klines = current default provider; venue-agnostic later) |
 | `jarvise analyze ...` | Read DB → regime / confidence / size (paper) |
 | `jarvise paper ...` | Enqueue / approve paper fills into local ledger (no exchange orders) |
-| `jarvise exchange ...` | Read-only spot balance sync (Binance first; no order placement) |
+| `jarvise exchange ...` | Read-only spot balance sync (Binance first; no order placement). `/analytics` shows ~USD via public USDT tickers. |
 | `jarvise rag ...` | Sync doctrine → Qdrant |
 
 Daily local examples:
