@@ -164,7 +164,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - **Timeout semantics**: paper timeout → `timed_out` + FLAT open positions (`resolve_reason=timeout_flat`). Live venue flatten is out of P4-C.
 - **Exchange panel**: raw balances + **~USD** (Binance public USDT ticker; stables face value; unpriced shown as —).
 - **OpenClaw paper-only**: `OPENCLAW_PAPER_ONLY` is a convention enforced by config/docs, not by Python code.
-- **Doctrine text drift**: `data/analytics/sources/jarvise-doctrine.txt` still says "Binance TH is a regulated Thai spot venue"; `AGENTS.md` (newer) says trade worldwide, Binance is one option. Re-sync the notebook extract when doctrine is next refreshed.
+- **Doctrine text:** local extracts aligned 2026-10-01 with AGENTS worldwide venue policy (Binance = first adapter). Notebook sources may still need a later refresh.
 - **Live enablement**: code present but flag off; trade keys unset; no withdraw; ops checklist §5.8 before turning on.
 
 ### 3.4 Missing entirely
@@ -295,7 +295,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 - [ ] **8. Ops hygiene before any live trade.**
   - [x] **8a.** `/analytics` USD valuation of exchange balances (public USDT prices).
   - [x] **8b.** Pending-approval Telegram (enqueue + hourly digest; soft-fail).
-  - [ ] Re-sync doctrine extract (remove Binance-TH-only wording)
+  - [x] **8c.** Re-sync doctrine extracts (worldwide venue; drop Binance-TH-only lock).
   - [ ] Confirm VPS trade key has **spot trade only, no withdraw**; then optional `JARVISE_LIVE_TRADING=true`.
 
 **Post-MVP backlog (do not start without a roadmap update):** P5 autonomy flag + scheduler; `macro_onchain_sentiment` writer (fear/greed, BTC dominance) and derivatives/ADX/MTF inputs to the analyzer; order-book microstructure; stocks/ETFs providers; additional venues/routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
