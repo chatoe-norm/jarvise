@@ -624,14 +624,11 @@ def upsert_analysis_output(conn: sqlite3.Connection, row: dict) -> None:
     conn.commit()
 
 
-def list_analysis_output(
-    conn: sqlite3.Connection,
+def _analysis_output_where(
     *,
     symbol: str | None = None,
     timeframe: str | None = None,
-    limit: int = 50,
-) -> list[dict]:
-    """Return latest analysis_output rows, newest first."""
+) -> tuple[str, list[object]]:
     clauses: list[str] = []
     params: list[object] = []
     if symbol:
@@ -641,8 +638,38 @@ def list_analysis_output(
         clauses.append("timeframe = ?")
         params.append(timeframe)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
+
+
+def count_analysis_output(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+) -> int:
+    """Count analysis_output rows matching optional filters."""
+    where, params = _analysis_output_where(symbol=symbol, timeframe=timeframe)
+    cur = conn.execute(
+        f"SELECT COUNT(*) AS n FROM analysis_output {where}",
+        params,
+    )
+    row = cur.fetchone()
+    return int(row["n"] if row is not None else 0)
+
+
+def list_analysis_output(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """Return latest analysis_output rows, newest first."""
+    where, params = _analysis_output_where(symbol=symbol, timeframe=timeframe)
     lim = max(1, min(int(limit), 500))
-    params.append(lim)
+    off = max(0, int(offset))
+    params.extend([lim, off])
     cur = conn.execute(
         f"""
         SELECT analysis_id, timestamp, symbol, timeframe, regime_state,
@@ -650,7 +677,7 @@ def list_analysis_output(
         FROM analysis_output
         {where}
         ORDER BY timestamp DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
         params,
     )

@@ -19,6 +19,7 @@ from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_aut
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_exchange.value import value_spot_balances
 from jarvise_ingest.db import (
+    count_analysis_output,
     ensure_paper_account,
     get_paper_account,
     list_analysis_output,
@@ -185,25 +186,32 @@ def load_analysis_rows(
     *,
     symbol: str | None = None,
     timeframe: str | None = None,
-    limit: int = 50,
-) -> tuple[list[dict[str, Any]], str | None]:
+    limit: int = 10,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int, str | None]:
     path = db_path()
     if not path.exists():
-        return [], f"Database not found: {path}"
+        return [], 0, f"Database not found: {path}"
     try:
         conn = open_db(path)
         try:
+            total = count_analysis_output(
+                conn,
+                symbol=symbol or None,
+                timeframe=timeframe or None,
+            )
             rows = list_analysis_output(
                 conn,
                 symbol=symbol or None,
                 timeframe=timeframe or None,
                 limit=limit,
+                offset=offset,
             )
         finally:
             conn.close()
-        return rows, None
+        return rows, total, None
     except Exception as exc:  # noqa: BLE001
-        return [], str(exc)
+        return [], 0, str(exc)
 
 
 def load_paper_ledger() -> tuple[dict[str, Any], str | None]:
@@ -340,15 +348,21 @@ def api_analysis(
     _: None = Depends(require_auth),
     symbol: str = Query(""),
     timeframe: str = Query(""),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
     sym = symbol.strip().upper() or None
     tf = timeframe.strip() or None
-    rows, err = load_analysis_rows(symbol=sym, timeframe=tf, limit=limit)
+    rows, total, err = load_analysis_rows(
+        symbol=sym, timeframe=tf, limit=limit, offset=offset
+    )
     payload: dict[str, Any] = {
         "paper_only": PAPER_ONLY,
         "db": str(db_path()),
         "rows": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
     }
     if err:
         payload["ok"] = False
