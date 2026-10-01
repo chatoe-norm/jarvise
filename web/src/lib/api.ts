@@ -53,6 +53,9 @@ export type MetricsPayload = {
 export type AnalysisPayload = {
   ok: boolean;
   rows: Array<Record<string, unknown>>;
+  total?: number;
+  limit?: number;
+  offset?: number;
   error?: string;
 };
 
@@ -108,10 +111,16 @@ export const api = {
   status: () => request<StatusPayload>("/api/status"),
   paper: () => request<PaperPayload>("/api/paper"),
   metrics: () => request<MetricsPayload>("/api/paper/metrics"),
-  analysis: (symbol = "", timeframe = "") => {
+  analysis: (
+    symbol = "",
+    timeframe = "",
+    opts?: { limit?: number; offset?: number },
+  ) => {
     const q = new URLSearchParams();
     if (symbol) q.set("symbol", symbol);
     if (timeframe) q.set("timeframe", timeframe);
+    if (opts?.limit != null) q.set("limit", String(opts.limit));
+    if (opts?.offset != null) q.set("offset", String(opts.offset));
     const qs = q.toString();
     return request<AnalysisPayload>(`/api/analysis${qs ? `?${qs}` : ""}`);
   },

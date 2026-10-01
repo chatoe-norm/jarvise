@@ -2,6 +2,7 @@ from pathlib import Path
 
 from jarvise_ingest.db import (
     append_derivatives,
+    count_analysis_output,
     count_market,
     list_analysis_output,
     open_db,
@@ -122,6 +123,11 @@ def test_list_analysis_output_filters(tmp_path: Path):
     assert len(btc_4h) == 1
     assert btc_4h[0]["analysis_id"] == "a1"
     assert btc_4h[0]["timeframe"] == "4h"
+
+    assert count_analysis_output(conn) == 3
+    assert count_analysis_output(conn, symbol="BTCUSDT") == 2
+    page = list_analysis_output(conn, limit=1, offset=1)
+    assert [r["analysis_id"] for r in page] == ["a3"]
     conn.close()
 
 

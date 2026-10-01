@@ -87,6 +87,9 @@ def test_analytics_and_api_with_rows(monkeypatch, tmp_path: Path) -> None:
     payload = api.json()
     assert payload["ok"] is True
     assert payload["paper_only"] is True
+    assert payload["total"] == 1
+    assert payload["limit"] == 10
+    assert payload["offset"] == 0
     assert len(payload["rows"]) == 1
     assert payload["rows"][0]["action"] == "long"
     assert payload["rows"][0]["timeframe"] == "4h"
@@ -95,6 +98,52 @@ def test_analytics_and_api_with_rows(monkeypatch, tmp_path: Path) -> None:
     assert filtered.status_code == 200
     assert filtered.json()["ok"] is True
     assert filtered.json()["rows"] == []
+    assert filtered.json()["total"] == 0
+
+
+def test_api_analysis_pagination(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    for i in range(25):
+        upsert_analysis_output(
+            conn,
+            {
+                "analysis_id": f"p{i}",
+                "timestamp": 1_700_000_000_000 + i,
+                "symbol": "BTCUSDT",
+                "timeframe": "4h",
+                "regime_state": "trend_up",
+                "confidence_score": 0.5,
+                "action": "long",
+                "invalidation_price": 90.0,
+                "size_pct_equity": 1.0,
+                "thesis": f"row {i}",
+            },
+        )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+
+    page1 = client.get("/api/analysis", params={"limit": 10, "offset": 0})
+    assert page1.status_code == 200
+    body1 = page1.json()
+    assert body1["ok"] is True
+    assert body1["total"] == 25
+    assert body1["limit"] == 10
+    assert body1["offset"] == 0
+    assert len(body1["rows"]) == 10
+    assert body1["rows"][0]["analysis_id"] == "p24"
+
+    page2 = client.get("/api/analysis", params={"limit": 10, "offset": 10})
+    body2 = page2.json()
+    assert len(body2["rows"]) == 10
+    assert body2["offset"] == 10
+    assert body2["rows"][0]["analysis_id"] == "p14"
+
+    default = client.get("/api/analysis")
+    assert default.json()["limit"] == 10
+    assert len(default.json()["rows"]) == 10
 
 
 def test_parse_status_payload_json_and_legacy_text() -> None:
