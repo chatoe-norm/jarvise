@@ -1,0 +1,190 @@
+"""Second-layer paper reviewer: Jarvise filters, Claude (OpenRouter) confirms / rejects / defers.
+
+Paper only. Decisions are applied exclusively through approve_approval / reject_approval,
+so kill-switch, market safety, expiry and risk caps are re-checked by the existing code.
+The auto path never submits exchange orders and refuses to run when live trading is on.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from jarvise.rag import doctrine_snippets
+from jarvise_ingest.db import (
+    ensure_paper_account,
+    get_analysis_output,
+    get_approval,
+    get_paper_position,
+    insert_llm_review,
+    list_approvals,
+    list_paper_positions,
+    load_latest_candle,
+    set_approval_resolve_reason,
+)
+from jarvise_paper.approval import approve_approval, reject_approval
+from jarvise_paper.llm_openrouter import OpenRouterError, chat_json
+from jarvise_paper.recommendation import doctrine_query
+from jarvise_risk import RiskCaps, estimated_notional, evaluate_from_db, load_risk_caps
+from jarvise_trade import live_trading_enabled
+
+PROMPT_VERSION = "2026-10-02.1"
+DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
+DECISIONS = frozenset({"approve", "reject", "defer"})
+REASON_MAX = 280
+UNPARSEABLE = "auto:claude:unparseable"
+_TRUE = {"1", "true", "yes", "on"}
+
+SYSTEM_PROMPT = f"""You are the second-layer reviewer for Jarvise, a PAPER trading ledger (no real orders).
+Jarvise already filtered this candidate with deterministic rules. Your only job is to confirm, reject, or defer it.
+Rules:
+1. Reply with ONE JSON object and nothing else: {{"decision": "approve" | "reject" | "defer", "reason": "<= 280 chars"}}.
+2. You MUST answer "defer" when ANY of these hold: doctrine is empty AND candidate.confidence_score < 0.70; ledger.same_symbol_open is true; market_safety.reasons is non-empty.
+3. Never change size, direction, or price. Never suggest live orders.
+4. "approve" only when indicators, doctrine and policy agree with the candidate's thesis; "reject" on a clear contradiction; otherwise "defer".
+5. Write the reason in Thai, short, for an owner who does not read charts.
+Prompt version: {PROMPT_VERSION}"""
+
+ChatFn = Callable[..., dict[str, Any]]
+DoctrineFn = Callable[[str], list[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class AutoDecideConfig:
+    enabled: bool
+    model: str
+    min_conf: float
+    max_per_run: int
+    timeout_s: float
+    api_key: str | None
+
+
+def _fenv(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+def load_auto_decide_config() -> AutoDecideConfig:
+    key = (os.environ.get("OPENROUTER_API_KEY") or "").strip() or None
+    return AutoDecideConfig(
+        enabled=(os.environ.get("JARVISE_PAPER_AUTO_DECIDE") or "").strip().lower() in _TRUE,
+        model=(os.environ.get("JARVISE_AUTO_DECIDE_MODEL") or DEFAULT_MODEL).strip(),
+        min_conf=_fenv("JARVISE_AUTO_DECIDE_MIN_CONF", 0.55),
+        max_per_run=max(0, int(_fenv("JARVISE_AUTO_DECIDE_MAX_PER_RUN", 4))),
+        timeout_s=_fenv("JARVISE_AUTO_DECIDE_TIMEOUT_S", 30.0),
+        api_key=key,
+    )
+
+
+def filter_candidates(
+    conn: Any,
+    rows: list[dict[str, Any]],
+    *,
+    min_conf: float,
+    now_ms: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Hard filters before any LLM call. Returns (eligible oldest-first, filtered_out)."""
+    eligible: list[dict[str, Any]] = []
+    filtered: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda r: int(r.get("created_at_ms") or 0)):
+        reason: str | None = None
+        action = str(row.get("action") or "flat").lower()
+        size = float(row.get("size_pct_equity") or 0.0)
+        conf = float(row.get("confidence_score") or 0.0)
+        if action == "flat":
+            reason = "action_flat"
+        elif size <= 0.0:
+            reason = "size_zero"
+        elif conf < min_conf:
+            reason = "low_conf"
+        elif int(row.get("expires_at_ms") or 0) <= now_ms:
+            reason = "expired"
+        elif evaluate_from_db(conn, str(row["symbol"]), now_ms=now_ms).force_flat:
+            reason = "force_flat"
+        if reason:
+            filtered.append({"id": row["id"], "symbol": row.get("symbol"), "reason": reason})
+        else:
+            eligible.append(row)
+    return eligible, filtered
+
+
+def build_brief(
+    conn: Any,
+    row: dict[str, Any],
+    *,
+    doctrine: list[str],
+    now_ms: int,
+    caps: RiskCaps,
+    min_conf: float,
+) -> dict[str, Any]:
+    symbol = str(row["symbol"]).upper()
+    timeframe = str(row["timeframe"])
+    candle = load_latest_candle(conn, symbol, timeframe) or {}
+    analysis = (
+        get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
+    ) or {}
+    account = ensure_paper_account(conn)
+    positions = list_paper_positions(conn)
+    size = float(row.get("size_pct_equity") or 0.0)
+    safety = evaluate_from_db(conn, symbol, now_ms=now_ms).as_dict()
+    return {
+        "candidate": {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "action": row.get("action"),
+            "regime_state": row.get("regime_state"),
+            "confidence_score": row.get("confidence_score"),
+            "size_pct_equity": size,
+            "invalidation_price": analysis.get("invalidation_price"),
+            "thesis": analysis.get("thesis"),
+            "expires_at_ms": row.get("expires_at_ms"),
+        },
+        "indicators": {
+            key: candle.get(key) for key in ("close", "ema_20", "ema_200", "rsi_14", "atr_14")
+        },
+        "ledger": {
+            "equity": float(account["equity"]),
+            "cash": float(account["cash"]),
+            "open_positions": len(positions),
+            "same_symbol_open": get_paper_position(conn, symbol) is not None,
+        },
+        "market_safety": {
+            "ok": safety["ok"],
+            "force_flat": safety["force_flat"],
+            "reasons": list(safety["reasons"]),
+        },
+        "doctrine": list(doctrine),
+        "policy": {
+            "min_conf": min_conf,
+            "max_notional_per_order_usd": float(caps.max_notional_per_order),
+            "max_daily_loss_usd": float(caps.max_daily_loss_usd),
+            "estimated_notional_usd": round(
+                estimated_notional(equity=float(account["equity"]), size_pct_equity=size), 2
+            ),
+            "mode": "paper only — no real orders; never change size or direction",
+        },
+        "prompt_version": PROMPT_VERSION,
+    }
+
+
+def brief_hash(brief: dict[str, Any]) -> str:
+    raw = json.dumps(brief, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def parse_decision(obj: Any) -> tuple[str, str]:
+    """Strict contract: exactly {decision, reason}. Anything else → defer/unparseable."""
+    if not isinstance(obj, dict) or set(obj) != {"decision", "reason"}:
+        return "defer", UNPARSEABLE
+    decision = str(obj.get("decision") or "").strip().lower()
+    if decision not in DECISIONS:
+        return "defer", UNPARSEABLE
+    reason = str(obj.get("reason") or "").strip()[:REASON_MAX]
+    return decision, reason
