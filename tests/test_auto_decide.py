@@ -316,6 +316,7 @@ def test_lookup_exception_defers_candidate_and_batch_continues(tmp_path: Path) -
 
     out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("approve"), doctrine_lookup=lookup)
     assert len(calls) == 2
+    assert out["processed"] == 1
     reasons = {d["id"]: d["reason"] for d in out["deferred"]}
     assert reasons["a"].startswith("auto:error:RuntimeError:")
     assert [x["id"] for x in out["approved"]] == ["b"]

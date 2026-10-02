@@ -239,13 +239,13 @@ def run_auto_decide(
         if not cfg.api_key:
             deferred.append({**entry, "reason": "missing_api_key"})
             continue
-        processed += 1
         try:
             hits = lookup(doctrine_query(row))
             doctrine = [str(h.get("text")) for h in hits if isinstance(h, dict) and h.get("text")]
             if not doctrine:
                 doctrine_unavailable = True
             brief = build_brief(conn, row, doctrine=doctrine, now_ms=ts, caps=caps, min_conf=cfg.min_conf)
+            processed += 1
             try:
                 raw = chat(
                     [
