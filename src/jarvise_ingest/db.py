@@ -441,6 +441,27 @@ def count_derivatives(conn: sqlite3.Connection, symbol: str) -> int:
     return int(cur.fetchone()[0])
 
 
+_INDICATOR_COLUMNS = frozenset({"atr_14", "rsi_14", "ema_20", "ema_200"})
+
+
+def count_indicator_ready(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    column: str = "ema_200",
+) -> int:
+    """Rows where an indicator column is populated (warm-up complete)."""
+    if column not in _INDICATOR_COLUMNS:
+        raise ValueError(f"unknown indicator column: {column}")
+    cur = conn.execute(
+        f"SELECT COUNT(*) FROM market_technicals "
+        f"WHERE symbol=? AND timeframe=? AND {column} IS NOT NULL",
+        (symbol.upper(), timeframe),
+    )
+    return int(cur.fetchone()[0])
+
+
 def upsert_order_book(conn: sqlite3.Connection, row: dict) -> int:
     """Insert or replace one order_book_microstructure snapshot."""
     sql = """
