@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
 import httpx
 
-COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
+COINGECKO_PUBLIC_GLOBAL = "https://api.coingecko.com/api/v3/global"
+COINGECKO_PRO_GLOBAL = "https://pro-api.coingecko.com/api/v3/global"
+
+
+def _env_key(*names: str) -> str:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip():
+            return raw.strip()
+    return ""
+
+
+def resolve_coingecko_global_request() -> tuple[str, dict[str, str]]:
+    """Return (url, headers) for GET /global.
+
+    Priority: Pro key → Demo / generic / legacy key → keyless public.
+    """
+    headers: dict[str, str] = {"Accept": "application/json"}
+    pro = _env_key("COINGECKO_PRO_API_KEY")
+    if pro:
+        headers["x-cg-pro-api-key"] = pro
+        return COINGECKO_PRO_GLOBAL, headers
+    demo = _env_key("COINGECKO_DEMO_API_KEY", "COINGECKO_API_KEY", "CoinGecko_API_KEY")
+    if demo:
+        headers["x-cg-demo-api-key"] = demo
+        return COINGECKO_PUBLIC_GLOBAL, headers
+    return COINGECKO_PUBLIC_GLOBAL, headers
 
 
 def fetch_global_macro(
@@ -18,9 +45,10 @@ def fetch_global_macro(
     """BTC dominance + total crypto market cap → macro_onchain_sentiment row."""
     own = client is None
     http = client or httpx.Client(timeout=30.0)
+    url, headers = resolve_coingecko_global_request()
     try:
         try:
-            resp = http.get(COINGECKO_GLOBAL, headers={"Accept": "application/json"})
+            resp = http.get(url, headers=headers)
             resp.raise_for_status()
             payload = resp.json()
         except httpx.HTTPError as exc:
