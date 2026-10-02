@@ -20,7 +20,10 @@ from jarvise_ingest.providers.binance_book import (
     _depth_notional_within_pct,
     fetch_order_book_snapshot,
 )
-from jarvise_ingest.providers.coingecko_global import fetch_global_macro
+from jarvise_ingest.providers.coingecko_global import (
+    fetch_global_macro,
+    resolve_coingecko_global_request,
+)
 from jarvise_paper.engine import effective_slip_bps, fill_price
 from jarvise_risk.market_safety import (
     MarketSafetyConfig,
@@ -61,6 +64,11 @@ def test_fetch_order_book_snapshot_parses(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_fetch_global_macro_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_DEMO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    monkeypatch.delenv("CoinGecko_API_KEY", raising=False)
+
     class Resp:
         def raise_for_status(self) -> None:
             return None
@@ -78,6 +86,60 @@ def test_fetch_global_macro_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     row = fetch_global_macro(client=client, now_ms=1_700_000_000_000)
     assert row["btc_dominance_pct"] == 54.2
     assert row["global_market_cap_usd"] == 2.5e12
+    client.get.assert_called_once()
+    args, kwargs = client.get.call_args
+    assert args[0] == "https://api.coingecko.com/api/v3/global"
+    assert kwargs["headers"] == {"Accept": "application/json"}
+
+
+def test_resolve_coingecko_demo_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
+    monkeypatch.setenv("COINGECKO_API_KEY", "CG-test-demo")
+    url, headers = resolve_coingecko_global_request()
+    assert url == "https://api.coingecko.com/api/v3/global"
+    assert headers["x-cg-demo-api-key"] == "CG-test-demo"
+
+
+def test_resolve_coingecko_legacy_key_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_DEMO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    monkeypatch.setenv("CoinGecko_API_KEY", "CG-legacy")
+    url, headers = resolve_coingecko_global_request()
+    assert url.endswith("/api/v3/global")
+    assert headers["x-cg-demo-api-key"] == "CG-legacy"
+
+
+def test_resolve_coingecko_pro_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COINGECKO_PRO_API_KEY", "CG-pro")
+    monkeypatch.setenv("COINGECKO_API_KEY", "CG-demo-ignored")
+    url, headers = resolve_coingecko_global_request()
+    assert url == "https://pro-api.coingecko.com/api/v3/global"
+    assert headers["x-cg-pro-api-key"] == "CG-pro"
+    assert "x-cg-demo-api-key" not in headers
+
+
+def test_fetch_global_macro_sends_demo_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
+    monkeypatch.setenv("COINGECKO_API_KEY", "CG-demo")
+
+    class Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "data": {
+                    "market_cap_percentage": {"btc": 50.0},
+                    "total_market_cap": {"usd": 1e12},
+                }
+            }
+
+    client = MagicMock()
+    client.get.return_value = Resp()
+    fetch_global_macro(client=client, now_ms=1)
+    _args, kwargs = client.get.call_args
+    assert kwargs["headers"]["x-cg-demo-api-key"] == "CG-demo"
 
 
 def test_db_writers_roundtrip(tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ Provider map: [`data/analytics/api-map.json`](../../data/analytics/api-map.json)
 
 | Capability | Jarvise |
 |------------|---------|
-| `GET /api/v3/global` (BTC dominance + total market cap) | **Allowed** — `coingecko_global` → `macro_onchain_sentiment` via `jarvise ingest` |
+| `GET /api/v3/global` (BTC dominance + total market cap) | **Allowed** — `coingecko_global` → `macro_onchain_sentiment` via `jarvise ingest`; uses Demo/Pro API key from env when set (`x-cg-demo-api-key` / `x-cg-pro-api-key`), else keyless public |
 | Other CoinGecko REST / Pro / onchain / NFT endpoints as SQLite writers | **Not wired** — add only if they meet efficient/stable/secure bars and stay GET-only |
 | CoinGecko MCP / Docs MCP / CLI as agent research | **Optional overlay** — not installed in this pass; never fill paper or silent-merge into SQLite |
 | Official Agent SKILL (`npx skills add coingecko/skills`) | **Exclude by default** until reviewed |
@@ -38,7 +38,7 @@ Same rule as TradingView MCP: agents may use CoinGecko AI tools for research; nu
 
 | Layer | Source | Role |
 |-------|--------|------|
-| Numeric truth | `jarvise ingest` → `GET /api/v3/global` → `jarvise.db` | Macro for `market_safety`; kill-switch only when macro is required |
+| Numeric truth | `jarvise ingest` → `GET /api/v3/global` (keyed when env set) → `jarvise.db` | Macro for `market_safety`; kill-switch only when macro is **required** |
 | Research overlay | CoinGecko MCP, Docs MCP, CLI, (future) reviewed SKILL | Cursor / OpenClaw chat context only |
 | Doctrine | Gemini Notebook + owner doctrine sources | Never CoinGecko Learn or this technical map |
 
@@ -69,9 +69,10 @@ Cursor / Claude-style remote config examples from CoinGecko docs:
 
 OpenClaw can set a local `@coingecko/coingecko-mcp` with `COINGECKO_DEMO_API_KEY` / `COINGECKO_PRO_API_KEY` and `COINGECKO_ENVIRONMENT`. Jarvise does **not** enable this on the VPS in this pass: MCP helps agent research, not paper/ingest/market-safety.
 
-## Macro safety (unchanged)
+## Macro safety
 
-- Macro is optional by default (`JARVISE_MARKET_SAFETY_REQUIRE_MACRO=0`): a CoinGecko `/global` blip forces FLAT/block for trading paths that need macro context but must **not** engage kill-switch when macro is not required.
+- Macro is optional by default (`JARVISE_MARKET_SAFETY_REQUIRE_MACRO=0`): a CoinGecko `/global` fetch blip does **not** force FLAT and does **not** engage kill-switch. Last good `macro_onchain_sentiment` row in SQLite remains usable.
+- When macro **is** required (`JARVISE_MARKET_SAFETY_REQUIRE_MACRO=1` or ingest without treating macro as skippable), a `macro:*` provider error is critical → FLAT + kill-switch.
 - `--skip-macro` excludes the stream from required critical failures.
 - See [market-safety ingest design](../superpowers/specs/2026-10-01-market-safety-ingest-design.md).
 
@@ -79,10 +80,10 @@ OpenClaw can set a local `@coingecko/coingecko-mcp` with `COINGECKO_DEMO_API_KEY
 
 | Rule | Behavior |
 |------|----------|
-| Ingest | Public GET `/api/v3/global` only (today); raw HTTP, no SDK requirement |
+| Ingest | Public GET `/api/v3/global` only (today); raw HTTP, no SDK; Demo key → `x-cg-demo-api-key`, Pro key → `pro-api` + `x-cg-pro-api-key` |
 | Paper / SQLite truth | Never filled from MCP, CLI, or Agent SKILL |
 | Doctrine RAG | No CoinGecko Learn, no AI Integration pages in Qdrant |
-| Secrets | No API keys in docs or UI; Demo/Pro keys in env only if MCP is enabled later |
+| Secrets | No API keys in docs or UI; `COINGECKO_API_KEY` / `COINGECKO_DEMO_API_KEY` / `COINGECKO_PRO_API_KEY` in `.env` for controlled ingest (and Demo/Pro keys for MCP only if enabled later) |
 | VPS MCP | Optional future OpenClaw research aid — does not replace controlled ingest |
 
 ## Related
