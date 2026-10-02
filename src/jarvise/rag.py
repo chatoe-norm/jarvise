@@ -33,6 +33,9 @@ PREFERRED_DOCTRINE_MARKERS = (
     "binance-api-intro-jarvise",
     "binance-skills-hub-jarvise",
 )
+# Index allowlist: same markers + OpenClaw notes. Generic Notebook scrapes stay on disk for
+# NotebookLM research but are not embedded into jarvise_doctrine.
+_INDEXABLE_SUFFIXES = {".txt", ".md", ".markdown"}
 
 
 def repo_root() -> Path:
@@ -351,18 +354,29 @@ def ingest_firecrawl(
     return {"ok": not errors, "paper_only": True, "written": written, "errors": errors}
 
 
+def is_indexable_doctrine_path(path: Path) -> bool:
+    """True when a source file should be embedded into jarvise_doctrine.
+
+    Keeps owner protocol extracts + OpenClaw notes. Drops generic Notebook scrapes
+    (Investopedia / ChartSchool / CMC / Buffett quotes / etc.) even if they still live
+    under data/analytics/sources/notebook/ for NotebookLM research.
+    """
+    if path.suffix.lower() not in _INDEXABLE_SUFFIXES:
+        return False
+    parts_l = [p.lower() for p in path.parts]
+    if "openclaw" in parts_l:
+        return True
+    blob = f"{path.name} {path.as_posix()}".lower()
+    return any(marker in blob for marker in PREFERRED_DOCTRINE_MARKERS)
+
+
 def collect_source_files(root: Path | None = None) -> list[Path]:
     root = root or repo_root()
-    bases = [
-        root / "data" / "analytics" / "sources",
-        root / "data" / "analytics",
-    ]
+    base = root / "data" / "analytics" / "sources"
     files: list[Path] = []
-    for base in bases:
-        if not base.exists():
-            continue
+    if base.exists():
         for path in base.rglob("*"):
-            if path.is_file() and path.suffix.lower() in {".txt", ".md", ".markdown"}:
+            if path.is_file() and is_indexable_doctrine_path(path):
                 files.append(path)
     # Prefer unique paths
     seen: set[Path] = set()
