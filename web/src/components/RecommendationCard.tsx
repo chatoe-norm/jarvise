@@ -55,7 +55,7 @@ export function RecommendationCard({ data }: { data: RecommendationPayload }) {
         </span>
       </div>
 
-      {data.claude ? (
+      {data.recommendation_source === "claude" && data.claude ? (
         <Section title={`Claude (${data.claude.model}) ตัดสิน: ${data.claude.decision}`}>
           <p>{data.claude.reason || "—"}</p>
         </Section>

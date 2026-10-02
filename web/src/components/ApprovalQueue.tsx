@@ -59,6 +59,11 @@ export function ApprovalQueue({
     const next = !open[id];
     setOpen((prev) => ({ ...prev, [id]: next }));
     if (!next || cards[id]) return;
+    setCardError((prev) => {
+      const cleared = { ...prev };
+      delete cleared[id];
+      return cleared;
+    });
     try {
       const card = await api.recommendation(id);
       setCards((prev) => ({ ...prev, [id]: card }));
