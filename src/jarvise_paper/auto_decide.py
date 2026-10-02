@@ -188,3 +188,113 @@ def parse_decision(obj: Any) -> tuple[str, str]:
         return "defer", UNPARSEABLE
     reason = str(obj.get("reason") or "").strip()[:REASON_MAX]
     return decision, reason
+
+
+def _default_doctrine(query: str) -> list[dict[str, Any]]:
+    return doctrine_snippets(query, limit=3)
+
+
+def run_auto_decide(
+    conn: Any,
+    *,
+    now_ms: int | None = None,
+    kill_switch: bool = False,
+    config: AutoDecideConfig | None = None,
+    chat: ChatFn = chat_json,
+    doctrine_lookup: DoctrineFn | None = None,
+) -> dict[str, Any]:
+    ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    cfg = config or load_auto_decide_config()
+    started = time.monotonic()
+    base: dict[str, Any] = {
+        "ok": True,
+        "paper_only": True,
+        "model": cfg.model,
+        "prompt_version": PROMPT_VERSION,
+        "at_ms": ts,
+    }
+    if not cfg.enabled:
+        return {**base, "skipped": True, "reason": "auto_decide_disabled"}
+    if kill_switch:
+        return {**base, "ok": False, "skipped": True, "reason": "kill_switch engaged"}
+    if live_trading_enabled():
+        return {**base, "ok": False, "skipped": True, "reason": "live_trading_enabled"}
+
+    lookup = doctrine_lookup or _default_doctrine
+    caps = load_risk_caps()
+    pending_rows = list_approvals(conn, status="pending", limit=100)
+    eligible, filtered_out = filter_candidates(conn, pending_rows, min_conf=cfg.min_conf, now_ms=ts)
+    approved: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    apply_failed: list[dict[str, Any]] = []
+    doctrine_unavailable = False
+    processed = 0
+
+    for index, row in enumerate(eligible):
+        entry = {"id": row["id"], "symbol": row.get("symbol")}
+        if index >= cfg.max_per_run:
+            deferred.append({**entry, "reason": "deferred_cap"})
+            continue
+        if not cfg.api_key:
+            deferred.append({**entry, "reason": "missing_api_key"})
+            continue
+        processed += 1
+        hits = lookup(doctrine_query(row))
+        doctrine = [str(h.get("text")) for h in hits if isinstance(h, dict) and h.get("text")]
+        if not doctrine:
+            doctrine_unavailable = True
+        brief = build_brief(conn, row, doctrine=doctrine, now_ms=ts, caps=caps, min_conf=cfg.min_conf)
+        try:
+            raw = chat(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(brief, ensure_ascii=False, default=str)},
+                ],
+                model=cfg.model,
+                timeout_s=cfg.timeout_s,
+                api_key=cfg.api_key,
+            )
+            decision, reason = parse_decision(raw)
+        except OpenRouterError as exc:
+            decision, reason = "defer", f"auto:claude:error:{exc}"[:REASON_MAX]
+        insert_llm_review(
+            conn,
+            {
+                "approval_id": row["id"],
+                "model": cfg.model,
+                "decision": decision,
+                "reason": reason,
+                "brief_hash": brief_hash(brief),
+                "created_at_ms": ts,
+            },
+        )
+        entry["reason"] = reason
+        if decision == "approve":
+            result = approve_approval(conn, row["id"], kill_switch=kill_switch, now_ms=ts)
+            if result.get("ok"):
+                set_approval_resolve_reason(conn, row["id"], "auto:claude:approve")
+                approved.append({**entry, "fills": len(result.get("fills") or [])})
+            else:
+                inner = str(result.get("error") or "approve failed")
+                after = get_approval(conn, row["id"])
+                if after is not None and after["status"] != "pending":
+                    set_approval_resolve_reason(conn, row["id"], f"auto:apply_failed:{inner}"[:400])
+                apply_failed.append({**entry, "error": inner})
+        elif decision == "reject":
+            reject_approval(conn, row["id"], reason=f"auto:claude:reject:{reason}"[:400], now_ms=ts)
+            rejected.append(entry)
+        else:
+            deferred.append(entry)
+
+    return {
+        **base,
+        "processed": processed,
+        "approved": approved,
+        "rejected": rejected,
+        "deferred": deferred,
+        "filtered_out": filtered_out,
+        "apply_failed": apply_failed,
+        "doctrine_unavailable": doctrine_unavailable,
+        "duration_s": round(time.monotonic() - started, 3),
+    }

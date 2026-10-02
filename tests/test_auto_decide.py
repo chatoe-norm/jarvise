@@ -4,6 +4,10 @@ import pytest
 
 from jarvise_ingest.db import (
     ensure_paper_account,
+    get_approval,
+    get_latest_llm_review,
+    get_paper_position,
+    list_paper_orders,
     open_db,
     upsert_analysis_output,
     upsert_market_technicals,
@@ -21,7 +25,9 @@ from jarvise_paper.auto_decide import (
     filter_candidates,
     load_auto_decide_config,
     parse_decision,
+    run_auto_decide,
 )
+from jarvise_paper.llm_openrouter import OpenRouterError
 from jarvise_risk import load_risk_caps
 
 NOW = 1_700_000_000_000 + 14_400_000 + 60_000
@@ -149,3 +155,146 @@ def test_system_prompt_pins_rules() -> None:
     assert '"defer"' in SYSTEM_PROMPT
     assert "0.70" in SYSTEM_PROMPT
     assert PROMPT_VERSION in SYSTEM_PROMPT
+
+
+CFG = AutoDecideConfig(
+    enabled=True, model="test/model", min_conf=0.55, max_per_run=4, timeout_s=1.0, api_key="k"
+)
+NO_DOCTRINE = lambda _q: []  # noqa: E731
+DOCTRINE = lambda _q: [{"text": "structure first", "source": "d.md", "score": 0.9}]  # noqa: E731
+
+
+@pytest.fixture(autouse=True)
+def _live_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_LIVE_TRADING", raising=False)
+
+
+def _chat(decision: str, reason: str = "เหตุผล"):
+    calls: list[dict] = []
+
+    def fn(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return {"decision": decision, "reason": reason}
+
+    fn.calls = calls  # type: ignore[attr-defined]
+    return fn
+
+
+def test_flag_off_skips_and_touches_nothing(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "a.db")
+    pending(conn, "ok", "BTCUSDT")
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=AutoDecideConfig(**{**CFG.__dict__, "enabled": False}),
+                          chat=chat, doctrine_lookup=DOCTRINE)
+    assert out["ok"] is True and out["skipped"] is True
+    assert out["reason"] == "auto_decide_disabled" and out["paper_only"] is True
+    assert chat.calls == []
+    assert get_approval(conn, "ok")["status"] == "pending"
+
+
+def test_live_on_refuses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("JARVISE_LIVE_TRADING", "true")
+    conn = seed_db(tmp_path / "l.db")
+    pending(conn, "ok", "BTCUSDT")
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert out["ok"] is False and out["skipped"] is True and out["reason"] == "live_trading_enabled"
+    assert chat.calls == []
+    assert get_approval(conn, "ok")["status"] == "pending"
+
+
+def test_approve_path_fills_paper_and_prefixes_reason(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "ap.db")
+    pending(conn, "ok", "BTCUSDT")
+    chat = _chat("approve", "แนวโน้มชัด")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert out["ok"] is True and out["processed"] == 1
+    assert [a["id"] for a in out["approved"]] == ["ok"]
+    assert out["rejected"] == [] and out["deferred"] == [] and out["apply_failed"] == []
+    assert out["doctrine_unavailable"] is False
+    row = get_approval(conn, "ok")
+    assert row["status"] == "approved"
+    assert row["resolve_reason"] == "auto:claude:approve"
+    assert get_paper_position(conn, "BTCUSDT") is not None
+    assert list_paper_orders(conn)
+    review = get_latest_llm_review(conn, "ok")
+    assert review["decision"] == "approve" and review["model"] == "test/model"
+    assert len(chat.calls) == 1
+    assert chat.calls[0]["model"] == "test/model"
+    assert chat.calls[0]["messages"][0]["role"] == "system"
+
+
+def test_reject_path_prefixes_reason_and_no_fill(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "rj.db")
+    pending(conn, "ok", "BTCUSDT")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("reject", "ขัดกับ doctrine"),
+                          doctrine_lookup=DOCTRINE)
+    assert [r["id"] for r in out["rejected"]] == ["ok"]
+    row = get_approval(conn, "ok")
+    assert row["status"] == "rejected"
+    assert row["resolve_reason"] == "auto:claude:reject:ขัดกับ doctrine"
+    assert get_paper_position(conn, "BTCUSDT") is None
+
+
+def test_defer_error_and_garbage_leave_pending(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "df.db")
+    pending(conn, "a", "BTCUSDT", created_at_ms=1)
+    pending(conn, "b", "ETHUSDT", created_at_ms=2)
+    answers = iter([OpenRouterError("status 503"), {"decision": "yes"}])
+
+    def chat(messages, **kwargs):
+        nxt = next(answers)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=NO_DOCTRINE)
+    reasons = {d["id"]: d["reason"] for d in out["deferred"]}
+    assert reasons["a"].startswith("auto:claude:error:")
+    assert reasons["b"] == "auto:claude:unparseable"
+    assert out["doctrine_unavailable"] is True
+    assert get_approval(conn, "a")["status"] == "pending"
+    assert get_approval(conn, "b")["status"] == "pending"
+    assert get_latest_llm_review(conn, "b")["decision"] == "defer"
+    assert list_paper_orders(conn) == []
+
+
+def test_cap_and_missing_key_defer_without_calls(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "cap.db")
+    pending(conn, "a", "BTCUSDT", created_at_ms=1)
+    pending(conn, "b", "ETHUSDT", created_at_ms=2)
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=AutoDecideConfig(**{**CFG.__dict__, "max_per_run": 1}),
+                          chat=chat, doctrine_lookup=DOCTRINE)
+    assert [a["id"] for a in out["approved"]] == ["a"]
+    assert out["deferred"] == [{"id": "b", "symbol": "ETHUSDT", "reason": "deferred_cap"}]
+    assert len(chat.calls) == 1
+
+    conn2 = seed_db(tmp_path / "key.db")
+    pending(conn2, "a", "BTCUSDT")
+    chat2 = _chat("approve")
+    out2 = run_auto_decide(conn2, now_ms=NOW, config=AutoDecideConfig(**{**CFG.__dict__, "api_key": None}),
+                           chat=chat2, doctrine_lookup=DOCTRINE)
+    assert out2["deferred"] == [{"id": "a", "symbol": "BTCUSDT", "reason": "missing_api_key"}]
+    assert chat2.calls == []
+
+
+def test_filtered_rows_never_reach_claude(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "fl.db")
+    pending(conn, "flat", "BTCUSDT", action="flat", size_pct_equity=0.0)
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert out["filtered_out"] == [{"id": "flat", "symbol": "BTCUSDT", "reason": "action_flat"}]
+    assert chat.calls == [] and out["processed"] == 0
+
+
+def test_apply_failure_recorded_with_prefix(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "af.db")
+    pending(conn, "big", "BTCUSDT", size_pct_equity=50.0)  # 5000 USD > 2000 cap → risk breach
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("approve"), doctrine_lookup=DOCTRINE)
+    assert out["approved"] == []
+    assert out["apply_failed"][0]["id"] == "big"
+    assert "max_notional" in out["apply_failed"][0]["error"]
+    row = get_approval(conn, "big")
+    assert row["status"] == "failed"
+    assert row["resolve_reason"].startswith("auto:apply_failed:max_notional")
