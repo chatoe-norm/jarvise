@@ -279,6 +279,7 @@ def run_auto_decide(
     doctrine_unavailable = False
     lookup_error: str | None = None
     processed = 0
+    halted: str | None = None
 
     for index, row in enumerate(eligible):
         entry = {"id": row["id"], "symbol": row.get("symbol")}
@@ -366,7 +367,8 @@ def run_auto_decide(
                 if result.get("paper_only") is False:
                     # Must be unreachable: live is checked before every apply. Fail loud and stop everything.
                     engage_kill_switch(reason="auto_decide: live path reached")
-                    apply_failed.append({**entry, "error": "live path reached; kill switch engaged"})
+                    halted = "live path reached; kill switch engaged"
+                    apply_failed.append({**entry, "error": halted})
                     break
                 if result.get("ok"):
                     approved.append({**entry, "fills": len(result.get("fills") or [])})
@@ -389,7 +391,10 @@ def run_auto_decide(
                         else:
                             deferred.append({**entry, "reason": "already_resolved"})
                     else:
-                        apply_failed.append({**entry, "error": inner})
+                        if inner == "approval not pending":
+                            deferred.append({**entry, "reason": "candidate_changed"})
+                        else:
+                            apply_failed.append({**entry, "error": inner})
             else:
                 result = reject_approval(
                     conn, row["id"], reason=f"auto:claude:reject:{reason}"[:400], now_ms=apply_ts
@@ -402,8 +407,13 @@ def run_auto_decide(
             apply_failed.append({**entry, "error": f"{type(exc).__name__}: {exc}"})
             continue
 
+    if halted:
+        for rest in eligible[index + 1 :]:
+            deferred.append({"id": rest["id"], "symbol": rest.get("symbol"), "reason": "run_halted"})
+
     return {
         **base,
+        "ok": halted is None,
         "processed": processed,
         "approved": approved,
         "rejected": rejected,
@@ -413,4 +423,5 @@ def run_auto_decide(
         "doctrine_unavailable": doctrine_unavailable,
         "doctrine_error": lookup_error,
         "duration_s": round(time.monotonic() - started, 3),
+        "halted": halted,
     }

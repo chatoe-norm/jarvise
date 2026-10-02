@@ -172,9 +172,10 @@ Response parsing: strict JSON object with exactly those keys; anything else → 
 | Candidate is `flat`, size 0, conf < MIN_CONF, force_flat, or expired | Filtered before Claude (`filtered_out` list in payload with reason). |
 | Qdrant unavailable | Brief and card proceed with `doctrine: []`; payload flags `doctrine_unavailable: true`. |
 | More candidates than `MAX_PER_RUN` | Oldest-first processed; remainder `deferred_cap`. |
-| ingest-health (paper timeframe): no candles, or `ema200_ready == 0` for any paper symbol, or newest candle closed more than `JARVISE_INGEST_HEALTH_MAX_AGE_MIN` ago, or `gaps > 0` | Telegram alert (soft-fail) with the counts and the one-shot backfill command; no ingest triggered. |
-| Row re-enqueued or resolved by the owner while Claude reviewed it → deferred `candidate_changed` / `already_resolved`, nothing applied; the paper claim also requires the reviewed `analysis_id` | |
-| Second trigger while a run is in progress → 409 `auto_decide_running`, Redis untouched | |
+| ingest-health (paper timeframe): no candles, or `ema200_ready == 0` for any paper symbol, or newest candle closed more than one candle interval + `JARVISE_INGEST_HEALTH_MAX_AGE_MIN` ago, or `gaps > 0` | Telegram alert (soft-fail) with the counts and the one-shot backfill command; no ingest triggered. |
+| Row re-enqueued (same id, new analysis) or resolved by the owner while Claude reviewed it | Deferred as `candidate_changed` / `already_resolved`; nothing applied. The paper claim additionally requires the reviewed `analysis_id`. |
+| Second trigger while a run is in progress | HTTP 409 `auto_decide_running`; Redis untouched. |
+| Live path ever reached from the auto run (must be unreachable) | Kill switch engaged, run halted (`ok: false`, `halted`), remaining candidates `run_halted`. |
 
 Defer alerts use one Telegram message per run listing each deferred symbol with the Claude reason or error, so the owner can open Home and decide.
 

@@ -15,6 +15,8 @@ export type PaperAutoStatus = {
   ok: boolean;
   skipped?: boolean;
   reason?: string;
+  error?: string;
+  halted?: string | null;
   model?: string;
   prompt_version?: string;
   processed?: number;

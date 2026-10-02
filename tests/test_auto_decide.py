@@ -505,7 +505,9 @@ def test_live_path_result_engages_kill_switch(monkeypatch: pytest.MonkeyPatch, t
     assert engaged and "live path" in engaged[0]
     assert out["approved"] == []
     assert out["apply_failed"][0]["id"] == "a" and "live path" in out["apply_failed"][0]["error"]
-    assert all(d["id"] != "b" for d in out["approved"])  # run stopped; b untouched
+    assert out["ok"] is False and out["halted"] == "live path reached; kill switch engaged"
+    assert {"id": "b", "symbol": "ETHUSDT", "reason": "run_halted"} in out["deferred"]
+    assert get_approval(conn, "b")["status"] == "pending"
 
 
 def test_resolve_reason_stamp_is_conditional_on_resolved_at(tmp_path: Path) -> None:

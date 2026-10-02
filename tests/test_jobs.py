@@ -312,6 +312,9 @@ def test_paper_auto_decide_redis_failure_fails_closed(monkeypatch) -> None:
         raise RuntimeError("redis down")
 
     monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", boom)
-    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "jarvise.jobs.publish_redis_status",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("redis down")),
+    )
     code, body = run_paper_auto_decide()
-    assert code == 3 and body["skipped"] is True
+    assert code == 3 and body["skipped"] is True and body["reason"] == "kill_switch unreadable"

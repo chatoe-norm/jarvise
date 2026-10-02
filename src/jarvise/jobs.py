@@ -49,6 +49,13 @@ def _fenv(name: str, default: float) -> float:
         return default
 
 
+def _publish_best_effort(key: str, payload: dict[str, Any]) -> None:
+    try:
+        publish_redis_status(key, payload)
+    except Exception:  # noqa: BLE001 — Redis down must not turn a 409/payload into a dropped connection
+        return
+
+
 _AUTO_DECIDE_LOCK = threading.Lock()
 
 
@@ -221,19 +228,21 @@ def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
     if not _AUTO_DECIDE_LOCK.acquire(blocking=False):
         return 3, {"ok": False, "skipped": True, "reason": "auto_decide_running", "paper_only": True, "at_ms": now}
     try:
+        unreadable = False
         try:
             engaged = kill_switch_engaged()
         except Exception:  # noqa: BLE001 — cannot read the switch → fail closed
             engaged = True
+            unreadable = True
         if engaged:
-            payload = _skipped()
-            publish_redis_status(key, payload)
+            payload = {**_skipped(), "reason": "kill_switch unreadable"} if unreadable else _skipped()
+            _publish_best_effort(key, payload)
             return 3, payload
         raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
         path = Path(raw)
         if not path.exists():
             payload = {"ok": False, "skipped": True, "reason": "no_database", "paper_only": True, "at_ms": now}
-            publish_redis_status(key, payload)
+            _publish_best_effort(key, payload)
             return 1, payload
         conn = open_db(path)
         try:
@@ -243,7 +252,7 @@ def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
         finally:
             conn.close()
         payload["telegram_sent"] = notify_auto_decide(payload)
-        publish_redis_status(key, payload)
+        _publish_best_effort(key, payload)
         if payload.get("skipped") and payload.get("reason") == "live_trading_enabled":
             return 3, payload
         return (0 if payload.get("ok") else 1), payload

@@ -105,6 +105,8 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
               <span className="text-xs text-[var(--color-muted)]">
                 {auto.model} · {relativeAge(auto.at_ms)} · {auto.duration_s ?? "—"}s
                 {auto.doctrine_unavailable ? " · doctrine unavailable" : ""}
+                {auto.error ? ` · ${auto.error}` : ""}
+                {auto.halted ? ` · halted: ${auto.halted}` : ""}
               </span>
             </div>
             <div className="grid grid-cols-5 gap-2">
