@@ -9,8 +9,9 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
-from jarvise.rag import publish_redis_status
+from jarvise.rag import doctrine_snippets, publish_redis_status
 from jarvise_ingest.db import list_approvals, open_db
 from jarvise_notify import notify_pending_digest
 
@@ -164,6 +165,12 @@ def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
     return 0, payload
 
 
+def run_doctrine_search(query: str, limit: int) -> dict[str, Any]:
+    """GET-only doctrine lookup for web cards and the auto-decide brief."""
+    hits = doctrine_snippets(query, limit=limit)
+    return {"ok": True, "query": query, "hits": hits, "paper_only": True}
+
+
 def _parse_stdout(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     text = (proc.stdout or "").strip()
     if text:
@@ -182,6 +189,7 @@ def _parse_stdout(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 ROUTES = {
     ("GET", "/healthz"): "health",
+    ("GET", "/doctrine"): "doctrine",
     ("POST", "/jobs/ingest"): "ingest",
     ("POST", "/jobs/rag-refresh"): "rag",
     ("POST", "/jobs/paper-run"): "paper_run",
@@ -214,6 +222,15 @@ class JobHandler(BaseHTTPRequestHandler):
         action = ROUTES.get((self.command, path))
         if action == "health":
             self._send(200, {"ok": True, "paper_only": True})
+            return
+        if action == "doctrine":
+            params = parse_qs(self.path.partition("?")[2])
+            query = (params.get("q") or [""])[0]
+            try:
+                limit = int((params.get("limit") or ["3"])[0])
+            except ValueError:
+                limit = 3
+            self._send(200, run_doctrine_search(query, limit))
             return
         if action == "ingest":
             code, body = run_ingest()

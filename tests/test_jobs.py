@@ -181,3 +181,19 @@ def test_paper_pending_digest_route(monkeypatch) -> None:
     handler.path = "/jobs/paper-pending-digest"
     handler._dispatch()
     assert handler._status == 200
+
+
+def test_doctrine_route_passes_query(monkeypatch) -> None:
+    seen: list[tuple[str, int]] = []
+
+    def fake_search(query: str, limit: int):
+        seen.append((query, limit))
+        return {"ok": True, "query": query, "hits": [], "paper_only": True}
+
+    monkeypatch.setattr("jarvise.jobs.run_doctrine_search", fake_search)
+    handler = _Handler()
+    handler.command = "GET"
+    handler.path = "/doctrine?q=trend_up%20long&limit=2"
+    handler._dispatch()
+    assert handler._status == 200
+    assert seen == [("trend_up long", 2)]
