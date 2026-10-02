@@ -189,7 +189,7 @@ def test_gate_provider_error_critical_and_ks(
     )
     cfg = MarketSafetyConfig(
         enabled=True,
-        require_book=False,
+        require_book=True,
         require_derivatives=False,
         require_macro=False,
     )
@@ -200,6 +200,39 @@ def test_gate_provider_error_critical_and_ks(
     result = maybe_engage_kill_switch(result)
     assert result.kill_switch_engaged
     assert called and called[0].startswith("market_safety:")
+
+
+def test_optional_macro_provider_error_no_ks() -> None:
+    """CoinGecko blip must not engage kill-switch when macro is not required."""
+    cfg = MarketSafetyConfig(
+        enabled=True,
+        require_book=False,
+        require_derivatives=False,
+        require_macro=False,
+    )
+    result = evaluate_market_safety(
+        config=cfg,
+        provider_errors=["macro:Client error '400 Bad Request'"],
+    )
+    assert result.ok is True
+    assert result.force_flat is False
+    assert result.critical is False
+    assert maybe_engage_kill_switch(result).kill_switch_engaged is False
+
+
+def test_required_macro_provider_error_is_critical() -> None:
+    cfg = MarketSafetyConfig(
+        enabled=True,
+        require_book=False,
+        require_derivatives=False,
+        require_macro=True,
+    )
+    result = evaluate_market_safety(
+        config=cfg,
+        provider_errors=["macro:timeout"],
+    )
+    assert result.force_flat and result.critical
+    assert any("provider_error: macro:" in r for r in result.reasons)
 
 
 def test_gate_disabled_ok() -> None:

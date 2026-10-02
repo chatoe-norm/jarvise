@@ -1,4 +1,9 @@
-"""Market-safety gate — FLAT / block trading; kill-switch on critical failures."""
+"""Market-safety gate — FLAT / block trading; kill-switch on critical failures only.
+
+Optional-stream provider blips (e.g. CoinGecko when macro is not required) force
+neither FLAT nor kill-switch; required book/derivatives (and macro when opted in)
+still fail closed.
+"""
 
 from __future__ import annotations
 
@@ -83,6 +88,32 @@ def load_market_safety_config(
     )
 
 
+def provider_error_stream(err: str) -> str | None:
+    """Return book|derivatives|macro when err is tagged ``stream:...``, else None."""
+    head = (err or "").split(":", 1)[0].strip().lower()
+    if head in {"book", "derivatives", "macro"}:
+        return head
+    return None
+
+
+def provider_error_is_required(err: str, cfg: MarketSafetyConfig) -> bool:
+    """True when a provider failure should trip critical / kill-switch.
+
+    Optional streams (e.g. CoinGecko macro when ``require_macro`` is false) still
+    fail soft: last SQLite snapshot remains usable; do not engage kill-switch on
+    transient HTTP blips.
+    """
+    stream = provider_error_stream(err)
+    if stream == "book":
+        return cfg.require_book
+    if stream == "derivatives":
+        return cfg.require_derivatives
+    if stream == "macro":
+        return cfg.require_macro
+    # Untagged errors stay fail-closed critical.
+    return True
+
+
 def evaluate_market_safety(
     *,
     book: dict[str, Any] | None = None,
@@ -103,8 +134,11 @@ def evaluate_market_safety(
     critical = False
 
     for err in provider_errors or []:
-        reasons.append(f"provider_error: {err}")
-        critical = True
+        if provider_error_is_required(err, cfg):
+            reasons.append(f"provider_error: {err}")
+            critical = True
+        # Optional-stream fetch failures are ignored here: ingest still records them
+        # in the run payload, and other checks use the last good SQLite snapshot.
 
     if cfg.require_book:
         if book is None:

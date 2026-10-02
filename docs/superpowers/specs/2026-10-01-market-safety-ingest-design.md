@@ -19,7 +19,7 @@ Extend controlled GET-only ingest so derivatives (CoinGlass), order-book spreads
 ## Locked decisions
 
 1. **Sources:** CoinGlass V4 (derivatives), Binance public `bookTicker` + `depth` (microstructure), CoinGecko `/global` (dominance + market cap). TV MCP stays research overlay only.
-2. **Failure policy:** Fail-closed trading (FLAT + block). Kill-switch only when gate enabled and a required stream fails critically. `--skip-derivatives` / `--skip-book` / `--skip-macro` exclude that stream from kill-switch trips.
+2. **Failure policy:** Fail-closed trading (FLAT + block) for **required** streams. Kill-switch only when the gate is enabled and a **required** stream fails critically. `--skip-derivatives` / `--skip-book` / `--skip-macro` (and `JARVISE_MARKET_SAFETY_REQUIRE_MACRO=0`, the default) exclude that stream from kill-switch trips — e.g. a CoinGecko `/global` 400 must not engage KS when macro is optional.
 3. **Cadence:** Existing ingest / n8n poll — not realtime websockets.
 4. **EV:** Spread-aware paper slip `max(5 bps, half bid-ask spread in bps)` so expectancy includes realistic spread cost.
 
@@ -34,6 +34,7 @@ Extend controlled GET-only ingest so derivatives (CoinGlass), order-book spreads
 | Check | FLAT + block | Kill-switch if gate on |
 |-------|--------------|------------------------|
 | Required provider HTTP/parse fail | yes | yes |
+| Optional provider HTTP/parse fail (e.g. macro when not required) | no | no |
 | Both sided depth &lt; floor USD | yes | yes |
 | Spread &gt; max bps | yes | no |
 | Required CoinGlass metrics null | yes | yes |
