@@ -77,7 +77,7 @@ Existing code reused unchanged: `approve_approval`, `reject_approval`, `list_app
 | `JARVISE_AUTO_DECIDE_MAX_PER_RUN` | `4` | Max Claude calls per job run; remainder deferred. |
 | `JARVISE_AUTO_DECIDE_TIMEOUT_S` | `30` | Per-call HTTP timeout. |
 | `OPENROUTER_API_KEY` | (existing) | Reused from the OpenClaw setup; missing key → every candidate deferred. |
-| `JARVISE_INGEST_HEALTH_MAX_AGE_MIN` | `60` | Alert when the newest paper-timeframe candle **closed** more than this many minutes ago (`timestamp + interval`), so a 4h series with 15-minute ingest does not false-alarm. |
+| `JARVISE_INGEST_HEALTH_MAX_AGE_MIN` | `60` | Alert when the newest paper-timeframe candle **closed** more than one candle interval + this many minutes ago (`timestamp + interval`), so a 4h series with 15-minute ingest does not false-alarm. |
 | `JARVISE_JOBS_URL` | `http://jobs:8090` | Web → jobs for doctrine snippets on the card (docker network only; reuses `JARVISE_JOBS_TOKEN` when set). |
 
 All live in `.env.example` with comments. The `jobs` service gets the auto-decide and health variables; the web service only needs `JARVISE_JOBS_URL` (everything else it reads from Redis/SQLite).
@@ -147,12 +147,14 @@ Brief (one candidate per call; JSON body, no raw tables):
 |-------|--------|
 | `candidate` | approval row: symbol, timeframe, action, regime_state, confidence_score, size_pct_equity, invalidation_price, thesis, expires_at_ms |
 | `indicators` | latest closed candle: close, ema_20, ema_200, rsi_14, atr_14 |
-| `ledger` | equity, cash, open position count, open position on same symbol (bool) |
+| `ledger` | equity, cash, open position count, open position on same symbol (bool), open position side on same symbol |
 | `market_safety` | `evaluate_from_db(...).as_dict()` (ok, force_flat, reasons) |
 | `doctrine` | same top-3 snippets as the card (may be empty) |
 | `policy` | `min_conf`, `max_notional_per_order_usd` and `max_daily_loss_usd` from `load_risk_caps()`, estimated notional for this candidate, "paper only" sentence |
 
 System prompt (fixed, versioned in code): Claude is a second-layer reviewer for a paper ledger; it may only output JSON `{"decision": "approve" | "reject" | "defer", "reason": "<= 280 chars"}`; it must `defer` when doctrine is empty **and** confidence < 0.70, when the same symbol already has an open position, or when market_safety reasons are non-empty; it must never change size or direction.
+
+The two deterministic must-defer rules (opposite-side position open; doctrine empty and confidence < 0.70) are also enforced in code before the model is called (`forced_defer_reason`), reasons `auto:rule:opposite_side_open` / `auto:rule:no_doctrine_low_conf`.
 
 Response parsing: strict JSON object with exactly those keys; anything else → `defer` with reason `auto:claude:unparseable`.
 
@@ -171,6 +173,8 @@ Response parsing: strict JSON object with exactly those keys; anything else → 
 | Qdrant unavailable | Brief and card proceed with `doctrine: []`; payload flags `doctrine_unavailable: true`. |
 | More candidates than `MAX_PER_RUN` | Oldest-first processed; remainder `deferred_cap`. |
 | ingest-health (paper timeframe): no candles, or `ema200_ready == 0` for any paper symbol, or newest candle closed more than `JARVISE_INGEST_HEALTH_MAX_AGE_MIN` ago, or `gaps > 0` | Telegram alert (soft-fail) with the counts and the one-shot backfill command; no ingest triggered. |
+| Row re-enqueued or resolved by the owner while Claude reviewed it → deferred `candidate_changed` / `already_resolved`, nothing applied; the paper claim also requires the reviewed `analysis_id` | |
+| Second trigger while a run is in progress → 409 `auto_decide_running`, Redis untouched | |
 
 Defer alerts use one Telegram message per run listing each deferred symbol with the Claude reason or error, so the owner can open Home and decide.
 

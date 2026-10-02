@@ -5,18 +5,21 @@ from pathlib import Path
 import pytest
 
 from jarvise_ingest.db import (
+    claim_approval_for_fill,
     ensure_paper_account,
     get_approval,
     get_latest_llm_review,
     get_paper_position,
     list_paper_orders,
     open_db,
+    set_approval_resolve_reason,
     upsert_analysis_output,
     upsert_market_technicals,
+    upsert_paper_position,
     upsert_pending_approval,
     write_indicators,
 )
-from jarvise_paper.approval import approve_approval
+from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.auto_decide import (
     DEFAULT_MODEL,
     PROMPT_VERSION,
@@ -30,7 +33,7 @@ from jarvise_paper.auto_decide import (
     parse_decision,
     run_auto_decide,
 )
-from jarvise_paper.llm_openrouter import OpenRouterError
+from jarvise_paper.llm_openrouter import OpenRouterError, OpenRouterParseError
 from jarvise_risk import load_risk_caps
 
 NOW = 1_700_000_000_000 + 14_400_000 + 60_000
@@ -134,7 +137,13 @@ def test_build_brief_shape_and_hash(tmp_path: Path) -> None:
     assert brief["candidate"]["symbol"] == "BTCUSDT"
     assert brief["candidate"]["invalidation_price"] == 85000.0 * 0.98
     assert brief["indicators"]["ema_200"] == 85000.0 * 0.9
-    assert brief["ledger"] == {"equity": 10000.0, "cash": 10000.0, "open_positions": 0, "same_symbol_open": False}
+    assert brief["ledger"] == {
+        "equity": 10000.0,
+        "cash": 10000.0,
+        "open_positions": 0,
+        "same_symbol_open": False,
+        "same_symbol_open_side": None,
+    }
     assert brief["market_safety"]["reasons"] == []
     assert brief["doctrine"] == ["structure first"]
     assert brief["policy"]["estimated_notional_usd"] == 112.5
@@ -392,3 +401,117 @@ def test_apply_exception_is_recorded_and_batch_continues(monkeypatch: pytest.Mon
     assert out["apply_failed"][0]["id"] == "a"
     assert out["apply_failed"][0]["error"].startswith("OperationalError: ")
     assert [x["id"] for x in out["approved"]] == ["b"]
+
+
+def test_candidate_changed_during_review_is_deferred(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "cc.db")
+    pending(conn, "ok", "BTCUSDT")
+
+    def chat(messages, **kwargs):
+        # a paper run re-enqueues the same symbol (same id, new analysis) while Claude is reviewing
+        pending(conn, "ok", "BTCUSDT", analysis_id="an-NEW", action="short", size_pct_equity=15.0,
+                confidence_score=0.56, created_at_ms=2_000)
+        return {"decision": "approve", "reason": "ok"}
+
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert out["approved"] == []
+    assert out["deferred"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": "candidate_changed"}]
+    row = get_approval(conn, "ok")
+    assert row["status"] == "pending" and row["analysis_id"] == "an-NEW"
+    assert get_paper_position(conn, "BTCUSDT") is None
+
+
+def test_claim_requires_expected_analysis_id(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "cl.db")
+    pending(conn, "ok", "BTCUSDT")
+    assert claim_approval_for_fill(conn, "ok", now_ms=NOW, expected_analysis_id="an-OTHER") is None
+    assert get_approval(conn, "ok")["status"] == "pending"
+    claimed = claim_approval_for_fill(conn, "ok", now_ms=NOW, expected_analysis_id="an-BTCUSDT")
+    assert claimed is not None and claimed["status"] == "approved"
+
+
+def test_owner_decision_during_review_is_not_relabelled(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "od.db")
+    pending(conn, "ok", "BTCUSDT")
+
+    def chat(messages, **kwargs):
+        reject_approval(conn, "ok", reason="ui", now_ms=NOW + 5)
+        return {"decision": "approve", "reason": "ok"}
+
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert out["approved"] == [] and out["apply_failed"] == []
+    assert out["deferred"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": "already_resolved"}]
+    row = get_approval(conn, "ok")
+    assert row["status"] == "rejected" and row["resolve_reason"] == "ui"
+
+
+def test_forced_defer_opposite_side_open_skips_claude(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "os.db")
+    upsert_paper_position(conn, {"symbol": "BTCUSDT", "side": "short", "qty": 0.001, "entry_price": 85000.0,
+                                 "entry_ts": 1, "unrealized_pnl": 0.0, "realized_pnl": 0.0})
+    conn.commit()
+    pending(conn, "ok", "BTCUSDT")  # candidate is long
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert chat.calls == [] and out["processed"] == 0
+    assert out["deferred"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": "auto:rule:opposite_side_open"}]
+
+
+def test_forced_defer_no_doctrine_low_conf_skips_claude(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "nd.db")
+    pending(conn, "ok", "BTCUSDT", confidence_score=0.60)
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=NO_DOCTRINE)
+    assert chat.calls == []
+    assert out["deferred"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": "auto:rule:no_doctrine_low_conf"}]
+
+
+def test_parse_error_maps_to_unparseable(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "pe.db")
+    pending(conn, "ok", "BTCUSDT")
+
+    def chat(messages, **kwargs):
+        raise OpenRouterParseError("non-JSON content")
+
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert out["deferred"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": UNPARSEABLE}]
+    assert get_latest_llm_review(conn, "ok")["reason"] == UNPARSEABLE
+
+
+def test_kill_switch_check_exception_is_treated_as_engaged(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "kx.db")
+    pending(conn, "ok", "BTCUSDT")
+
+    def broken_check() -> bool:
+        raise RuntimeError("redis down")
+
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE,
+                          kill_switch_check=broken_check)
+    assert chat.calls == []
+    assert out["deferred"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": "kill_switch engaged"}]
+
+
+def test_live_path_result_engages_kill_switch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "lp.db")
+    pending(conn, "a", "BTCUSDT", created_at_ms=1)
+    pending(conn, "b", "ETHUSDT", created_at_ms=2)
+    engaged: list[str] = []
+    monkeypatch.setattr("jarvise_paper.auto_decide.approve_approval",
+                        lambda *a, **k: {"ok": True, "paper_only": False, "fills": [], "error": None})
+    monkeypatch.setattr("jarvise_paper.auto_decide.engage_kill_switch",
+                        lambda *, reason="": engaged.append(reason) or True)
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("approve"), doctrine_lookup=DOCTRINE)
+    assert engaged and "live path" in engaged[0]
+    assert out["approved"] == []
+    assert out["apply_failed"][0]["id"] == "a" and "live path" in out["apply_failed"][0]["error"]
+    assert all(d["id"] != "b" for d in out["approved"])  # run stopped; b untouched
+
+
+def test_resolve_reason_stamp_is_conditional_on_resolved_at(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "st.db")
+    pending(conn, "ok", "BTCUSDT")
+    reject_approval(conn, "ok", reason="ui", now_ms=NOW + 5)
+    assert set_approval_resolve_reason(conn, "ok", "auto:x", resolved_at_ms=NOW) is None
+    assert get_approval(conn, "ok")["resolve_reason"] == "ui"
+    assert set_approval_resolve_reason(conn, "ok", "auto:y", resolved_at_ms=NOW + 5)["resolve_reason"] == "auto:y"

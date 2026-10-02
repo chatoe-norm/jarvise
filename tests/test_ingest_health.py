@@ -70,15 +70,29 @@ def test_health_alerts_not_ready_stale_and_gap(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "h3.db")
     _candles(conn, "BTCUSDT", 4, skip_index=1)
     newest_close = T0 + 3 * H4 + H4
-    report = ingest_health(conn, ["BTCUSDT", "ETHUSDT"], "4h", now_ms=newest_close + 90 * 60_000)
+    report = ingest_health(conn, ["BTCUSDT", "ETHUSDT"], "4h", now_ms=newest_close + 310 * 60_000)
     assert report["ok"] is False
     btc = report["symbols"]["BTCUSDT"]
     assert btc["ema200_ready"] == 0
     assert btc["gaps"] == 1
-    assert btc["newest_age_min"] == 90.0
+    assert btc["newest_age_min"] == 310.0
     assert report["symbols"]["ETHUSDT"]["rows"] == 0
     joined = "\n".join(report["alerts"])
     assert "BTCUSDT: ema_200 not ready" in joined
-    assert "BTCUSDT: newest 4h candle closed 90 min ago" in joined
+    assert "BTCUSDT: newest 4h candle closed 310 min ago" in joined
     assert "BTCUSDT: 1 gap(s)" in joined
     assert "ETHUSDT: no 4h candles stored" in joined
+
+
+def test_health_no_false_alarm_within_one_interval(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "h4.db")
+    _candles(conn, "BTCUSDT", 3)
+    write_indicators(
+        conn,
+        [{"symbol": "BTCUSDT", "timeframe": "4h", "timestamp": T0 + 2 * H4,
+          "atr_14": 1.0, "rsi_14": 50.0, "ema_20": 100.0, "ema_200": 100.0}],
+    )
+    newest_close = T0 + 2 * H4 + H4
+    report = ingest_health(conn, ["BTCUSDT"], "4h", now_ms=newest_close + 235 * 60_000)
+    assert report["ok"] is True and report["alerts"] == []
+    assert report["stale_after_min"] == 300.0

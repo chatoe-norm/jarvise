@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,6 +38,7 @@ def _skipped() -> dict[str, Any]:
         "skipped": True,
         "reason": "kill_switch engaged",
         "paper_only": True,
+        "at_ms": int(time.time() * 1000),
     }
 
 
@@ -45,6 +47,9 @@ def _fenv(name: str, default: float) -> float:
         return float(os.environ.get(name) or default)
     except ValueError:
         return default
+
+
+_AUTO_DECIDE_LOCK = threading.Lock()
 
 
 def run_ingest() -> tuple[int, dict[str, Any]]:
@@ -206,28 +211,44 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
 
 
 def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
-    """Second-layer Claude review of pending paper candidates. Paper only; flag default off."""
+    """Second-layer Claude review of pending paper candidates. Paper only; flag default off.
+
+    Single-flight: a second trigger while a run is in progress is refused (409) and does not
+    touch Redis. Any crash inside the run still publishes a payload and alerts the owner.
+    """
     key = "jarvise:paper_auto:last"
-    if kill_switch_engaged():
-        payload = _skipped()
-        publish_redis_status(key, payload)
-        return 3, payload
-    raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
-    path = Path(raw)
-    if not path.exists():
-        payload = {"ok": False, "skipped": True, "reason": "no_database", "paper_only": True}
-        publish_redis_status(key, payload)
-        return 1, payload
-    conn = open_db(path)
+    now = int(time.time() * 1000)
+    if not _AUTO_DECIDE_LOCK.acquire(blocking=False):
+        return 3, {"ok": False, "skipped": True, "reason": "auto_decide_running", "paper_only": True, "at_ms": now}
     try:
-        payload = run_auto_decide(conn, kill_switch_check=kill_switch_engaged)
+        try:
+            engaged = kill_switch_engaged()
+        except Exception:  # noqa: BLE001 — cannot read the switch → fail closed
+            engaged = True
+        if engaged:
+            payload = _skipped()
+            publish_redis_status(key, payload)
+            return 3, payload
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        if not path.exists():
+            payload = {"ok": False, "skipped": True, "reason": "no_database", "paper_only": True, "at_ms": now}
+            publish_redis_status(key, payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            payload = run_auto_decide(conn, kill_switch_check=kill_switch_engaged)
+        except Exception as exc:  # noqa: BLE001 — never leave Redis/Telegram silent on a crashed run
+            payload = {"ok": False, "paper_only": True, "error": f"{type(exc).__name__}: {exc}", "at_ms": now}
+        finally:
+            conn.close()
+        payload["telegram_sent"] = notify_auto_decide(payload)
+        publish_redis_status(key, payload)
+        if payload.get("skipped") and payload.get("reason") == "live_trading_enabled":
+            return 3, payload
+        return (0 if payload.get("ok") else 1), payload
     finally:
-        conn.close()
-    payload["telegram_sent"] = notify_auto_decide(payload)
-    publish_redis_status(key, payload)
-    if payload.get("skipped") and payload.get("reason") == "live_trading_enabled":
-        return 3, payload
-    return (0 if payload.get("ok") else 1), payload
+        _AUTO_DECIDE_LOCK.release()
 
 
 def run_doctrine_search(query: str, limit: int) -> dict[str, Any]:

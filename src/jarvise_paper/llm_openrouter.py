@@ -22,17 +22,21 @@ class OpenRouterError(RuntimeError):
     """Missing key, HTTP failure, timeout, or non-JSON-object content."""
 
 
+class OpenRouterParseError(OpenRouterError):
+    """Reply was not one JSON object (malformed envelope, non-JSON, or non-object)."""
+
+
 def _parse_content(resp: httpx.Response) -> dict[str, Any]:
     try:
         content = resp.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise OpenRouterError("malformed response") from exc
+        raise OpenRouterParseError("malformed response") from exc
     try:
         parsed = json.loads(_FENCE.sub("", str(content)).strip())
     except json.JSONDecodeError as exc:
-        raise OpenRouterError("non-JSON content") from exc
+        raise OpenRouterParseError("non-JSON content") from exc
     if not isinstance(parsed, dict):
-        raise OpenRouterError("non-object JSON")
+        raise OpenRouterParseError("non-object JSON")
     return parsed
 
 

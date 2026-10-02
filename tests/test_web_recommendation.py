@@ -137,6 +137,30 @@ def test_recommendation_claude_source(monkeypatch, tmp_path: Path) -> None:
     }
 
 
+def test_recommendation_ignores_older_review_than_candidate(monkeypatch, tmp_path: Path) -> None:
+    _stub(monkeypatch)
+    db = tmp_path / "w-old.db"
+    _seed(db)
+    conn = open_db(db)
+    insert_llm_review(
+        conn,
+        {
+            "approval_id": "ap-1",
+            "model": "anthropic/claude-sonnet-4.5",
+            "decision": "approve",
+            "reason": "stale",
+            "brief_hash": "h",
+            "created_at_ms": 500,
+        },
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    card = client.get("/api/approvals/ap-1/recommendation").json()
+    assert card["recommendation_source"] == "template"
+    assert card["claude"] is None
+
+
 def test_recommendation_404(monkeypatch, tmp_path: Path) -> None:
     _stub(monkeypatch)
     db = tmp_path / "w3.db"

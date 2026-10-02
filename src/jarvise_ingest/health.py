@@ -1,5 +1,8 @@
 """Ingest health: is indicator warm-up complete and is the stored series fresh?
 
+Stale alerts use one candle interval plus grace (`max_age_min`), because the age of the
+newest closed candle naturally cycles from 0 up to one full interval on a healthy series.
+
 Read-only. Alert-only — this module never triggers ingest and never places orders.
 """
 
@@ -29,6 +32,7 @@ def ingest_health(
 ) -> dict[str, Any]:
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
     step = INTERVAL_MS[timeframe]
+    stale_after_min = step / 60_000.0 + max_age_min
     out: dict[str, dict[str, Any]] = {}
     alerts: list[str] = []
     for raw in symbols:
@@ -53,10 +57,10 @@ def ingest_health(
             alerts.append(f"{sym}: no {timeframe} candles stored")
         elif ready == 0:
             alerts.append(f"{sym}: ema_200 not ready ({rows} rows) — analyze stays flat")
-        if newest_age_min is not None and newest_age_min > max_age_min:
+        if newest_age_min is not None and newest_age_min > stale_after_min:
             alerts.append(
                 f"{sym}: newest {timeframe} candle closed {newest_age_min:.0f} min ago "
-                f"(> {max_age_min:.0f})"
+                f"(> {stale_after_min:.0f} = one {timeframe} interval + {max_age_min:.0f} grace)"
             )
         if gaps > 0:
             alerts.append(f"{sym}: {gaps} gap(s) in stored {timeframe} series")
@@ -67,5 +71,6 @@ def ingest_health(
         "alerts": alerts,
         "backfill_hint": BACKFILL_HINT.format(symbols=",".join(out), timeframe=timeframe),
         "at_ms": ts,
+        "stale_after_min": stale_after_min,
         "paper_only": True,
     }

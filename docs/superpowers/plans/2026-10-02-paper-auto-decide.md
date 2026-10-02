@@ -30,7 +30,7 @@
 ## Spec amendments (clarifications made while planning)
 
 1. **Doctrine lookup path.** The web image has `qdrant-client` but not `sentence-transformers`, so web cannot embed queries. The `jobs` service (worker image, has both) exposes a GET-only `GET /doctrine?q=&limit=` route; web calls it over the docker network (`JARVISE_JOBS_URL`, default `http://jobs:8090`, 5 s timeout) and falls back to `doctrine: []` on any error. `auto_decide` calls the same helper in-process. Spec §4/§5 said web needs no new env; it now needs `JARVISE_JOBS_URL` (+ `JARVISE_JOBS_TOKEN` when set).
-2. **Ingest-health age.** Health runs on the paper timeframe (`JARVISE_PAPER_TIMEFRAME`, default `4h`) because that is where `ema_200` readiness decides the queue. `newest_age_min` is minutes since the newest stored candle **closed** (`timestamp + INTERVAL_MS[tf]`), so `JARVISE_INGEST_HEALTH_MAX_AGE_MIN=60` does not false-alarm on a 4h series with 15-minute ingest.
+2. **Ingest-health age.** Health runs on the paper timeframe (`JARVISE_PAPER_TIMEFRAME`, default `4h`) because that is where `ema_200` readiness decides the queue. `newest_age_min` is minutes since the newest stored candle **closed**; the alert threshold is one candle interval plus `JARVISE_INGEST_HEALTH_MAX_AGE_MIN`, because that age legitimately cycles up to one interval on a healthy series.
 
 ## File map
 

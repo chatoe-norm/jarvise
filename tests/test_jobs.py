@@ -285,3 +285,33 @@ def test_paper_auto_decide_route(monkeypatch) -> None:
     handler.path = "/jobs/paper-auto-decide"
     handler._dispatch()
     assert handler._status == 200
+
+
+def test_paper_auto_decide_crash_still_publishes(monkeypatch, tmp_path) -> None:
+    db = tmp_path / "crash.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: False)
+
+    def boom(conn, **kw):
+        raise RuntimeError("sqlite exploded")
+
+    monkeypatch.setattr("jarvise.jobs.run_auto_decide", boom)
+    sent: list[dict] = []
+    monkeypatch.setattr("jarvise.jobs.notify_auto_decide", lambda payload: sent.append(payload) or True)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda key, payload: published.append((key, payload)))
+    code, body = run_paper_auto_decide()
+    assert code == 1 and body["ok"] is False
+    assert body["error"].startswith("RuntimeError: ")
+    assert published[0][0] == "jarvise:paper_auto:last" and sent
+
+
+def test_paper_auto_decide_redis_failure_fails_closed(monkeypatch) -> None:
+    def boom() -> bool:
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", boom)
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
+    code, body = run_paper_auto_decide()
+    assert code == 3 and body["skipped"] is True

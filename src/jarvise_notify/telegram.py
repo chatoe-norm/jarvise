@@ -144,6 +144,8 @@ def format_auto_decide_message(payload: dict[str, Any]) -> str:
             "Jarvise auto-decide REFUSED: JARVISE_LIVE_TRADING=true.\n"
             "Auto path is paper-only; queue left for the owner."
         )
+    if payload.get("error"):
+        return f"Jarvise paper auto-decide CRASHED: {payload['error']}\nQueue untouched beyond what the payload lists; check Ops."
     approved = payload.get("approved") or []
     rejected = payload.get("rejected") or []
     deferred = payload.get("deferred") or []
@@ -167,7 +169,12 @@ def notify_auto_decide(
 ) -> bool:
     """One message per run when something needs the owner (defer / failure / live refusal)."""
     refused = bool(payload.get("skipped")) and payload.get("reason") == "live_trading_enabled"
-    needs_owner = refused or bool(payload.get("deferred")) or bool(payload.get("apply_failed"))
+    needs_owner = (
+        refused
+        or bool(payload.get("error"))
+        or bool(payload.get("deferred"))
+        or bool(payload.get("apply_failed"))
+    )
     if not needs_owner or not notify_configured():
         return False
     return send_telegram_message(format_auto_decide_message(payload), client=client)

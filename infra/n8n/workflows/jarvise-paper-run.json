@@ -39,7 +39,7 @@
         "method": "POST",
         "url": "http://jobs:8090/jobs/paper-auto-decide",
         "options": {
-          "timeout": 180000
+          "timeout": 360000
         }
       },
       "id": "http-paper-auto-decide",

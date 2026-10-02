@@ -191,6 +191,7 @@ def approve_approval(
     *,
     kill_switch: bool,
     now_ms: int | None = None,
+    expected_analysis_id: str | None = None,
 ) -> dict[str, Any]:
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
     row = get_approval(conn, approval_id)
@@ -265,7 +266,9 @@ def approve_approval(
             "error": "no stored candles",
             "paper_only": True,
         }
-    claimed = claim_approval_for_fill(conn, approval_id, now_ms=ts)
+    claimed = claim_approval_for_fill(
+        conn, approval_id, now_ms=ts, expected_analysis_id=expected_analysis_id
+    )
     if claimed is None:
         return _claim_failure(conn, approval_id, ts=ts)
     analysis = {

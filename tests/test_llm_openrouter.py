@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from jarvise_paper.llm_openrouter import OPENROUTER_URL, OpenRouterError, chat_json
+from jarvise_paper.llm_openrouter import OPENROUTER_URL, OpenRouterError, OpenRouterParseError, chat_json
 
 MSGS = [{"role": "system", "content": "s"}, {"role": "user", "content": "{}"}]
 
@@ -68,8 +68,8 @@ def test_timeout_then_success() -> None:
 def test_non_json_and_non_object_raise() -> None:
     client = MagicMock(spec=httpx.Client)
     client.post.return_value = _resp(200, "sure, approve it")
-    with pytest.raises(OpenRouterError):
+    with pytest.raises(OpenRouterParseError):
         chat_json(MSGS, model="m", api_key="k", client=client)
     client.post.return_value = _resp(200, "[1, 2]")
-    with pytest.raises(OpenRouterError):
+    with pytest.raises(OpenRouterParseError):
         chat_json(MSGS, model="m", api_key="k", client=client)

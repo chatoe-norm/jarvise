@@ -320,6 +320,8 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         position = get_paper_position(conn, symbol)
         safety = evaluate_from_db(conn, symbol).as_dict()
         review = get_latest_llm_review(conn, approval_id)
+        if review is not None and int(review["created_at_ms"]) < int(row["created_at_ms"]):
+            review = None
     finally:
         conn.close()
     claude = (

@@ -13,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 SCHEMA_SQL = """
 -- Timestamps: INTEGER Unix milliseconds (UTC)
@@ -1104,19 +1105,23 @@ def claim_approval_for_fill(
     *,
     now_ms: int,
     resolve_reason: str = "paper_fill",
+    expected_analysis_id: str | None = None,
 ) -> dict | None:
     """Atomically claim a pending, unexpired row before paper or live fill."""
     ts = int(now_ms)
-    cur = conn.execute(
-        """
+    sql = """
         UPDATE approval_queue SET
             status = 'approved',
             resolved_at_ms = ?,
             resolve_reason = ?
         WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
-        """,
-        (ts, resolve_reason, approval_id, ts),
-    )
+        """
+    params: list[Any] = [ts, resolve_reason, approval_id, ts]
+    if expected_analysis_id is not None:
+        # Guards the auto path: the row must still be the exact analysis that was reviewed.
+        sql += " AND analysis_id = ?"
+        params.append(expected_analysis_id)
+    cur = conn.execute(sql, params)
     conn.commit()
     if cur.rowcount == 0:
         return None
@@ -1225,9 +1230,22 @@ def list_expired_pending_approvals(
 
 
 def set_approval_resolve_reason(
-    conn: sqlite3.Connection, approval_id: str, reason: str
+    conn: sqlite3.Connection,
+    approval_id: str,
+    reason: str,
+    *,
+    resolved_at_ms: int | None = None,
 ) -> dict | None:
-    """Overwrite resolve_reason only (status untouched). Used for auto: audit prefixes."""
+    """Overwrite resolve_reason only. With resolved_at_ms, only when the row was resolved at exactly that instant (same run)."""
+    if resolved_at_ms is not None:
+        cur = conn.execute(
+            "UPDATE approval_queue SET resolve_reason = ? WHERE id = ? AND resolved_at_ms = ?",
+            (reason, approval_id, int(resolved_at_ms)),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return get_approval(conn, approval_id)
     conn.execute(
         "UPDATE approval_queue SET resolve_reason = ? WHERE id = ?",
         (reason, approval_id),

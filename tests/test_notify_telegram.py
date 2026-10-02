@@ -153,3 +153,15 @@ def test_auto_decide_message_variants(monkeypatch: pytest.MonkeyPatch) -> None:
     assert notify_auto_decide(quiet, client=client) is False
     assert notify_auto_decide(refused, client=client) is True
     assert client.post.call_count == 2
+
+
+def test_auto_decide_crash_payload_notifies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = mock_resp
+    payload = {"ok": False, "error": "RuntimeError: boom", "paper_only": True}
+    assert "CRASHED" in format_auto_decide_message(payload)
+    assert notify_auto_decide(payload, client=client) is True
