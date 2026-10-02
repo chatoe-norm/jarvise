@@ -15,7 +15,8 @@ from urllib.parse import parse_qs
 from jarvise.rag import doctrine_snippets, publish_redis_status
 from jarvise_ingest.db import list_approvals, open_db
 from jarvise_ingest.health import ingest_health
-from jarvise_notify import notify_ingest_health, notify_pending_digest
+from jarvise_notify import notify_auto_decide, notify_ingest_health, notify_pending_digest
+from jarvise_paper.auto_decide import run_auto_decide
 
 
 def kill_switch_engaged() -> bool:
@@ -204,6 +205,31 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
     return 0, payload
 
 
+def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
+    """Second-layer Claude review of pending paper candidates. Paper only; flag default off."""
+    key = "jarvise:paper_auto:last"
+    if kill_switch_engaged():
+        payload = _skipped()
+        publish_redis_status(key, payload)
+        return 3, payload
+    raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+    path = Path(raw)
+    if not path.exists():
+        payload = {"ok": False, "skipped": True, "reason": "no_database", "paper_only": True}
+        publish_redis_status(key, payload)
+        return 1, payload
+    conn = open_db(path)
+    try:
+        payload = run_auto_decide(conn)
+    finally:
+        conn.close()
+    payload["telegram_sent"] = notify_auto_decide(payload)
+    publish_redis_status(key, payload)
+    if payload.get("skipped") and payload.get("reason") == "live_trading_enabled":
+        return 3, payload
+    return (0 if payload.get("ok") else 1), payload
+
+
 def run_doctrine_search(query: str, limit: int) -> dict[str, Any]:
     """GET-only doctrine lookup for web cards and the auto-decide brief."""
     hits = doctrine_snippets(query, limit=limit)
@@ -235,6 +261,7 @@ ROUTES = {
     ("POST", "/jobs/paper-expire"): "paper_expire",
     ("POST", "/jobs/paper-pending-digest"): "paper_pending_digest",
     ("POST", "/jobs/ingest-health"): "ingest_health",
+    ("POST", "/jobs/paper-auto-decide"): "paper_auto_decide",
 }
 
 
@@ -295,6 +322,10 @@ class JobHandler(BaseHTTPRequestHandler):
         if action == "ingest_health":
             code, body = run_ingest_health()
             self._send(200 if code == 0 else 500, body)
+            return
+        if action == "paper_auto_decide":
+            code, body = run_paper_auto_decide()
+            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
             return
         self._send(404, {"ok": False, "error": "not found"})
 

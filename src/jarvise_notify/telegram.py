@@ -136,3 +136,38 @@ def notify_ingest_health(
     if not payload.get("alerts") or not notify_configured():
         return False
     return send_telegram_message(format_ingest_health_message(payload), client=client)
+
+
+def format_auto_decide_message(payload: dict[str, Any]) -> str:
+    if payload.get("skipped") and payload.get("reason") == "live_trading_enabled":
+        return (
+            "Jarvise auto-decide REFUSED: JARVISE_LIVE_TRADING=true.\n"
+            "Auto path is paper-only; queue left for the owner."
+        )
+    approved = payload.get("approved") or []
+    rejected = payload.get("rejected") or []
+    deferred = payload.get("deferred") or []
+    failed = payload.get("apply_failed") or []
+    lines = [
+        f"Jarvise paper auto-decide ({payload.get('model')})",
+        f"approved={len(approved)} rejected={len(rejected)} deferred={len(deferred)} failed={len(failed)}",
+    ]
+    for d in deferred[:DIGEST_CAP]:
+        lines.append(f"- DEFER {d.get('symbol')} id={d.get('id')}: {d.get('reason')}")
+    for f in failed[:DIGEST_CAP]:
+        lines.append(f"- FAILED {f.get('symbol')} id={f.get('id')}: {f.get('error')}")
+    lines.append("Decide on Home (:8080) or: jarvise paper approve|reject <id>")
+    return "\n".join(lines)
+
+
+def notify_auto_decide(
+    payload: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """One message per run when something needs the owner (defer / failure / live refusal)."""
+    refused = bool(payload.get("skipped")) and payload.get("reason") == "live_trading_enabled"
+    needs_owner = refused or bool(payload.get("deferred")) or bool(payload.get("apply_failed"))
+    if not needs_owner or not notify_configured():
+        return False
+    return send_telegram_message(format_auto_decide_message(payload), client=client)

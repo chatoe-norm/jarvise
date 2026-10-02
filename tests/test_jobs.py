@@ -7,10 +7,12 @@ from jarvise.jobs import (
     JobHandler,
     run_ingest,
     run_ingest_health,
+    run_paper_auto_decide,
     run_paper_expire,
     run_paper_pending_digest,
     run_paper_run,
 )
+from jarvise_ingest.db import open_db
 
 
 class _Handler(JobHandler):
@@ -223,5 +225,63 @@ def test_ingest_health_route(monkeypatch) -> None:
     )
     handler = _Handler()
     handler.path = "/jobs/ingest-health"
+    handler._dispatch()
+    assert handler._status == 200
+
+
+def test_paper_auto_decide_kill_switch(monkeypatch) -> None:
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: True)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "jarvise.jobs.publish_redis_status",
+        lambda key, payload: published.append((key, payload)),
+    )
+    code, body = run_paper_auto_decide()
+    assert code == 3 and body["skipped"] is True
+    assert published[0][0] == "jarvise:paper_auto:last"
+
+
+def test_paper_auto_decide_runs_and_publishes(monkeypatch, tmp_path) -> None:
+    db = tmp_path / "auto.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: False)
+    monkeypatch.setattr(
+        "jarvise.jobs.run_auto_decide",
+        lambda conn, **kw: {"ok": True, "paper_only": True, "deferred": [], "apply_failed": []},
+    )
+    monkeypatch.setattr("jarvise.jobs.notify_auto_decide", lambda payload: False)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "jarvise.jobs.publish_redis_status",
+        lambda key, payload: published.append((key, payload)),
+    )
+    code, body = run_paper_auto_decide()
+    assert code == 0 and body["ok"] is True and body["telegram_sent"] is False
+    assert published[0][0] == "jarvise:paper_auto:last"
+
+
+def test_paper_auto_decide_live_refused_is_409(monkeypatch, tmp_path) -> None:
+    db = tmp_path / "auto2.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: False)
+    monkeypatch.setattr(
+        "jarvise.jobs.run_auto_decide",
+        lambda conn, **kw: {"ok": False, "skipped": True, "reason": "live_trading_enabled", "paper_only": True},
+    )
+    monkeypatch.setattr("jarvise.jobs.notify_auto_decide", lambda payload: True)
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
+    code, body = run_paper_auto_decide()
+    assert code == 3 and body["telegram_sent"] is True
+
+
+def test_paper_auto_decide_route(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "jarvise.jobs.run_paper_auto_decide",
+        lambda: (0, {"ok": True, "skipped": True, "reason": "auto_decide_disabled", "paper_only": True}),
+    )
+    handler = _Handler()
+    handler.path = "/jobs/paper-auto-decide"
     handler._dispatch()
     assert handler._status == 200

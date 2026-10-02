@@ -8,9 +8,11 @@ import httpx
 import pytest
 
 from jarvise_notify.telegram import (
+    format_auto_decide_message,
     format_digest_message,
     format_enqueue_message,
     format_ingest_health_message,
+    notify_auto_decide,
     notify_ingest_health,
     notify_pending_digest,
     notify_pending_enqueue,
@@ -120,3 +122,34 @@ def test_ingest_health_message_and_notify(monkeypatch: pytest.MonkeyPatch) -> No
     assert notify_ingest_health(payload, client=client) is True
     assert notify_ingest_health({**payload, "ok": True, "alerts": []}, client=client) is False
     assert client.post.call_count == 1
+
+
+def test_auto_decide_message_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    refused = {"ok": False, "skipped": True, "reason": "live_trading_enabled", "model": "m"}
+    assert "REFUSED" in format_auto_decide_message(refused)
+    assert "JARVISE_LIVE_TRADING" in format_auto_decide_message(refused)
+
+    payload = {
+        "ok": True,
+        "model": "anthropic/claude-sonnet-4.5",
+        "approved": [{"id": "a", "symbol": "BTCUSDT", "reason": "ok", "fills": 1}],
+        "rejected": [],
+        "deferred": [{"id": "b", "symbol": "ETHUSDT", "reason": "auto:claude:error:status 503"}],
+        "apply_failed": [{"id": "c", "symbol": "SOLUSDT", "error": "approval expired"}],
+    }
+    text = format_auto_decide_message(payload)
+    assert "approved=1 rejected=0 deferred=1 failed=1" in text
+    assert "DEFER ETHUSDT id=b" in text
+    assert "FAILED SOLUSDT id=c" in text
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = mock_resp
+    assert notify_auto_decide(payload, client=client) is True
+    quiet = {**payload, "deferred": [], "apply_failed": []}
+    assert notify_auto_decide(quiet, client=client) is False
+    assert notify_auto_decide(refused, client=client) is True
+    assert client.post.call_count == 2
