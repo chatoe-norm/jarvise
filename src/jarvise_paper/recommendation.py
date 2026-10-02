@@ -36,9 +36,17 @@ def template_recommendation(action: str | None, conf: float | None) -> str:
 
 
 def doctrine_query(row: Mapping[str, Any]) -> str:
+    """Embed query for card / auto-decide doctrine lookup.
+
+    Includes Jarvise doctrine anchors so retrieval prefers owner protocol notes over
+    generic Notebook scrapes (raw regime/action queries alone surface Investopedia/TV).
+    """
     regime = row.get("regime_state") or "range"
     action = row.get("action") or "flat"
-    return f"{regime} {action} entry risk stop"
+    return (
+        f"jarvise doctrine {regime} {action} entry risk stop "
+        "capital preservation kill-switch FLAT"
+    )
 
 
 def _f(value: Any) -> float | None:

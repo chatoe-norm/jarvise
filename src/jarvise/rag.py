@@ -24,6 +24,15 @@ DEFAULT_SOURCES_CONFIG = Path("config/rag-sources.json")
 OPENCLAW_EXPORT_REL = Path("data/openclaw/exports")
 OPENCLAW_SOURCES_REL = Path("data/analytics/sources/openclaw")
 SOURCE_KINDS = ("notebook", "fetch", "firecrawl", "openclaw")
+# Prefer owner / Jarvise protocol extracts over generic Notebook scrapes (Investopedia, etc.).
+PREFERRED_DOCTRINE_MARKERS = (
+    "jarvise-doctrine",
+    "jarvise-analyzer",
+    "jarvise-autonomous",
+    "jarvise-crypto-trader",
+    "binance-api-intro-jarvise",
+    "binance-skills-hub-jarvise",
+)
 
 
 def repo_root() -> Path:
@@ -512,6 +521,49 @@ def _encode_query(text: str) -> list[float]:
     return _QUERY_MODEL.encode(text).tolist()
 
 
+def is_preferred_doctrine_payload(payload: dict[str, Any] | None) -> bool:
+    """True for owner extracts / Jarvise protocol notes — not generic scraped articles."""
+    if not payload:
+        return False
+    kind = str(payload.get("kind") or "")
+    if kind == "openclaw":
+        return True
+    blob = f"{payload.get('source') or ''} {payload.get('path') or ''}".lower()
+    return any(marker in blob for marker in PREFERRED_DOCTRINE_MARKERS)
+
+
+def _hit_dict(hit: Any) -> dict[str, Any]:
+    payload = getattr(hit, "payload", None) or {}
+    return {
+        "text": str(payload.get("text") or "")[:240],
+        "source": payload.get("source"),
+        "score": float(getattr(hit, "score", 0.0) or 0.0),
+        "kind": payload.get("kind"),
+        "preferred": is_preferred_doctrine_payload(payload),
+    }
+
+
+def prefer_doctrine_hits(hits: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Stable re-rank: preferred Jarvise/owner chunks first, then fill from the rest."""
+    k = max(1, int(limit))
+    preferred = [h for h in hits if h.get("preferred")]
+    other = [h for h in hits if not h.get("preferred")]
+    merged = preferred + other
+    out: list[dict[str, Any]] = []
+    for item in merged:
+        if len(out) >= k:
+            break
+        # Drop ranking helpers from the public snippet shape (card/brief use text+source+score).
+        out.append(
+            {
+                "text": item.get("text") or "",
+                "source": item.get("source"),
+                "score": float(item.get("score") or 0.0),
+            }
+        )
+    return out
+
+
 def doctrine_snippets(
     query: str,
     *,
@@ -520,11 +572,17 @@ def doctrine_snippets(
     encoder: Callable[[str], list[float]] | None = None,
     raise_on_error: bool = False,
 ) -> list[dict[str, Any]]:
-    """Top-k doctrine chunks for a query. [] on empty query, missing deps, or Qdrant error."""
+    """Top-k doctrine chunks for a query. [] on empty query, missing deps, or Qdrant error.
+
+    Oversamples then prefers owner/Jarvise protocol sources so card/auto-decide hits are not
+    dominated by generic Notebook scrapes (Investopedia / ChartSchool / TradingView ideas).
+    """
     text = (query or "").strip()
     if not text:
         return []
     k = max(1, min(int(limit), 10))
+    # Pull a wider pool so preferred chunks can surface even when raw cosine ranks them lower.
+    fetch_n = min(40, max(k * 10, 20))
     try:
         vector = (encoder or _encode_query)(text)
         if client is None:
@@ -536,22 +594,13 @@ def doctrine_snippets(
                 timeout=10,
                 check_compatibility=False,
             )
-        hits = client.query_points(collection_name=COLLECTION, query=vector, limit=k)
+        hits = client.query_points(collection_name=COLLECTION, query=vector, limit=fetch_n)
     except Exception:  # noqa: BLE001 — fail-soft by design; card and brief render without doctrine
         if raise_on_error:
             raise
         return []
-    out: list[dict[str, Any]] = []
-    for hit in getattr(hits, "points", []) or []:
-        payload = getattr(hit, "payload", None) or {}
-        out.append(
-            {
-                "text": str(payload.get("text") or "")[:240],
-                "source": payload.get("source"),
-                "score": float(getattr(hit, "score", 0.0) or 0.0),
-            }
-        )
-    return out
+    mapped = [_hit_dict(hit) for hit in (getattr(hits, "points", []) or [])]
+    return prefer_doctrine_hits(mapped, k)
 
 
 def publish_redis_status(key: str, payload: dict[str, Any]) -> None:
