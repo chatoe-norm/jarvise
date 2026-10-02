@@ -141,8 +141,13 @@
     },
     {
       "name": "CoinGecko",
-      "role": "Spot prices, market cap, breadth, DEX via GeckoTerminal",
-      "docs": "https://docs.coingecko.com/"
+      "role": "Macro ingest (BTC dominance + global mcap via GET /api/v3/global); optional AI research overlay (MCP/Docs MCP/CLI) — never silent-merge into SQLite/paper",
+      "docs": "https://docs.coingecko.com/",
+      "ai_integration": "https://docs.coingecko.com/ai-integration",
+      "jarvise_map": "docs/market-data/coingecko-for-jarvise.md",
+      "mvp_endpoints": [
+        "GET https://api.coingecko.com/api/v3/global"
+      ]
     },
     {
       "name": "CoinMarketCap",
