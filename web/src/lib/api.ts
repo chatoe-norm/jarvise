@@ -23,6 +23,37 @@ export type ApprovalRow = {
   status?: string;
 };
 
+export type RecommendationPayload = {
+  ok: boolean;
+  approval_id: string;
+  symbol: string;
+  timeframe: string;
+  action: string;
+  status?: string;
+  recommendation: "approve" | "approve_with_caution" | "reject";
+  recommendation_source: "template" | "claude";
+  confidence_label: string;
+  headline: string;
+  what_happened: string[];
+  risk: {
+    size_pct_equity: number | null;
+    notional_usd: number | null;
+    equity_usd: number;
+    invalidation_price: number | null;
+    est_loss_usd?: number;
+    stop_atr_multiple: number;
+  };
+  doctrine: string[];
+  checklist: string[];
+  thesis?: string | null;
+  claude: {
+    decision: string;
+    reason: string | null;
+    model: string;
+    at_ms: number;
+  } | null;
+};
+
 export type PaperPayload = {
   ok: boolean;
   paper_only?: boolean;
@@ -127,6 +158,10 @@ export const api = {
   approvals: (status = "pending") =>
     request<{ ok: boolean; rows: ApprovalRow[] }>(
       `/api/approvals?status=${encodeURIComponent(status)}`,
+    ),
+  recommendation: (id: string) =>
+    request<RecommendationPayload>(
+      `/api/approvals/${encodeURIComponent(id)}/recommendation`,
     ),
   exchange: () => request<ExchangePayload>("/api/exchange"),
   approve: (id: string) =>
