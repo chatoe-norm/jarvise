@@ -6,6 +6,7 @@ from io import BytesIO
 from jarvise.jobs import (
     JobHandler,
     run_ingest,
+    run_ingest_health,
     run_paper_expire,
     run_paper_pending_digest,
     run_paper_run,
@@ -197,3 +198,30 @@ def test_doctrine_route_passes_query(monkeypatch) -> None:
     handler._dispatch()
     assert handler._status == 200
     assert seen == [("trend_up long", 2)]
+
+
+def test_ingest_health_missing_db_publishes(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("JARVISE_DB", str(tmp_path / "missing.db"))
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "jarvise.jobs.publish_redis_status",
+        lambda key, payload: published.append((key, payload)),
+    )
+    code, body = run_ingest_health()
+    assert code == 0
+    assert body["ok"] is False
+    assert body["alerts"] and "database missing" in body["alerts"][0]
+    assert body["telegram_sent"] is False
+    assert published[0][0] == "jarvise:ingest:health"
+
+
+def test_ingest_health_route(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "jarvise.jobs.run_ingest_health",
+        lambda: (0, {"ok": True, "alerts": [], "paper_only": True}),
+    )
+    handler = _Handler()
+    handler.path = "/jobs/ingest-health"
+    handler._dispatch()
+    assert handler._status == 200

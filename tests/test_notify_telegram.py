@@ -10,6 +10,8 @@ import pytest
 from jarvise_notify.telegram import (
     format_digest_message,
     format_enqueue_message,
+    format_ingest_health_message,
+    notify_ingest_health,
     notify_pending_digest,
     notify_pending_enqueue,
     send_telegram_message,
@@ -90,3 +92,31 @@ def test_digest_with_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["count"] == 1
     assert "ETHUSDT" in format_digest_message(rows, total=1)
     assert "pending approval" in format_enqueue_message(rows[0]).lower()
+
+
+def test_ingest_health_message_and_notify(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "ok": False,
+        "timeframe": "4h",
+        "symbols": {"BTCUSDT": {"rows": 217, "ema200_ready": 0, "newest_age_min": 12.0, "gaps": 0}},
+        "alerts": ["BTCUSDT: ema_200 not ready (217 rows) — analyze stays flat"],
+        "backfill_hint": "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives --json",
+    }
+    text = format_ingest_health_message(payload)
+    assert "Jarvise ingest health (4h)" in text
+    assert "ema_200 not ready" in text
+    assert "--since 2021-01-01" in text
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    assert notify_ingest_health(payload) is False
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = mock_resp
+    assert notify_ingest_health(payload, client=client) is True
+    assert notify_ingest_health({**payload, "ok": True, "alerts": []}, client=client) is False
+    assert client.post.call_count == 1

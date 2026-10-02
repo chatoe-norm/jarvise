@@ -1,0 +1,56 @@
+{
+  "id": "jrvsIngestHealth1h",
+  "name": "Jarvise ingest health",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "cron-ingest-health",
+      "name": "Every 1h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/ingest-health",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "http-ingest-health",
+      "name": "POST ingest health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Read-only: ema_200 warm-up, freshness, gaps on the paper timeframe. Telegram alert only when something is wrong. Never triggers ingest, never places orders. Jobs writes jarvise:ingest:health."
+    }
+  ],
+  "connections": {
+    "Every 1h": {
+      "main": [[{ "node": "POST ingest health", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "n8n UI → Workflows → Import from File → infra/n8n/workflows/jarvise-ingest-health.json"
+    }
+  },
+  "pinData": {},
+  "active": false
+}

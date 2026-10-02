@@ -109,3 +109,30 @@ def notify_pending_digest(
         "reason": None if sent else "send_failed",
         "count": len(rows),
     }
+
+
+def format_ingest_health_message(payload: dict[str, Any]) -> str:
+    lines = [f"Jarvise ingest health ({payload.get('timeframe')})"]
+    for sym, info in (payload.get("symbols") or {}).items():
+        lines.append(
+            f"- {sym}: rows={info.get('rows')} ema200_ready={info.get('ema200_ready')} "
+            f"age_min={info.get('newest_age_min')} gaps={info.get('gaps')}"
+        )
+    for alert in (payload.get("alerts") or [])[:DIGEST_CAP]:
+        lines.append(f"! {alert}")
+    hint = payload.get("backfill_hint")
+    if hint:
+        lines.append("One-shot backfill (VPS worker):")
+        lines.append(str(hint))
+    return "\n".join(lines)
+
+
+def notify_ingest_health(
+    payload: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Alert only when there are alerts. Soft-fail."""
+    if not payload.get("alerts") or not notify_configured():
+        return False
+    return send_telegram_message(format_ingest_health_message(payload), client=client)

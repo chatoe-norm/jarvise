@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,8 @@ from urllib.parse import parse_qs
 
 from jarvise.rag import doctrine_snippets, publish_redis_status
 from jarvise_ingest.db import list_approvals, open_db
-from jarvise_notify import notify_pending_digest
+from jarvise_ingest.health import ingest_health
+from jarvise_notify import notify_ingest_health, notify_pending_digest
 
 
 def kill_switch_engaged() -> bool:
@@ -35,6 +37,13 @@ def _skipped() -> dict[str, Any]:
         "reason": "kill_switch engaged",
         "paper_only": True,
     }
+
+
+def _fenv(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
 
 
 def run_ingest() -> tuple[int, dict[str, Any]]:
@@ -165,6 +174,36 @@ def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
     return 0, payload
 
 
+def run_ingest_health() -> tuple[int, dict[str, Any]]:
+    """Read-only warm-up/freshness check; alert only. Never triggers ingest, ignores kill-switch."""
+    raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+    path = Path(raw)
+    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    symbols = [
+        s for s in (os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")).split(",")
+        if s.strip()
+    ]
+    max_age = _fenv("JARVISE_INGEST_HEALTH_MAX_AGE_MIN", 60.0)
+    if not path.exists():
+        payload: dict[str, Any] = {
+            "ok": False,
+            "timeframe": timeframe,
+            "symbols": {},
+            "alerts": [f"database missing: {path}"],
+            "at_ms": int(time.time() * 1000),
+            "paper_only": True,
+        }
+    else:
+        conn = open_db(path)
+        try:
+            payload = ingest_health(conn, symbols, timeframe, max_age_min=max_age)
+        finally:
+            conn.close()
+    payload["telegram_sent"] = notify_ingest_health(payload)
+    publish_redis_status("jarvise:ingest:health", payload)
+    return 0, payload
+
+
 def run_doctrine_search(query: str, limit: int) -> dict[str, Any]:
     """GET-only doctrine lookup for web cards and the auto-decide brief."""
     hits = doctrine_snippets(query, limit=limit)
@@ -195,6 +234,7 @@ ROUTES = {
     ("POST", "/jobs/paper-run"): "paper_run",
     ("POST", "/jobs/paper-expire"): "paper_expire",
     ("POST", "/jobs/paper-pending-digest"): "paper_pending_digest",
+    ("POST", "/jobs/ingest-health"): "ingest_health",
 }
 
 
@@ -250,6 +290,10 @@ class JobHandler(BaseHTTPRequestHandler):
             return
         if action == "paper_pending_digest":
             code, body = run_paper_pending_digest()
+            self._send(200 if code == 0 else 500, body)
+            return
+        if action == "ingest_health":
+            code, body = run_ingest_health()
             self._send(200 if code == 0 else 500, body)
             return
         self._send(404, {"ok": False, "error": "not found"})
