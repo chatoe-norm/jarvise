@@ -8,8 +8,12 @@ import httpx
 import pytest
 
 from jarvise_notify.telegram import (
+    format_auto_decide_message,
     format_digest_message,
     format_enqueue_message,
+    format_ingest_health_message,
+    notify_auto_decide,
+    notify_ingest_health,
     notify_pending_digest,
     notify_pending_enqueue,
     send_telegram_message,
@@ -90,3 +94,74 @@ def test_digest_with_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["count"] == 1
     assert "ETHUSDT" in format_digest_message(rows, total=1)
     assert "pending approval" in format_enqueue_message(rows[0]).lower()
+
+
+def test_ingest_health_message_and_notify(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "ok": False,
+        "timeframe": "4h",
+        "symbols": {"BTCUSDT": {"rows": 217, "ema200_ready": 0, "newest_age_min": 12.0, "gaps": 0}},
+        "alerts": ["BTCUSDT: ema_200 not ready (217 rows) — analyze stays flat"],
+        "backfill_hint": "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives --json",
+    }
+    text = format_ingest_health_message(payload)
+    assert "Jarvise ingest health (4h)" in text
+    assert "ema_200 not ready" in text
+    assert "--since 2021-01-01" in text
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    assert notify_ingest_health(payload) is False
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = mock_resp
+    assert notify_ingest_health(payload, client=client) is True
+    assert notify_ingest_health({**payload, "ok": True, "alerts": []}, client=client) is False
+    assert client.post.call_count == 1
+
+
+def test_auto_decide_message_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    refused = {"ok": False, "skipped": True, "reason": "live_trading_enabled", "model": "m"}
+    assert "REFUSED" in format_auto_decide_message(refused)
+    assert "JARVISE_LIVE_TRADING" in format_auto_decide_message(refused)
+
+    payload = {
+        "ok": True,
+        "model": "anthropic/claude-sonnet-4.5",
+        "approved": [{"id": "a", "symbol": "BTCUSDT", "reason": "ok", "fills": 1}],
+        "rejected": [],
+        "deferred": [{"id": "b", "symbol": "ETHUSDT", "reason": "auto:claude:error:status 503"}],
+        "apply_failed": [{"id": "c", "symbol": "SOLUSDT", "error": "approval expired"}],
+    }
+    text = format_auto_decide_message(payload)
+    assert "approved=1 rejected=0 deferred=1 failed=1" in text
+    assert "DEFER ETHUSDT id=b" in text
+    assert "FAILED SOLUSDT id=c" in text
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = mock_resp
+    assert notify_auto_decide(payload, client=client) is True
+    quiet = {**payload, "deferred": [], "apply_failed": []}
+    assert notify_auto_decide(quiet, client=client) is False
+    assert notify_auto_decide(refused, client=client) is True
+    assert client.post.call_count == 2
+
+
+def test_auto_decide_crash_payload_notifies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = mock_resp
+    payload = {"ok": False, "error": "RuntimeError: boom", "paper_only": True}
+    assert "CRASHED" in format_auto_decide_message(payload)
+    assert notify_auto_decide(payload, client=client) is True

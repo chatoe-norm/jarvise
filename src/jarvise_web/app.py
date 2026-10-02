@@ -21,16 +21,22 @@ from jarvise_exchange.value import value_spot_balances
 from jarvise_ingest.db import (
     count_analysis_output,
     ensure_paper_account,
+    get_analysis_output,
+    get_approval,
+    get_latest_llm_review,
     get_paper_account,
+    get_paper_position,
     list_analysis_output,
     list_approvals,
     list_paper_orders,
     list_paper_positions,
+    load_latest_candle,
     open_db,
 )
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
-from jarvise_risk import load_risk_caps
+from jarvise_paper.recommendation import build_recommendation, doctrine_query
+from jarvise_risk import evaluate_from_db, load_risk_caps
 from jarvise_trade import live_trading_enabled
 
 logger = logging.getLogger(__name__)
@@ -47,6 +53,9 @@ INGEST_KEY = "jarvise:ingest:last"
 RAG_KEY = "jarvise:rag:last"
 PAPER_KEY = "jarvise:paper:last"
 PAPER_EXPIRE_KEY = "jarvise:paper:expire:last"
+PAPER_AUTO_KEY = "jarvise:paper_auto:last"
+INGEST_HEALTH_KEY = "jarvise:ingest:health"
+JOBS_URL = os.environ.get("JARVISE_JOBS_URL", "http://jobs:8090")
 DEFAULT_DB = Path("data/analytics/jarvise.db")
 
 _PKG_DIR = Path(__file__).resolve().parent
@@ -251,6 +260,8 @@ def status_payload() -> dict[str, Any]:
         "rag": redis_get_json(RAG_KEY),
         "paper": redis_get_json(PAPER_KEY),
         "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
+        "paper_auto": redis_get_json(PAPER_AUTO_KEY),
+        "ingest_health": redis_get_json(INGEST_HEALTH_KEY),
         "risk_caps": load_risk_caps().as_dict(),
         "qdrant": qdrant_info(),
     }
@@ -268,6 +279,71 @@ def load_metrics() -> dict[str, Any]:
         conn.close()
     report["db"] = str(path)
     return report
+
+
+def fetch_doctrine(query: str, *, limit: int = 3) -> list[str]:
+    """Doctrine snippets via the jobs service (it owns the embedding model). [] on any error."""
+    headers: dict[str, str] = {}
+    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
+    if token:
+        headers["X-Jarvise-Token"] = token
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(
+                f"{JOBS_URL}/doctrine",
+                params={"q": query, "limit": limit},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            hits = resp.json().get("hits") or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("doctrine fetch soft-fail: %s", type(exc).__name__)
+        return []
+    return [str(h.get("text")) for h in hits if isinstance(h, dict) and h.get("text")]
+
+
+def load_recommendation(approval_id: str) -> dict[str, Any] | None:
+    path = db_path()
+    if not path.exists():
+        return None
+    conn = open_db(path)
+    try:
+        row = get_approval(conn, approval_id)
+        if row is None:
+            return None
+        symbol = str(row["symbol"])
+        candle = load_latest_candle(conn, symbol, str(row["timeframe"]))
+        analysis = (
+            get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
+        )
+        account = ensure_paper_account(conn)
+        position = get_paper_position(conn, symbol)
+        safety = evaluate_from_db(conn, symbol).as_dict()
+        review = get_latest_llm_review(conn, approval_id)
+        if review is not None and int(review["created_at_ms"]) < int(row["created_at_ms"]):
+            review = None
+    finally:
+        conn.close()
+    claude = (
+        {
+            "decision": review["decision"],
+            "reason": review["reason"],
+            "model": review["model"],
+            "at_ms": review["created_at_ms"],
+        }
+        if review
+        else None
+    )
+    return build_recommendation(
+        approval=row,
+        candle=candle,
+        analysis=analysis,
+        account=account,
+        position=position,
+        safety=safety,
+        doctrine=fetch_doctrine(doctrine_query(row)),
+        claude=claude,
+    )
 
 
 def exchange_payload() -> dict[str, Any]:
@@ -412,6 +488,16 @@ def api_approvals(
     finally:
         conn.close()
     return {"ok": True, "rows": rows}
+
+
+@app.get("/api/approvals/{approval_id}/recommendation")
+def api_approval_recommendation(
+    approval_id: str, _: None = Depends(require_auth)
+) -> dict[str, Any]:
+    card = load_recommendation(approval_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="approval not found")
+    return card
 
 
 @app.get("/api/exchange")

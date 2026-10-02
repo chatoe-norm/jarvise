@@ -1,3 +1,36 @@
+export type IngestHealthStatus = {
+  ok: boolean;
+  timeframe: string;
+  symbols: Record<
+    string,
+    { rows: number; ema200_ready: number; newest_age_min: number | null; gaps: number }
+  >;
+  alerts: string[];
+  backfill_hint?: string;
+  at_ms: number;
+  telegram_sent?: boolean;
+};
+
+export type PaperAutoStatus = {
+  ok: boolean;
+  skipped?: boolean;
+  reason?: string;
+  error?: string;
+  halted?: string | null;
+  model?: string;
+  prompt_version?: string;
+  processed?: number;
+  approved?: Array<{ id: string; symbol?: string; reason?: string; fills?: number }>;
+  rejected?: Array<{ id: string; symbol?: string; reason?: string }>;
+  deferred?: Array<{ id: string; symbol?: string; reason?: string }>;
+  filtered_out?: Array<{ id: string; symbol?: string; reason?: string }>;
+  apply_failed?: Array<{ id: string; symbol?: string; error?: string }>;
+  doctrine_unavailable?: boolean;
+  duration_s?: number;
+  at_ms?: number;
+  telegram_sent?: boolean;
+};
+
 export type StatusPayload = {
   paper_only: boolean;
   live_trading: boolean;
@@ -6,6 +39,8 @@ export type StatusPayload = {
   rag: unknown;
   paper: unknown;
   paper_expire: unknown;
+  ingest_health?: IngestHealthStatus | null;
+  paper_auto?: PaperAutoStatus | null;
   risk_caps: Record<string, unknown>;
   qdrant: Record<string, unknown>;
 };
@@ -21,6 +56,37 @@ export type ApprovalRow = {
   regime_state?: string;
   thesis?: string;
   status?: string;
+};
+
+export type RecommendationPayload = {
+  ok: boolean;
+  approval_id: string;
+  symbol: string;
+  timeframe: string;
+  action: string;
+  status?: string;
+  recommendation: "approve" | "approve_with_caution" | "reject";
+  recommendation_source: "template" | "claude";
+  confidence_label: string;
+  headline: string;
+  what_happened: string[];
+  risk: {
+    size_pct_equity: number | null;
+    notional_usd: number | null;
+    equity_usd: number;
+    invalidation_price: number | null;
+    est_loss_usd?: number;
+    stop_atr_multiple: number;
+  };
+  doctrine: string[];
+  checklist: string[];
+  thesis?: string | null;
+  claude: {
+    decision: string;
+    reason: string | null;
+    model: string;
+    at_ms: number;
+  } | null;
 };
 
 export type PaperPayload = {
@@ -127,6 +193,10 @@ export const api = {
   approvals: (status = "pending") =>
     request<{ ok: boolean; rows: ApprovalRow[] }>(
       `/api/approvals?status=${encodeURIComponent(status)}`,
+    ),
+  recommendation: (id: string) =>
+    request<RecommendationPayload>(
+      `/api/approvals/${encodeURIComponent(id)}/recommendation`,
     ),
   exchange: () => request<ExchangePayload>("/api/exchange"),
   approve: (id: string) =>

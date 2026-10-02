@@ -6,13 +6,18 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
-from jarvise.rag import publish_redis_status
+from jarvise.rag import doctrine_snippets, publish_redis_status
 from jarvise_ingest.db import list_approvals, open_db
-from jarvise_notify import notify_pending_digest
+from jarvise_ingest.health import ingest_health
+from jarvise_notify import notify_auto_decide, notify_ingest_health, notify_pending_digest
+from jarvise_paper.auto_decide import run_auto_decide
 
 
 def kill_switch_engaged() -> bool:
@@ -33,7 +38,25 @@ def _skipped() -> dict[str, Any]:
         "skipped": True,
         "reason": "kill_switch engaged",
         "paper_only": True,
+        "at_ms": int(time.time() * 1000),
     }
+
+
+def _fenv(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+def _publish_best_effort(key: str, payload: dict[str, Any]) -> None:
+    try:
+        publish_redis_status(key, payload)
+    except Exception:  # noqa: BLE001 — Redis down must not turn a 409/payload into a dropped connection
+        return
+
+
+_AUTO_DECIDE_LOCK = threading.Lock()
 
 
 def run_ingest() -> tuple[int, dict[str, Any]]:
@@ -164,6 +187,85 @@ def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
     return 0, payload
 
 
+def run_ingest_health() -> tuple[int, dict[str, Any]]:
+    """Read-only warm-up/freshness check; alert only. Never triggers ingest, ignores kill-switch."""
+    raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+    path = Path(raw)
+    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    symbols = [
+        s for s in (os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")).split(",")
+        if s.strip()
+    ]
+    max_age = _fenv("JARVISE_INGEST_HEALTH_MAX_AGE_MIN", 60.0)
+    if not path.exists():
+        payload: dict[str, Any] = {
+            "ok": False,
+            "timeframe": timeframe,
+            "symbols": {},
+            "alerts": [f"database missing: {path}"],
+            "at_ms": int(time.time() * 1000),
+            "paper_only": True,
+        }
+    else:
+        conn = open_db(path)
+        try:
+            payload = ingest_health(conn, symbols, timeframe, max_age_min=max_age)
+        finally:
+            conn.close()
+    payload["telegram_sent"] = notify_ingest_health(payload)
+    publish_redis_status("jarvise:ingest:health", payload)
+    return 0, payload
+
+
+def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
+    """Second-layer Claude review of pending paper candidates. Paper only; flag default off.
+
+    Single-flight: a second trigger while a run is in progress is refused (409) and does not
+    touch Redis. Any crash inside the run still publishes a payload and alerts the owner.
+    """
+    key = "jarvise:paper_auto:last"
+    now = int(time.time() * 1000)
+    if not _AUTO_DECIDE_LOCK.acquire(blocking=False):
+        return 3, {"ok": False, "skipped": True, "reason": "auto_decide_running", "paper_only": True, "at_ms": now}
+    try:
+        unreadable = False
+        try:
+            engaged = kill_switch_engaged()
+        except Exception:  # noqa: BLE001 — cannot read the switch → fail closed
+            engaged = True
+            unreadable = True
+        if engaged:
+            payload = {**_skipped(), "reason": "kill_switch unreadable"} if unreadable else _skipped()
+            _publish_best_effort(key, payload)
+            return 3, payload
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        if not path.exists():
+            payload = {"ok": False, "skipped": True, "reason": "no_database", "paper_only": True, "at_ms": now}
+            _publish_best_effort(key, payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            payload = run_auto_decide(conn, kill_switch_check=kill_switch_engaged)
+        except Exception as exc:  # noqa: BLE001 — never leave Redis/Telegram silent on a crashed run
+            payload = {"ok": False, "paper_only": True, "error": f"{type(exc).__name__}: {exc}", "at_ms": now}
+        finally:
+            conn.close()
+        payload["telegram_sent"] = notify_auto_decide(payload)
+        _publish_best_effort(key, payload)
+        if payload.get("skipped") and payload.get("reason") == "live_trading_enabled":
+            return 3, payload
+        return (0 if payload.get("ok") else 1), payload
+    finally:
+        _AUTO_DECIDE_LOCK.release()
+
+
+def run_doctrine_search(query: str, limit: int) -> dict[str, Any]:
+    """GET-only doctrine lookup for web cards and the auto-decide brief."""
+    hits = doctrine_snippets(query, limit=limit)
+    return {"ok": True, "query": query, "hits": hits, "paper_only": True}
+
+
 def _parse_stdout(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     text = (proc.stdout or "").strip()
     if text:
@@ -182,11 +284,14 @@ def _parse_stdout(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 ROUTES = {
     ("GET", "/healthz"): "health",
+    ("GET", "/doctrine"): "doctrine",
     ("POST", "/jobs/ingest"): "ingest",
     ("POST", "/jobs/rag-refresh"): "rag",
     ("POST", "/jobs/paper-run"): "paper_run",
     ("POST", "/jobs/paper-expire"): "paper_expire",
     ("POST", "/jobs/paper-pending-digest"): "paper_pending_digest",
+    ("POST", "/jobs/ingest-health"): "ingest_health",
+    ("POST", "/jobs/paper-auto-decide"): "paper_auto_decide",
 }
 
 
@@ -215,6 +320,15 @@ class JobHandler(BaseHTTPRequestHandler):
         if action == "health":
             self._send(200, {"ok": True, "paper_only": True})
             return
+        if action == "doctrine":
+            params = parse_qs(self.path.partition("?")[2])
+            query = (params.get("q") or [""])[0]
+            try:
+                limit = int((params.get("limit") or ["3"])[0])
+            except ValueError:
+                limit = 3
+            self._send(200, run_doctrine_search(query, limit))
+            return
         if action == "ingest":
             code, body = run_ingest()
             self._send(200 if code == 0 else 409 if code == 3 else 500, body)
@@ -234,6 +348,14 @@ class JobHandler(BaseHTTPRequestHandler):
         if action == "paper_pending_digest":
             code, body = run_paper_pending_digest()
             self._send(200 if code == 0 else 500, body)
+            return
+        if action == "ingest_health":
+            code, body = run_ingest_health()
+            self._send(200 if code == 0 else 500, body)
+            return
+        if action == "paper_auto_decide":
+            code, body = run_paper_auto_decide()
+            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
             return
         self._send(404, {"ok": False, "error": "not found"})
 

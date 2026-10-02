@@ -103,11 +103,18 @@ Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`,
 
 - Every ~15 minutes: `POST /jobs/ingest` → refresh market data
 - Every ~6 hours: `POST /jobs/rag-refresh` → refresh doctrine RAG
-- Every ~4 hours: `POST /jobs/paper-run` → enqueue paper candidates (`paper_core` @ `4h` by default; **no** `--auto-fill`)
-- Every ~1 hour: `POST /jobs/paper-expire` → mark timed-out approvals (no FLAT)
+- Every ~4 hours: `POST /jobs/paper-run` → enqueue paper candidates (`paper_core` @ `4h` by default; **no** `--auto-fill`), then `POST /jobs/paper-auto-decide` → no-op unless `JARVISE_PAPER_AUTO_DECIDE=true`
+- Every ~1 hour: `POST /jobs/paper-expire` → mark timed-out approvals (timeout → FLAT on any open paper position for that symbol)
+- Every ~1 hour: `POST /jobs/ingest-health` → Telegram alert when `ema_200` warm-up is missing, candles are stale, or the series has gaps (alert only; fix with the one-shot backfill shown in the message)
 
 Approve/Reject on the Command Dashboard Home (`http://$TAILSCALE_IP:8080/`) or `jarvise paper approve|reject`. Legacy `/analytics` serves the same SPA.
 Optional Telegram alerts when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set (enqueue + hourly pending digest via n8n `Jarvise paper pending digest`). Soft-fail if unset.
+
+**Recommendation card (Thai):** every pending row on Home has "ดูคำแนะนำ" — what happened, dollar risk, doctrine, and a checklist, so you can Approve/Reject without reading charts. The Approve button is labelled "(แนะนำ)" or "(ระวัง)" from the template rule (`conf ≥ 0.70` approve, `0.55–0.69` caution, otherwise reject). Buttons are never disabled by the card.
+
+**Paper auto-decide (optional, default off):** set `JARVISE_PAPER_AUTO_DECIDE=true` + `OPENROUTER_API_KEY` on the `jobs` service. After each paper-run, Claude reviews candidates that passed Jarvise's filters and approves (simulated fill, reason `auto:claude:approve`), rejects (`auto:claude:reject:<reason>`), or defers. Deferred rows stay pending and you get one Telegram summary per run. Spec: [paper auto-decide](superpowers/specs/2026-10-02-paper-auto-decide-design.md). Live stays off; the job refuses when `JARVISE_LIVE_TRADING=true`.
+
+**n8n after deploy:** workflows are files, not auto-imported — in n8n re-import `infra/n8n/workflows/jarvise-paper-run.json` (adds the auto-decide node) and import + activate `jarvise-ingest-health.json`.
 
 **Manual on VPS when needed:**
 

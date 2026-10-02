@@ -13,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 SCHEMA_SQL = """
 -- Timestamps: INTEGER Unix milliseconds (UTC)
@@ -179,6 +180,19 @@ CREATE TABLE IF NOT EXISTS live_orders (
 );
 CREATE INDEX IF NOT EXISTS idx_live_orders_created
     ON live_orders (created_at_ms);
+
+-- Second-layer LLM reviews for paper approvals (auto-decide audit). Paper only.
+CREATE TABLE IF NOT EXISTS approval_llm_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    approval_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT,
+    brief_hash TEXT,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_approval_llm_reviews_approval
+    ON approval_llm_reviews (approval_id, created_at_ms);
 """
 
 _DERIV_METRIC_KEYS = (
@@ -424,6 +438,27 @@ def count_derivatives(conn: sqlite3.Connection, symbol: str) -> int:
     cur = conn.execute(
         "SELECT COUNT(*) FROM derivatives_analytics WHERE symbol=?",
         (symbol,),
+    )
+    return int(cur.fetchone()[0])
+
+
+_INDICATOR_COLUMNS = frozenset({"atr_14", "rsi_14", "ema_20", "ema_200"})
+
+
+def count_indicator_ready(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    column: str = "ema_200",
+) -> int:
+    """Rows where an indicator column is populated (warm-up complete)."""
+    if column not in _INDICATOR_COLUMNS:
+        raise ValueError(f"unknown indicator column: {column}")
+    cur = conn.execute(
+        f"SELECT COUNT(*) FROM market_technicals "
+        f"WHERE symbol=? AND timeframe=? AND {column} IS NOT NULL",
+        (symbol.upper(), timeframe),
     )
     return int(cur.fetchone()[0])
 
@@ -1070,19 +1105,23 @@ def claim_approval_for_fill(
     *,
     now_ms: int,
     resolve_reason: str = "paper_fill",
+    expected_analysis_id: str | None = None,
 ) -> dict | None:
     """Atomically claim a pending, unexpired row before paper or live fill."""
     ts = int(now_ms)
-    cur = conn.execute(
-        """
+    sql = """
         UPDATE approval_queue SET
             status = 'approved',
             resolved_at_ms = ?,
             resolve_reason = ?
         WHERE id = ? AND status = 'pending' AND expires_at_ms > ?
-        """,
-        (ts, resolve_reason, approval_id, ts),
-    )
+        """
+    params: list[Any] = [ts, resolve_reason, approval_id, ts]
+    if expected_analysis_id is not None:
+        # Guards the auto path: the row must still be the exact analysis that was reviewed.
+        sql += " AND analysis_id = ?"
+        params.append(expected_analysis_id)
+    cur = conn.execute(sql, params)
     conn.commit()
     if cur.rowcount == 0:
         return None
@@ -1188,6 +1227,86 @@ def list_expired_pending_approvals(
         (int(now_ms),),
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+def set_approval_resolve_reason(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    reason: str,
+    *,
+    resolved_at_ms: int | None = None,
+) -> dict | None:
+    """Overwrite resolve_reason only. With resolved_at_ms, only when the row was resolved at exactly that instant (same run)."""
+    if resolved_at_ms is not None:
+        cur = conn.execute(
+            "UPDATE approval_queue SET resolve_reason = ? WHERE id = ? AND resolved_at_ms = ?",
+            (reason, approval_id, int(resolved_at_ms)),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return get_approval(conn, approval_id)
+    conn.execute(
+        "UPDATE approval_queue SET resolve_reason = ? WHERE id = ?",
+        (reason, approval_id),
+    )
+    conn.commit()
+    return get_approval(conn, approval_id)
+
+
+def get_analysis_output(conn: sqlite3.Connection, analysis_id: str) -> dict | None:
+    cur = conn.execute(
+        """
+        SELECT analysis_id, timestamp, symbol, timeframe, regime_state,
+               confidence_score, action, invalidation_price, size_pct_equity, thesis
+        FROM analysis_output
+        WHERE analysis_id = ?
+        """,
+        (analysis_id,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+_LLM_REVIEW_COLUMNS = "approval_id, model, decision, reason, brief_hash, created_at_ms"
+
+
+def insert_llm_review(conn: sqlite3.Connection, row: dict) -> dict:
+    """Append one LLM decision for an approval; returns the stored row."""
+    conn.execute(
+        f"""
+        INSERT INTO approval_llm_reviews ({_LLM_REVIEW_COLUMNS})
+        VALUES (:approval_id, :model, :decision, :reason, :brief_hash, :created_at_ms)
+        """,
+        {
+            "approval_id": str(row["approval_id"]),
+            "model": str(row["model"]),
+            "decision": str(row["decision"]),
+            "reason": row.get("reason"),
+            "brief_hash": row.get("brief_hash"),
+            "created_at_ms": int(row["created_at_ms"]),
+        },
+    )
+    conn.commit()
+    latest = get_latest_llm_review(conn, str(row["approval_id"]))
+    if latest is None:
+        raise RuntimeError("approval_llm_reviews insert did not persist")
+    return latest
+
+
+def get_latest_llm_review(conn: sqlite3.Connection, approval_id: str) -> dict | None:
+    cur = conn.execute(
+        f"""
+        SELECT {_LLM_REVIEW_COLUMNS}
+        FROM approval_llm_reviews
+        WHERE approval_id = ?
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT 1
+        """,
+        (approval_id,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
 
 
 _LIVE_ORDER_COLUMNS = (

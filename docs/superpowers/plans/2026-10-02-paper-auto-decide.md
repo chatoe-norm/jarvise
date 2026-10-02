@@ -30,7 +30,7 @@
 ## Spec amendments (clarifications made while planning)
 
 1. **Doctrine lookup path.** The web image has `qdrant-client` but not `sentence-transformers`, so web cannot embed queries. The `jobs` service (worker image, has both) exposes a GET-only `GET /doctrine?q=&limit=` route; web calls it over the docker network (`JARVISE_JOBS_URL`, default `http://jobs:8090`, 5 s timeout) and falls back to `doctrine: []` on any error. `auto_decide` calls the same helper in-process. Spec §4/§5 said web needs no new env; it now needs `JARVISE_JOBS_URL` (+ `JARVISE_JOBS_TOKEN` when set).
-2. **Ingest-health age.** Health runs on the paper timeframe (`JARVISE_PAPER_TIMEFRAME`, default `4h`) because that is where `ema_200` readiness decides the queue. `newest_age_min` is minutes since the newest stored candle **closed** (`timestamp + INTERVAL_MS[tf]`), so `JARVISE_INGEST_HEALTH_MAX_AGE_MIN=60` does not false-alarm on a 4h series with 15-minute ingest.
+2. **Ingest-health age.** Health runs on the paper timeframe (`JARVISE_PAPER_TIMEFRAME`, default `4h`) because that is where `ema_200` readiness decides the queue. `newest_age_min` is minutes since the newest stored candle **closed**; the alert threshold is one candle interval plus `JARVISE_INGEST_HEALTH_MAX_AGE_MIN`, because that age legitimately cycles up to one interval on a healthy series.
 
 ## File map
 
@@ -249,7 +249,8 @@ def insert_llm_review(conn: sqlite3.Connection, row: dict) -> dict:
     )
     conn.commit()
     latest = get_latest_llm_review(conn, str(row["approval_id"]))
-    assert latest is not None
+    if latest is None:
+        raise RuntimeError("approval_llm_reviews insert did not persist")
     return latest
 
 
@@ -1722,12 +1723,10 @@ git commit -m "feat(ingest): read-only ingest_health (ema200 ready, freshness, g
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_notify_telegram.py`:
+In `tests/test_notify_telegram.py`, add `format_ingest_health_message` and `notify_ingest_health` to the existing `from jarvise_notify.telegram import (...)` block at the top (alphabetical), then append:
 
 ```python
 def test_ingest_health_message_and_notify(monkeypatch: pytest.MonkeyPatch) -> None:
-    from jarvise_notify.telegram import format_ingest_health_message, notify_ingest_health
-
     payload = {
         "ok": False,
         "timeframe": "4h",
@@ -1755,12 +1754,10 @@ def test_ingest_health_message_and_notify(monkeypatch: pytest.MonkeyPatch) -> No
     assert client.post.call_count == 1
 ```
 
-Append to `tests/test_jobs.py`:
+In `tests/test_jobs.py`, add `run_ingest_health` to the existing `from jarvise.jobs import (...)` block at the top (alphabetical), then append:
 
 ```python
 def test_ingest_health_missing_db_publishes(monkeypatch, tmp_path) -> None:
-    from jarvise.jobs import run_ingest_health
-
     monkeypatch.setenv("JARVISE_DB", str(tmp_path / "missing.db"))
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     published: list[tuple[str, dict]] = []
@@ -2659,7 +2656,7 @@ git commit -m "feat(paper): auto-decide config, hard filters, Claude brief and s
 
 **Files:**
 - Modify: `src/jarvise_paper/auto_decide.py` (append)
-- Test: `tests/test_auto_decide_run.py`
+- Test: `tests/test_auto_decide.py` (append — reuses `seed_db`, `pending`, `NOW` already defined there in Task 10; `tests/` is not a package, so do not create a second file that would need to import them)
 
 **Interfaces:**
 - Consumes: everything from Task 10; `approve_approval(conn, id, *, kill_switch, now_ms)`, `reject_approval(conn, id, *, reason, now_ms)`; `insert_llm_review`, `set_approval_resolve_reason`, `get_approval`, `list_approvals`.
@@ -2667,74 +2664,9 @@ git commit -m "feat(paper): auto-decide config, hard filters, Claude brief and s
 
 - [ ] **Step 1: Write the failing tests**
 
+Extend the top-level imports of `tests/test_auto_decide.py`: add `get_approval, get_latest_llm_review, get_paper_position, list_paper_orders` to the `jarvise_ingest.db` import block, add `run_auto_decide` to the `jarvise_paper.auto_decide` import block, and add `from jarvise_paper.llm_openrouter import OpenRouterError`. Then append:
+
 ```python
-# tests/test_auto_decide_run.py
-from pathlib import Path
-
-import pytest
-
-from jarvise_ingest.db import (
-    ensure_paper_account,
-    get_approval,
-    get_latest_llm_review,
-    get_paper_position,
-    list_paper_orders,
-    open_db,
-    upsert_analysis_output,
-    upsert_market_technicals,
-    upsert_pending_approval,
-    write_indicators,
-)
-from jarvise_paper.auto_decide import AutoDecideConfig, run_auto_decide
-from jarvise_paper.llm_openrouter import OpenRouterError
-
-# tests/ is not a package, so the seed helpers are repeated here instead of imported
-# from tests/test_auto_decide.py.
-NOW = 1_700_000_000_000 + 14_400_000 + 60_000
-FAR = 9_999_999_999_999
-
-
-def seed_db(path: Path) -> object:
-    conn = open_db(path)
-    ensure_paper_account(conn)
-    for sym, close in (("BTCUSDT", 85000.0), ("ETHUSDT", 3000.0)):
-        upsert_market_technicals(
-            conn,
-            [{"symbol": sym, "timestamp": 1_700_000_000_000, "timeframe": "4h", "open": close,
-              "high": close, "low": close, "close": close, "volume": 1.0}],
-        )
-        write_indicators(
-            conn,
-            [{"symbol": sym, "timeframe": "4h", "timestamp": 1_700_000_000_000, "atr_14": close * 0.01,
-              "rsi_14": 60.0, "ema_20": close * 0.99, "ema_200": close * 0.9}],
-        )
-        upsert_analysis_output(
-            conn,
-            {"analysis_id": f"an-{sym}", "timestamp": 1_700_000_000_000, "symbol": sym, "timeframe": "4h",
-             "regime_state": "trend_up", "confidence_score": 0.75, "action": "long",
-             "invalidation_price": close * 0.98, "size_pct_equity": 1.125, "thesis": "trend_up"},
-        )
-    return conn
-
-
-def pending(conn, approval_id: str, symbol: str, **over) -> dict:
-    row = {
-        "id": approval_id,
-        "created_at_ms": 1_000,
-        "expires_at_ms": FAR,
-        "symbol": symbol,
-        "timeframe": "4h",
-        "analysis_id": f"an-{symbol}",
-        "action": "long",
-        "regime_state": "trend_up",
-        "confidence_score": 0.75,
-        "size_pct_equity": 1.125,
-        "status": "pending",
-    }
-    row.update(over)
-    return upsert_pending_approval(conn, row)
-
-
 CFG = AutoDecideConfig(
     enabled=True, model="test/model", min_conf=0.55, max_per_run=4, timeout_s=1.0, api_key="k"
 )
@@ -2882,8 +2814,8 @@ Note: the risk-breach test calls `engage_kill_switch`, which is a no-op without 
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_auto_decide_run.py -q`
-Expected: FAIL with `ImportError: cannot import name 'run_auto_decide'`
+Run: `python -m pytest tests/test_auto_decide.py -q`
+Expected: FAIL at collection with `ImportError: cannot import name 'run_auto_decide'`
 
 - [ ] **Step 3: Append `run_auto_decide`**
 
@@ -3002,13 +2934,13 @@ def run_auto_decide(
 
 - [ ] **Step 4: Run tests**
 
-Run: `python -m pytest tests/test_auto_decide_run.py tests/test_auto_decide.py tests/test_paper_approval.py -q`
-Expected: all PASS
+Run: `python -m pytest tests/test_auto_decide.py tests/test_paper_approval.py -q`
+Expected: all PASS (6 from Task 10 + 8 new)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/jarvise_paper/auto_decide.py tests/test_auto_decide_run.py
+git add src/jarvise_paper/auto_decide.py tests/test_auto_decide.py
 git commit -m "feat(paper): run_auto_decide applies Claude decisions via approve/reject_approval"
 ```
 
@@ -3029,12 +2961,10 @@ git commit -m "feat(paper): run_auto_decide applies Claude decisions via approve
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_notify_telegram.py`:
+In `tests/test_notify_telegram.py`, add `format_auto_decide_message` and `notify_auto_decide` to the top-level `from jarvise_notify.telegram import (...)` block (alphabetical), then append:
 
 ```python
 def test_auto_decide_message_variants(monkeypatch: pytest.MonkeyPatch) -> None:
-    from jarvise_notify.telegram import format_auto_decide_message, notify_auto_decide
-
     refused = {"ok": False, "skipped": True, "reason": "live_trading_enabled", "model": "m"}
     assert "REFUSED" in format_auto_decide_message(refused)
     assert "JARVISE_LIVE_TRADING" in format_auto_decide_message(refused)
@@ -3065,12 +2995,10 @@ def test_auto_decide_message_variants(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.post.call_count == 2
 ```
 
-Append to `tests/test_jobs.py`:
+In `tests/test_jobs.py`, add `run_paper_auto_decide` to the top-level `from jarvise.jobs import (...)` block and `from jarvise_ingest.db import open_db` to the top-level imports, then append:
 
 ```python
 def test_paper_auto_decide_kill_switch(monkeypatch) -> None:
-    from jarvise.jobs import run_paper_auto_decide
-
     monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: True)
     published: list[tuple[str, dict]] = []
     monkeypatch.setattr(
@@ -3083,9 +3011,6 @@ def test_paper_auto_decide_kill_switch(monkeypatch) -> None:
 
 
 def test_paper_auto_decide_runs_and_publishes(monkeypatch, tmp_path) -> None:
-    from jarvise.jobs import run_paper_auto_decide
-    from jarvise_ingest.db import open_db
-
     db = tmp_path / "auto.db"
     open_db(db).close()
     monkeypatch.setenv("JARVISE_DB", str(db))
@@ -3106,9 +3031,6 @@ def test_paper_auto_decide_runs_and_publishes(monkeypatch, tmp_path) -> None:
 
 
 def test_paper_auto_decide_live_refused_is_409(monkeypatch, tmp_path) -> None:
-    from jarvise.jobs import run_paper_auto_decide
-    from jarvise_ingest.db import open_db
-
     db = tmp_path / "auto2.db"
     open_db(db).close()
     monkeypatch.setenv("JARVISE_DB", str(db))

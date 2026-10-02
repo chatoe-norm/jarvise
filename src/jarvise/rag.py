@@ -12,6 +12,7 @@ import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -495,6 +496,62 @@ def index_sources(
             for hit in hits.points
         ]
     return result
+
+
+_QUERY_MODEL: Any = None
+
+
+def _encode_query(text: str) -> list[float]:
+    """Embed one query with the same model used by index_sources. Cached per process."""
+    global _QUERY_MODEL
+    if _QUERY_MODEL is None:
+        # Heavy optional extra (.[rag]); imported lazily so web/CLI without it stay importable.
+        from sentence_transformers import SentenceTransformer
+
+        _QUERY_MODEL = SentenceTransformer(MODEL_NAME)
+    return _QUERY_MODEL.encode(text).tolist()
+
+
+def doctrine_snippets(
+    query: str,
+    *,
+    limit: int = 3,
+    client: Any | None = None,
+    encoder: Callable[[str], list[float]] | None = None,
+    raise_on_error: bool = False,
+) -> list[dict[str, Any]]:
+    """Top-k doctrine chunks for a query. [] on empty query, missing deps, or Qdrant error."""
+    text = (query or "").strip()
+    if not text:
+        return []
+    k = max(1, min(int(limit), 10))
+    try:
+        vector = (encoder or _encode_query)(text)
+        if client is None:
+            # Optional extra; lazy import keeps the module importable without qdrant_client.
+            from qdrant_client import QdrantClient
+
+            client = QdrantClient(
+                url=os.environ.get("QDRANT_URL", "http://localhost:6333"),
+                timeout=10,
+                check_compatibility=False,
+            )
+        hits = client.query_points(collection_name=COLLECTION, query=vector, limit=k)
+    except Exception:  # noqa: BLE001 — fail-soft by design; card and brief render without doctrine
+        if raise_on_error:
+            raise
+        return []
+    out: list[dict[str, Any]] = []
+    for hit in getattr(hits, "points", []) or []:
+        payload = getattr(hit, "payload", None) or {}
+        out.append(
+            {
+                "text": str(payload.get("text") or "")[:240],
+                "source": payload.get("source"),
+                "score": float(getattr(hit, "score", 0.0) or 0.0),
+            }
+        )
+    return out
 
 
 def publish_redis_status(key: str, payload: dict[str, Any]) -> None:
