@@ -56,8 +56,8 @@ Two-layer rule: Jarvise filters first, Claude only sees candidates that already 
 | `src/jarvise_paper/llm_openrouter.py` | Minimal `httpx` client: `chat_json(messages, model, timeout) -> dict`. Raises on non-2xx / timeout / non-JSON. No retries beyond one. |
 | `src/jarvise_paper/auto_decide.py` | `run_auto_decide(conn, *, now_ms) -> dict`: gate → filter → brief → Claude → apply via `approve_approval` / `reject_approval` → payload. |
 | `src/jarvise_ingest/health.py` | `ingest_health(conn, symbols, timeframe) -> dict`: `ema200_ready` count per symbol, latest candle age (min), gaps from stored series. |
-| `src/jarvise/jobs.py` | Add routes `POST /jobs/paper-auto-decide` and `POST /jobs/ingest-health` following the existing `run_*` + `publish_redis_status` pattern. |
-| `src/jarvise_web/app.py` | `GET /api/approvals/{id}/recommendation`; `/api/status` adds `paper_auto` and `ingest_health` from Redis. |
+| `src/jarvise/jobs.py` | Add routes `POST /jobs/paper-auto-decide` and `POST /jobs/ingest-health` following the existing `run_*` + `publish_redis_status` pattern, plus GET-only `GET /doctrine?q=&limit=` (jobs owns the embedding model; web has no `sentence-transformers`). |
+| `src/jarvise_web/app.py` | `GET /api/approvals/{id}/recommendation` (doctrine fetched from `JARVISE_JOBS_URL/doctrine`, 5 s timeout, `[]` on error); `/api/status` adds `paper_auto` and `ingest_health` from Redis. |
 | `web/src/lib/api.ts`, `web/src/components/ApprovalQueue.tsx` | Expandable row that lazily fetches the recommendation and renders the card. |
 | `web/src/pages/OpsPage.tsx` | Show `paper_auto` last run and `ingest_health` summary. |
 | `infra/n8n/workflows/jarvise-paper-run.json` | Append HTTP node: after `POST paper run` → `POST /jobs/paper-auto-decide` (timeout 180 s). |
@@ -77,9 +77,10 @@ Existing code reused unchanged: `approve_approval`, `reject_approval`, `list_app
 | `JARVISE_AUTO_DECIDE_MAX_PER_RUN` | `4` | Max Claude calls per job run; remainder deferred. |
 | `JARVISE_AUTO_DECIDE_TIMEOUT_S` | `30` | Per-call HTTP timeout. |
 | `OPENROUTER_API_KEY` | (existing) | Reused from the OpenClaw setup; missing key → every candidate deferred. |
-| `JARVISE_INGEST_HEALTH_MAX_AGE_MIN` | `60` | Alert when the newest 1h candle is older than this. |
+| `JARVISE_INGEST_HEALTH_MAX_AGE_MIN` | `60` | Alert when the newest paper-timeframe candle **closed** more than this many minutes ago (`timestamp + interval`), so a 4h series with 15-minute ingest does not false-alarm. |
+| `JARVISE_JOBS_URL` | `http://jobs:8090` | Web → jobs for doctrine snippets on the card (docker network only; reuses `JARVISE_JOBS_TOKEN` when set). |
 
-All live in `.env.example` with comments and are passed to the `jobs` service in compose. The web service needs none of them (it reads Redis).
+All live in `.env.example` with comments. The `jobs` service gets the auto-decide and health variables; the web service only needs `JARVISE_JOBS_URL` (everything else it reads from Redis/SQLite).
 
 ## 6. Recommendation card contract
 
@@ -169,7 +170,7 @@ Response parsing: strict JSON object with exactly those keys; anything else → 
 | Candidate is `flat`, size 0, conf < MIN_CONF, force_flat, or expired | Filtered before Claude (`filtered_out` list in payload with reason). |
 | Qdrant unavailable | Brief and card proceed with `doctrine: []`; payload flags `doctrine_unavailable: true`. |
 | More candidates than `MAX_PER_RUN` | Oldest-first processed; remainder `deferred_cap`. |
-| ingest-health: `ema200_ready == 0` for any paper symbol, or newest candle older than `JARVISE_INGEST_HEALTH_MAX_AGE_MIN`, or `gaps > 0` | Telegram alert (soft-fail) with the counts and the one-shot backfill command; no ingest triggered. |
+| ingest-health (paper timeframe): no candles, or `ema200_ready == 0` for any paper symbol, or newest candle closed more than `JARVISE_INGEST_HEALTH_MAX_AGE_MIN` ago, or `gaps > 0` | Telegram alert (soft-fail) with the counts and the one-shot backfill command; no ingest triggered. |
 
 Defer alerts use one Telegram message per run listing each deferred symbol with the Claude reason or error, so the owner can open Home and decide.
 
