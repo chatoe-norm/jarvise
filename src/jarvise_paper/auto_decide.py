@@ -240,52 +240,63 @@ def run_auto_decide(
             deferred.append({**entry, "reason": "missing_api_key"})
             continue
         processed += 1
-        hits = lookup(doctrine_query(row))
-        doctrine = [str(h.get("text")) for h in hits if isinstance(h, dict) and h.get("text")]
-        if not doctrine:
-            doctrine_unavailable = True
-        brief = build_brief(conn, row, doctrine=doctrine, now_ms=ts, caps=caps, min_conf=cfg.min_conf)
         try:
-            raw = chat(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(brief, ensure_ascii=False, default=str)},
-                ],
-                model=cfg.model,
-                timeout_s=cfg.timeout_s,
-                api_key=cfg.api_key,
+            hits = lookup(doctrine_query(row))
+            doctrine = [str(h.get("text")) for h in hits if isinstance(h, dict) and h.get("text")]
+            if not doctrine:
+                doctrine_unavailable = True
+            brief = build_brief(conn, row, doctrine=doctrine, now_ms=ts, caps=caps, min_conf=cfg.min_conf)
+            try:
+                raw = chat(
+                    [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": json.dumps(brief, ensure_ascii=False, default=str)},
+                    ],
+                    model=cfg.model,
+                    timeout_s=cfg.timeout_s,
+                    api_key=cfg.api_key,
+                )
+                decision, reason = parse_decision(raw)
+            except OpenRouterError as exc:
+                decision, reason = "defer", f"auto:claude:error:{exc}"[:REASON_MAX]
+            insert_llm_review(
+                conn,
+                {
+                    "approval_id": row["id"],
+                    "model": cfg.model,
+                    "decision": decision,
+                    "reason": reason,
+                    "brief_hash": brief_hash(brief),
+                    "created_at_ms": ts,
+                },
             )
-            decision, reason = parse_decision(raw)
-        except OpenRouterError as exc:
-            decision, reason = "defer", f"auto:claude:error:{exc}"[:REASON_MAX]
-        insert_llm_review(
-            conn,
-            {
-                "approval_id": row["id"],
-                "model": cfg.model,
-                "decision": decision,
-                "reason": reason,
-                "brief_hash": brief_hash(brief),
-                "created_at_ms": ts,
-            },
-        )
+        except Exception as exc:  # noqa: BLE001 — fail closed per candidate; keep the batch running
+            deferred.append({**entry, "reason": f"auto:error:{type(exc).__name__}:{exc}"[:REASON_MAX]})
+            continue
         entry["reason"] = reason
-        if decision == "approve":
-            result = approve_approval(conn, row["id"], kill_switch=kill_switch, now_ms=ts)
-            if result.get("ok"):
-                set_approval_resolve_reason(conn, row["id"], "auto:claude:approve")
-                approved.append({**entry, "fills": len(result.get("fills") or [])})
+        try:
+            if decision == "approve":
+                result = approve_approval(conn, row["id"], kill_switch=kill_switch, now_ms=ts)
+                if result.get("ok"):
+                    set_approval_resolve_reason(conn, row["id"], "auto:claude:approve")
+                    approved.append({**entry, "fills": len(result.get("fills") or [])})
+                else:
+                    inner = str(result.get("error") or "approve failed")
+                    after = get_approval(conn, row["id"])
+                    if after is not None and after["status"] != "pending":
+                        set_approval_resolve_reason(conn, row["id"], f"auto:apply_failed:{inner}"[:400])
+                    apply_failed.append({**entry, "error": inner})
+            elif decision == "reject":
+                result = reject_approval(conn, row["id"], reason=f"auto:claude:reject:{reason}"[:400], now_ms=ts)
+                if result.get("ok"):
+                    rejected.append(entry)
+                else:
+                    apply_failed.append({**entry, "error": str(result.get("error") or "reject failed")})
             else:
-                inner = str(result.get("error") or "approve failed")
-                after = get_approval(conn, row["id"])
-                if after is not None and after["status"] != "pending":
-                    set_approval_resolve_reason(conn, row["id"], f"auto:apply_failed:{inner}"[:400])
-                apply_failed.append({**entry, "error": inner})
-        elif decision == "reject":
-            reject_approval(conn, row["id"], reason=f"auto:claude:reject:{reason}"[:400], now_ms=ts)
-            rejected.append(entry)
-        else:
-            deferred.append(entry)
+                deferred.append(entry)
+        except Exception as exc:  # noqa: BLE001
+            apply_failed.append({**entry, "error": f"{type(exc).__name__}: {exc}"})
+            continue
 
     return {
         **base,

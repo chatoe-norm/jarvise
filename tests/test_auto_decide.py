@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from jarvise_ingest.db import (
     upsert_pending_approval,
     write_indicators,
 )
+from jarvise_paper.approval import approve_approval
 from jarvise_paper.auto_decide import (
     DEFAULT_MODEL,
     PROMPT_VERSION,
@@ -298,3 +300,54 @@ def test_apply_failure_recorded_with_prefix(tmp_path: Path) -> None:
     row = get_approval(conn, "big")
     assert row["status"] == "failed"
     assert row["resolve_reason"].startswith("auto:apply_failed:max_notional")
+
+
+def test_lookup_exception_defers_candidate_and_batch_continues(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "ex.db")
+    pending(conn, "a", "BTCUSDT", created_at_ms=1)
+    pending(conn, "b", "ETHUSDT", created_at_ms=2)
+    calls: list[str] = []
+
+    def lookup(query: str):
+        calls.append(query)
+        if len(calls) == 1:
+            raise RuntimeError("qdrant exploded")
+        return [{"text": "structure first", "source": "d.md", "score": 0.9}]
+
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("approve"), doctrine_lookup=lookup)
+    assert len(calls) == 2
+    reasons = {d["id"]: d["reason"] for d in out["deferred"]}
+    assert reasons["a"].startswith("auto:error:RuntimeError:")
+    assert [x["id"] for x in out["approved"]] == ["b"]
+    assert get_approval(conn, "a")["status"] == "pending"
+    assert get_approval(conn, "b")["status"] == "approved"
+
+
+def test_reject_failure_is_recorded_not_claimed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "rf.db")
+    pending(conn, "ok", "BTCUSDT")
+    monkeypatch.setattr(
+        "jarvise_paper.auto_decide.reject_approval",
+        lambda *a, **k: {"ok": False, "approval": None, "error": "approval not pending", "paper_only": True},
+    )
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("reject", "x"), doctrine_lookup=DOCTRINE)
+    assert out["rejected"] == []
+    assert out["apply_failed"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": "x", "error": "approval not pending"}]
+
+
+def test_apply_exception_is_recorded_and_batch_continues(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "ae.db")
+    pending(conn, "a", "BTCUSDT", created_at_ms=1)
+    pending(conn, "b", "ETHUSDT", created_at_ms=2)
+    real = approve_approval
+
+    def flaky(conn_, approval_id, **kwargs):
+        if approval_id == "a":
+            raise sqlite3.OperationalError("database is locked")
+        return real(conn_, approval_id, **kwargs)
+
+    monkeypatch.setattr("jarvise_paper.auto_decide.approve_approval", flaky)
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("approve"), doctrine_lookup=DOCTRINE)
+    assert out["apply_failed"][0]["id"] == "a"
+    assert out["apply_failed"][0]["error"].startswith("OperationalError: ")
+    assert [x["id"] for x in out["approved"]] == ["b"]
