@@ -37,17 +37,62 @@ def test_ingest_fetch_dry_run(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_doctrine_allowlist_is_trading_only() -> None:
-    # jarvise_doctrine indexes notebook + owner extracts + openclaw — not UI / Learn / raw venue docs.
+    # jarvise_doctrine indexes preferred protocol extracts + openclaw — not UI / Learn / scrapes.
     cfg = json.loads((ROOT / "config" / "rag-sources.json").read_text(encoding="utf-8"))
     assert cfg["fetch"] == []
     assert cfg["firecrawl"] == []
     assert cfg["notebook"]["alias"] == "jarvise"
+    assert "PREFERRED" in cfg["note"] or "protocol" in cfg["note"].lower()
     # If fetch/firecrawl are re-enabled later, keep markdown/.txt (SPA HTML shells are empty).
     for section in ("fetch", "firecrawl"):
         for entry in cfg.get(section) or []:
             url = entry["url"]
             path = urlparse(url).path
             assert path.endswith((".md", ".txt")) or urlparse(url).hostname != "developers.binance.com", url
+
+
+def test_is_indexable_doctrine_path_filters_scrapes(tmp_path: Path) -> None:
+    sources = tmp_path / "data" / "analytics" / "sources"
+    keep = [
+        sources / "jarvise-doctrine.txt",
+        sources / "jarvise-analyzer-stack.txt",
+        sources / "binance-api-intro-jarvise.txt",
+        sources / "notebook" / "jarvise-autonomous-trader-core-protocol-2f474ccb.md",
+        sources / "notebook" / "jarvise-crypto-trader-2-37169594.md",
+        sources / "openclaw" / "2026-09-22-btc-ops-verify.md",
+    ]
+    drop = [
+        sources / "notebook" / "what-is-macd-deebae93.md",
+        sources / "notebook" / "90-warren-buffett-quotes-on-investing-business-and-life-7f3a6fa7.md",
+        sources / "notebook" / "catalog.md",
+        tmp_path / "data" / "analytics" / "stack.md",
+    ]
+    for path in keep + drop:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("body", encoding="utf-8")
+    for path in keep:
+        assert rag.is_indexable_doctrine_path(path), path
+    for path in drop:
+        assert not rag.is_indexable_doctrine_path(path), path
+
+
+def test_collect_source_files_skips_notebook_scrapes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_ROOT", str(tmp_path))
+    sources = tmp_path / "data" / "analytics" / "sources"
+    (sources / "jarvise-doctrine.txt").parent.mkdir(parents=True, exist_ok=True)
+    (sources / "jarvise-doctrine.txt").write_text("owner", encoding="utf-8")
+    (sources / "notebook").mkdir(parents=True, exist_ok=True)
+    (sources / "notebook" / "what-is-macd.md").write_text("scrape", encoding="utf-8")
+    (sources / "notebook" / "jarvise-doctrine-expectancy.md").write_text("protocol", encoding="utf-8")
+    (sources / "openclaw").mkdir(parents=True, exist_ok=True)
+    (sources / "openclaw" / "note.md").write_text("ops", encoding="utf-8")
+    (tmp_path / "data" / "analytics" / "stack.md").write_text("stack", encoding="utf-8")
+    names = sorted(p.name for p in rag.collect_source_files(tmp_path))
+    assert names == [
+        "jarvise-doctrine-expectancy.md",
+        "jarvise-doctrine.txt",
+        "note.md",
+    ]
 
 
 def test_sync_notebook_dry_run(monkeypatch, tmp_path: Path) -> None:

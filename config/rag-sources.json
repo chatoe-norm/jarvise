@@ -1,7 +1,7 @@
 {
   "version": 1,
   "paper_only": true,
-  "note": "Trusted RAG allowlist only. Trading/risk/venue doctrine — no UI, no generic education scrapes, no raw exchange developer docs. No order placement.",
+  "note": "Trusted RAG allowlist only. Index embeds owner protocol extracts (PREFERRED markers) + OpenClaw notes; generic Notebook scrapes may remain on disk for NotebookLM but are not indexed into jarvise_doctrine. No UI, no Learn, no raw exchange developer docs. No order placement.",
   "fetch": [],
   "firecrawl": [],
   "notebook": {

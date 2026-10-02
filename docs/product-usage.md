@@ -102,7 +102,7 @@ Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`,
 **Automatic** (n8n → jobs service in [`src/jarvise/jobs.py`](../src/jarvise/jobs.py)):
 
 - Every ~15 minutes: `POST /jobs/ingest` → refresh market data
-- Every ~6 hours: `POST /jobs/rag-refresh` → refresh doctrine RAG
+- Every ~6 hours: `POST /jobs/rag-refresh` → refresh doctrine RAG (indexes owner protocol extracts + OpenClaw only; generic Notebook scrapes stay on disk for NotebookLM but are not embedded)
 - Every ~4 hours: `POST /jobs/paper-run` → enqueue paper candidates (`paper_core` @ `4h` by default; **no** `--auto-fill`), then `POST /jobs/paper-auto-decide` → no-op unless `JARVISE_PAPER_AUTO_DECIDE=true`
 - Every ~1 hour: `POST /jobs/paper-expire` → mark timed-out approvals (timeout → **hold** if open paper position is already the same side; otherwise timeout → FLAT)
 - Every ~1 hour: `POST /jobs/ingest-health` → Telegram alert when `ema_200` warm-up is missing, candles are stale, or the series has gaps (alert only; fix with the one-shot backfill shown in the message)
