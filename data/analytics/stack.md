@@ -22,6 +22,11 @@ Drive sync: **0 Drive sources, 0 stale**. Web/generated sources indexed in the n
 | `sources/binance-api-intro-jarvise.txt` | Binance API intro → Jarvise allowlist/denylist |
 | `sources/binance-skills-hub-jarvise.txt` | Binance Skills Hub adopt/exclude/deny matrix → skill `jarvise-binance-intel` (read-only, no keys) |
 | `sources/notebook/` | NotebookLM export via `jarvise rag sync-notebook` |
+| `sources/openclaw/` | Owner-exported OpenClaw trading notes (when present) |
+
+## Doctrine RAG (`jarvise_doctrine`)
+
+Index **only** trading/risk/venue doctrine: Notebook export + owner `sources/*.txt` above + `openclaw/`. Do **not** index UI/frontend docs, CoinGecko Learn, or raw Binance developer docs (`config/rag-sources.json` fetch/firecrawl stay empty). UX notes live under [`docs/ux-ui/shadcn-for-jarvise.md`](../../docs/ux-ui/shadcn-for-jarvise.md) — not Qdrant.
 
 ## First build (doctrine)
 

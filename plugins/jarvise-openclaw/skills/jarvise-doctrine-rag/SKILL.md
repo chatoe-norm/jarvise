@@ -26,8 +26,9 @@ Invoke with `/skill jarvise-doctrine-rag` or by asking in natural language. Afte
 
 1. Prefer Cursor / stack MCP `mcp-server-qdrant` against `COLLECTION_NAME=jarvise_doctrine` when available.
 2. Otherwise use Qdrant HTTP scroll/search against `$QDRANT_URL/collections/jarvise_doctrine` for payload inspection only.
-3. Prefer hits whose payload `kind` is `doctrine`, `notebook`, `fetch`, `firecrawl`, or `openclaw`.
+3. Prefer hits whose payload `kind` is `notebook`, `doctrine`, or `openclaw`. Treat `fetch`/`firecrawl` as legacy noise if any remain — do not elevate them over notebook/owner extracts.
 4. Respect payload `paper_only: true` and `note: no order placement`.
+5. Allowlist policy: trading/risk/venue doctrine only. Reject UI/frontend, CoinGecko Learn, raw exchange developer docs, Obsidian, TradingView-as-doctrine, and live prices.
 
 ## Doctrine themes to surface
 
@@ -38,9 +39,10 @@ When summarizing hits, prioritize:
 - Kill-switch / daily drawdown halt; no auto-resume without written review
 - Structure-first charts; oscillators as context; stops ≥ ~1.5× ATR
 - Fractional Kelly only; EV after fees/slippage
-- Binance TH spot costs and BTC vs ETH microstructure differences
+- Venue microstructure (BTC vs ETH depth/spread) when present in notebook / owner extracts
 - Binance API allowlist only: public klines + planned read-only `GET /api/v3/account` (P3); never orders/withdraw; cite `binance-api-intro-jarvise.txt` / `docs/exchange/binance-for-jarvise.md` when surfacing venue/API constraints
 - Binance Skills Hub adopt/exclude/deny matrix: read-only public intel via `jarvise-binance-intel` only; hub trading/wallet skills, `binance-cli`, `baw`, and the Binance MCP Server are denied; cite `binance-skills-hub-jarvise.txt`
+- Analytics UI is **not** doctrine RAG — cite [`docs/ux-ui/shadcn-for-jarvise.md`](../../../../docs/ux-ui/shadcn-for-jarvise.md) for UX rewrite notes only; never treat Vercel or silent SPA replacement as Jarvise deploy/UI policy
 
 ## Response style
 
