@@ -152,9 +152,9 @@ Brief (one candidate per call; JSON body, no raw tables):
 | `doctrine` | same top-3 snippets as the card (may be empty) |
 | `policy` | `min_conf`, `max_notional_per_order_usd` and `max_daily_loss_usd` from `load_risk_caps()`, estimated notional for this candidate, "paper only" sentence |
 
-System prompt (fixed, versioned in code): Claude is a second-layer reviewer for a paper ledger; it may only output JSON `{"decision": "approve" | "reject" | "defer", "reason": "<= 280 chars"}`; it must `defer` when doctrine is empty **and** confidence < 0.70, when the same symbol already has an open position, or when market_safety reasons are non-empty; it must never change size or direction.
+System prompt (fixed, versioned in code): Claude is a second-layer reviewer for a paper ledger; it may only output JSON `{"decision": "approve" | "reject" | "defer", "reason": "<= 280 chars"}`; it must `defer` when doctrine is empty **and** confidence < 0.70, or when market_safety reasons are non-empty; opposite-side same-symbol open and same-side open are handled in code (not asked of Claude); it must never change size or direction.
 
-The two deterministic must-defer rules (opposite-side position open; doctrine empty and confidence < 0.70) are also enforced in code before the model is called (`forced_defer_reason`), reasons `auto:rule:opposite_side_open` / `auto:rule:no_doctrine_low_conf`.
+Deterministic pre-Claude rules: opposite-side position open → forced defer (`auto:rule:opposite_side_open`); same-side position open → approve no-op hold without Claude (`auto:rule:same_side_hold`); doctrine empty and confidence < 0.70 → forced defer (`auto:rule:no_doctrine_low_conf`).
 
 Response parsing: strict JSON object with exactly those keys; anything else → `defer` with reason `auto:claude:unparseable`.
 
