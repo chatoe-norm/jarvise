@@ -146,7 +146,8 @@ def test_enqueue_breach_skips(tmp_path: Path, monkeypatch) -> None:
     conn.close()
 
 
-def test_timeout_applies_flat(tmp_path: Path) -> None:
+def test_timeout_same_side_holds(tmp_path: Path) -> None:
+    """Same-side pending timeout must not FLAT an open paper position (auto-decide churn)."""
     conn = open_db(tmp_path / "f.db")
     ensure_paper_account(conn)
     _seed_candle(conn, "BTCUSDT", "4h", 100.0)
@@ -185,7 +186,55 @@ def test_timeout_applies_flat(tmp_path: Path) -> None:
     _seed_candle(conn, "BTCUSDT", "4h", 105.0, ts=1_700_000_100_000)
     out = expire_approvals(conn, now_ms=3_000)
     assert out["expired"] == 1
+    assert out["held"] == 1
+    assert out["flat_fills"] == 0
+    assert get_paper_position(conn, "BTCUSDT") is not None
+    assert get_approval(conn, row["id"])["status"] == "timed_out"
+    assert get_approval(conn, row["id"])["resolve_reason"] == "timeout_hold"
+    conn.close()
+
+
+def test_timeout_opposite_side_applies_flat(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "f2.db")
+    ensure_paper_account(conn)
+    _seed_candle(conn, "BTCUSDT", "4h", 100.0)
+    apply_signal(
+        conn,
+        analysis={
+            "analysis_id": "open1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "size_pct_equity": 5.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        mid_price=100.0,
+        timeframe="4h",
+        now_ms=1_000,
+    )
+    assert get_paper_position(conn, "BTCUSDT") is not None
+    row = enqueue_approval(
+        conn,
+        analysis={
+            "analysis_id": "pend",
+            "symbol": "BTCUSDT",
+            "action": "short",
+            "size_pct_equity": 5.0,
+            "regime_state": "trend_down",
+            "confidence_score": 0.7,
+        },
+        timeframe="4h",
+        now_ms=2_000,
+    )
+    conn.execute(
+        "UPDATE approval_queue SET expires_at_ms = 1500 WHERE id = ?", (row["id"],)
+    )
+    conn.commit()
+    _seed_candle(conn, "BTCUSDT", "4h", 105.0, ts=1_700_000_100_000)
+    out = expire_approvals(conn, now_ms=3_000)
+    assert out["expired"] == 1
     assert out["flat_fills"] >= 1
+    assert out.get("held", 0) == 0
     assert get_paper_position(conn, "BTCUSDT") is None
     assert get_approval(conn, row["id"])["status"] == "timed_out"
     assert get_approval(conn, row["id"])["resolve_reason"] == "timeout_flat"

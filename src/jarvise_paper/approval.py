@@ -398,43 +398,56 @@ def reject_approval(
 
 
 def expire_approvals(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
-    """Mark timed-out pendings and apply paper FLAT (roadmap: timeout → FLAT)."""
+    """Mark timed-out pendings; FLAT open positions only when timeout should exit.
+
+    Same-side open + same-side pending → hold (no FLAT). Otherwise timeout → FLAT so
+    abandoned opposite/flat decisions cannot leave the paper book stuck.
+    """
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
     expired_rows = list_expired_pending_approvals(conn, now_ms=ts)
     flat_fills = 0
+    held = 0
     flat_errors: list[str] = []
     for row in expired_rows:
         symbol = str(row["symbol"]).upper()
         timeframe = str(row["timeframe"])
+        action = str(row.get("action") or "flat").lower()
         pos = get_paper_position(conn, symbol)
+        resolve_reason = "timeout_flat"
         if pos is not None:
-            candle = load_latest_candle(conn, symbol, timeframe)
-            if candle is None:
-                flat_errors.append(f"{symbol}: no candle for timeout FLAT")
+            pos_side = str(pos.get("side") or "").lower()
+            # Same-side pending would be a no-op hold on approve; do not FLAT the book away.
+            if action in {"long", "short"} and pos_side == action:
+                held += 1
+                resolve_reason = "timeout_hold"
             else:
-                try:
-                    applied = apply_signal(
-                        conn,
-                        analysis={
-                            "analysis_id": row.get("analysis_id") or f"timeout-{row['id']}",
-                            "symbol": symbol,
-                            "action": "flat",
-                            "regime_state": row.get("regime_state") or "range",
-                            "confidence_score": 0.0,
-                            "size_pct_equity": 0.0,
-                        },
-                        mid_price=float(candle["close"]),
-                        timeframe=timeframe,
-                        now_ms=ts,
-                    )
-                    flat_fills += len(applied.get("fills") or [])
-                except Exception as exc:  # noqa: BLE001
-                    flat_errors.append(f"{symbol}: {exc}")
+                candle = load_latest_candle(conn, symbol, timeframe)
+                if candle is None:
+                    flat_errors.append(f"{symbol}: no candle for timeout FLAT")
+                else:
+                    try:
+                        applied = apply_signal(
+                            conn,
+                            analysis={
+                                "analysis_id": row.get("analysis_id") or f"timeout-{row['id']}",
+                                "symbol": symbol,
+                                "action": "flat",
+                                "regime_state": row.get("regime_state") or "range",
+                                "confidence_score": 0.0,
+                                "size_pct_equity": 0.0,
+                            },
+                            mid_price=float(candle["close"]),
+                            timeframe=timeframe,
+                            now_ms=ts,
+                        )
+                        flat_fills += len(applied.get("fills") or [])
+                    except Exception as exc:  # noqa: BLE001
+                        flat_errors.append(f"{symbol}: {exc}")
         resolve_approval(
             conn,
             row["id"],
             status="timed_out",
-            resolve_reason="timeout_flat",
+            resolve_reason=resolve_reason,
             resolved_at_ms=ts,
         )
     # Safety net for any race
@@ -444,7 +457,8 @@ def expire_approvals(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
         "ok": True,
         "expired": expired_count,
         "flat_fills": flat_fills,
+        "held": held,
         "flat_errors": flat_errors,
         "paper_only": True,
-        "note": "timeout → FLAT on open paper positions",
+        "note": "timeout → hold same-side; FLAT otherwise on open paper positions",
     }
