@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { api, type StatusPayload } from "@/lib/api";
+import { api, type IngestHealthStatus, type StatusPayload } from "@/lib/api";
+import { relativeAge } from "@/lib/utils";
 
 function jobSummary(payload: unknown): { ok: boolean | null; label: string } {
   if (payload == null) return { ok: null, label: "No run recorded" };
@@ -15,6 +16,55 @@ function jobSummary(payload: unknown): { ok: boolean | null; label: string } {
     .map(([k, v]) => `${k}=${typeof v === "object" ? "…" : String(v)}`)
     .join(" · ");
   return { ok, label: bits || (ok === true ? "OK" : ok === false ? "Failed" : "Status") };
+}
+
+function IngestHealthCard({ health }: { health: IngestHealthStatus | null | undefined }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Ingest health</CardTitle>
+        <CardDescription>
+          EMA200 warm-up, freshness and gaps on the paper timeframe. Alert-only — fix with the one-shot backfill.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {!health ? (
+          <p className="text-[var(--color-muted)]">No health run recorded yet.</p>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={health.ok ? "ok" : "danger"}>{health.ok ? "healthy" : "attention"}</Badge>
+              <span className="text-xs text-[var(--color-muted)]">
+                {health.timeframe} · checked {relativeAge(health.at_ms)}
+              </span>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {Object.entries(health.symbols).map(([sym, s]) => (
+                <div key={sym} className="rounded-md border border-[var(--color-border)] px-3 py-2">
+                  <div className="font-medium">{sym}</div>
+                  <div className="text-xs text-[var(--color-muted)]">
+                    rows {s.rows} · EMA200 ready {s.ema200_ready} · age {s.newest_age_min ?? "—"} min · gaps {s.gaps}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {health.alerts.length ? (
+              <ul className="list-disc space-y-1 pl-5 text-[var(--color-danger)]">
+                {health.alerts.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
+            ) : null}
+            {!health.ok && health.backfill_hint ? (
+              <code className="block overflow-x-auto rounded-md bg-[#161d27] p-2 text-xs">
+                {health.backfill_hint}
+              </code>
+            ) : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
@@ -145,6 +195,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                   rag: status?.rag,
                   paper: status?.paper,
                   paper_expire: status?.paper_expire,
+                  ingest_health: status?.ingest_health,
                   qdrant: status?.qdrant,
                 },
                 null,
@@ -154,6 +205,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           ) : null}
         </CardContent>
       </Card>
+
+      <IngestHealthCard health={status?.ingest_health} />
 
       <Card>
         <CardHeader>

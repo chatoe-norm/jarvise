@@ -1,3 +1,16 @@
+export type IngestHealthStatus = {
+  ok: boolean;
+  timeframe: string;
+  symbols: Record<
+    string,
+    { rows: number; ema200_ready: number; newest_age_min: number | null; gaps: number }
+  >;
+  alerts: string[];
+  backfill_hint?: string;
+  at_ms: number;
+  telegram_sent?: boolean;
+};
+
 export type StatusPayload = {
   paper_only: boolean;
   live_trading: boolean;
@@ -6,6 +19,7 @@ export type StatusPayload = {
   rag: unknown;
   paper: unknown;
   paper_expire: unknown;
+  ingest_health?: IngestHealthStatus | null;
   risk_caps: Record<string, unknown>;
   qdrant: Record<string, unknown>;
 };
