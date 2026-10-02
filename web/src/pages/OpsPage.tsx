@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { api, type IngestHealthStatus, type StatusPayload } from "@/lib/api";
+import { api, type IngestHealthStatus, type PaperAutoStatus, type StatusPayload } from "@/lib/api";
 import { relativeAge } from "@/lib/utils";
 
 function jobSummary(payload: unknown): { ok: boolean | null; label: string } {
@@ -59,6 +59,79 @@ function IngestHealthCard({ health }: { health: IngestHealthStatus | null | unde
               <code className="block overflow-x-auto rounded-md bg-[#161d27] p-2 text-xs">
                 {health.backfill_hint}
               </code>
+            ) : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
+  const counts = auto
+    ? [
+        ["approved", auto.approved?.length ?? 0],
+        ["rejected", auto.rejected?.length ?? 0],
+        ["deferred", auto.deferred?.length ?? 0],
+        ["filtered", auto.filtered_out?.length ?? 0],
+        ["failed", auto.apply_failed?.length ?? 0],
+      ]
+    : [];
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Paper auto-decide</CardTitle>
+        <CardDescription>
+          Claude (OpenRouter) second-layer review after each paper run. Paper only; off by default
+          (JARVISE_PAPER_AUTO_DECIDE).
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {!auto ? (
+          <p className="text-[var(--color-muted)]">No auto-decide run recorded yet.</p>
+        ) : auto.skipped ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={auto.reason === "auto_decide_disabled" ? "muted" : "danger"}>
+              {auto.reason === "auto_decide_disabled" ? "off" : "skipped"}
+            </Badge>
+            <span className="text-xs text-[var(--color-muted)]">
+              {auto.reason} · {relativeAge(auto.at_ms)}
+            </span>
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={auto.ok ? "ok" : "danger"}>{auto.ok ? "ran" : "error"}</Badge>
+              <span className="text-xs text-[var(--color-muted)]">
+                {auto.model} · {relativeAge(auto.at_ms)} · {auto.duration_s ?? "—"}s
+                {auto.doctrine_unavailable ? " · doctrine unavailable" : ""}
+              </span>
+            </div>
+            <div className="grid grid-cols-5 gap-2">
+              {counts.map(([label, n]) => (
+                <div key={String(label)}>
+                  <div className="text-xs text-[var(--color-muted)]">{label}</div>
+                  <div className="font-medium tabular-nums">{n}</div>
+                </div>
+              ))}
+            </div>
+            {auto.deferred?.length ? (
+              <ul className="list-disc space-y-1 pl-5">
+                {auto.deferred.slice(0, 5).map((d) => (
+                  <li key={d.id}>
+                    <span className="font-medium">{d.symbol}</span> — {d.reason}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {auto.apply_failed?.length ? (
+              <ul className="list-disc space-y-1 pl-5 text-[var(--color-danger)]">
+                {auto.apply_failed.slice(0, 5).map((f) => (
+                  <li key={f.id}>
+                    <span className="font-medium">{f.symbol}</span> — {f.error}
+                  </li>
+                ))}
+              </ul>
             ) : null}
           </>
         )}
@@ -196,6 +269,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                   paper: status?.paper,
                   paper_expire: status?.paper_expire,
                   ingest_health: status?.ingest_health,
+                  paper_auto: status?.paper_auto,
                   qdrant: status?.qdrant,
                 },
                 null,
@@ -207,6 +281,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       </Card>
 
       <IngestHealthCard health={status?.ingest_health} />
+
+      <PaperAutoCard auto={status?.paper_auto} />
 
       <Card>
         <CardHeader>

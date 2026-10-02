@@ -11,6 +11,24 @@ export type IngestHealthStatus = {
   telegram_sent?: boolean;
 };
 
+export type PaperAutoStatus = {
+  ok: boolean;
+  skipped?: boolean;
+  reason?: string;
+  model?: string;
+  prompt_version?: string;
+  processed?: number;
+  approved?: Array<{ id: string; symbol?: string; reason?: string; fills?: number }>;
+  rejected?: Array<{ id: string; symbol?: string; reason?: string }>;
+  deferred?: Array<{ id: string; symbol?: string; reason?: string }>;
+  filtered_out?: Array<{ id: string; symbol?: string; reason?: string }>;
+  apply_failed?: Array<{ id: string; symbol?: string; error?: string }>;
+  doctrine_unavailable?: boolean;
+  duration_s?: number;
+  at_ms?: number;
+  telegram_sent?: boolean;
+};
+
 export type StatusPayload = {
   paper_only: boolean;
   live_trading: boolean;
@@ -20,6 +38,7 @@ export type StatusPayload = {
   paper: unknown;
   paper_expire: unknown;
   ingest_health?: IngestHealthStatus | null;
+  paper_auto?: PaperAutoStatus | null;
   risk_caps: Record<string, unknown>;
   qdrant: Record<string, unknown>;
 };
