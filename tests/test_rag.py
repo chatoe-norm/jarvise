@@ -36,17 +36,18 @@ def test_ingest_fetch_dry_run(tmp_path: Path, monkeypatch) -> None:
     assert result["count"] == 1
 
 
-def test_binance_docs_fetch_urls_are_markdown() -> None:
-    # developers.binance.com renders client-side; HTML URLs fetch an empty shell.
+def test_doctrine_allowlist_is_trading_only() -> None:
+    # jarvise_doctrine indexes notebook + owner extracts + openclaw — not UI / Learn / raw venue docs.
     cfg = json.loads((ROOT / "config" / "rag-sources.json").read_text(encoding="utf-8"))
-    binance = [
-        e["url"]
-        for e in cfg["fetch"]
-        if urlparse(e["url"]).hostname == "developers.binance.com"
-    ]
-    assert binance
-    for url in binance:
-        assert urlparse(url).path.endswith((".md", ".txt")), url
+    assert cfg["fetch"] == []
+    assert cfg["firecrawl"] == []
+    assert cfg["notebook"]["alias"] == "jarvise"
+    # If fetch/firecrawl are re-enabled later, keep markdown/.txt (SPA HTML shells are empty).
+    for section in ("fetch", "firecrawl"):
+        for entry in cfg.get(section) or []:
+            url = entry["url"]
+            path = urlparse(url).path
+            assert path.endswith((".md", ".txt")) or urlparse(url).hostname != "developers.binance.com", url
 
 
 def test_sync_notebook_dry_run(monkeypatch, tmp_path: Path) -> None:
