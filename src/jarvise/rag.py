@@ -518,6 +518,7 @@ def doctrine_snippets(
     limit: int = 3,
     client: Any | None = None,
     encoder: Callable[[str], list[float]] | None = None,
+    raise_on_error: bool = False,
 ) -> list[dict[str, Any]]:
     """Top-k doctrine chunks for a query. [] on empty query, missing deps, or Qdrant error."""
     text = (query or "").strip()
@@ -537,6 +538,8 @@ def doctrine_snippets(
             )
         hits = client.query_points(collection_name=COLLECTION, query=vector, limit=k)
     except Exception:  # noqa: BLE001 — fail-soft by design; card and brief render without doctrine
+        if raise_on_error:
+            raise
         return []
     out: list[dict[str, Any]] = []
     for hit in getattr(hits, "points", []) or []:

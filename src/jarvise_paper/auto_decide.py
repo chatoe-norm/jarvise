@@ -191,7 +191,16 @@ def parse_decision(obj: Any) -> tuple[str, str]:
 
 
 def _default_doctrine(query: str) -> list[dict[str, Any]]:
-    return doctrine_snippets(query, limit=3)
+    return doctrine_snippets(query, limit=3, raise_on_error=True)
+
+
+def _blocked_reason(kill_switch: bool, kill_switch_check: Callable[[], bool] | None) -> str | None:
+    """Re-evaluated per candidate: the run must stop applying as soon as either gate trips."""
+    if kill_switch or (kill_switch_check is not None and kill_switch_check()):
+        return "kill_switch engaged"
+    if live_trading_enabled():
+        return "live_trading_enabled"
+    return None
 
 
 def run_auto_decide(
@@ -199,6 +208,7 @@ def run_auto_decide(
     *,
     now_ms: int | None = None,
     kill_switch: bool = False,
+    kill_switch_check: Callable[[], bool] | None = None,
     config: AutoDecideConfig | None = None,
     chat: ChatFn = chat_json,
     doctrine_lookup: DoctrineFn | None = None,
@@ -229,6 +239,7 @@ def run_auto_decide(
     deferred: list[dict[str, Any]] = []
     apply_failed: list[dict[str, Any]] = []
     doctrine_unavailable = False
+    lookup_error: str | None = None
     processed = 0
 
     for index, row in enumerate(eligible):
@@ -239,11 +250,18 @@ def run_auto_decide(
         if not cfg.api_key:
             deferred.append({**entry, "reason": "missing_api_key"})
             continue
+        blocked = _blocked_reason(kill_switch, kill_switch_check)
+        if blocked:
+            deferred.append({**entry, "reason": blocked})
+            continue
         try:
-            hits = lookup(doctrine_query(row))
-            doctrine = [str(h.get("text")) for h in hits if isinstance(h, dict) and h.get("text")]
-            if not doctrine:
+            try:
+                hits = lookup(doctrine_query(row))
+            except Exception as exc:  # noqa: BLE001 — spec §8: proceed without doctrine, flag the run
+                hits = []
                 doctrine_unavailable = True
+                lookup_error = f"{type(exc).__name__}: {exc}"
+            doctrine = [str(h.get("text")) for h in hits if isinstance(h, dict) and h.get("text")]
             brief = build_brief(conn, row, doctrine=doctrine, now_ms=ts, caps=caps, min_conf=cfg.min_conf)
             processed += 1
             try:
@@ -275,6 +293,10 @@ def run_auto_decide(
             continue
         entry["reason"] = reason
         try:
+            blocked = _blocked_reason(kill_switch, kill_switch_check)
+            if blocked:
+                deferred.append({**entry, "reason": blocked})
+                continue
             if decision == "approve":
                 result = approve_approval(conn, row["id"], kill_switch=kill_switch, now_ms=ts)
                 if result.get("ok"):
@@ -307,5 +329,6 @@ def run_auto_decide(
         "filtered_out": filtered_out,
         "apply_failed": apply_failed,
         "doctrine_unavailable": doctrine_unavailable,
+        "doctrine_error": lookup_error,
         "duration_s": round(time.monotonic() - started, 3),
     }

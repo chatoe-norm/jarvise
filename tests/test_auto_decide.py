@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 
@@ -254,7 +255,7 @@ def test_defer_error_and_garbage_leave_pending(tmp_path: Path) -> None:
     reasons = {d["id"]: d["reason"] for d in out["deferred"]}
     assert reasons["a"].startswith("auto:claude:error:")
     assert reasons["b"] == "auto:claude:unparseable"
-    assert out["doctrine_unavailable"] is True
+    assert out["doctrine_unavailable"] is False
     assert get_approval(conn, "a")["status"] == "pending"
     assert get_approval(conn, "b")["status"] == "pending"
     assert get_latest_llm_review(conn, "b")["decision"] == "defer"
@@ -302,7 +303,7 @@ def test_apply_failure_recorded_with_prefix(tmp_path: Path) -> None:
     assert row["resolve_reason"].startswith("auto:apply_failed:max_notional")
 
 
-def test_lookup_exception_defers_candidate_and_batch_continues(tmp_path: Path) -> None:
+def test_lookup_exception_flags_doctrine_unavailable_and_continues(tmp_path: Path) -> None:
     conn = seed_db(tmp_path / "ex.db")
     pending(conn, "a", "BTCUSDT", created_at_ms=1)
     pending(conn, "b", "ETHUSDT", created_at_ms=2)
@@ -314,14 +315,53 @@ def test_lookup_exception_defers_candidate_and_batch_continues(tmp_path: Path) -
             raise RuntimeError("qdrant exploded")
         return [{"text": "structure first", "source": "d.md", "score": 0.9}]
 
-    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("approve"), doctrine_lookup=lookup)
-    assert len(calls) == 2
-    assert out["processed"] == 1
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=lookup)
+    assert len(calls) == 2 and len(chat.calls) == 2
+    assert out["processed"] == 2
+    assert out["doctrine_unavailable"] is True
+    assert out["doctrine_error"].startswith("RuntimeError: ")
+    assert [x["id"] for x in out["approved"]] == ["a", "b"]
+    first_brief = json.loads(chat.calls[0]["messages"][1]["content"])
+    assert first_brief["doctrine"] == []
+
+
+def test_zero_hits_do_not_flag_doctrine_unavailable(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "zh.db")
+    pending(conn, "ok", "BTCUSDT")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=_chat("approve"), doctrine_lookup=NO_DOCTRINE)
+    assert out["doctrine_unavailable"] is False
+    assert out["doctrine_error"] is None
+
+
+def test_live_flip_mid_batch_defers_remaining(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "lf.db")
+    pending(conn, "a", "BTCUSDT", created_at_ms=1)
+    pending(conn, "b", "ETHUSDT", created_at_ms=2)
+
+    def chat(messages, **kwargs):
+        # live trading gets switched on while Claude is reviewing the first candidate
+        monkeypatch.setenv("JARVISE_LIVE_TRADING", "true")
+        return {"decision": "approve", "reason": "ok"}
+
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert out["approved"] == []
     reasons = {d["id"]: d["reason"] for d in out["deferred"]}
-    assert reasons["a"].startswith("auto:error:RuntimeError:")
-    assert [x["id"] for x in out["approved"]] == ["b"]
+    assert reasons == {"a": "live_trading_enabled", "b": "live_trading_enabled"}
     assert get_approval(conn, "a")["status"] == "pending"
-    assert get_approval(conn, "b")["status"] == "approved"
+    assert get_paper_position(conn, "BTCUSDT") is None
+    assert list_paper_orders(conn) == []
+
+
+def test_kill_switch_check_defers_without_claude(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "ks.db")
+    pending(conn, "ok", "BTCUSDT")
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE,
+                          kill_switch_check=lambda: True)
+    assert chat.calls == []
+    assert out["deferred"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": "kill_switch engaged"}]
+    assert get_approval(conn, "ok")["status"] == "pending"
 
 
 def test_reject_failure_is_recorded_not_claimed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

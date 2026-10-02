@@ -47,7 +47,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [520, 0],
-      "notes": "Second-layer Claude review (OpenRouter inside jobs). No-op unless JARVISE_PAPER_AUTO_DECIDE=true on jobs. Paper only; refuses when live trading is on. Writes jarvise:paper_auto:last. Only runs when paper-run returned 2xx."
+      "notes": "Second-layer Claude review (OpenRouter inside jobs). No-op unless JARVISE_PAPER_AUTO_DECIDE=true on jobs. Paper only; refuses when live trading is on. Writes jarvise:paper_auto:last. Only runs when paper-run returned 2xx. Returns 409 (execution shows as failed) when JARVISE_LIVE_TRADING=true or the kill switch is engaged — intentional visibility, no retry needed."
     }
   ],
   "connections": {

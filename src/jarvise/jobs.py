@@ -220,7 +220,7 @@ def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
         return 1, payload
     conn = open_db(path)
     try:
-        payload = run_auto_decide(conn)
+        payload = run_auto_decide(conn, kill_switch_check=kill_switch_engaged)
     finally:
         conn.close()
     payload["telegram_sent"] = notify_auto_decide(payload)

@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from jarvise.rag import doctrine_snippets
 
 
@@ -46,3 +48,12 @@ def test_client_error_fail_soft() -> None:
             raise RuntimeError("qdrant down")
 
     assert doctrine_snippets("q", client=Broken(), encoder=lambda _t: [0.0]) == []
+
+
+def test_raise_on_error_propagates() -> None:
+    class Broken:
+        def query_points(self, **kwargs):
+            raise RuntimeError("qdrant down")
+
+    with pytest.raises(RuntimeError):
+        doctrine_snippets("q", client=Broken(), encoder=lambda _t: [0.0], raise_on_error=True)
