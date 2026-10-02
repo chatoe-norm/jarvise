@@ -45,8 +45,14 @@ def test_confidence_labels() -> None:
 
 
 def test_doctrine_query_uses_regime_and_action() -> None:
-    assert doctrine_query(APPROVAL) == "trend_up long entry risk stop"
-    assert doctrine_query({}) == "range flat entry risk stop"
+    assert doctrine_query(APPROVAL) == (
+        "jarvise doctrine trend_up long entry risk stop "
+        "capital preservation kill-switch FLAT"
+    )
+    assert doctrine_query({}) == (
+        "jarvise doctrine range flat entry risk stop "
+        "capital preservation kill-switch FLAT"
+    )
 
 
 def test_card_approve_with_risk_math() -> None:
