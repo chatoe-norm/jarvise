@@ -46,6 +46,7 @@ Do not use the `default` profile (`normstudiox@gmail.com`) for this notebook —
 - Binance APIs for Jarvise = public market data (`GET /api/v3/klines`) plus planned read-only spot account (`GET /api/v3/account`, P3). Never order/withdraw endpoints; never keys with withdrawal/transfer permission. See `binance-api-intro-jarvise.txt` and `docs/exchange/binance-for-jarvise.md`.
 - Binance Skills Hub is used read-only through skill `jarvise-binance-intel` (public token info, token audit, rank/hype context, tokenized US stocks, Academy). Never install the hub, `binance-cli`, `baw`, the Agentic Wallet, or the Binance MCP Server. Token audit `HIGH` → FLAT; rank/hype is context, never a trigger. See `binance-skills-hub-jarvise.txt`.
 - Analytics / control UI is FastAPI HTML (`/analytics`). shadcn/ui Installation knowledge is for a future rewrite only — use skill `jarvise-ux-ui` and `docs/ux-ui/shadcn-for-jarvise.md`. Never `npx shadcn@latest init` in-repo without an owner-approved UI plan.
+- Eterna MCP (`mcp.eterna.exchange`) is a research overlay / future venue candidate only, same rule as TradingView MCP — use skill `jarvise-eterna` and `docs/exchange/eterna-for-jarvise.md`. Never call its trading or funding SDK methods; never index Eterna docs into doctrine.
 
 ## Query style
 

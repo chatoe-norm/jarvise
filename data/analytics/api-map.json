@@ -150,6 +150,36 @@
       ]
     },
     {
+      "name": "Eterna MCP Gateway",
+      "role": "Research overlay / future venue candidate: remote MCP (search_sdk, search_examples, execute_code TypeScript sandbox) over USDT linear perps + USDT spot with a per-agent sub-account. Not wired; never a SQLite writer, paper trigger, or live path.",
+      "status": "overlay_not_wired",
+      "transport": "streamable-http",
+      "mcp_url": "https://mcp.eterna.exchange/mcp",
+      "auth": "OAuth mcp:full via https://ai-auth.eterna.exchange (scope covers trading + withdrawal); legacy Bearer API key excluded",
+      "docs": [
+        "https://github.com/EternaHybridExchange/eterna-mcp",
+        "https://ai.eterna.exchange/llms.txt",
+        "https://eterna.exchange/guides/mcp-crypto-trading",
+        "https://institutional.eterna.exchange/"
+      ],
+      "jarvise_map": "docs/exchange/eterna-for-jarvise.md",
+      "skill": ".cursor/skills/jarvise-eterna/SKILL.md",
+      "allowed_as_research": [
+        "search_sdk",
+        "search_examples",
+        "execute_code: getTickers, getOrderbook, getInstruments, getRsi, getMacd, getEma, getSma, getBollingerBands, getVwap"
+      ],
+      "display_only_if_enabled": ["getBalance", "getAccountInfo", "getAllCoinsBalance", "getPositions", "getOrders"],
+      "forbidden": [
+        "placeOrder, sellSpotBalance, closePosition, cancelOrder, cancelAllOrders, setLeverage, setTradingStop",
+        "getDepositAddress, transferToTrading, swapToUsdt, submitWithdrawal, getWithdrawalStatus and any funding flow from an agent session",
+        "@eterna-hybrid-exchange/openclaw-plugin or CLI on the VPS; eterna login from VPS hosts",
+        "strategy_* prompts or Claude skills bundle in data/analytics/sources or jarvise_doctrine",
+        "silent-merge of Eterna tickers / order book / TA into market_technicals, market_microstructure, or the paper ledger"
+      ],
+      "future_adapter": "VenueClient.list_spot_balances() over a GET-only path first (evaluate https://ai.eterna.exchange/.well-known/api-catalog); spot only; live only after docs/ops/live-enable-checklist.md"
+    },
+    {
       "name": "CoinMarketCap",
       "role": "Dominance, Fear & Greed, Altcoin Season, global metrics",
       "mvp_endpoints": [
