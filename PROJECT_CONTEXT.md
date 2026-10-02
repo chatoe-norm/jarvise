@@ -93,6 +93,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - Derivatives context — funding/OI (and liquidations when CoinGlass keyed) as crowding context for market safety.
 - Order-book microstructure + BTC dominance / global mcap writers (Binance public book + CoinGecko global) with `jarvise_risk.market_safety` FLAT/kill-switch gate — see `docs/superpowers/specs/2026-10-01-market-safety-ingest-design.md`.
 - Agent-side **Binance Web3 intel** (`jarvise-binance-intel` skill, no keys): token search/meta, **security audit** (audit `HIGH`, `riskType: RISK`, or sell tax → **FLAT veto**), market rank, social hype, smart-money inflow, tokenized US stocks info, Academy risk education.
+- Agent-side **CoinGecko AI tools** (MCP / Docs MCP / CLI — optional, not wired by default): research overlay only; map in `docs/market-data/coingecko-for-jarvise.md`; never doctrine RAG.
 - Doctrine RAG + OpenClaw research notes as the "sentiment/narrative" layer.
 
 *Post-MVP (schema reserved):* remaining `macro_onchain_sentiment` fields (fear/greed, altcoin season, exchange netflow/reserve, ETF flows) and spoof-wall heuristics on `order_book_microstructure`.
@@ -120,7 +121,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - Indicators (`indicators.py`): ATR-14, RSI-14, EMA-20, EMA-200 recomputed over the full stored series; values withheld until seed influence < 1%.
 - Derivatives router (`providers/derivatives.py`): **Binance Futures public** funding + OI hist by default (no key); CoinGlass v4 when `COINGLASS_API_KEY` set (OI/funding/liquidations + best-effort L/S) → `derivatives_analytics` bitemporal.
 - Binance public book (`providers/binance_book.py`): `ticker/bookTicker` + `depth` → `order_book_microstructure` (spread, ±1% depth USD).
-- CoinGecko global (`providers/coingecko_global.py`): BTC dominance + total market cap → `macro_onchain_sentiment`.
+- CoinGecko global (`providers/coingecko_global.py`): BTC dominance + total market cap → `macro_onchain_sentiment`. CoinGecko AI Integration (MCP/CLI/SKILL) is an optional research overlay only — see `docs/market-data/coingecko-for-jarvise.md`; not a SQLite writer.
 - Market-safety gate (`jarvise_risk.market_safety`): FLAT + block enqueue/approve on unsafe/stale/anomalous data; kill-switch on critical failures when `JARVISE_MARKET_SAFETY=1` (default on). Flags: `--skip-book`, `--skip-macro`, `--skip-derivatives`.
 - Point-in-time universe (`universe.py`): `paper_core` = BTCUSDT, ETHUSDT (listed 2021-01-01) → `universe_membership`; blocks survivorship bias.
 - SQLite schema + migrations (`db.py`, documented in `data/analytics/mvas-schema.sql`).

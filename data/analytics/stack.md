@@ -24,9 +24,11 @@ Drive sync: **0 Drive sources, 0 stale**. Web/generated sources indexed in the n
 | `sources/notebook/` | NotebookLM export via `jarvise rag sync-notebook` |
 | `sources/openclaw/` | Owner-exported OpenClaw trading notes (when present) |
 
+Technical maps (not doctrine RAG): [`docs/exchange/binance-for-jarvise.md`](../../docs/exchange/binance-for-jarvise.md), [`docs/market-data/coingecko-for-jarvise.md`](../../docs/market-data/coingecko-for-jarvise.md) (CoinGecko AI Integration overlay + macro ingest filter).
+
 ## Doctrine RAG (`jarvise_doctrine`)
 
-Index **only** trading/risk/venue doctrine: Notebook export + owner `sources/*.txt` above + `openclaw/`. Do **not** index UI/frontend docs, CoinGecko Learn, or raw Binance developer docs (`config/rag-sources.json` fetch/firecrawl stay empty). UX notes live under [`docs/ux-ui/shadcn-for-jarvise.md`](../../docs/ux-ui/shadcn-for-jarvise.md) — not Qdrant.
+Index **only** trading/risk/venue doctrine: Notebook export + owner `sources/*.txt` above + `openclaw/`. Do **not** index UI/frontend docs, CoinGecko Learn, CoinGecko AI Integration pages, or raw Binance developer docs (`config/rag-sources.json` fetch/firecrawl stay empty). UX notes live under [`docs/ux-ui/shadcn-for-jarvise.md`](../../docs/ux-ui/shadcn-for-jarvise.md) — not Qdrant.
 
 ## First build (doctrine)
 
