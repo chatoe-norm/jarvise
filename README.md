@@ -1,6 +1,6 @@
 # jarvise
 
-Paper analytics for an intelligent crypto trader. **No order placement** in this phase.
+Paper analytics for an intelligent crypto trader. Live submit exists but stays gated off (`JARVISE_LIVE_TRADING=false`) until the owner enables trade keys.
 
 Repository: https://github.com/chatoe-norm/jarvise
 
@@ -11,26 +11,46 @@ How to run the shipped product day-to-day (CLI, VPS schedules, agent/MCP): [docs
 One Typer entrypoint: `jarvise` (`status` / `init` / `config` / `ingest` / `analyze`). Paper ingest and analyze are delegated from that CLI; `jarvise-ingest` / `jarvise-analyze` remain compatibility aliases.
 
 ```powershell
-# Python 3.11+ (repo uses 3.12 locally)
-python -m venv .venv
+# Python 3.12 required (3.11+ ok; prefer 3.12)
+py -3.12 -m venv .venv
 .venv\Scripts\pip install -e ".[dev]"
 
-.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 50 --skip-derivatives --json
+.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 4h --limit 50 --skip-derivatives --json
 .venv\Scripts\jarvise analyze --symbol BTCUSDT --timeframe 4h --json
 ```
 
-On macOS/Linux, use `.venv/bin/pip` and `.venv/bin/jarvise` instead.
+On macOS/Linux: `python3.12 -m venv .venv`, then use `.venv/bin/pip` and `.venv/bin/jarvise`.
 
 With CoinGlass:
 
 ```powershell
 $env:COINGLASS_API_KEY="..."
-.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --json
+.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 4h --json
 ```
 
 SQLite DB: `data/analytics/jarvise.db` (gitignored). Doctrine extract: `data/analytics/`.
 
 On Windows, prefer `.venv\Scripts\jarvise` over bash `bin/jarvise status` — the bash shim and Typer CLI use separate state files.
+
+## Command Dashboard (local)
+
+Owner UI is the Vite/React SPA under [`web/`](web/README.md), served by FastAPI `jarvise_web` on `:8080` (Home / Paper / Decisions / Exchange / Ops). Day-to-day paths: [docs/product-usage.md](docs/product-usage.md).
+
+```bash
+.venv/bin/pip install -e ".[web]"
+.venv/bin/python -m uvicorn jarvise_web.app:app --port 8080
+# optional hot UI: cd web && npm install && npm run dev   # :5173 → proxies API
+```
+
+## Validate (matches CI)
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+./scripts/check.sh
+# optional SPA: cd web && npm ci && npm run build
+```
+
+Windows (no bash): `.venv\Scripts\ruff check src tests`, then `.venv\Scripts\mypy`, then `.venv\Scripts\python -m pytest --cov=src --cov-report=term --cov-fail-under=70`.
 
 ## Background MCP plane (Phase 2)
 

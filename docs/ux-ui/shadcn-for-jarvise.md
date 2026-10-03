@@ -1,6 +1,6 @@
 # shadcn/ui for Jarvise (UX / UI)
 
-**Paper-first control plane.** This page maps the official [shadcn/ui Installation](https://ui.shadcn.com/docs/installation) docs into what Jarvise may adopt for a future analytics UI. It does **not** mean the shipped stack is React/shadcn today.
+**Paper-first control plane.** Jarvise ships a Vite/React Command Dashboard under [`web/`](../../web/README.md), served by FastAPI `jarvise_web` on `:8080`. This page maps official [shadcn/ui Installation](https://ui.shadcn.com/docs/installation) docs into how agents may adopt shadcn components **inside that SPA** — not as a greenfield rewrite of the monorepo.
 
 Local digest: [`data/analytics/sources/shadcn-ui-installation-jarvise.txt`](../../data/analytics/sources/shadcn-ui-installation-jarvise.txt)  
 Machine index: [llms.txt](https://ui.shadcn.com/llms.txt)
@@ -13,18 +13,18 @@ Machine index: [llms.txt](https://ui.shadcn.com/llms.txt)
 | CLI / config | [CLI](https://ui.shadcn.com/docs/cli), [components.json](https://ui.shadcn.com/docs/components-json) |
 | AI skills | [Skills](https://ui.shadcn.com/docs/skills) |
 | Jarvise filter | This doc + local digest |
-| Shipped UI | FastAPI `src/jarvise_web/app.py` — `/` + `/analytics` |
+| Shipped UI | [`web/`](../../web/README.md) SPA + FastAPI [`src/jarvise_web/app.py`](../../src/jarvise_web/app.py) on `:8080` (`/` + legacy `/analytics`) |
 
 ## What Jarvise ships today (Technical)
 
 | Surface | Implementation |
 |---------|----------------|
-| Control web | FastAPI HTML, kill-switch / status |
-| Analytics | Server-rendered `/analytics` + JSON APIs (`/api/analysis`, `/api/paper`, …) |
-| Styling | Inline CSS in `jarvise_web` — **not** Tailwind / shadcn |
+| Control web | Command Dashboard SPA (Home / Paper / Decisions / Exchange / Ops) + kill-switch / status APIs |
+| Analytics | SPA routes + JSON APIs (`/api/analysis`, `/api/paper`, …) |
+| Styling | Tailwind in `web/` (shadcn-style components); FastAPI serves `web/dist` |
 | Deploy | Hostinger VPS + Tailscale (`:8080`); see [`docs/deploy/hostinger-vps.md`](../deploy/hostinger-vps.md) |
 
-P1 plan: [`../superpowers/plans/2026-09-23-p1-analytics-ui.md`](../superpowers/plans/2026-09-23-p1-analytics-ui.md).
+P1 plan (historical): [`../superpowers/plans/2026-09-23-p1-analytics-ui.md`](../superpowers/plans/2026-09-23-p1-analytics-ui.md). Command Dashboard design: [`../superpowers/specs/2026-10-01-command-dashboard-design.md`](../superpowers/specs/2026-10-01-command-dashboard-design.md).
 
 ## What shadcn Installation offers
 
@@ -41,14 +41,15 @@ Related: CSS-variable theming, Typeset, Dark Mode, Registry, and optional [AI Sk
 | Capability | Jarvise |
 |------------|---------|
 | Read official docs + digest for UI planning | **Allowed** (knowledge) |
-| Keep FastAPI `/analytics` as SoT until a rewrite plan | **Required today** |
-| Scaffold Vite/Next + shadcn in-repo | **Deferred** — owner-approved roadmap slice only |
+| Treat shipped `web/` SPA + `jarvise_web` APIs as UI SoT | **Required today** |
+| Incremental shadcn components inside `web/` | **Allowed** when aligned with [web/README.md](../../web/README.md) and [`.cursor/skills/jarvise-ux-ui`](../../.cursor/skills/jarvise-ux-ui/SKILL.md) |
+| Scaffold a second Vite/Next app outside `web/` | **Deferred** — owner-approved only |
 | Replace Approve/Reject / paper banners with generic marketing UI | **Forbidden** |
 | Soft-fail exchange panel; never leak keys to the client | **Required** |
-| Official shadcn Skills / MCP inside a future frontend package | **Optional after** that package has `components.json` |
+| Official shadcn Skills / MCP inside `web/` once `components.json` exists | **Optional** |
 | Treat Vercel CTAs as Jarvise deploy path | **Denied** — VPS + Tailscale remains deploy SoT |
 
-### Preferred components (if a rewrite is approved)
+### Preferred components (incremental adoption)
 
 Analytics and approval UX maps cleanly to: **Card**, **Table / Data Table**, **Chart**, **Button**, **Alert Dialog**, **Badge**, **Tabs**, **Alert**, **Skeleton**, **Empty**. Forms for filters: **Field** / **Select** / **Input**. Do not invent live-order chrome beyond the paper approval contract (and later P4-C only when gated).
 
@@ -57,15 +58,15 @@ Analytics and approval UX maps cleanly to: **Card**, **Table / Data Table**, **C
 | Rule | Behavior |
 |------|----------|
 | Current phase | Paper analytics + approval UI; no live order placement UI until P4-C is approved and gated |
-| Stack default | Python FastAPI HTML until an explicit UI rewrite lands |
+| Stack default | FastAPI serves `web/dist`; UI work happens in `web/` |
 | Secrets | Never in client bundles or HTML responses |
 | Kill-switch | Always visible / respected on control and analytics surfaces |
 | Deploy | Hostinger + Tailscale; not public HTTPS marketing hosting by default |
 
 ## Skills (agents)
 
-- Cursor: [`.cursor/skills/jarvise-ux-ui/SKILL.md`](../../.cursor/skills/jarvise-ux-ui/SKILL.md) — load when changing `/analytics` or planning a frontend rewrite.
-- Trading doctrine skills (`jarvise-notebook`, OpenClaw pack) stay market/risk focused; they only point here so agents do not silently React-scaffold the monorepo.
+- Cursor: [`.cursor/skills/jarvise-ux-ui/SKILL.md`](../../.cursor/skills/jarvise-ux-ui/SKILL.md) — load when changing the Command Dashboard or `web/` SPA.
+- Trading doctrine skills (`jarvise-notebook`, OpenClaw pack) stay market/risk focused; they only point here so agents do not silently scaffold a second frontend package.
 
 ## RAG allowlist
 
