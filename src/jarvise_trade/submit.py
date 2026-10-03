@@ -17,7 +17,7 @@ from jarvise_ingest.db import (
     insert_live_order,
     sum_live_realized_pnl_utc_day,
 )
-from jarvise_risk import estimated_notional, load_risk_caps
+from jarvise_risk import estimated_notional, load_risk_caps, utc_day_bounds_ms
 from jarvise_trade.auth import resolve_trade_auth
 from jarvise_trade.binance_market import (
     client_order_id_for_approval,
@@ -41,16 +41,10 @@ def _live_equity_usd(conn: Any) -> float:
     return float(acct.get("equity") or 0.0)
 
 
-def _utc_day_bounds_ms(now_ms: int) -> tuple[int, int]:
-    day_ms = 86_400_000
-    start = (int(now_ms) // day_ms) * day_ms
-    return start, start + day_ms
-
-
 def live_day_loss_breach(conn: Any, *, now_ms: int) -> str | None:
     """Block if realized live PnL for UTC day is at/under -max_daily_loss."""
     caps = load_risk_caps()
-    start, end = _utc_day_bounds_ms(now_ms)
+    start, end = utc_day_bounds_ms(now_ms)
     pnl = sum_live_realized_pnl_utc_day(conn, day_start_ms=start, day_end_ms=end)
     if pnl <= -caps.max_daily_loss_usd:
         return f"live_max_daily_loss: day_pnl ${pnl:.2f} <= -${caps.max_daily_loss_usd:.2f}"

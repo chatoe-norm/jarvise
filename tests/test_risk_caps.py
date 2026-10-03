@@ -7,6 +7,7 @@ from jarvise_ingest.db import (
     ensure_paper_account,
     get_approval,
     get_paper_position,
+    insert_paper_order,
     list_approvals,
     list_paper_orders,
     open_db,
@@ -15,7 +16,7 @@ from jarvise_ingest.db import (
 )
 from jarvise_paper.approval import approve_approval, enqueue_approval, expire_approvals
 from jarvise_paper.engine import apply_signal
-from jarvise_risk.caps import RiskCaps, check_caps, load_risk_caps
+from jarvise_risk.caps import RiskCaps, check_caps, load_risk_caps, utc_day_bounds_ms
 
 
 def _seed_candle(conn, symbol: str, timeframe: str, close: float, ts: int = 1_700_000_000_000) -> None:
@@ -71,6 +72,157 @@ def test_check_caps_notional_and_drawdown() -> None:
         )
         is None
     )
+
+
+def test_check_caps_daily_loss_is_utc_day_not_lifetime() -> None:
+    caps = RiskCaps(
+        max_notional_per_order=5000.0,
+        max_daily_loss_usd=100.0,
+        drawdown_lock_pct=50.0,
+    )
+    # Lifetime -$150 vs start must not trip daily loss when today's realized is 0.
+    assert (
+        check_caps(
+            caps,
+            equity=9_850.0,
+            starting_equity=10_000.0,
+            utc_day_realized_pnl_usd=0.0,
+            action="flat",
+        )
+        is None
+    )
+    assert (
+        check_caps(
+            caps,
+            equity=10_000.0,
+            starting_equity=10_000.0,
+            utc_day_realized_pnl_usd=-100.0,
+            action="flat",
+        )
+        is not None
+    )
+    assert (
+        check_caps(
+            caps,
+            equity=10_000.0,
+            starting_equity=10_000.0,
+            utc_day_realized_pnl_usd=-99.0,
+            action="flat",
+        )
+        is None
+    )
+
+
+def test_enqueue_daily_loss_ignores_prior_utc_days(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_MAX_DAILY_LOSS_USD", "100")
+    monkeypatch.setenv("JARVISE_MAX_NOTIONAL_PER_ORDER", "5000")
+    monkeypatch.setenv("JARVISE_DRAWDOWN_LOCK_PCT", "50")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    conn = open_db(tmp_path / "day.db")
+    ensure_paper_account(conn)
+    set_paper_account_value(conn, "equity", 9_850.0)
+    set_paper_account_value(conn, "cash", 9_850.0)
+    now_ms = 1_702_000_000_000
+    day_start, _day_end = utc_day_bounds_ms(now_ms)
+    _seed_candle(conn, "BTCUSDT", "4h", 100.0, ts=now_ms)
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "o_y",
+            "ts": day_start - 2_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "side": "buy",
+            "qty": 1.0,
+            "price": 250.0,
+            "fee_usd": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "y",
+            "reason": "open_long",
+        },
+    )
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "c_y",
+            "ts": day_start - 1_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "side": "sell",
+            "qty": 1.0,
+            "price": 100.0,
+            "fee_usd": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "y",
+            "reason": "close_long",
+        },
+    )
+    conn.commit()
+    row = enqueue_approval(
+        conn,
+        analysis={
+            "analysis_id": "ok1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "size_pct_equity": 1.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        timeframe="4h",
+        now_ms=now_ms,
+    )
+    assert row.get("skipped") is not True
+    assert row["status"] == "pending"
+
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "o_t",
+            "ts": day_start + 1_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "side": "buy",
+            "qty": 1.0,
+            "price": 200.0,
+            "fee_usd": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "t",
+            "reason": "open_long",
+        },
+    )
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "c_t",
+            "ts": day_start + 2_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "side": "sell",
+            "qty": 1.0,
+            "price": 100.0,
+            "fee_usd": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "t",
+            "reason": "close_long",
+        },
+    )
+    conn.commit()
+    blocked = enqueue_approval(
+        conn,
+        analysis={
+            "analysis_id": "bad1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "size_pct_equity": 1.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        timeframe="4h",
+        now_ms=now_ms + 3_000,
+    )
+    assert blocked.get("skipped") is True
+    assert "max_daily_loss" in (blocked.get("error") or "")
+    conn.close()
 
 
 def test_load_risk_caps_from_env(monkeypatch) -> None:

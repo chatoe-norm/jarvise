@@ -20,6 +20,7 @@ from jarvise_paper.feedback import (
     metrics_by_decision_source,
     sync_decision_outcomes,
 )
+from jarvise_risk.caps import utc_day_bounds_ms
 
 PAPER_STRATEGY_ID = "paper"
 MIN_TRADES_FOR_RATIOS = 30
@@ -94,6 +95,16 @@ def reconstruct_closed_trades(orders: list[dict]) -> tuple[list[dict], int, int]
 
     open_remaining = sum(len(v) for v in stacks.values())
     return trades, unmatched, open_remaining
+
+
+def paper_utc_day_realized_pnl(orders: list[dict], *, now_ms: int) -> float:
+    """Sum closed round-trip PnL whose close_ts falls in the UTC calendar day of now_ms."""
+    start, end = utc_day_bounds_ms(now_ms)
+    trades, _unmatched, _open = reconstruct_closed_trades(orders)
+    return round(
+        sum(float(t["pnl_usd"]) for t in trades if start <= int(t["close_ts"]) < end),
+        8,
+    )
 
 
 def _max_drawdown_pct(pnls: list[float], *, start: float) -> float | None:

@@ -92,6 +92,13 @@ def load_risk_caps() -> RiskCaps:
     )
 
 
+def utc_day_bounds_ms(now_ms: int) -> tuple[int, int]:
+    """UTC calendar day [start, end) in unix milliseconds."""
+    day_ms = 86_400_000
+    start = (int(now_ms) // day_ms) * day_ms
+    return start, start + day_ms
+
+
 def estimated_notional(
     *,
     equity: float,
@@ -119,17 +126,22 @@ def check_caps(
     starting_equity: float,
     size_pct_equity: float | None = None,
     action: str | None = None,
+    utc_day_realized_pnl_usd: float = 0.0,
 ) -> str | None:
-    """Return account/order breach reason or None if OK (engage kill-switch on breach)."""
+    """Return account/order breach reason or None if OK (engage kill-switch on breach).
+
+    ``max_daily_loss_usd`` is UTC-calendar realized PnL (same window as live submit),
+    not lifetime distance from starting equity. Drawdown lock stays vs starting equity.
+    """
     start = float(starting_equity) if starting_equity else 0.0
     eq = float(equity)
     if start > 0:
         dd_pct = max(0.0, (start - eq) / start * 100.0)
         if dd_pct >= caps.drawdown_lock_pct:
             return f"drawdown_lock: {dd_pct:.2f}% >= {caps.drawdown_lock_pct:.2f}%"
-        loss = start - eq
-        if loss >= caps.max_daily_loss_usd:
-            return f"max_daily_loss: loss ${loss:.2f} >= ${caps.max_daily_loss_usd:.2f}"
+    day_pnl = float(utc_day_realized_pnl_usd)
+    if day_pnl <= -caps.max_daily_loss_usd:
+        return f"max_daily_loss: utc_day_pnl ${day_pnl:.2f} <= -${caps.max_daily_loss_usd:.2f}"
 
     act = (action or "").lower()
     if act in {"long", "short"} and size_pct_equity is not None:

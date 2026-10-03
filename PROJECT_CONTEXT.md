@@ -144,7 +144,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - CLI: `jarvise paper run [--auto-fill] | queue [--all] | approve <id> | reject <id> [--reason] | expire | status | metrics`. Default `run` **enqueues** (no fill); `--auto-fill` is the escape hatch. Kill-switch → exit 3, nothing written.
 
 **Risk** (`src/jarvise_risk/`)
-- Per-order notional / daily loss / drawdown lock; portfolio caps `JARVISE_MAX_OPEN_POSITIONS`, `JARVISE_MAX_GROSS_NOTIONAL_PCT`, `JARVISE_MAX_SYMBOL_NOTIONAL_PCT`, `JARVISE_MAX_CORRELATED_BUCKET_PCT` (soft block, no kill-switch); market-safety FLAT/kill on critical; expose caps on Ops.
+- Per-order notional / UTC-day realized `max_daily_loss` / drawdown lock; portfolio caps `JARVISE_MAX_OPEN_POSITIONS`, `JARVISE_MAX_GROSS_NOTIONAL_PCT`, `JARVISE_MAX_SYMBOL_NOTIONAL_PCT`, `JARVISE_MAX_CORRELATED_BUCKET_PCT` (soft block, no kill-switch); market-safety FLAT/kill on critical; expose caps on Ops.
 
 **Exchange read-only** (`src/jarvise_exchange/`)
 - `VenueClient` protocol + **registry**; `BinanceSpotClient.list_spot_balances()` (signed GET only); `resolve_binance_auth()` prefers PEM private key over HMAC secret; zero balances filtered; `exchange_balances` snapshots; `jarvise exchange sync-balances [--dry-run] --json`; Exchange page soft-fail. **Eterna** spot: fixture/blocker only (research overlay; no safe GET-only REST — see `docs/exchange/eterna-for-jarvise.md`). **No order POSTs in this package.**

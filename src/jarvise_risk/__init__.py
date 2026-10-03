@@ -18,6 +18,7 @@ from jarvise_risk.caps import (
     position_notional,
     read_kill_switch,
     symbol_bucket,
+    utc_day_bounds_ms,
 )
 from jarvise_risk.market_safety import (
     MarketSafetyConfig,
@@ -54,4 +55,5 @@ __all__ = [
     "position_notional",
     "read_kill_switch",
     "symbol_bucket",
+    "utc_day_bounds_ms",
 ]

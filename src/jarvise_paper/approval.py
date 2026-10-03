@@ -16,6 +16,7 @@ from jarvise_ingest.db import (
     get_paper_account,
     get_paper_position,
     list_expired_pending_approvals,
+    list_paper_orders_asc,
     list_paper_positions,
     load_latest_candle,
     mark_approval_failed,
@@ -26,6 +27,7 @@ from jarvise_ingest.db import (
 from jarvise_notify import notify_pending_enqueue
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.feedback import decision_source_from_reason
+from jarvise_paper.metrics import paper_utc_day_realized_pnl
 from jarvise_risk import (
     apply_safety_to_analysis,
     check_caps,
@@ -63,15 +65,18 @@ def _risk_breach(
     *,
     action: str | None,
     size_pct_equity: float | None,
+    now_ms: int,
 ) -> str | None:
     caps = load_risk_caps()
     acct = _account_snapshot(conn)
+    day_pnl = paper_utc_day_realized_pnl(list_paper_orders_asc(conn), now_ms=now_ms)
     return check_caps(
         caps,
         equity=float(acct["equity"]),
         starting_equity=float(acct["starting_equity"]),
         size_pct_equity=size_pct_equity,
         action=action,
+        utc_day_realized_pnl_usd=day_pnl,
     )
 
 
@@ -157,6 +162,7 @@ def enqueue_approval(
         conn,
         action=action,
         size_pct_equity=size_f,
+        now_ms=ts,
     )
     if breach:
         engaged = engage_kill_switch(reason=breach)
@@ -292,6 +298,7 @@ def approve_approval(
         conn,
         action=action,
         size_pct_equity=size_f,
+        now_ms=ts,
     )
     if breach:
         return _fail_risk(conn, approval_id, reason=breach, ts=ts, row=row)
