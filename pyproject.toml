@@ -23,7 +23,7 @@ dev = [
   "python-multipart>=0.0.32",
   "ruff>=0.14",
   "mypy>=1.14",
-  "pip-audit>=2.9",
+  "pip-audit>=2.10.1",
 ]
 rag = [
   "qdrant-client>=1.19.1",
