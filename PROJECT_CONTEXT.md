@@ -2,7 +2,7 @@
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
 **Generated:** 2026-09-25; **status refreshed:** 2026-10-03.
-**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** shipped on `main` ([PR #83](https://github.com/chatoe-norm/jarvise/pull/83)); VPS Deploy green. Live submit **code** stays gated off. **Next:** optional owner live enable per checklist; prove paper EV (incl. auto-decide feedback); do **not** start P5 until gated live path is stable.
+**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** shipped on `main` ([PR #83](https://github.com/chatoe-norm/jarvise/pull/83); flat_exit [#85](https://github.com/chatoe-norm/jarvise/pull/85)); VPS Deploy green. Live submit **code** stays gated off. **Coverage verdict:** intelligence + hardened paper autotrade + Approve→live *door* — **not** unattended live (P5). **Next:** prove paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
 ### Status at a glance (2026-10-03)
@@ -10,16 +10,18 @@
 | Area | State |
 |------|--------|
 | Ladder | **P0–P4-C (gated)** on `main` + paper excellence Tier 0–2 (#60, #83). |
+| Autotrade coverage | **Paper + gated Approve path: yes.** **Unattended live (P5): no** — see §5.1. |
 | Live trading | **Off by default** — `jarvise_trade` + `live_orders`; flag `JARVISE_LIVE_TRADING=false`. |
 | Shipped UX | Command Dashboard SPA (`web/`: Home / Paper / Decisions / Exchange / Ops) + FastAPI JSON; approval-first Home. |
 | Paper path | `paper run` → enqueue → manual Approve **or** auto-decide (+ soft EV gate) → paper fill when flag off. |
 | Equity paper | Universe `paper_equity` (SPY/QQQ) via Stooq 1d; paper-only; no broker live. |
 | VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**, pending digest / auto-decide as configured. |
 | Next | Prove auto-decide EV via feedback; optional checklist live enable; stabilize before P5. |
+| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false` temporarily (compose-wired) to accumulate `auto_*` closes while HTF chaotic; restore `true` after N≈10. Live stays false. |
 | Risk | Per-order + portfolio book caps (open/gross/symbol/bucket) + market safety; timeout → FLAT (paper). |
 | Obs | `GET /metrics` (web + jobs); optional compose profile `obs` (Prometheus/Grafana, Tailscale-bound). |
 | P4-C | Implemented: Approve → caps → `jarvise_trade` MARKET POST → `live_orders`; no paper mirror when live. |
-| VPS | Deploy green after #83; healthz `paper_only:true`. Live flag stays false. |
+| VPS | Deploy green after #83/#85; healthz `paper_only:true`. Live flag stays false. |
 
 ---
 
@@ -299,6 +301,21 @@ Console scripts: `jarvise` (canonical), `jarvise-ingest`, `jarvise-analyze`, `ja
 
 Repo convention: **spec → plan → TDD implementation → review → PR to `main`**; the VPS redeploys automatically on green `main`.
 
+### 5.1 Coverage verdict — crypto autotrade after Tier 0–2
+
+**Verdict (2026-10-03):** Tier 0–1 hardening + Tier 2 paper excellence make Jarvise **ready as hardened intelligence + paper autotrade**, with an **Approve→live door** (P4-C code, flag off). They do **not** complete end-state **unattended live crypto autotrade (P5)**. Both plans explicitly left live flag and P5 out of scope.
+
+| Layer | Meaning | After T0–1 + T2 |
+|-------|---------|-----------------|
+| Intelligence | OHLCV/book/macro/derivs, analyze, doctrine RAG, MTF HTF | **Covered for crypto paper** |
+| Paper auto | enqueue → auto-decide → fills → feedback / soft EV gate | **Code complete**; VPS `auto_*` EV sample still thin |
+| Manual live (P4-C) | Approve → size-capped spot | **Code complete, flag off**; not smoked on VPS |
+| Autonomy (P5) | scheduler places live without per-trade Approve | **Absent by design** |
+
+**Still not “full autotrade”:** prove `by_decision_source_30d` for `auto_*` (N≈10+); owner live checklist smoke; P5 flag/scheduler; live venue flatten on timeout; real second-venue REST (Eterna = fixture); ADX/volume triggers; remaining macro writers; CoinGecko Pro/public URL mismatch on HTF ingest when it fails.
+
+**Do not skip the ladder:** paper EV → optional gated live → stabilize P4-C → **then** a separate P5 plan.
+
 ### MVP checklist (complete; live flip still owner-gated)
 
 - [x] **1–7.** P4-B → paper 24/7 → expectancy → replay → risk caps → P4-C design → P4-C implementation (gated). Evidence in §3 / §6.
@@ -310,7 +327,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 
 ### Owner / ops next (not code by default)
 
-1. **Prove paper EV** — run auto-decide long enough for `by_decision_source_30d`; set soft EV gate when sample size is honest; do not raise autonomy on thin data.
+1. **Prove paper EV** — run auto-decide long enough for `by_decision_source_30d` on `auto_*`; set soft EV gate (`JARVISE_AUTO_DECIDE_MIN_EV`) only when N is honest; do not raise autonomy on thin data.
 2. **Optional live enable** — only via checklist (`BINANCE_TRADE_*` + `JARVISE_LIVE_TRADING=true`); keep paper-only until then.
 3. **Stabilize gated live** — smoke Approve → live path on a tiny size; then consider P5. **Do not start P5 before this.**
 
@@ -318,7 +335,7 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 
 P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (fear/greed, ETF flows, netflow) and ADX/volume analyzer inputs; broker equity live; real second-venue REST (beyond Eterna fixture); multi-venue routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
 
-*(Shipped post-MVP, not backlog: HTF MTF confirm, Stooq `paper_equity` paper ingest, Telegram alerts, VenueClient registry + Eterna stub, Prometheus/Grafana profile, decision feedback + portfolio caps — see Tier 2 / #83.)*
+*(Shipped post-MVP, not backlog: HTF MTF confirm, Stooq `paper_equity` paper ingest, Telegram alerts, VenueClient registry + Eterna stub, Prometheus/Grafana profile, decision feedback + portfolio caps, flat_exit rule — see Tier 2 / #83, #85.)*
 
 ---
 
