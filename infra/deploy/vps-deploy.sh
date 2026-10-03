@@ -21,11 +21,19 @@ fi
 git fetch origin main
 git checkout -f -B main FETCH_HEAD
 
+uid="$(env_get JARVISE_UID)"; uid="${uid:-1000}"
+gid="$(env_get JARVISE_GID)"; gid="${gid:-1000}"
+export JARVISE_UID="$uid" JARVISE_GID="$gid"
+COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
+
+# Build first (no downtime), then stop our writers before changing ownership so no root-owned
+# SQLite -wal/-shm file can race the new non-root containers.
+"${COMPOSE[@]}" build
+
 # Containers run as a non-root user (Dockerfile ARG JARVISE_UID/GID, default 1000). Bind mounts
 # they must write (SQLite, HF cache, nlm session, OpenClaw notes) are chowned to that uid; secrets
 # are made readable by it and nobody else. Co-tenant stacks under /opt/t4trip* are untouched.
-uid="$(env_get JARVISE_UID)"; uid="${uid:-1000}"
-gid="$(env_get JARVISE_GID)"; gid="${gid:-1000}"
+"${COMPOSE[@]}" stop jobs web >/dev/null 2>&1 || true
 mkdir -p data/analytics data/openclaw data/nlm data/.cache secrets
 chown -R "$uid:$gid" data
 if [[ -n "$(ls -A secrets 2>/dev/null)" ]]; then
@@ -34,8 +42,7 @@ if [[ -n "$(ls -A secrets 2>/dev/null)" ]]; then
   find secrets -type f -exec chmod 0400 {} +
 fi
 
-export JARVISE_UID="$uid" JARVISE_GID="$gid"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+"${COMPOSE[@]}" up -d
 
 echo "image digests (for rollback via docker tag / compose image pin):"
 docker compose -f docker-compose.yml -f docker-compose.prod.yml images 2>/dev/null || true
