@@ -190,14 +190,14 @@ def _finish_cli_payload(job: str, proc: Any, key: str) -> tuple[int, dict[str, A
     if proc.returncode == TIMEOUT_EXIT_CODE:
         payload["ok"] = False
         payload["error"] = f"timeout after {job_timeout_s(job):.0f}s"
-    publish_redis_status(key, payload)
+    _publish_best_effort(key, payload)
     return proc.returncode, payload
 
 
 def run_ingest() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
-        publish_redis_status("jarvise:ingest:last", payload)
+        _publish_best_effort("jarvise:ingest:last", payload)
         return 3, payload
     with single_flight("ingest") as acquired:
         if not acquired:
@@ -245,14 +245,14 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
             for key in ("db", "market_technicals", "errors", "duration_s"):
                 if key in by_tf["1h"]:
                     payload[key] = by_tf["1h"][key]
-        publish_redis_status("jarvise:ingest:last", payload)
+        _publish_best_effort("jarvise:ingest:last", payload)
         return exit_code, payload
 
 
 def run_rag_refresh() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
-        publish_redis_status("jarvise:rag:last", payload)
+        _publish_best_effort("jarvise:rag:last", payload)
         return 3, payload
     with single_flight("rag") as acquired:
         if not acquired:
@@ -266,7 +266,7 @@ def run_rag_refresh() -> tuple[int, dict[str, Any]]:
 def run_paper_run() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
-        publish_redis_status("jarvise:paper:last", payload)
+        _publish_best_effort("jarvise:paper:last", payload)
         return 3, payload
     with single_flight("paper_run") as acquired:
         if not acquired:
@@ -292,7 +292,7 @@ def run_paper_run() -> tuple[int, dict[str, Any]]:
 def run_paper_expire() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
-        publish_redis_status("jarvise:paper:expire:last", payload)
+        _publish_best_effort("jarvise:paper:expire:last", payload)
         return 3, payload
     with single_flight("paper_expire") as acquired:
         if not acquired:
@@ -317,7 +317,7 @@ def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
                 "count": 0,
                 "paper_only": True,
             }
-            publish_redis_status("jarvise:paper:digest:last", payload)
+            _publish_best_effort("jarvise:paper:digest:last", payload)
             return 0, payload
         conn = open_db(path)
         try:
@@ -326,7 +326,7 @@ def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
             conn.close()
         result = notify_pending_digest(rows)
         payload = {**result, "paper_only": True}
-        publish_redis_status("jarvise:paper:digest:last", payload)
+        _publish_best_effort("jarvise:paper:digest:last", payload)
         return 0, payload
 
 
@@ -356,7 +356,7 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
         finally:
             conn.close()
     payload["telegram_sent"] = notify_ingest_health(payload)
-    publish_redis_status("jarvise:ingest:health", payload)
+    _publish_best_effort("jarvise:ingest:health", payload)
     return 0, payload
 
 

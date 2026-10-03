@@ -35,6 +35,17 @@ OUT="$DEST_BASE/$STAMP"
 mkdir -p "$OUT"
 log() { printf '[backup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
+# Compose prefixes volumes with the project name (jarvise_jarvise_qdrant); resolve by label so we
+# never tar an empty look-alike volume by accident.
+compose_volume() {
+  docker volume ls -q \
+    --filter "label=com.docker.compose.project=jarvise" \
+    --filter "label=com.docker.compose.volume=$1" | head -n 1
+}
+QDRANT_VOL="$(compose_volume jarvise_qdrant)"
+REDIS_VOL="$(compose_volume jarvise_redis)"
+[[ -n "$QDRANT_VOL" && -n "$REDIS_VOL" ]] || { echo "could not resolve compose volumes (qdrant='$QDRANT_VOL' redis='$REDIS_VOL')" >&2; exit 1; }
+
 # 1. SQLite: online, consistent copy via the backup API (works under WAL without stopping jobs/web).
 DB="$ROOT/data/analytics/jarvise.db"
 if [[ -f "$DB" ]]; then
@@ -56,22 +67,26 @@ else
 fi
 
 # 2. Qdrant: snapshot the named volume while the container is stopped briefly (consistent files).
-log "qdrant volume → qdrant.tgz"
+log "qdrant volume ($QDRANT_VOL) → qdrant.tgz"
 "${COMPOSE[@]}" stop qdrant >/dev/null
-docker run --rm -v jarvise_qdrant:/qdrant/storage:ro -v "$OUT":/backup alpine \
+docker run --rm -v "$QDRANT_VOL":/qdrant/storage:ro -v "$OUT":/backup alpine \
   tar czf /backup/qdrant.tgz -C /qdrant/storage .
 "${COMPOSE[@]}" start qdrant >/dev/null
 
 # 3. Redis: kill-switch + job status. Force an RDB point-in-time save, then copy the data dir.
-log "redis → redis.tgz"
+log "redis ($REDIS_VOL) → redis.tgz"
 "${COMPOSE[@]}" exec -T redis redis-cli BGSAVE >/dev/null || true
 sleep 2
-docker run --rm -v jarvise_redis:/data:ro -v "$OUT":/backup alpine \
+docker run --rm -v "$REDIS_VOL":/data:ro -v "$OUT":/backup alpine \
   tar czf /backup/redis.tgz -C /data .
 
-# 4. OpenClaw notes + doctrine extracts (small; bind mounts).
-log "openclaw + sources → openclaw.tgz / sources.tgz"
-tar czf "$OUT/openclaw.tgz" -C "$ROOT" data/openclaw 2>/dev/null || true
+# 4. OpenClaw state (agents, sessions, exports, config) + doctrine extracts. Installed plugin
+#    trees, caches, and logs are re-created by the image/update path and are excluded.
+log "openclaw state + sources → openclaw.tgz / sources.tgz"
+tar czf "$OUT/openclaw.tgz" -C "$ROOT" \
+  --exclude='data/openclaw/extensions' --exclude='data/openclaw/py-mcp' \
+  --exclude='data/openclaw/cache' --exclude='data/openclaw/logs' \
+  --exclude='*/node_modules' data/openclaw 2>/dev/null || true
 tar czf "$OUT/sources.tgz" -C "$ROOT" data/analytics/sources 2>/dev/null || true
 
 # 5. Manifest + checksums.
