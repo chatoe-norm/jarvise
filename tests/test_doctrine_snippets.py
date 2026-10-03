@@ -40,9 +40,7 @@ def test_hits_mapped_and_truncated() -> None:
         ),
     ]
     client = _FakeClient(points)
-    hits = doctrine_snippets(
-        "trend_up long", limit=2, client=client, encoder=lambda _t: [0.1, 0.2]
-    )
+    hits = doctrine_snippets("trend_up long", limit=2, client=client, encoder=lambda _t: [0.1, 0.2])
     # Oversample: min(40, max(2*10, 20)) == 20
     assert client.calls == [("jarvise_doctrine", 20)]
     assert len(hits) == 2

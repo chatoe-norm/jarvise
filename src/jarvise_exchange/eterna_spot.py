@@ -41,9 +41,7 @@ def load_balances_fixture(path: Path) -> list[SpotBalance]:
         free = _dec(row.get("free", 0))
         locked = _dec(row.get("locked", 0))
         total = _dec(row["total"]) if row.get("total") is not None else free + locked
-        out.append(
-            SpotBalance(venue=VENUE, asset=asset, free=free, locked=locked, total=total)
-        )
+        out.append(SpotBalance(venue=VENUE, asset=asset, free=free, locked=locked, total=total))
     return out
 
 

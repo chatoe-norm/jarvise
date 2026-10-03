@@ -78,22 +78,14 @@ class RiskCaps:
 
 def load_risk_caps() -> RiskCaps:
     return RiskCaps(
-        max_notional_per_order=_fenv(
-            "JARVISE_MAX_NOTIONAL_PER_ORDER", DEFAULT_MAX_NOTIONAL
-        ),
+        max_notional_per_order=_fenv("JARVISE_MAX_NOTIONAL_PER_ORDER", DEFAULT_MAX_NOTIONAL),
         max_daily_loss_usd=_fenv("JARVISE_MAX_DAILY_LOSS_USD", DEFAULT_MAX_DAILY_LOSS),
-        drawdown_lock_pct=_fenv(
-            "JARVISE_DRAWDOWN_LOCK_PCT", DEFAULT_DRAWDOWN_LOCK_PCT
-        ),
+        drawdown_lock_pct=_fenv("JARVISE_DRAWDOWN_LOCK_PCT", DEFAULT_DRAWDOWN_LOCK_PCT),
         max_open_positions=max(
             0, int(_fenv("JARVISE_MAX_OPEN_POSITIONS", float(DEFAULT_MAX_OPEN_POSITIONS)))
         ),
-        max_gross_notional_pct=_fenv(
-            "JARVISE_MAX_GROSS_NOTIONAL_PCT", DEFAULT_MAX_GROSS_NOTIONAL_PCT
-        ),
-        max_symbol_notional_pct=_fenv(
-            "JARVISE_MAX_SYMBOL_NOTIONAL_PCT", DEFAULT_MAX_SYMBOL_NOTIONAL_PCT
-        ),
+        max_gross_notional_pct=_fenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", DEFAULT_MAX_GROSS_NOTIONAL_PCT),
+        max_symbol_notional_pct=_fenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", DEFAULT_MAX_SYMBOL_NOTIONAL_PCT),
         max_correlated_bucket_pct=_fenv(
             "JARVISE_MAX_CORRELATED_BUCKET_PCT", DEFAULT_MAX_CORRELATED_BUCKET_PCT
         ),
@@ -134,22 +126,16 @@ def check_caps(
     if start > 0:
         dd_pct = max(0.0, (start - eq) / start * 100.0)
         if dd_pct >= caps.drawdown_lock_pct:
-            return (
-                f"drawdown_lock: {dd_pct:.2f}% >= {caps.drawdown_lock_pct:.2f}%"
-            )
+            return f"drawdown_lock: {dd_pct:.2f}% >= {caps.drawdown_lock_pct:.2f}%"
         loss = start - eq
         if loss >= caps.max_daily_loss_usd:
-            return (
-                f"max_daily_loss: loss ${loss:.2f} >= ${caps.max_daily_loss_usd:.2f}"
-            )
+            return f"max_daily_loss: loss ${loss:.2f} >= ${caps.max_daily_loss_usd:.2f}"
 
     act = (action or "").lower()
     if act in {"long", "short"} and size_pct_equity is not None:
         notional = estimated_notional(equity=eq, size_pct_equity=float(size_pct_equity))
         if notional > caps.max_notional_per_order:
-            return (
-                f"max_notional: ${notional:.2f} > ${caps.max_notional_per_order:.2f}"
-            )
+            return f"max_notional: ${notional:.2f} > ${caps.max_notional_per_order:.2f}"
     return None
 
 
@@ -177,28 +163,20 @@ def check_portfolio_caps(
     if existing is not None and str(existing.get("side") or "").lower() == act:
         return None
 
-    projected: dict[str, float] = {
-        s: position_notional(p) for s, p in by_sym.items() if s != sym
-    }
+    projected: dict[str, float] = {s: position_notional(p) for s, p in by_sym.items() if s != sym}
     projected[sym] = cand_notional
 
     if len(projected) > caps.max_open_positions:
-        return (
-            f"max_open_positions: {len(projected)} > {caps.max_open_positions}"
-        )
+        return f"max_open_positions: {len(projected)} > {caps.max_open_positions}"
 
     gross = sum(projected.values())
     gross_pct = (gross / eq) * 100.0
     if gross_pct > caps.max_gross_notional_pct:
-        return (
-            f"max_gross_notional_pct: {gross_pct:.2f}% > {caps.max_gross_notional_pct:.2f}%"
-        )
+        return f"max_gross_notional_pct: {gross_pct:.2f}% > {caps.max_gross_notional_pct:.2f}%"
 
     sym_pct = (cand_notional / eq) * 100.0
     if sym_pct > caps.max_symbol_notional_pct:
-        return (
-            f"max_symbol_notional_pct: {sym_pct:.2f}% > {caps.max_symbol_notional_pct:.2f}%"
-        )
+        return f"max_symbol_notional_pct: {sym_pct:.2f}% > {caps.max_symbol_notional_pct:.2f}%"
 
     bucket = symbol_bucket(sym)
     if bucket is not None:

@@ -28,7 +28,11 @@ def main() -> int:
     if not result.get("ok"):
         print(result.get("error") or result, file=sys.stderr)
         return 2
-    print(json.dumps(result, indent=2) if args.query else f"indexed {result.get('chunks')} chunks into {result.get('collection')}")
+    print(
+        json.dumps(result, indent=2)
+        if args.query
+        else f"indexed {result.get('chunks')} chunks into {result.get('collection')}"
+    )
     if args.query:
         for hit in result.get("hits") or []:
             print(f"score={hit['score']:.3f} source={hit.get('source')}")

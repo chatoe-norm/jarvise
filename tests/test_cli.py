@@ -47,9 +47,7 @@ def test_since_after_until_exit_2():
 
 def test_dry_run_reports_the_backfill_window(tmp_path: Path, capsys):
     db = tmp_path / "missing" / "jarvise.db"
-    code = run(
-        [*BACKFILL_BASE, "--since", "2026-01-01", "--dry-run", "--json", "--db", str(db)]
-    )
+    code = run([*BACKFILL_BASE, "--since", "2026-01-01", "--dry-run", "--json", "--db", str(db)])
 
     assert code == 0
     planned = json.loads(capsys.readouterr().out)["market_technicals"]["BTCUSDT"]

@@ -51,12 +51,7 @@ def test_decision_source_from_reason() -> None:
 def test_schema_version_seven_has_feedback_tables(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "fb.db")
     assert schema_version(conn) == SCHEMA_VERSION == 7
-    tables = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "paper_decision_outcomes" in tables
     assert "paper_auto_runs" in tables
     cols = {r[1] for r in conn.execute("PRAGMA table_info(paper_orders)").fetchall()}
@@ -249,7 +244,9 @@ def test_auto_ev_gate_blocks_when_negative(tmp_path: Path, monkeypatch) -> None:
         timeout_s=5.0,
         api_key="test-key",
     )
-    out = run_auto_decide(conn, now_ms=now, config=cfg, chat=lambda *a, **k: {"decision": "approve", "reason": "x"})
+    out = run_auto_decide(
+        conn, now_ms=now, config=cfg, chat=lambda *a, **k: {"decision": "approve", "reason": "x"}
+    )
     assert out.get("skipped") is True
     assert out.get("reason") == "auto_ev_gate"
     runs = conn.execute("SELECT COUNT(*) FROM paper_auto_runs").fetchone()[0]

@@ -43,9 +43,7 @@ class BinanceAuth:
             raise ValueError("BinanceAuth requires exactly one of hmac_secret or private_key")
 
 
-def load_private_key_pem(
-    path: Path, *, passphrase: str | None = None
-) -> PrivateKeyTypes:
+def load_private_key_pem(path: Path, *, passphrase: str | None = None) -> PrivateKeyTypes:
     raw = path.read_bytes()
     password = passphrase.encode("utf-8") if passphrase else None
     return serialization.load_pem_private_key(raw, password=password)
@@ -64,9 +62,7 @@ def resolve_binance_auth() -> BinanceAuth | None:
     if key_path:
         path = Path(key_path)
         if not path.is_file():
-            raise FileNotFoundError(
-                f"BINANCE_API_PRIVATE_KEY_PATH not found or not a file: {key_path}"
-            )
+            raise FileNotFoundError(f"BINANCE_API_PRIVATE_KEY_PATH not found or not a file: {key_path}")
         passphrase = os.environ.get("BINANCE_API_PRIVATE_KEY_PASSPHRASE") or None
         private_key = load_private_key_pem(path, passphrase=passphrase)
         return BinanceAuth(api_key=api_key, private_key=private_key)
@@ -107,9 +103,7 @@ def sign_payload(auth: BinanceAuth, query_string: str) -> str:
     elif isinstance(key, rsa.RSAPrivateKey):
         sig = key.sign(payload, padding.PKCS1v15(), hashes.SHA256())
     else:
-        raise TypeError(
-            f"Unsupported private key type for Binance signing: {type(key).__name__}"
-        )
+        raise TypeError(f"Unsupported private key type for Binance signing: {type(key).__name__}")
     return base64.b64encode(sig).decode("ascii")
 
 

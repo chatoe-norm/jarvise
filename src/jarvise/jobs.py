@@ -341,8 +341,7 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
     path = Path(raw)
     timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
     symbols = [
-        s for s in (os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")).split(",")
-        if s.strip()
+        s for s in (os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")).split(",") if s.strip()
     ]
     max_age = _fenv("JARVISE_INGEST_HEALTH_MAX_AGE_MIN", 60.0)
     if not path.exists():
@@ -375,7 +374,13 @@ def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
     now = int(time.time() * 1000)
     with single_flight("paper_auto_decide") as acquired:
         if not acquired:
-            return 3, {"ok": False, "skipped": True, "reason": "auto_decide_running", "paper_only": True, "at_ms": now}
+            return 3, {
+                "ok": False,
+                "skipped": True,
+                "reason": "auto_decide_running",
+                "paper_only": True,
+                "at_ms": now,
+            }
         unreadable = False
         try:
             engaged = kill_switch_engaged()
@@ -389,7 +394,13 @@ def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
         raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
         path = Path(raw)
         if not path.exists():
-            payload = {"ok": False, "skipped": True, "reason": "no_database", "paper_only": True, "at_ms": now}
+            payload = {
+                "ok": False,
+                "skipped": True,
+                "reason": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
             _publish_best_effort(key, payload)
             return 1, payload
         conn = open_db(path)
@@ -417,7 +428,14 @@ def run_live_reconcile() -> tuple[int, dict[str, Any]]:
         raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
         path = Path(raw)
         if not path.exists():
-            payload = {"ok": True, "skipped": True, "reason": "no_database", "open": 0, "read_only": True, "at_ms": now}
+            payload = {
+                "ok": True,
+                "skipped": True,
+                "reason": "no_database",
+                "open": 0,
+                "read_only": True,
+                "at_ms": now,
+            }
             _publish_best_effort(key, payload)
             return 0, payload
         conn = open_db(path)
@@ -466,6 +484,7 @@ ROUTES = {
     ("POST", "/jobs/paper-auto-decide"): "paper_auto_decide",
     ("POST", "/jobs/live-reconcile"): "live_reconcile",
 }
+
 
 class JobHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802

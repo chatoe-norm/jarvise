@@ -49,10 +49,7 @@ def fetch_global_macro(
     try:
         payload = get_json(url, headers=headers, client=client, provider="coingecko_global")
     except ProviderError as exc:
-        raise RuntimeError(
-            f"coingecko global failed: {exc}. "
-            "Retry: jarvise ingest --skip-macro"
-        ) from exc
+        raise RuntimeError(f"coingecko global failed: {exc}. Retry: jarvise ingest --skip-macro") from exc
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):

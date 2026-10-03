@@ -112,9 +112,7 @@ def indicator_series(
 ) -> dict[str, list[float | None]]:
     """Indicator columns for a whole series, warm-up values withheld as NULL."""
     return {
-        "atr_14": _withhold_until(
-            atr(highs, lows, closes, 14), warm_from(13, 1 / 14)
-        ),
+        "atr_14": _withhold_until(atr(highs, lows, closes, 14), warm_from(13, 1 / 14)),
         "rsi_14": _withhold_until(rsi(closes, 14), warm_from(14, 1 / 14)),
         "ema_20": _withhold_until(ema(closes, 20), warm_from(19, 2 / 21)),
         "ema_200": _withhold_until(ema(closes, 200), warm_from(199, 2 / 201)),

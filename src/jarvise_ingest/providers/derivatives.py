@@ -38,7 +38,5 @@ def fetch_derivatives(
             client=client,
         )
         return rows, PROVIDER_COINGLASS
-    rows = binance_futures_deriv.fetch_derivatives(
-        pair_symbol, interval, limit, client=client
-    )
+    rows = binance_futures_deriv.fetch_derivatives(pair_symbol, interval, limit, client=client)
     return rows, PROVIDER_BINANCE_FUTURES

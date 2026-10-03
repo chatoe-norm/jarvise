@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "jarvise"
 version = "0.1.0"
 description = "Jarvise paper analytics + agent workspace CLI (no order placement)"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "httpx>=0.28.1",
@@ -24,6 +26,8 @@ dev = [
   "ruff>=0.16.9",
   "mypy>=1.14",
   "pip-audit>=2.10.1",
+  "pre-commit>=4",
+  "build>=1.2",
 ]
 rag = [
   "qdrant-client>=1.19.1",
@@ -74,6 +78,11 @@ ignore = ["E501", "B008", "UP042"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011", "B017"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
 
 [tool.mypy]
 python_version = "3.11"

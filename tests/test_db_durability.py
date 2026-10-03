@@ -153,12 +153,30 @@ def test_prune_trims_only_unbounded_tables(tmp_path: Path) -> None:
     # Derivatives: two versions of one old bar; only the superseded version goes.
     append_derivatives(
         conn,
-        [{"symbol": "BTC", "timestamp": old, "open_interest_usd": 1.0, "funding_rate": 0.01, "long_short_ratio": None, "liquidations_24h_usd": None}],
+        [
+            {
+                "symbol": "BTC",
+                "timestamp": old,
+                "open_interest_usd": 1.0,
+                "funding_rate": 0.01,
+                "long_short_ratio": None,
+                "liquidations_24h_usd": None,
+            }
+        ],
         ingested_at=old + 10,
     )
     append_derivatives(
         conn,
-        [{"symbol": "BTC", "timestamp": old, "open_interest_usd": 2.0, "funding_rate": 0.01, "long_short_ratio": None, "liquidations_24h_usd": None}],
+        [
+            {
+                "symbol": "BTC",
+                "timestamp": old,
+                "open_interest_usd": 2.0,
+                "funding_rate": 0.01,
+                "long_short_ratio": None,
+                "liquidations_24h_usd": None,
+            }
+        ],
         ingested_at=old + 20,
     )
     conn.commit()

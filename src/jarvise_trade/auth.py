@@ -21,9 +21,7 @@ def resolve_trade_auth() -> BinanceAuth | None:
     if key_path:
         path = Path(key_path)
         if not path.is_file():
-            raise FileNotFoundError(
-                f"BINANCE_TRADE_PRIVATE_KEY_PATH not found or not a file: {key_path}"
-            )
+            raise FileNotFoundError(f"BINANCE_TRADE_PRIVATE_KEY_PATH not found or not a file: {key_path}")
         passphrase = os.environ.get("BINANCE_TRADE_PRIVATE_KEY_PASSPHRASE") or None
         private_key = load_private_key_pem(path, passphrase=passphrase)
         return BinanceAuth(api_key=api_key, private_key=private_key)

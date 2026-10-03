@@ -153,9 +153,7 @@ def test_paper_run_route(monkeypatch) -> None:
 
 
 def test_paper_expire_route(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "jarvise.jobs.run_paper_expire", lambda: (0, {"ok": True, "paper_only": True})
-    )
+    monkeypatch.setattr("jarvise.jobs.run_paper_expire", lambda: (0, {"ok": True, "paper_only": True}))
     handler = _Handler()
     handler.path = "/jobs/paper-expire"
     handler._dispatch()
@@ -269,7 +267,12 @@ def test_paper_auto_decide_live_refused_is_409(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: False)
     monkeypatch.setattr(
         "jarvise.jobs.run_auto_decide",
-        lambda conn, **kw: {"ok": False, "skipped": True, "reason": "live_trading_enabled", "paper_only": True},
+        lambda conn, **kw: {
+            "ok": False,
+            "skipped": True,
+            "reason": "live_trading_enabled",
+            "paper_only": True,
+        },
     )
     monkeypatch.setattr("jarvise.jobs.notify_auto_decide", lambda payload: True)
     monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
@@ -412,7 +415,9 @@ def test_paper_auto_decide_crash_still_publishes(monkeypatch, tmp_path) -> None:
     sent: list[dict] = []
     monkeypatch.setattr("jarvise.jobs.notify_auto_decide", lambda payload: sent.append(payload) or True)
     published: list[tuple[str, dict]] = []
-    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda key, payload: published.append((key, payload)))
+    monkeypatch.setattr(
+        "jarvise.jobs.publish_redis_status", lambda key, payload: published.append((key, payload))
+    )
     code, body = run_paper_auto_decide()
     assert code == 1 and body["ok"] is False
     assert body["error"].startswith("RuntimeError: ")

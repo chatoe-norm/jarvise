@@ -28,18 +28,14 @@ def test_bullish_ema_stack_is_trend_up_long():
 
 
 def test_bearish_ema_stack_is_trend_down_short():
-    out = analyze_snapshot(
-        _snap(close=90.0, ema_20=89.0, ema_200=100.0, rsi_14=40.0)
-    )
+    out = analyze_snapshot(_snap(close=90.0, ema_20=89.0, ema_200=100.0, rsi_14=40.0))
     assert out["regime_state"] == "trend_down"
     assert out["action"] == "short"
     assert out["invalidation_price"] == 93.0  # 90 + 1.5 * 2
 
 
 def test_flat_emas_are_range_and_action_flat():
-    out = analyze_snapshot(
-        _snap(close=100.0, ema_20=100.1, ema_200=99.9, atr_14=1.0, rsi_14=50.0)
-    )
+    out = analyze_snapshot(_snap(close=100.0, ema_20=100.1, ema_200=99.9, atr_14=1.0, rsi_14=50.0))
     assert out["regime_state"] == "range"
     assert out["action"] == "flat"
     assert out["size_pct_equity"] == 0.0
@@ -60,9 +56,7 @@ def test_high_atr_with_conflict_is_chaotic_flat():
 
 
 def test_missing_indicators_force_flat_low_confidence():
-    out = analyze_snapshot(
-        _snap(atr_14=None, ema_20=None, ema_200=None, rsi_14=None)
-    )
+    out = analyze_snapshot(_snap(atr_14=None, ema_20=None, ema_200=None, rsi_14=None))
     assert out["action"] == "flat"
     assert out["confidence_score"] < 0.3
     assert out["size_pct_equity"] == 0.0

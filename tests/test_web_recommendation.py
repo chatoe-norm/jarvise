@@ -21,9 +21,7 @@ def _stub(monkeypatch, *, doctrine=None) -> None:
     monkeypatch.setattr("jarvise_web.app.redis_get_strict", lambda key: "0")
     monkeypatch.setattr("jarvise_web.app.redis_get_json", lambda key: {"ok": True, "key": key})
     monkeypatch.setattr("jarvise_web.app.qdrant_info", lambda: {"exists": True, "points": 0})
-    monkeypatch.setattr(
-        "jarvise_web.app.fetch_doctrine", lambda query, limit=3: list(doctrine or [])
-    )
+    monkeypatch.setattr("jarvise_web.app.fetch_doctrine", lambda query, limit=3: list(doctrine or []))
 
 
 def _seed(db: Path) -> None:

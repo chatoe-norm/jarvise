@@ -40,15 +40,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
 DEFAULT_LIMIT = 200
 EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 1h --skip-derivatives --json"
-BACKFILL_EXAMPLE = (
-    "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives"
-)
-UNIVERSE_EXAMPLE = (
-    "jarvise ingest --universe paper_core --timeframe 4h --skip-derivatives --json"
-)
-EQUITY_EXAMPLE = (
-    "jarvise ingest --universe paper_equity --timeframe 1d --skip-book --skip-derivatives --json"
-)
+BACKFILL_EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives"
+UNIVERSE_EXAMPLE = "jarvise ingest --universe paper_core --timeframe 4h --skip-derivatives --json"
+EQUITY_EXAMPLE = "jarvise ingest --universe paper_equity --timeframe 1d --skip-book --skip-derivatives --json"
 
 
 def _parse_instant(raw: str) -> datetime:
@@ -88,8 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--universe",
         help=(
-            f"Resolve symbols from a point-in-time universe "
-            f"(seeded: {PAPER_CORE}); may combine with --symbol"
+            f"Resolve symbols from a point-in-time universe (seeded: {PAPER_CORE}); may combine with --symbol"
         ),
     )
     p.add_argument(
@@ -157,9 +150,7 @@ def run(argv: list[str] | None = None) -> int:
         return 2
     symbols = _parse_symbols(args.symbols or [])
     if args.until and not args.since:
-        print(
-            f"Error: --until requires --since.\n  {BACKFILL_EXAMPLE}", file=sys.stderr
-        )
+        print(f"Error: --until requires --since.\n  {BACKFILL_EXAMPLE}", file=sys.stderr)
         return 2
     since: datetime | None = None
     until: datetime | None = None
@@ -334,9 +325,7 @@ def run(argv: list[str] | None = None) -> int:
                     provider_name = "binance"
                 n = upsert_market_technicals(conn, candles)
                 derived = recompute_indicators(conn, sym, args.timeframe)
-                gaps = find_gaps(
-                    conn, sym, args.timeframe, asset_class="equity" if equity else "crypto"
-                )
+                gaps = find_gaps(conn, sym, args.timeframe, asset_class="equity" if equity else "crypto")
                 market_summary[sym] = {
                     "timeframe": args.timeframe,
                     "upserted": n,
@@ -375,10 +364,7 @@ def run(argv: list[str] | None = None) -> int:
                     }
                     if not args.as_json:
                         spread_bps = float(book_row["bid_ask_spread"]) * 10_000
-                        print(
-                            f"ingested order_book_microstructure: {sym} "
-                            f"spread_bps={spread_bps:.2f}"
-                        )
+                        print(f"ingested order_book_microstructure: {sym} spread_bps={spread_bps:.2f}")
                 except Exception as exc:  # noqa: BLE001
                     errors.append(str(exc))
                     provider_errors[sym].append(f"book:{exc}")
@@ -388,9 +374,7 @@ def run(argv: list[str] | None = None) -> int:
                 skipped.append(f"derivatives:{sym}")
             else:
                 try:
-                    rows, provider = fetch_derivatives(
-                        sym, args.timeframe, limit=min(30, limit)
-                    )
+                    rows, provider = fetch_derivatives(sym, args.timeframe, limit=min(30, limit))
                     n = append_derivatives(conn, rows)
                     coin = rows[0]["symbol"] if rows else sym
                     deriv_summary[coin] = {
@@ -464,9 +448,7 @@ def _emit(payload: dict, as_json: bool, *, dry_run: bool) -> None:
                     f"page={info['page_limit']}"
                 )
             else:
-                print(
-                    f"  market_technicals {sym} {info['timeframe']} planned={info['planned']}"
-                )
+                print(f"  market_technicals {sym} {info['timeframe']} planned={info['planned']}")
         for coin, info in payload["derivatives_analytics"].items():
             print(f"  derivatives_analytics {coin} planned={info['planned']}")
         for sym, info in payload.get("order_book_microstructure", {}).items():

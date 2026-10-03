@@ -22,15 +22,11 @@ def resolve_venue_client(venue: str | None = None) -> VenueClient:
     if name == "binance":
         auth = resolve_binance_auth()
         if auth is None:
-            raise ValueError(
-                "Missing Binance auth (BINANCE_API_KEY + SECRET or PRIVATE_KEY_PATH)"
-            )
+            raise ValueError("Missing Binance auth (BINANCE_API_KEY + SECRET or PRIVATE_KEY_PATH)")
         return BinanceSpotClient(auth)
     if name == "eterna":
         return EternaSpotClient()
-    raise ValueError(
-        f"Unknown venue {name!r}; supported: {', '.join(SUPPORTED_VENUES)}"
-    )
+    raise ValueError(f"Unknown venue {name!r}; supported: {', '.join(SUPPORTED_VENUES)}")
 
 
 def list_supported_venues() -> list[dict[str, Any]]:

@@ -82,7 +82,5 @@ def test_sum_live_realized_pnl_utc_day(tmp_path: Path) -> None:
             "realized_pnl_usd": -999.0,
         },
     )
-    total = sum_live_realized_pnl_utc_day(
-        conn, day_start_ms=day, day_end_ms=day + 86_400_000
-    )
+    total = sum_live_realized_pnl_utc_day(conn, day_start_ms=day, day_end_ms=day + 86_400_000)
     assert total == -50.0

@@ -129,14 +129,10 @@ def test_client_url_encodes_asymmetric_signature(tmp_path: Path):
         captured["url"] = str(request.url)
         return httpx.Response(
             200,
-            content=json.dumps(
-                {"balances": [{"asset": "BTC", "free": "1", "locked": "0"}]}
-            ),
+            content=json.dumps({"balances": [{"asset": "BTC", "free": "1", "locked": "0"}]}),
         )
 
-    client = BinanceSpotClient(
-        auth, client=httpx.Client(transport=httpx.MockTransport(handler))
-    )
+    client = BinanceSpotClient(auth, client=httpx.Client(transport=httpx.MockTransport(handler)))
     rows = client.list_spot_balances()
     assert len(rows) == 1
     parsed = urlparse(captured["url"])
