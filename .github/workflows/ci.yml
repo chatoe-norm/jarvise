@@ -43,8 +43,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install pip-audit
-      - run: pip-audit --strict --require-hashes -r requirements/worker.lock
-      - run: pip-audit --strict --require-hashes -r requirements/web.lock
+      # Locks are fully pinned (uv pip compile --generate-hashes); audit the pins directly so the
+      # linux-only CUDA wheels in worker.lock are not re-resolved by pip on the runner.
+      - run: pip-audit --strict --disable-pip -r requirements/worker.lock
+      - run: pip-audit --strict --disable-pip -r requirements/web.lock
 
   web:
     name: web build (tsc + vite)
