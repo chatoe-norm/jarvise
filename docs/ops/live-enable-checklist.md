@@ -2,13 +2,17 @@
 
 **Gate:** Keep `JARVISE_LIVE_TRADING=false` until every step below is done.
 
-## 1. Create a dedicated trade API key (Binance)
+## 1. Dedicated Binance sub-account + trade API key
 
-1. Binance → API Management → Create API.
-2. Permissions: **Enable Spot & Margin Trading** only.
-3. Disable / do not enable: **Withdrawals**, Internal Transfer, Universal Transfer, Futures (unless required later).
-4. Prefer IP allowlist to VPS public/Tailscale egress if available.
-5. Store as **separate** secrets from the read-only balance key:
+Capital isolation first — do **not** trade from the main account.
+
+1. Binance → Sub-accounts → create a **Jarvise-only** sub-account.
+2. Transfer in **only** what you are willing to lose on live (size-capped).
+3. On that sub-account: API Management → Create API.
+4. Permissions: **Enable Spot & Margin Trading** only.
+5. Disable / do not enable: **Withdrawals**, Internal Transfer, Universal Transfer, Futures (unless required later).
+6. Prefer IP allowlist to VPS public/Tailscale egress if available.
+7. Store as **separate** secrets from the read-only balance key:
    - `BINANCE_TRADE_API_KEY`
    - `BINANCE_TRADE_API_SECRET` **or** `BINANCE_TRADE_PRIVATE_KEY_PATH`
 
@@ -46,9 +50,10 @@ curl -sS http://127.0.0.1:8080/healthz   # via Tailscale IP in practice
 ## 4. Smoke
 
 1. Ensure one small pending approval (`long`, tiny size under caps).
-2. Approve once on `/analytics`.
+2. Approve once on `/analytics` (or Command Dashboard Home).
 3. Confirm Telegram alert path still works; check `live_orders` row status `submitted`.
-4. Kill-switch still blocks approve.
+4. Confirm the fill hit the **Jarvise sub-account** balance, not the main account.
+5. Kill-switch still blocks approve.
 
 ## Current VPS status (2026-10-01)
 

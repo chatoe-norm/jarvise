@@ -114,6 +114,8 @@ Optional Telegram alerts when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set 
 
 **Paper auto-decide (optional, default off):** set `JARVISE_PAPER_AUTO_DECIDE=true` + `OPENROUTER_API_KEY` on the `jobs` service. After each paper-run, Claude reviews candidates that passed Jarvise's filters and approves (simulated fill, reason `auto:claude:approve`), rejects (`auto:claude:reject:<reason>`), or defers. Same-symbol **same-side** open is auto-held in code without Claude (`auto:rule:same_side_hold` → approve no-op); **opposite-side** open is forced defer (`auto:rule:opposite_side_open`). Deferred rows stay pending and you get one Telegram summary per run. Spec: [paper auto-decide](superpowers/specs/2026-10-02-paper-auto-decide-design.md). Live stays off; the job refuses when `JARVISE_LIVE_TRADING=true`.
 
+**Paper fees:** simulated fills use **10 bps** by default (Binance spot taker, no BNB discount) plus slip `max(5 bps, half bid-ask spread)` when book data exists. Override fee with `JARVISE_PAPER_FEE_BPS`. Each fill stores `fee_bps` on `paper_orders`.
+
 **n8n after deploy:** workflows are files, not auto-imported — in n8n re-import `infra/n8n/workflows/jarvise-paper-run.json` (adds the auto-decide node) and import + activate `jarvise-ingest-health.json`.
 
 **Manual on VPS when needed:**
