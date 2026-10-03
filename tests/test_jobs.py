@@ -287,6 +287,97 @@ def test_paper_auto_decide_route(monkeypatch) -> None:
     assert handler._status == 200
 
 
+def test_subprocess_timeout_returns_failure_and_alerts(monkeypatch) -> None:
+    import subprocess as sp
+
+    from jarvise import jobs
+
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: False)
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
+    monkeypatch.setenv("JARVISE_JOB_TIMEOUT_PAPER_RUN_S", "7")
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setattr("jarvise.jobs.notify_job_failure", lambda job, err: alerts.append((job, err)) or True)
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        raise sp.TimeoutExpired(cmd, kwargs.get("timeout"), output=b"partial", stderr=b"")
+
+    monkeypatch.setattr("jarvise.jobs.subprocess.run", fake_run)
+    code, body = run_paper_run()
+    assert seen["timeout"] == 7.0
+    assert code == jobs.TIMEOUT_EXIT_CODE
+    assert body["ok"] is False and body["error"].startswith("timeout after 7s")
+    assert alerts == [("paper_run", "timeout after 7s")]
+
+
+def test_single_flight_refuses_overlap_in_process(monkeypatch) -> None:
+    from jarvise import jobs
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    with jobs.single_flight("paper_expire") as first:
+        assert first is True
+        with jobs.single_flight("paper_expire") as second:
+            assert second is False
+        # Different job names do not contend.
+        with jobs.single_flight("ingest") as other:
+            assert other is True
+    with jobs.single_flight("paper_expire") as again:
+        assert again is True
+
+
+def test_single_flight_uses_redis_set_nx(monkeypatch) -> None:
+    from jarvise import jobs
+
+    class FakeRedis:
+        store: dict[str, str] = {}
+        evals: list = []
+
+        def set(self, key, value, nx=False, ex=None):
+            if nx and key in self.store:
+                return None
+            self.store[key] = value
+            return True
+
+        def eval(self, script, numkeys, key, token):
+            self.evals.append((key, token))
+            if self.store.get(key) == token:
+                del self.store[key]
+                return 1
+            return 0
+
+    fake = FakeRedis()
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    # The redis driver is an optional extra; inject a stub module so the Redis path runs here.
+    import sys
+    import types
+
+    stub = types.ModuleType("redis")
+    stub.Redis = types.SimpleNamespace(from_url=lambda *a, **k: fake)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "redis", stub)
+    with jobs.single_flight("ingest") as acquired:
+        assert acquired is True
+        assert "jarvise:lock:ingest" in fake.store
+        with jobs.single_flight("ingest") as second:
+            assert second is False
+    assert "jarvise:lock:ingest" not in fake.store
+    assert fake.evals and fake.evals[0][0] == "jarvise:lock:ingest"
+
+
+def test_paper_run_returns_409_payload_when_running(monkeypatch) -> None:
+    from jarvise import jobs
+
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: False)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    lock = jobs._local_lock("paper_run")
+    assert lock.acquire(blocking=False)
+    try:
+        code, body = run_paper_run()
+    finally:
+        lock.release()
+    assert code == 3 and body["skipped"] is True and body["reason"] == "paper_run_running"
+
+
 def test_live_reconcile_route_and_noop(monkeypatch, tmp_path) -> None:
     from jarvise.jobs import run_live_reconcile
 

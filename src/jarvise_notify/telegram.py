@@ -197,6 +197,31 @@ def notify_kill_switch(
         return False
 
 
+def format_job_failure_message(job: str, error: str) -> str:
+    return (
+        f"Jarvise job FAILED: {job}\n"
+        f"{error}\n"
+        "Check Ops (:8080/ops) and `docker compose logs jobs`. Schedules keep running; "
+        "the next trigger retries."
+    )
+
+
+def notify_job_failure(
+    job: str,
+    error: str,
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Alert when a scheduled job times out or crashes. Soft-fail."""
+    if not notify_configured():
+        return False
+    try:
+        return send_telegram_message(format_job_failure_message(job, error), client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify job failure soft-fail: %s", type(exc).__name__)
+        return False
+
+
 def notify_auto_decide(
     payload: dict[str, Any],
     *,

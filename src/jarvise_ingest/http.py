@@ -21,6 +21,11 @@ DEFAULT_TIMEOUT_S = 30.0
 BACKOFF_BASE_S = 0.5
 BACKOFF_CAP_S = 8.0
 RETRY_AFTER_CAP_S = 60.0
+# Circuit breaker: after this many consecutive exhausted failures per provider, skip the
+# provider for CIRCUIT_OPEN_S so a dead upstream cannot stall every ingest run.
+CIRCUIT_FAILURE_THRESHOLD = 5
+CIRCUIT_OPEN_S = 15 * 60
+CIRCUIT_FAILURE_WINDOW_S = 30 * 60
 
 UrlLike = str | Callable[[], str]
 
@@ -36,16 +41,107 @@ class ProviderError(RuntimeError):
         status: int | None = None,
         retryable: bool = False,
         attempts: list[str] | None = None,
+        circuit_open: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.status = status
         self.retryable = retryable
         self.attempts = list(attempts or [])
+        self.circuit_open = circuit_open
 
 
 def _sleep(seconds: float) -> None:
     time.sleep(seconds)
+
+
+# ---- circuit breaker state (Redis when available, else in-process) -------------------
+
+_LOCAL_FAILURES: dict[str, int] = {}
+_LOCAL_OPEN_UNTIL: dict[str, float] = {}
+
+
+def _breaker_redis() -> Any | None:
+    url = os.environ.get("REDIS_URL")
+    if not url:
+        return None
+    try:
+        import redis
+
+        return redis.Redis.from_url(url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2)
+    except Exception:  # noqa: BLE001 — breaker is best-effort; never block a fetch on Redis
+        return None
+
+
+def circuit_open_until(provider: str) -> float | None:
+    """Unix seconds until which the provider circuit is open, or None when closed."""
+    if not provider:
+        return None
+    client = _breaker_redis()
+    if client is not None:
+        try:
+            raw = client.get(f"jarvise:circuit:{provider}:open_until")
+            if raw:
+                until = float(raw)
+                return until if until > time.time() else None
+            return None
+        except Exception:  # noqa: BLE001
+            pass
+    until = _LOCAL_OPEN_UNTIL.get(provider)
+    if until is None or until <= time.time():
+        return None
+    return until
+
+
+def record_provider_success(provider: str) -> None:
+    if not provider:
+        return
+    client = _breaker_redis()
+    if client is not None:
+        try:
+            client.delete(f"jarvise:circuit:{provider}:failures")
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    _LOCAL_FAILURES.pop(provider, None)
+
+
+def record_provider_failure(provider: str) -> int:
+    """Count a consecutive exhausted failure; open the circuit at the threshold. Returns count."""
+    if not provider:
+        return 0
+    client = _breaker_redis()
+    count: int
+    if client is not None:
+        try:
+            key = f"jarvise:circuit:{provider}:failures"
+            count = int(client.incr(key))
+            client.expire(key, CIRCUIT_FAILURE_WINDOW_S)
+            if count >= CIRCUIT_FAILURE_THRESHOLD:
+                until = time.time() + CIRCUIT_OPEN_S
+                client.set(f"jarvise:circuit:{provider}:open_until", f"{until:.3f}", ex=CIRCUIT_OPEN_S)
+                client.delete(key)
+            return count
+        except Exception:  # noqa: BLE001
+            pass
+    count = _LOCAL_FAILURES.get(provider, 0) + 1
+    _LOCAL_FAILURES[provider] = count
+    if count >= CIRCUIT_FAILURE_THRESHOLD:
+        _LOCAL_OPEN_UNTIL[provider] = time.time() + CIRCUIT_OPEN_S
+        _LOCAL_FAILURES.pop(provider, None)
+    return count
+
+
+def reset_circuit(provider: str) -> None:
+    """Close the circuit and clear counters (ops / tests)."""
+    client = _breaker_redis()
+    if client is not None:
+        try:
+            client.delete(f"jarvise:circuit:{provider}:failures", f"jarvise:circuit:{provider}:open_until")
+        except Exception:  # noqa: BLE001
+            pass
+    _LOCAL_FAILURES.pop(provider, None)
+    _LOCAL_OPEN_UNTIL.pop(provider, None)
 
 
 def default_retries() -> int:
@@ -91,6 +187,15 @@ def get_json(
     attempt and never fall outside the venue's recvWindow after a backoff sleep.
     """
     max_retries = default_retries() if retries is None else max(0, int(retries))
+    open_until = circuit_open_until(provider)
+    if open_until is not None:
+        remaining = max(0, int(open_until - time.time()))
+        raise ProviderError(
+            f"{provider} circuit_open: skipping for {remaining}s after repeated failures",
+            provider=provider,
+            retryable=True,
+            circuit_open=True,
+        )
     own = client is None
     http = client or httpx.Client(timeout=timeout)
     attempts: list[str] = []
@@ -102,6 +207,7 @@ def get_json(
             except httpx.HTTPError as exc:
                 attempts.append(f"{type(exc).__name__}")
                 if attempt >= max_retries:
+                    record_provider_failure(provider)
                     raise ProviderError(
                         f"{provider or 'http'} GET failed after {attempt + 1} attempt(s): {exc}",
                         provider=provider,
@@ -115,6 +221,7 @@ def get_json(
             if status in RETRY_STATUSES:
                 attempts.append(f"HTTP {status}")
                 if attempt >= max_retries:
+                    record_provider_failure(provider)
                     raise ProviderError(
                         f"{provider or 'http'} GET failed after {attempt + 1} attempt(s): HTTP {status}",
                         provider=provider,
@@ -126,6 +233,7 @@ def get_json(
                 _sleep(delay if delay is not None else backoff_delay(attempt))
                 continue
             if status >= 400:
+                # Client/auth errors are not upstream outages: no breaker count.
                 attempts.append(f"HTTP {status}")
                 raise ProviderError(
                     f"{provider or 'http'} GET failed: HTTP {status} {resp.text[:160]}",
@@ -135,7 +243,7 @@ def get_json(
                     attempts=attempts,
                 )
             try:
-                return resp.json()
+                payload = resp.json()
             except ValueError as exc:
                 raise ProviderError(
                     f"{provider or 'http'} GET returned invalid JSON",
@@ -144,6 +252,8 @@ def get_json(
                     retryable=False,
                     attempts=attempts,
                 ) from exc
+            record_provider_success(provider)
+            return payload
     finally:
         if own:
             http.close()

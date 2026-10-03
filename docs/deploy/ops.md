@@ -109,7 +109,15 @@ Redis status keys (JSON via jobs → `publish_redis_status`):
 | `jarvise:rag:last` | `POST /jobs/rag-refresh` |
 | `jarvise:paper:last` | `POST /jobs/paper-run` |
 | `jarvise:paper:expire:last` | `POST /jobs/paper-expire` |
-| `jarvise:kill_switch` | control UI / redis-cli |
+| `jarvise:paper:digest:last` | `POST /jobs/paper-pending-digest` |
+| `jarvise:paper_auto:last` | `POST /jobs/paper-auto-decide` |
+| `jarvise:ingest:health` | `POST /jobs/ingest-health` |
+| `jarvise:live:reconcile:last` | `POST /jobs/live-reconcile` (read-only) |
+| `jarvise:kill_switch` (+ `:reason`) | control UI / `engage_kill_switch` / redis-cli — **reads fail closed**: web approve and jobs treat an unreadable switch as engaged |
+| `jarvise:lock:<job>` | single-flight `SET NX EX` held while a job runs (ingest, paper_run, paper_expire, rag, paper_pending_digest, paper_auto_decide, live_reconcile); a second trigger gets HTTP 409 `<job>_running` |
+| `jarvise:circuit:<provider>:*` | provider circuit breaker (5 consecutive exhausted GET failures → skip 15 min; shows as `circuit_open` in ingest `provider_errors`) |
+
+Job subprocesses have wall-clock limits (`JARVISE_JOB_TIMEOUT_*_S`; defaults ingest 900s, paper-run 300s, expire 120s, rag 900s). A timeout returns exit code 124, publishes `error: timeout after Ns`, and sends a Telegram job-failure alert.
 
 ## Verify Tailscale path (laptop)
 

@@ -133,6 +133,50 @@ def test_provider_wraps_error_with_retry_hint() -> None:
     assert len(seen) == 4  # 1 + 3 retries
 
 
+def test_circuit_opens_after_threshold_and_skips(monkeypatch) -> None:
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    provider = "flaky"
+    for i in range(jhttp.CIRCUIT_FAILURE_THRESHOLD):
+        client, _ = _client([httpx.Response(503, content=b"")])
+        with pytest.raises(ProviderError) as info:
+            get_json("https://x/api", client=client, retries=0, provider=provider)
+        assert info.value.circuit_open is False
+    assert jhttp.circuit_open_until(provider) is not None
+    # Open circuit: no HTTP call at all, distinct error.
+    client, seen = _client([httpx.Response(200, content=b"{}")])
+    with pytest.raises(ProviderError) as info:
+        get_json("https://x/api", client=client, retries=0, provider=provider)
+    assert info.value.circuit_open is True and "circuit_open" in str(info.value)
+    assert seen == []
+    jhttp.reset_circuit(provider)
+    assert jhttp.circuit_open_until(provider) is None
+    assert get_json("https://x/api", client=client, retries=0, provider=provider) == {}
+
+
+def test_success_resets_failure_count(monkeypatch) -> None:
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    provider = "recovering"
+    for _ in range(jhttp.CIRCUIT_FAILURE_THRESHOLD - 1):
+        client, _ = _client([httpx.ReadTimeout("t")])
+        with pytest.raises(ProviderError):
+            get_json("https://x/api", client=client, retries=0, provider=provider)
+    client, _ = _client([httpx.Response(200, content=b"{}")])
+    assert get_json("https://x/api", client=client, retries=0, provider=provider) == {}
+    client, _ = _client([httpx.ReadTimeout("t")])
+    with pytest.raises(ProviderError):
+        get_json("https://x/api", client=client, retries=0, provider=provider)
+    assert jhttp.circuit_open_until(provider) is None
+
+
+def test_4xx_does_not_trip_circuit(monkeypatch) -> None:
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    for _ in range(jhttp.CIRCUIT_FAILURE_THRESHOLD + 1):
+        client, _ = _client([httpx.Response(404, content=b"{}")])
+        with pytest.raises(ProviderError):
+            get_json("https://x/api", client=client, retries=0, provider="auth")
+    assert jhttp.circuit_open_until("auth") is None
+
+
 def test_exchange_signed_get_retries_with_fresh_signature() -> None:
     from jarvise_exchange.binance_spot import BinanceAuth, BinanceSpotClient
 

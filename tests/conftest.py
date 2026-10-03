@@ -14,5 +14,8 @@ def _disable_market_safety_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_http_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Retry/backoff must never slow the suite; test_http_retry asserts the delays explicitly."""
+    """Retry/backoff must never slow the suite; test_http_retry asserts the delays explicitly.
+    Circuit-breaker state is in-process here (no REDIS_URL) and reset per test."""
     monkeypatch.setattr("jarvise_ingest.http._sleep", lambda seconds: None)
+    monkeypatch.setattr("jarvise_ingest.http._LOCAL_FAILURES", {})
+    monkeypatch.setattr("jarvise_ingest.http._LOCAL_OPEN_UNTIL", {})
