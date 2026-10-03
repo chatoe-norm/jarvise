@@ -46,6 +46,7 @@ DECISIONS = frozenset({"approve", "reject", "defer"})
 REASON_MAX = 280
 UNPARSEABLE = "auto:claude:unparseable"
 SAME_SIDE_HOLD = "auto:rule:same_side_hold"
+FLAT_EXIT = "auto:rule:flat_exit"
 CANDIDATE_FIELDS = (
     "status",
     "analysis_id",
@@ -118,11 +119,13 @@ def filter_candidates(
         action = str(row.get("action") or "flat").lower()
         size = float(row.get("size_pct_equity") or 0.0)
         conf = float(row.get("confidence_score") or 0.0)
-        if action == "flat":
+        flat_exit = action == "flat" and get_paper_position(conn, str(row["symbol"])) is not None
+        if action == "flat" and not flat_exit:
+            # Idle flat with no book → skip. Flat while open → keep for rule exit (capital preservation).
             reason = "action_flat"
-        elif size <= 0.0:
+        elif not flat_exit and size <= 0.0:
             reason = "size_zero"
-        elif conf < min_conf:
+        elif not flat_exit and conf < min_conf:
             reason = "low_conf"
         elif int(row.get("expires_at_ms") or 0) <= now_ms:
             reason = "expired"
@@ -255,6 +258,13 @@ def same_side_already_open(conn: Any, row: dict[str, Any]) -> bool:
     return str(pos.get("side") or "").lower() == action
 
 
+def flat_exit_needed(conn: Any, row: dict[str, Any]) -> bool:
+    """True when pending FLAT should close an open paper position (no Claude)."""
+    if str(row.get("action") or "").lower() != "flat":
+        return False
+    return get_paper_position(conn, str(row["symbol"])) is not None
+
+
 def _now_ms(now_ms: int | None) -> int:
     return int(now_ms) if now_ms is not None else int(time.time() * 1000)
 
@@ -323,8 +333,13 @@ def run_auto_decide(
         if blocked:
             deferred.append({**entry, "reason": blocked})
             continue
-        # Same-side open → approve no-op hold in code; do not call Claude or leave pending.
-        if same_side_already_open(conn, row):
+        # Rule exits / holds — no Claude. Flat+open closes the book; same-side long/short no-op hold.
+        rule_reason: str | None = None
+        if flat_exit_needed(conn, row):
+            rule_reason = FLAT_EXIT
+        elif same_side_already_open(conn, row):
+            rule_reason = SAME_SIDE_HOLD
+        if rule_reason is not None:
             apply_ts = _now_ms(now_ms)
             try:
                 result = approve_approval(
@@ -334,32 +349,31 @@ def run_auto_decide(
                     now_ms=apply_ts,
                     expected_analysis_id=row.get("analysis_id"),
                     decision_source="auto_rule",
-                    resolve_reason=SAME_SIDE_HOLD,
+                    resolve_reason=rule_reason,
                 )
                 if result.get("paper_only") is False:
                     engage_kill_switch(reason="auto_decide: live path reached")
                     halted = "live path reached; kill switch engaged"
-                    apply_failed.append({**entry, "error": halted, "reason": SAME_SIDE_HOLD})
+                    apply_failed.append({**entry, "error": halted, "reason": rule_reason})
                     break
                 if result.get("ok"):
-                    hold_entry = {
-                        **entry,
-                        "reason": SAME_SIDE_HOLD,
-                        "fills": len(result.get("fills") or []),
-                    }
-                    approved.append(hold_entry)
+                    approved.append(
+                        {
+                            **entry,
+                            "reason": rule_reason,
+                            "fills": len(result.get("fills") or []),
+                        }
+                    )
                 else:
                     apply_failed.append(
                         {
                             **entry,
-                            "reason": SAME_SIDE_HOLD,
-                            "error": str(result.get("error") or "same_side_hold failed"),
+                            "reason": rule_reason,
+                            "error": str(result.get("error") or f"{rule_reason} failed"),
                         }
                     )
             except Exception as exc:  # noqa: BLE001
-                apply_failed.append(
-                    {**entry, "reason": SAME_SIDE_HOLD, "error": f"{type(exc).__name__}: {exc}"}
-                )
+                apply_failed.append({**entry, "reason": rule_reason, "error": f"{type(exc).__name__}: {exc}"})
             continue
         if claude_slots >= cfg.max_per_run:
             deferred.append({**entry, "reason": "deferred_cap"})
