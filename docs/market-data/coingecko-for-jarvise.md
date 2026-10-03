@@ -80,7 +80,7 @@ OpenClaw can set a local `@coingecko/coingecko-mcp` with `COINGECKO_DEMO_API_KEY
 
 | Rule | Behavior |
 |------|----------|
-| Ingest | Public GET `/api/v3/global` only (today); raw HTTP, no SDK; Demo key → `x-cg-demo-api-key`, Pro key → `pro-api` + `x-cg-pro-api-key` |
+| Ingest | Public GET `/api/v3/global` only (today); raw HTTP, no SDK; Demo key → `x-cg-demo-api-key` on `api.coingecko.com`; Pro key or `COINGECKO_ENVIRONMENT=pro` → `pro-api` + `x-cg-pro-api-key`. HTTP 400/401/403 with a key retries the other host once (Pro key on public URL is a common 400). |
 | Paper / SQLite truth | Never filled from MCP, CLI, or Agent SKILL |
 | Doctrine RAG | No CoinGecko Learn, no AI Integration pages in Qdrant |
 | Secrets | No API keys in docs or UI; `COINGECKO_API_KEY` / `COINGECKO_DEMO_API_KEY` / `COINGECKO_PRO_API_KEY` in `.env` for controlled ingest (and Demo/Pro keys for MCP only if enabled later) |
