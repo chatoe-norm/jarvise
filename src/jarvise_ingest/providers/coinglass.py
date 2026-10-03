@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from jarvise_ingest.http import ProviderError, get_json
+
 COINGLASS_BASE = "https://open-api-v4.coinglass.com"
 INTERVAL_MAP = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
 
@@ -31,19 +33,14 @@ def _get(
     client: httpx.Client | None = None,
 ) -> Any:
     headers = {"CG-API-KEY": api_key, "Accept": "application/json"}
-    own = client is None
-    http = client or httpx.Client(timeout=30.0)
     try:
-        resp = http.get(f"{COINGLASS_BASE}{path}", params=params, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as exc:
+        return get_json(
+            f"{COINGLASS_BASE}{path}", params=params, headers=headers, client=client, provider="coinglass"
+        )
+    except ProviderError as exc:
         raise RuntimeError(
             f"coinglass GET {path} failed: {exc}. Check COINGLASS_API_KEY or use --skip-derivatives"
         ) from exc
-    finally:
-        if own:
-            http.close()
 
 
 def _series_from_payload(payload: Any) -> list[dict]:

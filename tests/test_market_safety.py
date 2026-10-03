@@ -70,6 +70,8 @@ def test_fetch_global_macro_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CoinGecko_API_KEY", raising=False)
 
     class Resp:
+        status_code = 200
+
         def raise_for_status(self) -> None:
             return None
 
@@ -124,6 +126,8 @@ def test_fetch_global_macro_sends_demo_header(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("COINGECKO_API_KEY", "CG-demo")
 
     class Resp:
+        status_code = 200
+
         def raise_for_status(self) -> None:
             return None
 

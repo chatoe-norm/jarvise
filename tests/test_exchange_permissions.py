@@ -37,6 +37,7 @@ def test_audit_blocks_withdraw() -> None:
 def test_fetch_api_restrictions_mocked() -> None:
     auth = BinanceAuth(api_key="k", hmac_secret="s")
     mock_resp = MagicMock()
+    mock_resp.status_code = 200
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}
     client = MagicMock(spec=httpx.Client)

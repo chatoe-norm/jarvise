@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 
 from jarvise_exchange.models import SpotBalance
+from jarvise_ingest.http import get_json
 
 BINANCE_BASE = "https://api.binance.com"
 ACCOUNT_PATH = "/api/v3/account"
@@ -151,18 +152,19 @@ class BinanceSpotClient:
         self._client = client
         self._base_url = base_url.rstrip("/")
 
-    def list_spot_balances(self) -> list[SpotBalance]:
+    def _signed_account_url(self) -> str:
+        # Rebuilt per attempt so a backoff sleep never pushes the timestamp outside recvWindow.
         params = {"timestamp": int(time.time() * 1000)}
         query = urlencode(params)
         signature = signature_for_query(self._auth, query)
+        return f"{self._base_url}{ACCOUNT_PATH}?{query}&signature={signature}"
+
+    def list_spot_balances(self) -> list[SpotBalance]:
         headers = {"X-MBX-APIKEY": self._auth.api_key}
-        url = f"{self._base_url}{ACCOUNT_PATH}?{query}&signature={signature}"
-        own = self._client is None
-        http = self._client or httpx.Client(timeout=30.0)
-        try:
-            resp = http.get(url, headers=headers)
-            resp.raise_for_status()
-            return balances_from_account_payload(resp.json())
-        finally:
-            if own:
-                http.close()
+        payload = get_json(
+            self._signed_account_url,
+            headers=headers,
+            client=self._client,
+            provider="binance_account",
+        )
+        return balances_from_account_payload(payload)

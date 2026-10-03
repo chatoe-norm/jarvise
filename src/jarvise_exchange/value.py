@@ -8,6 +8,7 @@ from typing import Callable
 import httpx
 
 from jarvise_exchange.models import SpotBalance, ValuationResult, ValuedBalance
+from jarvise_ingest.http import get_json
 
 BINANCE_BASE = "https://api.binance.com"
 TICKER_PRICE_PATH = "/api/v3/ticker/price"
@@ -26,22 +27,22 @@ def fetch_usdt_price(
 ) -> Decimal | None:
     """Public GET ticker/price for {ASSET}USDT. Returns None on miss/error."""
     symbol = f"{asset.upper()}USDT"
-    own = client is None
-    http = client or httpx.Client(timeout=15.0)
     try:
-        resp = http.get(f"{base_url.rstrip('/')}{TICKER_PRICE_PATH}", params={"symbol": symbol})
-        if resp.status_code != 200:
-            return None
-        payload = resp.json()
+        # One retry only: this feeds a UI panel, so stay soft and quick on failure.
+        payload = get_json(
+            f"{base_url.rstrip('/')}{TICKER_PRICE_PATH}",
+            params={"symbol": symbol},
+            client=client,
+            timeout=15.0,
+            retries=1,
+            provider="binance_ticker_price",
+        )
         raw = payload.get("price") if isinstance(payload, dict) else None
         if raw is None:
             return None
         return Decimal(str(raw))
     except Exception:  # noqa: BLE001
         return None
-    finally:
-        if own:
-            http.close()
 
 
 def value_spot_balances(

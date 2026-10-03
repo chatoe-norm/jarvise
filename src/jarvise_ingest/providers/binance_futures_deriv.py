@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from jarvise_ingest.http import ProviderError, get_json
+
 FAPI_BASE = "https://fapi.binance.com"
 PERIOD_MAP = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
 
@@ -16,20 +18,13 @@ def _get(
     *,
     client: httpx.Client | None = None,
 ) -> Any:
-    own = client is None
-    http = client or httpx.Client(timeout=30.0)
     try:
-        resp = http.get(f"{FAPI_BASE}{path}", params=params)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as exc:
+        return get_json(f"{FAPI_BASE}{path}", params=params, client=client, provider="binance_futures")
+    except ProviderError as exc:
         raise RuntimeError(
             f"binance futures GET {path} failed: {exc}. "
             "Retry: jarvise ingest --symbol SYM --skip-derivatives"
         ) from exc
-    finally:
-        if own:
-            http.close()
 
 
 def fetch_derivatives(

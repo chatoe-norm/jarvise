@@ -6,6 +6,7 @@ import time
 
 import httpx
 
+from jarvise_ingest.http import ProviderError, get_json
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS, INTERVAL_MS
 
 BINANCE_BASE = "https://api.binance.com"
@@ -27,10 +28,13 @@ def _request_page(
     if start_ms is not None:
         params["startTime"] = start_ms
     try:
-        resp = http.get(f"{BINANCE_BASE}/api/v3/klines", params=params)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as exc:
+        return get_json(
+            f"{BINANCE_BASE}/api/v3/klines",
+            params=params,
+            client=http,
+            provider="binance_klines",
+        )
+    except ProviderError as exc:
         raise RuntimeError(
             f"binance klines failed for {symbol}: {exc}. Retry: jarvise ingest --symbol {symbol} --skip-derivatives"
         ) from exc
