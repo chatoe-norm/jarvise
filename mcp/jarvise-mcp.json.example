@@ -60,6 +60,16 @@
     "paper_only": true,
     "no_order_placement": true,
     "deploy": "On Hostinger VPS use docker internal URLs redis://redis:6379 and http://qdrant:6333; access UIs only via Tailscale.",
+    "optional_overlays_not_enabled": {
+      "eterna": {
+        "type": "streamable-http",
+        "url": "https://mcp.eterna.exchange/mcp",
+        "env": {
+          "JARVISE_PAPER_ONLY": "true",
+          "NOTE": "Research overlay / future venue candidate only — kept OUT of mcpServers on purpose. OAuth scope mcp:full includes trading and withdrawal. If the owner enables it: use search_sdk / search_examples and execute_code read methods only (getTickers, getOrderbook, getInstruments, TA getters). Never placeOrder / closePosition / setLeverage / funding methods until docs/ops/live-enable-checklist.md is complete. Never write Eterna output into jarvise.db or the paper ledger. Map: docs/exchange/eterna-for-jarvise.md"
+        }
+      }
+    },
     "notes": [
       "Copy into Cursor MCP settings; replace ${...} placeholders.",
       "OpenClaw MCP: local `openclaw mcp serve --url ws://127.0.0.1:18789` (gateway must be up). Prefer command over OPENCLAW_MCP_URL.",
