@@ -495,8 +495,8 @@ class JobHandler(BaseHTTPRequestHandler):
         if action == "metrics":
             ks = kill_switch_state(strict=False)
             set_gauge("jarvise_kill_switch", 1.0 if ks.get("engaged") else 0.0)
-            body = render_prometheus()
-            self._send_text(200, body)
+            metrics_body = render_prometheus()
+            self._send_text(200, metrics_body)
             return
         if action == "doctrine":
             params = parse_qs(self.path.partition("?")[2])
@@ -518,16 +518,16 @@ class JobHandler(BaseHTTPRequestHandler):
             "live_reconcile": run_live_reconcile,
         }
         runner = runners.get(action or "")
-        if runner is None:
+        if runner is None or action is None:
             self._send(404, {"ok": False, "error": "not found"})
             return
         started = time.monotonic()
-        code, body = runner()
+        code, payload = runner()
         observe_job(action, ok=(code == 0), duration_s=time.monotonic() - started)
         if action == "ingest_health":
-            self._send(200 if code == 0 else 500, body)
+            self._send(200 if code == 0 else 500, payload)
         else:
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
+            self._send(200 if code == 0 else 409 if code == 3 else 500, payload)
 
     def _send(self, status: int, body: dict[str, Any]) -> None:
         raw = json.dumps(body).encode("utf-8")

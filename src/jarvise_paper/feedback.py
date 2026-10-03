@@ -138,7 +138,7 @@ def auto_ev_gate_status(
     threshold = cfg_ev if min_ev is None else min_ev
     need_n = cfg_n if min_n is None else max(1, int(min_n))
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
-    base = {
+    base: dict[str, Any] = {
         "enabled": threshold is not None,
         "blocked": False,
         "min_ev": threshold,

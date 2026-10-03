@@ -446,7 +446,7 @@ def healthz() -> dict[str, Any]:
 @app.get("/metrics")
 def metrics() -> PlainTextResponse:
     """Prometheus scrape endpoint (unauthenticated; bind Tailscale/private only)."""
-    ks = kill_switch_state(strict=False)
+    ks = kill_switch_state()
     set_gauge("jarvise_kill_switch", 1.0 if ks.get("engaged") else 0.0)
     pending = 0
     try:
