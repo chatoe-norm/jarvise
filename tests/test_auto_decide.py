@@ -22,6 +22,7 @@ from jarvise_ingest.db import (
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.auto_decide import (
     DEFAULT_MODEL,
+    FLAT_EXIT,
     PROMPT_VERSION,
     SAME_SIDE_HOLD,
     SYSTEM_PROMPT,
@@ -528,6 +529,35 @@ def test_forced_defer_opposite_side_open_skips_claude(tmp_path: Path) -> None:
     out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
     assert chat.calls == [] and out["processed"] == 0
     assert out["deferred"] == [{"id": "ok", "symbol": "BTCUSDT", "reason": "auto:rule:opposite_side_open"}]
+
+
+def test_flat_with_open_position_auto_exits_without_claude(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "fx.db")
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "qty": 0.001,
+            "entry_price": 85000.0,
+            "entry_ts": 1,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+        },
+    )
+    conn.commit()
+    pending(conn, "fx", "BTCUSDT", action="flat", size_pct_equity=0.0, confidence_score=0.40)
+    chat = _chat("defer")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert chat.calls == [] and out["processed"] == 0
+    assert out["filtered_out"] == []
+    assert out["approved"][0]["id"] == "fx"
+    assert out["approved"][0]["reason"] == FLAT_EXIT
+    assert out["approved"][0]["fills"] >= 1
+    row = get_approval(conn, "fx")
+    assert row["status"] == "approved"
+    assert row["resolve_reason"] == FLAT_EXIT
+    assert get_paper_position(conn, "BTCUSDT") is None
 
 
 def test_same_side_open_auto_holds_without_claude(tmp_path: Path) -> None:
