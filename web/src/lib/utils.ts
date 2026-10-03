@@ -36,3 +36,34 @@ export function expiresIn(expiresAtMs: number | null | undefined): string {
   if (min < 60) return `${min}m left`;
   return `${Math.floor(min / 60)}h ${min % 60}m left`;
 }
+
+const BANGKOK = "Asia/Bangkok";
+
+const decisionDateFmt = new Intl.DateTimeFormat("en-CA", {
+  timeZone: BANGKOK,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const decisionTimeFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: BANGKOK,
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+/** Format analysis timestamp (epoch ms) as Bangkok date + time. */
+export function formatDecisionStamp(
+  ms: unknown,
+): { date: string; time: string } {
+  const n = typeof ms === "number" ? ms : Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return { date: "—", time: "—" };
+  const d = new Date(n);
+  if (Number.isNaN(d.getTime())) return { date: "—", time: "—" };
+  return {
+    date: decisionDateFmt.format(d),
+    time: decisionTimeFmt.format(d),
+  };
+}

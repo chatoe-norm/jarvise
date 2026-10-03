@@ -10,7 +10,7 @@ import {
   PaginationPrevious,
 } from "@/components/ui/pagination";
 import { api } from "@/lib/api";
-import { formatNum } from "@/lib/utils";
+import { formatDecisionStamp, formatNum } from "@/lib/utils";
 
 const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
 
@@ -148,6 +148,9 @@ export function DecisionsPage() {
                 <table className="w-full text-left text-sm">
                   <thead className="text-[var(--color-muted)]">
                     <tr className="border-b border-[var(--color-border)]">
+                      <th className="py-2 pr-2">No</th>
+                      <th className="py-2 pr-2">Date</th>
+                      <th className="py-2 pr-2">Time</th>
                       <th className="py-2 pr-2">Symbol</th>
                       <th className="py-2 pr-2">TF</th>
                       <th className="py-2 pr-2">Regime</th>
@@ -158,11 +161,26 @@ export function DecisionsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((r, i) => (
+                    {rows.map((r, i) => {
+                      const stamp = formatDecisionStamp(r.timestamp);
+                      const rowKey =
+                        r.analysis_id != null && r.analysis_id !== ""
+                          ? String(r.analysis_id)
+                          : String(i);
+                      return (
                       <tr
-                        key={i}
+                        key={rowKey}
                         className="border-b border-[var(--color-border)]/60 align-top"
                       >
+                        <td className="py-2 pr-2 tabular-nums text-[var(--color-muted)]">
+                          {from + i}
+                        </td>
+                        <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
+                          {stamp.date}
+                        </td>
+                        <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
+                          {stamp.time}
+                        </td>
                         <td className="py-2 pr-2 font-medium">
                           {String(r.symbol ?? "")}
                         </td>
@@ -187,7 +205,8 @@ export function DecisionsPage() {
                           {String(r.thesis ?? "")}
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
