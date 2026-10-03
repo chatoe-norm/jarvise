@@ -9,7 +9,7 @@ from jarvise_ingest.db import (
     list_paper_orders,
     open_db,
 )
-from jarvise_paper.engine import apply_signal, fee_usd, fill_price
+from jarvise_paper.engine import apply_signal, fee_usd, fill_price, load_paper_fee_bps
 
 
 def test_fill_price_adverse():
@@ -17,8 +17,18 @@ def test_fill_price_adverse():
     assert fill_price(100.0, side="sell") < 100.0
 
 
-def test_fee_usd():
+def test_fee_usd_default_binance_spot_taker():
+    assert abs(fee_usd(10_000.0) - 10.0) < 1e-9
+
+
+def test_load_paper_fee_bps_env_override(monkeypatch) -> None:
+    monkeypatch.delenv("JARVISE_PAPER_FEE_BPS", raising=False)
+    assert load_paper_fee_bps() == 10.0
+    monkeypatch.setenv("JARVISE_PAPER_FEE_BPS", "5")
+    assert load_paper_fee_bps() == 5.0
     assert abs(fee_usd(10_000.0) - 5.0) < 1e-9
+    monkeypatch.setenv("JARVISE_PAPER_FEE_BPS", "-1")
+    assert load_paper_fee_bps() == 0.0
 
 
 def test_long_then_flat_realizes_pnl(tmp_path: Path):
@@ -42,9 +52,12 @@ def test_long_then_flat_realizes_pnl(tmp_path: Path):
     )
     assert open_res["fills"]
     assert open_res["fills"][0]["side"] == "buy"
+    assert open_res["fills"][0]["fee_bps"] == 10.0
     pos = get_paper_position(conn, "BTCUSDT")
     assert pos is not None
     assert pos["side"] == "long"
+    stored = list_paper_orders(conn)
+    assert stored[0]["fee_bps"] == 10.0
 
     close_res = apply_signal(
         conn,

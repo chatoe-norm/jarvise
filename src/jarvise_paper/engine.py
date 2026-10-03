@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from typing import Any
 
@@ -20,9 +21,21 @@ from jarvise_ingest.db import (
     upsert_performance_risk_metrics,
 )
 
-FEE_BPS = 5.0
+# Binance spot taker (no BNB discount) — owner-protective paper EV default.
+FEE_BPS = 10.0
 SLIP_BPS = 5.0
 STRATEGY_ID = "paper"
+
+
+def load_paper_fee_bps() -> float:
+    """Paper fee in bps. Env ``JARVISE_PAPER_FEE_BPS`` overrides; clamped to >= 0."""
+    raw = os.environ.get("JARVISE_PAPER_FEE_BPS")
+    if raw is None or str(raw).strip() == "":
+        return float(FEE_BPS)
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return float(FEE_BPS)
 
 
 def fill_price(
@@ -57,8 +70,9 @@ def effective_slip_bps(
     return max(float(slip_bps), float(bid_ask_spread) * 10_000.0 / 2.0)
 
 
-def fee_usd(notional: float, *, fee_bps: float = FEE_BPS) -> float:
-    return abs(notional) * (fee_bps / 10_000.0)
+def fee_usd(notional: float, *, fee_bps: float | None = None) -> float:
+    bps = load_paper_fee_bps() if fee_bps is None else float(fee_bps)
+    return abs(notional) * (max(0.0, bps) / 10_000.0)
 
 
 def mark_equity(cash: float, positions: list[dict], marks: dict[str, float]) -> float:
@@ -86,7 +100,7 @@ def apply_signal(
     mid_price: float,
     timeframe: str,
     dry_run: bool = False,
-    fee_bps: float = FEE_BPS,
+    fee_bps: float | None = None,
     slip_bps: float = SLIP_BPS,
     now_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -95,6 +109,8 @@ def apply_signal(
     - flat: close any open position
     - long/short: close opposite side then open that side sized by size_pct_equity
     - same side already open: no-op hold
+
+    Fee defaults to Binance-spot-taker-equivalent 10 bps (``JARVISE_PAPER_FEE_BPS``).
     """
     ensure_paper_account(conn)
     account = get_paper_account(conn)
@@ -107,6 +123,7 @@ def apply_signal(
     fills: list[dict[str, Any]] = []
     cash = float(account["cash"])
     realized_delta = 0.0
+    use_fee_bps = load_paper_fee_bps() if fee_bps is None else max(0.0, float(fee_bps))
 
     book = latest_order_book(conn, symbol)
     spread = None if book is None else book.get("bid_ask_spread")
@@ -120,7 +137,7 @@ def apply_signal(
     def _record_fill(side: str, qty: float, price: float, reason: str) -> None:
         nonlocal cash
         notional = qty * price
-        fee = fee_usd(notional, fee_bps=fee_bps)
+        fee = fee_usd(notional, fee_bps=use_fee_bps)
         if side == "buy":
             cash -= notional + fee
         else:
@@ -134,6 +151,7 @@ def apply_signal(
             "qty": qty,
             "price": price,
             "fee_usd": round(fee, 8),
+            "fee_bps": use_fee_bps,
             "slip_bps": use_slip,
             "analysis_id": analysis_id,
             "reason": reason,

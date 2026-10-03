@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     qty REAL NOT NULL,
     price REAL NOT NULL,
     fee_usd REAL NOT NULL,
+    fee_bps REAL,
     slip_bps REAL NOT NULL,
     analysis_id TEXT,
     reason TEXT
@@ -266,11 +267,20 @@ def _migrate_macro_global_mcap(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_paper_orders_fee_bps(conn: sqlite3.Connection) -> None:
+    """Add fee_bps to legacy paper_orders (bps used on that fill)."""
+    cols = _table_columns(conn, "paper_orders")
+    if not cols or "fee_bps" in cols:
+        return
+    conn.execute("ALTER TABLE paper_orders ADD COLUMN fee_bps REAL")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     _migrate_derivatives_bitemporal(conn)
     _migrate_analysis_timeframe(conn)
     _migrate_macro_global_mcap(conn)
+    _migrate_paper_orders_fee_bps(conn)
     conn.commit()
 
 
@@ -785,17 +795,19 @@ def set_paper_account_value(conn: sqlite3.Connection, key: str, value: float) ->
 
 
 def insert_paper_order(conn: sqlite3.Connection, row: dict) -> None:
+    payload = dict(row)
+    payload.setdefault("fee_bps", None)
     conn.execute(
         """
         INSERT INTO paper_orders (
             order_id, ts, symbol, timeframe, side, qty, price,
-            fee_usd, slip_bps, analysis_id, reason
+            fee_usd, fee_bps, slip_bps, analysis_id, reason
         ) VALUES (
             :order_id, :ts, :symbol, :timeframe, :side, :qty, :price,
-            :fee_usd, :slip_bps, :analysis_id, :reason
+            :fee_usd, :fee_bps, :slip_bps, :analysis_id, :reason
         )
         """,
-        row,
+        payload,
     )
 
 
@@ -851,7 +863,7 @@ def list_paper_orders(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict
     cur = conn.execute(
         """
         SELECT order_id, ts, symbol, timeframe, side, qty, price,
-               fee_usd, slip_bps, analysis_id, reason
+               fee_usd, fee_bps, slip_bps, analysis_id, reason
         FROM paper_orders
         ORDER BY ts DESC
         LIMIT ?
@@ -866,7 +878,7 @@ def list_paper_orders_asc(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.execute(
         """
         SELECT order_id, ts, symbol, timeframe, side, qty, price,
-               fee_usd, slip_bps, analysis_id, reason
+               fee_usd, fee_bps, slip_bps, analysis_id, reason
         FROM paper_orders
         ORDER BY ts ASC, order_id ASC
         """
