@@ -479,3 +479,118 @@ def test_post_approve_json_and_redirect(monkeypatch, tmp_path: Path) -> None:
     )
     assert resp.status_code == 303
     assert resp.headers.get("location") == "/"
+
+
+def test_api_ohlcv_404_unknown_id(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/approvals/missing/ohlcv")
+    assert resp.status_code == 404
+
+
+def test_api_ohlcv_empty_bars_when_no_technicals(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    upsert_pending_approval(
+        conn,
+        {
+            "id": "ohlcv-empty",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 3_600_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "analysis_id": None,
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+            "size_pct_equity": 1.0,
+        },
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/approvals/ohlcv-empty/ohlcv")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["symbol"] == "ETHUSDT"
+    assert body["timeframe"] == "4h"
+    assert body["bars"] == []
+    assert body["invalidation_price"] is None
+    assert body["action"] == "long"
+
+
+def test_api_ohlcv_seeded_closed_bars_in_order(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    candles = []
+    for i in range(50):
+        ts = 1_700_000_000_000 + i * 14_400_000
+        candles.append(
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": ts,
+                "timeframe": "4h",
+                "open": 100.0 + i,
+                "high": 101.0 + i,
+                "low": 99.0 + i,
+                "close": 100.5 + i,
+                "volume": 1.0,
+            }
+        )
+    upsert_market_technicals(conn, candles)
+    upsert_analysis_output(
+        conn,
+        {
+            "analysis_id": "an-ohlcv",
+            "timestamp": 1_700_000_000_000 + 49 * 14_400_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "regime_state": "trend_up",
+            "confidence_score": 0.75,
+            "action": "long",
+            "invalidation_price": 90.5,
+            "size_pct_equity": 1.0,
+            "thesis": "seed",
+        },
+    )
+    upsert_pending_approval(
+        conn,
+        {
+            "id": "ohlcv-full",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 3_600_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": "an-ohlcv",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.75,
+            "size_pct_equity": 1.0,
+        },
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/approvals/ohlcv-full/ohlcv")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "BTCUSDT"
+    assert body["timeframe"] == "4h"
+    assert len(body["bars"]) == 48
+    stamps = [b["t"] for b in body["bars"]]
+    assert stamps == sorted(stamps)
+    assert stamps[-1] == 1_700_000_000_000 + 49 * 14_400_000
+    last = body["bars"][-1]
+    assert last["o"] == 149.0 and last["c"] == 149.5
+    assert body["invalidation_price"] == 90.5
+    assert body["action"] == "long"

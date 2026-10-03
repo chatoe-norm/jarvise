@@ -811,6 +811,30 @@ def load_latest_candle(conn: sqlite3.Connection, symbol: str, timeframe: str) ->
     return dict(row) if row is not None else None
 
 
+def load_recent_ohlcv(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    limit: int = 48,
+) -> list[dict]:
+    """Newest closed OHLC bars, oldest first. Cap 120. SQLite only (no live fetch)."""
+    cap = max(1, min(int(limit), 120))
+    cur = conn.execute(
+        """
+        SELECT timestamp, open, high, low, close
+        FROM market_technicals
+        WHERE symbol=? AND timeframe=?
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (symbol.upper(), timeframe, cap),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    rows.reverse()
+    return rows
+
+
 def load_candles_in_range(
     conn: sqlite3.Connection,
     symbol: str,

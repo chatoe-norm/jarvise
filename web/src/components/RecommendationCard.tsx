@@ -1,7 +1,8 @@
 // web/src/components/RecommendationCard.tsx
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
-import type { RecommendationPayload } from "@/lib/api";
+import { CandleChart } from "@/components/CandleChart";
+import type { OhlcvPayload, RecommendationPayload } from "@/lib/api";
 import { formatNum } from "@/lib/utils";
 
 const REC_LABEL: Record<
@@ -43,8 +44,17 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function RecommendationCard({ data }: { data: RecommendationPayload }) {
+export function RecommendationCard({
+  data,
+  ohlcv,
+}: {
+  data: RecommendationPayload;
+  ohlcv?: OhlcvPayload | null;
+}) {
   const rec = REC_LABEL[data.recommendation];
+  const tfLabel = ohlcv
+    ? `${ohlcv.symbol} ${ohlcv.timeframe}`
+    : `${data.symbol} ${data.timeframe}`;
   return (
     <div className="space-y-4 rounded-md border border-[var(--color-border)] bg-[#121922] p-4 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -60,6 +70,14 @@ export function RecommendationCard({ data }: { data: RecommendationPayload }) {
           <p>{data.claude.reason || "—"}</p>
         </Section>
       ) : null}
+
+      <Section title="ราคา (แท่งปิด)">
+        <CandleChart
+          bars={ohlcv?.bars ?? []}
+          invalidation={ohlcv?.invalidation_price ?? data.risk.invalidation_price}
+          label={tfLabel}
+        />
+      </Section>
 
       <Section title="เกิดอะไรขึ้น">
         <List items={data.what_happened} />
