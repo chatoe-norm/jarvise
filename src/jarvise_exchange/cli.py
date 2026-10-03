@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 
@@ -28,7 +28,7 @@ exchange_app = typer.Typer(
 
 @exchange_app.command("sync-balances")
 def sync_balances(
-    db: Annotated[Optional[Path], typer.Option("--db")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:

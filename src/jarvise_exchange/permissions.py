@@ -13,6 +13,7 @@ from jarvise_exchange.binance_spot import (
     BinanceAuth,
     signature_for_query,
 )
+from jarvise_ingest.http import get_json
 
 RESTRICTIONS_PATH = "/sapi/v1/account/apiRestrictions"
 
@@ -25,23 +26,18 @@ def fetch_api_restrictions(
     timestamp_ms: int | None = None,
 ) -> dict[str, Any]:
     """GET /sapi/v1/account/apiRestrictions for the calling API key."""
-    params = {"timestamp": int(timestamp_ms if timestamp_ms is not None else time.time() * 1000)}
-    query = urlencode(params)
-    signature = signature_for_query(auth, query)
+
+    def signed_url() -> str:
+        params = {"timestamp": int(timestamp_ms if timestamp_ms is not None else time.time() * 1000)}
+        query = urlencode(params)
+        signature = signature_for_query(auth, query)
+        return f"{base_url.rstrip('/')}{RESTRICTIONS_PATH}?{query}&signature={signature}"
+
     headers = {"X-MBX-APIKEY": auth.api_key}
-    url = f"{base_url.rstrip('/')}{RESTRICTIONS_PATH}?{query}&signature={signature}"
-    own = client is None
-    http = client or httpx.Client(timeout=30.0)
-    try:
-        resp = http.get(url, headers=headers)
-        resp.raise_for_status()
-        payload = resp.json()
-        if not isinstance(payload, dict):
-            raise ValueError("unexpected apiRestrictions response type")
-        return payload
-    finally:
-        if own:
-            http.close()
+    payload = get_json(signed_url, headers=headers, client=client, provider="binance_restrictions")
+    if not isinstance(payload, dict):
+        raise ValueError("unexpected apiRestrictions response type")
+    return payload
 
 
 def audit_key_permissions(perms: dict[str, Any]) -> dict[str, Any]:

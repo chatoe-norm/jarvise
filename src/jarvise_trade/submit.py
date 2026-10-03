@@ -12,13 +12,22 @@ import httpx
 
 from jarvise_exchange.permissions import audit_key_permissions, fetch_api_restrictions
 from jarvise_ingest.db import (
+    get_live_order_by_client_id,
     get_paper_account,
     insert_live_order,
     sum_live_realized_pnl_utc_day,
 )
-from jarvise_risk import check_caps, estimated_notional, load_risk_caps
+from jarvise_risk import estimated_notional, load_risk_caps
 from jarvise_trade.auth import resolve_trade_auth
-from jarvise_trade.binance_market import place_spot_market_order
+from jarvise_trade.binance_market import (
+    client_order_id_for_approval,
+    place_spot_market_order,
+    query_order,
+    summarize_fill,
+)
+
+# Statuses that mean "the venue already has this order" — never POST again.
+_VENUE_HAS_ORDER_STATUSES = frozenset({"submitted", "partially_filled", "filled"})
 
 
 def _live_equity_usd(conn: Any) -> float:
@@ -304,6 +313,76 @@ def submit_live_for_approval(
             "paper_only": False,
         }
 
+    client_order_id = client_order_id_for_approval(approval_id)
+    base_row = {
+        "approval_id": approval_id,
+        "venue": "binance",
+        "symbol": symbol,
+        "side": side,
+        "order_type": "MARKET",
+        "requested_notional_usd": notional,
+        "kill_switch_clear": 1,
+        "caps_ok": 1,
+        "client_order_id": client_order_id,
+    }
+
+    # Idempotency 1/2: our own ledger already holds a venue-accepted order for this approval.
+    existing = get_live_order_by_client_id(conn, client_order_id)
+    if existing is not None and existing.get("status") in _VENUE_HAS_ORDER_STATUSES:
+        return {
+            "ok": True,
+            "live_order": existing,
+            "duplicate": True,
+            "error": None,
+            "paper_only": False,
+        }
+
+    # Idempotency 2/2: the venue may hold the order even if we never recorded it
+    # (crash or lost response after POST). Query before any new POST.
+    try:
+        prior = query_order(
+            auth,
+            symbol=symbol,
+            orig_client_order_id=client_order_id,
+            client=http_client,
+            timestamp_ms=ts,
+        )
+    except Exception as exc:  # noqa: BLE001 — cannot prove absence → do not POST
+        err = f"pre-submit order query failed: {exc}"
+        row = insert_live_order(
+            conn,
+            {**base_row, "id": _order_id(approval_id, ts), "created_at_ms": ts, "status": "error", "error": err},
+        )
+        return {"ok": False, "live_order": row, "error": err, "paper_only": False}
+    if prior is not None:
+        fill = summarize_fill(prior)
+        row = insert_live_order(
+            conn,
+            {
+                **base_row,
+                "id": _order_id(approval_id, ts),
+                "created_at_ms": ts,
+                "status": fill["status"],
+                "venue_order_id": fill["venue_order_id"],
+                "venue_status": fill["venue_status"],
+                "executed_qty": fill["executed_qty"],
+                "cummulative_quote_qty": fill["cummulative_quote_qty"],
+                "fills_count": fill["fills_count"],
+                "venue_response_json": json.dumps(prior),
+                "reconciled_at_ms": ts,
+                "realized_pnl_usd": 0.0,
+                "error": "recovered: venue already held this client order id",
+            },
+        )
+        return {
+            "ok": True,
+            "live_order": row,
+            "duplicate": True,
+            "venue_response": prior,
+            "error": None,
+            "paper_only": False,
+        }
+
     try:
         payload = place_spot_market_order(
             auth,
@@ -313,23 +392,58 @@ def submit_live_for_approval(
             quantity=None if side == "BUY" else notional,  # SELL path reserved
             client=http_client,
             timestamp_ms=ts,
+            new_client_order_id=client_order_id,
         )
     except Exception as exc:  # noqa: BLE001
+        # The POST may have reached the venue (timeout / dropped response). Check once
+        # before recording an error so the ledger never hides a real fill.
+        recovered = None
+        try:
+            recovered = query_order(
+                auth,
+                symbol=symbol,
+                orig_client_order_id=client_order_id,
+                client=http_client,
+                timestamp_ms=ts,
+            )
+        except Exception:  # noqa: BLE001 — stay with the original error
+            recovered = None
+        if recovered is not None:
+            fill = summarize_fill(recovered)
+            row = insert_live_order(
+                conn,
+                {
+                    **base_row,
+                    "id": _order_id(approval_id, ts),
+                    "created_at_ms": ts,
+                    "status": fill["status"],
+                    "venue_order_id": fill["venue_order_id"],
+                    "venue_status": fill["venue_status"],
+                    "executed_qty": fill["executed_qty"],
+                    "cummulative_quote_qty": fill["cummulative_quote_qty"],
+                    "fills_count": fill["fills_count"],
+                    "venue_response_json": json.dumps(recovered),
+                    "reconciled_at_ms": ts,
+                    "realized_pnl_usd": 0.0,
+                    "error": f"submit response lost ({type(exc).__name__}); recovered via order query",
+                },
+            )
+            return {
+                "ok": True,
+                "live_order": row,
+                "venue_response": recovered,
+                "recovered": True,
+                "error": None,
+                "paper_only": False,
+            }
         row = insert_live_order(
             conn,
             {
+                **base_row,
                 "id": _order_id(approval_id, ts),
                 "created_at_ms": ts,
-                "approval_id": approval_id,
-                "venue": "binance",
-                "symbol": symbol,
-                "side": side,
-                "order_type": "MARKET",
-                "requested_notional_usd": notional,
                 "status": "error",
                 "error": str(exc),
-                "kill_switch_clear": 1,
-                "caps_ok": 1,
                 "venue_response_json": None,
             },
         )
@@ -340,23 +454,21 @@ def submit_live_for_approval(
             "paper_only": False,
         }
 
-    venue_order_id = str(payload.get("orderId") or payload.get("clientOrderId") or "")
+    fill = summarize_fill(payload)
     row = insert_live_order(
         conn,
         {
+            **base_row,
             "id": _order_id(approval_id, ts),
             "created_at_ms": ts,
-            "approval_id": approval_id,
-            "venue": "binance",
-            "symbol": symbol,
-            "side": side,
-            "order_type": "MARKET",
-            "requested_notional_usd": notional,
-            "status": "submitted",
-            "venue_order_id": venue_order_id or None,
+            "status": fill["status"],
+            "venue_order_id": fill["venue_order_id"] or (fill["client_order_id"] or None),
+            "venue_status": fill["venue_status"],
+            "executed_qty": fill["executed_qty"],
+            "cummulative_quote_qty": fill["cummulative_quote_qty"],
+            "fills_count": fill["fills_count"],
             "venue_response_json": json.dumps(payload),
-            "kill_switch_clear": 1,
-            "caps_ok": 1,
+            "reconciled_at_ms": ts if fill["venue_status"] else None,
             "realized_pnl_usd": 0.0,
         },
     )

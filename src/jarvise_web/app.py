@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -49,6 +50,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "jarvise_doctrine")
 PAPER_ONLY = os.environ.get("JARVISE_PAPER_ONLY", "true").lower() in {"1", "true", "yes"}
 KILL_SWITCH_KEY = "jarvise:kill_switch"
+KILL_SWITCH_REASON_KEY = "jarvise:kill_switch:reason"
 INGEST_KEY = "jarvise:ingest:last"
 RAG_KEY = "jarvise:rag:last"
 PAPER_KEY = "jarvise:paper:last"
@@ -87,7 +89,12 @@ def db_path() -> Path:
 def _redis():
     import redis
 
-    return redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    return redis.Redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=3.0,
+        socket_timeout=3.0,
+    )
 
 
 def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
@@ -157,9 +164,15 @@ def format_status_pre(payload: Any) -> str:
     return str(payload)
 
 
+def redis_get_strict(key: str) -> str | None:
+    """Raise on Redis failure. Used where "unknown" must not read as "off" (kill-switch)."""
+    return _redis().get(key)
+
+
 def redis_get(key: str) -> str | None:
+    """Soft read for status panels: Redis failure → None."""
     try:
-        return _redis().get(key)
+        return redis_get_strict(key)
     except Exception:
         return None
 
@@ -243,19 +256,34 @@ def load_paper_ledger() -> tuple[dict[str, Any], str | None]:
         return {"account": None, "positions": [], "orders": []}, str(exc)
 
 
-def kill_switch_engaged() -> bool:
+def kill_switch_state() -> dict[str, Any]:
+    """Fail-closed kill-switch read: Redis unreachable → engaged=True, known=False."""
     try:
-        return (redis_get(KILL_SWITCH_KEY) or "0") in {"1", "true", "on", "yes"}
-    except Exception:
-        return True
+        raw = redis_get_strict(KILL_SWITCH_KEY)
+    except Exception as exc:  # noqa: BLE001 — unknown must block, never read as "off"
+        return {
+            "engaged": True,
+            "known": False,
+            "reason": None,
+            "error": f"{type(exc).__name__}",
+        }
+    engaged = str(raw or "0").strip().lower() in {"1", "true", "on", "yes"}
+    reason = redis_get(KILL_SWITCH_REASON_KEY) if engaged else None
+    return {"engaged": engaged, "known": True, "reason": reason, "error": None}
+
+
+def kill_switch_engaged() -> bool:
+    return bool(kill_switch_state()["engaged"])
 
 
 def status_payload() -> dict[str, Any]:
     live = live_trading_enabled()
+    ks = kill_switch_state()
     return {
         "paper_only": PAPER_ONLY and not live,
         "live_trading": live,
-        "kill_switch": kill_switch_engaged(),
+        "kill_switch": bool(ks["engaged"]),
+        "kill_switch_state": ks,
         "ingest": redis_get_json(INGEST_KEY),
         "rag": redis_get_json(RAG_KEY),
         "paper": redis_get_json(PAPER_KEY),
@@ -406,11 +434,11 @@ def exchange_payload() -> dict[str, Any]:
 
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
+    # Unauthenticated liveness probe: no mode flags beyond paper_only (live state is on /api/status).
     live = live_trading_enabled()
     return {
         "ok": True,
         "paper_only": PAPER_ONLY and not live,
-        "live_trading": live,
     }
 
 
@@ -548,10 +576,21 @@ async def approvals_approve(
     id: str = Form(...),
     _: None = Depends(require_auth),
 ) -> Any:
-    engaged = kill_switch_engaged()
+    ks = kill_switch_state()
+    if not ks["known"]:
+        # Fail closed: an unreadable switch must never let an approve through.
+        detail = {
+            "ok": False,
+            "error": f"kill_switch unreadable ({ks.get('error') or 'redis'}); approve blocked",
+            "kill_switch_state": ks,
+            "id": id,
+        }
+        if wants_json(request):
+            return JSONResponse(detail, status_code=503)
+        return RedirectResponse("/", status_code=303)
     conn = open_db(db_path())
     try:
-        result = approve_approval(conn, id, kill_switch=engaged)
+        result = approve_approval(conn, id, kill_switch=bool(ks["engaged"]))
     finally:
         conn.close()
     if wants_json(request):
@@ -623,8 +662,38 @@ def spa_routes(_: None = Depends(require_auth)) -> FileResponse:
     return spa_index()
 
 
+class _AssetsBasicAuth(StaticFiles):
+    """StaticFiles cannot take Depends(); enforce the same Basic Auth on bundled assets."""
+
+    async def __call__(self, scope, receive, send) -> None:  # type: ignore[override]
+        user = os.environ.get("WEB_BASIC_AUTH_USER") or ""
+        password = os.environ.get("WEB_BASIC_AUTH_PASSWORD") or ""
+        if (user or password) and scope.get("type") == "http":
+            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers") or []}
+            if not _basic_header_ok(headers.get("authorization"), user, password):
+                response = JSONResponse(
+                    {"detail": "Auth required"},
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    headers={"WWW-Authenticate": "Basic"},
+                )
+                await response(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
+
+
+def _basic_header_ok(header: str | None, user: str, password: str) -> bool:
+    if not header or not header.lower().startswith("basic "):
+        return False
+    try:
+        raw = base64.b64decode(header.split(" ", 1)[1].strip()).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    given_user, _, given_pass = raw.partition(":")
+    return secrets.compare_digest(given_user, user) and secrets.compare_digest(given_pass, password)
+
+
 _static = static_dir()
 if _static is not None:
     assets = _static / "assets"
     if assets.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+        app.mount("/assets", _AssetsBasicAuth(directory=str(assets)), name="assets")

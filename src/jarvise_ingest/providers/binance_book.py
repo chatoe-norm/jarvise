@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from jarvise_ingest.http import ProviderError, get_json
+
 BINANCE_BASE = "https://api.binance.com"
 
 
@@ -16,20 +18,13 @@ def _get(
     *,
     client: httpx.Client | None = None,
 ) -> Any:
-    own = client is None
-    http = client or httpx.Client(timeout=30.0)
     try:
-        resp = http.get(f"{BINANCE_BASE}{path}", params=params)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as exc:
+        return get_json(f"{BINANCE_BASE}{path}", params=params, client=client, provider="binance_book")
+    except ProviderError as exc:
         raise RuntimeError(
             f"binance book GET {path} failed for {params.get('symbol')}: {exc}. "
             "Retry: jarvise ingest --symbol SYM --skip-book"
         ) from exc
-    finally:
-        if own:
-            http.close()
 
 
 def _depth_notional_within_pct(

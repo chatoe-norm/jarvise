@@ -1,4 +1,8 @@
-"""SQLite storage for read-only exchange spot balance snapshots."""
+"""SQLite storage for read-only exchange spot balance snapshots.
+
+Schema ownership moved to ``jarvise_ingest.db`` (one ``migrate()`` owns every table);
+this module keeps the balance helpers and delegates open/migrate so callers see one DB.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from jarvise_exchange.models import SpotBalance
+from jarvise_ingest.db import migrate as _migrate_all
+from jarvise_ingest.db import open_db as _open_all
 
+# Kept for reference / docs; the canonical DDL lives in jarvise_ingest.db.SCHEMA_SQL.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_balances (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,14 +31,12 @@ CREATE INDEX IF NOT EXISTS idx_exchange_balances_venue_fetched
 
 
 def open_db(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Open (and migrate) the shared Jarvise DB with WAL/busy_timeout pragmas."""
+    return _open_all(path)
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
+    _migrate_all(conn)
 
 
 def insert_snapshot(

@@ -1,0 +1,57 @@
+{
+  "id": "jrvsLiveRecon1h001",
+  "name": "Jarvise live reconcile",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "cron-live-reconcile",
+      "name": "Every 1h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/live-reconcile",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "http-live-reconcile",
+      "name": "POST live reconcile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Read-only GET /api/v3/order by client order id for open live_orders; persists fill state. Places nothing. Import + activate only when JARVISE_LIVE_TRADING is enabled (docs/ops/live-enable-checklist.md). Jobs writes jarvise:live:reconcile:last."
+    }
+  ],
+  "connections": {
+    "Every 1h": {
+      "main": [[{ "node": "POST live reconcile", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": false,
+      "no_order_placement": true,
+      "read_only": true,
+      "import": "n8n UI → Workflows → Import from File → infra/n8n/workflows/jarvise-live-reconcile.json (activate only after live enable)"
+    }
+  },
+  "pinData": {},
+  "active": false
+}

@@ -18,6 +18,7 @@ def _stub(monkeypatch, *, doctrine=None) -> None:
     monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
     monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
     monkeypatch.setattr("jarvise_web.app.redis_get", lambda key: "0")
+    monkeypatch.setattr("jarvise_web.app.redis_get_strict", lambda key: "0")
     monkeypatch.setattr("jarvise_web.app.redis_get_json", lambda key: {"ok": True, "key": key})
     monkeypatch.setattr("jarvise_web.app.qdrant_info", lambda: {"exists": True, "points": 0})
     monkeypatch.setattr(

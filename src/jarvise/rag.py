@@ -10,9 +10,9 @@ import json
 import os
 import re
 import subprocess
-from datetime import datetime, timezone
-from pathlib import Path
 from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -47,7 +47,7 @@ def repo_root() -> Path:
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def load_sources_config(path: Path | None = None) -> dict[str, Any]:
@@ -412,9 +412,9 @@ def index_sources(
     model = SentenceTransformer(MODEL_NAME)
     # sentence-transformers renamed get_embedding_dimension → get_sentence_embedding_dimension
     if hasattr(model, "get_sentence_embedding_dimension"):
-        dim = int(model.get_sentence_embedding_dimension())
+        dim = int(model.get_sentence_embedding_dimension() or 0)
     else:
-        dim = int(model.get_embedding_dimension())
+        dim = int(model.get_embedding_dimension() or 0)
     root = repo_root()
     result: dict[str, Any] = {
         "ok": True,
@@ -473,7 +473,7 @@ def index_sources(
                     "url": url_meta,
                 }
             )
-    vectors = (
+    vectors: Any = (
         model.encode([item["text"] for item in pending], batch_size=32, show_progress_bar=False)
         if pending
         else []

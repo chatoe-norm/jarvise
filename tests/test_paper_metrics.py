@@ -72,12 +72,7 @@ def test_win_and_loss_expectancy(tmp_path: Path) -> None:
 
 
 def test_scratch_excluded_from_win_rate() -> None:
-    trades = [
-        {"pnl_usd": 10.0},
-        {"pnl_usd": 0.0},
-        {"pnl_usd": -5.0},
-    ]
-    # via reconstruct path with synthetic orders
+    # Round-trips below: +10 (win), 0 (scratch), -5 (loss) via the reconstruct path.
     orders = [
         {
             "order_id": "o1",

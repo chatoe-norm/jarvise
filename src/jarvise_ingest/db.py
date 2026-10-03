@@ -177,10 +177,30 @@ CREATE TABLE IF NOT EXISTS live_orders (
     error TEXT,
     kill_switch_clear INTEGER NOT NULL,
     caps_ok INTEGER NOT NULL,
-    realized_pnl_usd REAL
+    realized_pnl_usd REAL,
+    client_order_id TEXT,
+    venue_status TEXT,
+    executed_qty REAL,
+    cummulative_quote_qty REAL,
+    fills_count INTEGER,
+    reconciled_at_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_live_orders_created
     ON live_orders (created_at_ms);
+-- idx_live_orders_client is created by migration 5 (after the column exists on legacy DBs).
+
+-- Read-only exchange spot wallet snapshots (P3). Amounts as TEXT decimal strings.
+CREATE TABLE IF NOT EXISTS exchange_balances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    free TEXT NOT NULL,
+    locked TEXT NOT NULL,
+    total TEXT NOT NULL,
+    fetched_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_balances_venue_fetched
+    ON exchange_balances (venue, fetched_at_ms DESC);
 
 -- Second-layer LLM reviews for paper approvals (auto-decide audit). Paper only.
 CREATE TABLE IF NOT EXISTS approval_llm_reviews (
@@ -204,15 +224,45 @@ _DERIV_METRIC_KEYS = (
 )
 
 
+BUSY_TIMEOUT_MS = 5000
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
+    """Open SQLite with durability + concurrency pragmas.
+
+    WAL lets jobs, web, and the CLI read while one writer commits; busy_timeout turns
+    "database is locked" into a short wait; synchronous=NORMAL is safe under WAL.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=BUSY_TIMEOUT_MS / 1000.0)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        # Read-only filesystems or exotic mounts may refuse WAL; keep working with the default.
+        pass
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+
+
+def db_pragmas(conn: sqlite3.Connection) -> dict[str, Any]:
+    return {
+        "user_version": schema_version(conn),
+        "journal_mode": str(conn.execute("PRAGMA journal_mode").fetchone()[0]),
+        "synchronous": int(conn.execute("PRAGMA synchronous").fetchone()[0]),
+        "busy_timeout_ms": int(conn.execute("PRAGMA busy_timeout").fetchone()[0]),
+        "foreign_keys": bool(conn.execute("PRAGMA foreign_keys").fetchone()[0]),
+    }
 
 
 def _migrate_derivatives_bitemporal(conn: sqlite3.Connection) -> None:
@@ -275,13 +325,83 @@ def _migrate_paper_orders_fee_bps(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE paper_orders ADD COLUMN fee_bps REAL")
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+_LIVE_ORDER_RECONCILE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("client_order_id", "TEXT"),
+    ("venue_status", "TEXT"),
+    ("executed_qty", "REAL"),
+    ("cummulative_quote_qty", "REAL"),
+    ("fills_count", "INTEGER"),
+    ("reconciled_at_ms", "INTEGER"),
+)
+
+
+def _migrate_live_orders_reconcile(conn: sqlite3.Connection) -> None:
+    """Add idempotency + fill reconciliation columns to legacy live_orders."""
+    cols = _table_columns(conn, "live_orders")
+    if not cols:
+        return
+    for name, typ in _LIVE_ORDER_RECONCILE_COLUMNS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE live_orders ADD COLUMN {name} {typ}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_live_orders_client ON live_orders (client_order_id)"
+    )
+
+
+def _migrate_exchange_balances(conn: sqlite3.Connection) -> None:
+    """exchange_balances used to live in jarvise_exchange.db; SCHEMA_SQL now owns it."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS exchange_balances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            venue TEXT NOT NULL,
+            asset TEXT NOT NULL,
+            free TEXT NOT NULL,
+            locked TEXT NOT NULL,
+            total TEXT NOT NULL,
+            fetched_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_exchange_balances_venue_fetched "
+        "ON exchange_balances (venue, fetched_at_ms DESC)"
+    )
+
+
+# Ordered, numbered migrations. PRAGMA user_version records the last applied step so a
+# multi-step evolution runs exactly once per database. ``repair=True`` marks cheap,
+# idempotent additive steps (column sniff + ALTER ADD) that also re-run on every open so
+# schema drift self-heals; the destructive bitemporal rebuild is version-gated only.
+MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
+    (1, "derivatives_bitemporal", _migrate_derivatives_bitemporal, False),
+    (2, "analysis_timeframe", _migrate_analysis_timeframe, True),
+    (3, "macro_global_mcap", _migrate_macro_global_mcap, True),
+    (4, "paper_orders_fee_bps", _migrate_paper_orders_fee_bps, True),
+    (5, "live_orders_reconcile", _migrate_live_orders_reconcile, True),
+    (6, "exchange_balances", _migrate_exchange_balances, True),
+)
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """Create missing tables, apply numbered migrations above user_version, re-run repairs.
+
+    Returns the list of ``version:name`` steps that advanced user_version.
+    """
     conn.executescript(SCHEMA_SQL)
-    _migrate_derivatives_bitemporal(conn)
-    _migrate_analysis_timeframe(conn)
-    _migrate_macro_global_mcap(conn)
-    _migrate_paper_orders_fee_bps(conn)
+    current = schema_version(conn)
+    applied: list[str] = []
+    for version, name, fn, repair in MIGRATIONS:
+        if version <= current:
+            if repair:
+                fn(conn)
+            continue
+        fn(conn)
+        conn.execute(f"PRAGMA user_version = {int(version)}")
+        applied.append(f"{version}:{name}")
     conn.commit()
+    return applied
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:
@@ -1108,7 +1228,7 @@ def upsert_pending_approval(conn: sqlite3.Connection, row: dict) -> dict:
             {**payload, "id": approval_id},
         )
         conn.commit()
-    return dict(get_approval(conn, approval_id))
+    return dict(get_approval(conn, approval_id) or {})
 
 
 def claim_approval_for_fill(
@@ -1324,8 +1444,11 @@ def get_latest_llm_review(conn: sqlite3.Connection, approval_id: str) -> dict | 
 _LIVE_ORDER_COLUMNS = (
     "id, created_at_ms, approval_id, venue, symbol, side, order_type, "
     "requested_qty, requested_notional_usd, status, venue_order_id, "
-    "venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd"
+    "venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd, "
+    "client_order_id, venue_status, executed_qty, cummulative_quote_qty, "
+    "fills_count, reconciled_at_ms"
 )
+LIVE_ORDER_OPEN_STATUSES = ("submitted", "partially_filled")
 
 
 def insert_live_order(conn: sqlite3.Connection, row: dict) -> dict:
@@ -1335,8 +1458,10 @@ def insert_live_order(conn: sqlite3.Connection, row: dict) -> dict:
         INSERT INTO live_orders (
             id, created_at_ms, approval_id, venue, symbol, side, order_type,
             requested_qty, requested_notional_usd, status, venue_order_id,
-            venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd,
+            client_order_id, venue_status, executed_qty, cummulative_quote_qty,
+            fills_count, reconciled_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["id"],
@@ -1355,6 +1480,12 @@ def insert_live_order(conn: sqlite3.Connection, row: dict) -> dict:
             int(row.get("kill_switch_clear", 0)),
             int(row.get("caps_ok", 0)),
             row.get("realized_pnl_usd"),
+            row.get("client_order_id"),
+            row.get("venue_status"),
+            row.get("executed_qty"),
+            row.get("cummulative_quote_qty"),
+            row.get("fills_count"),
+            row.get("reconciled_at_ms"),
         ),
     )
     conn.commit()
@@ -1368,6 +1499,77 @@ def get_live_order(conn: sqlite3.Connection, order_id: str) -> dict | None:
     )
     row = cur.fetchone()
     return dict(row) if row else None
+
+
+def get_live_order_by_client_id(conn: sqlite3.Connection, client_order_id: str) -> dict | None:
+    """Latest live order row carrying this venue client order id (idempotency lookup)."""
+    cur = conn.execute(
+        f"""
+        SELECT {_LIVE_ORDER_COLUMNS} FROM live_orders
+        WHERE client_order_id = ?
+        ORDER BY created_at_ms DESC
+        LIMIT 1
+        """,
+        (client_order_id,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def list_live_orders_open(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict]:
+    """Live orders not yet terminal on the venue (need reconciliation)."""
+    placeholders = ",".join("?" for _ in LIVE_ORDER_OPEN_STATUSES)
+    cur = conn.execute(
+        f"""
+        SELECT {_LIVE_ORDER_COLUMNS} FROM live_orders
+        WHERE status IN ({placeholders}) AND client_order_id IS NOT NULL
+        ORDER BY created_at_ms ASC
+        LIMIT ?
+        """,
+        (*LIVE_ORDER_OPEN_STATUSES, max(1, min(int(limit), 1000))),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def update_live_order_fill(
+    conn: sqlite3.Connection,
+    order_id: str,
+    *,
+    status: str,
+    venue_status: str | None,
+    executed_qty: float | None,
+    cummulative_quote_qty: float | None,
+    fills_count: int | None,
+    venue_order_id: str | None,
+    venue_response_json: str | None,
+    reconciled_at_ms: int,
+    error: str | None = None,
+) -> dict | None:
+    """Write reconciled fill state for one live order."""
+    conn.execute(
+        """
+        UPDATE live_orders
+        SET status = ?, venue_status = ?, executed_qty = ?, cummulative_quote_qty = ?,
+            fills_count = ?, venue_order_id = COALESCE(?, venue_order_id),
+            venue_response_json = COALESCE(?, venue_response_json),
+            reconciled_at_ms = ?, error = COALESCE(?, error)
+        WHERE id = ?
+        """,
+        (
+            status,
+            venue_status,
+            executed_qty,
+            cummulative_quote_qty,
+            fills_count,
+            venue_order_id,
+            venue_response_json,
+            int(reconciled_at_ms),
+            error,
+            order_id,
+        ),
+    )
+    conn.commit()
+    return get_live_order(conn, order_id)
 
 
 def sum_live_realized_pnl_utc_day(

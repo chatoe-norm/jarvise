@@ -63,3 +63,15 @@ data/analytics/sources/openclaw/*
 
 # SDD scratch
 .superpowers/
+
+# SQLite WAL side files
+*.db-wal
+*.db-shm
+
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+
+# Model / HF cache written by jobs (HF_HOME=/app/data/.cache/hf)
+data/.cache/

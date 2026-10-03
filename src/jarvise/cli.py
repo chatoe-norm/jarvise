@@ -5,13 +5,15 @@ import os
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, NoReturn
 
 import typer
 
-from jarvise import config as store
 from jarvise import __version__
+from jarvise import config as store
 from jarvise_exchange.cli import exchange_app
+from jarvise_ingest.db_cli import db_app
+from jarvise_trade.cli import trade_app
 
 ROOT_EPILOG = """Examples:
   jarvise status
@@ -22,6 +24,9 @@ ROOT_EPILOG = """Examples:
   jarvise paper run --symbol BTCUSDT --timeframe 4h --json
   jarvise paper status --json
   jarvise exchange sync-balances --json
+  jarvise trade reconcile --dry-run --json
+  jarvise db status --json
+  jarvise db prune --older-than 180d --dry-run --json
 """
 
 STATUS_EPILOG = """Examples:
@@ -88,6 +93,8 @@ rag_app = typer.Typer(
 )
 app.add_typer(rag_app, name="rag")
 app.add_typer(exchange_app, name="exchange")
+app.add_typer(trade_app, name="trade")
+app.add_typer(db_app, name="db")
 
 
 class OutputFormat(str, Enum):
@@ -109,7 +116,7 @@ DryRunOpt = Annotated[
 ]
 
 
-def fail(message: str, *examples: str) -> None:
+def fail(message: str, *examples: str) -> NoReturn:
     lines = [f"Error: {message}"]
     lines.extend(f"  {example}" for example in examples)
     typer.echo("\n".join(lines), err=True)
@@ -184,7 +191,7 @@ def init(
 
 @config_app.command("get", epilog=CONFIG_GET_EPILOG)
 def config_get(
-    key: Annotated[Optional[str], typer.Option("--key", help="Config key to read.")] = None,
+    key: Annotated[str | None, typer.Option("--key", help="Config key to read.")] = None,
     path: PathOpt = Path("."),
     output: OutputOpt = OutputFormat.text,
 ) -> None:
@@ -205,8 +212,8 @@ def config_get(
 
 @config_app.command("set", epilog=CONFIG_SET_EPILOG)
 def config_set(
-    key: Annotated[Optional[str], typer.Option("--key", help="Config key to write.")] = None,
-    value: Annotated[Optional[str], typer.Option("--value", help="Value to store.")] = None,
+    key: Annotated[str | None, typer.Option("--key", help="Config key to write.")] = None,
+    value: Annotated[str | None, typer.Option("--value", help="Value to store.")] = None,
     path: PathOpt = Path("."),
     dry_run: DryRunOpt = False,
 ) -> None:
@@ -373,7 +380,7 @@ def rag_ingest_sources(
 
 @rag_app.command("index")
 def rag_index(
-    query: Annotated[Optional[str], typer.Option("--query", help="Smoke-search after index.")] = None,
+    query: Annotated[str | None, typer.Option("--query", help="Smoke-search after index.")] = None,
     skip_index: Annotated[bool, typer.Option("--skip-index")] = False,
     output: OutputOpt = OutputFormat.text,
 ) -> None:

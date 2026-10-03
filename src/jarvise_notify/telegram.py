@@ -162,6 +162,66 @@ def format_auto_decide_message(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_kill_switch_message(reason: str, *, engaged: bool, error: str | None = None) -> str:
+    if engaged:
+        return (
+            "Jarvise KILL-SWITCH ENGAGED\n"
+            f"reason: {reason}\n"
+            "Paper enqueue/approve and jobs are blocked until you clear it on Ops (:8080/ops) "
+            "after a written review."
+        )
+    return (
+        "Jarvise KILL-SWITCH ENGAGE FAILED\n"
+        f"reason: {reason}\n"
+        f"error: {error or 'unknown'}\n"
+        "Redis is unset or unreachable. Services fail closed, but check Redis now."
+    )
+
+
+def notify_kill_switch(
+    reason: str,
+    *,
+    engaged: bool,
+    error: str | None = None,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Alert on every kill-switch engage attempt (success or failure). Soft-fail."""
+    if not notify_configured():
+        return False
+    try:
+        return send_telegram_message(
+            format_kill_switch_message(reason, engaged=engaged, error=error), client=client
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify kill-switch soft-fail: %s", type(exc).__name__)
+        return False
+
+
+def format_job_failure_message(job: str, error: str) -> str:
+    return (
+        f"Jarvise job FAILED: {job}\n"
+        f"{error}\n"
+        "Check Ops (:8080/ops) and `docker compose logs jobs`. Schedules keep running; "
+        "the next trigger retries."
+    )
+
+
+def notify_job_failure(
+    job: str,
+    error: str,
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Alert when a scheduled job times out or crashes. Soft-fail."""
+    if not notify_configured():
+        return False
+    try:
+        return send_telegram_message(format_job_failure_message(job, error), client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify job failure soft-fail: %s", type(exc).__name__)
+        return False
+
+
 def notify_auto_decide(
     payload: dict[str, Any],
     *,

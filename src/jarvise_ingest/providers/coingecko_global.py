@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from jarvise_ingest.http import ProviderError, get_json
+
 COINGECKO_PUBLIC_GLOBAL = "https://api.coingecko.com/api/v3/global"
 COINGECKO_PRO_GLOBAL = "https://pro-api.coingecko.com/api/v3/global"
 
@@ -43,22 +45,14 @@ def fetch_global_macro(
     now_ms: int | None = None,
 ) -> dict[str, Any]:
     """BTC dominance + total crypto market cap → macro_onchain_sentiment row."""
-    own = client is None
-    http = client or httpx.Client(timeout=30.0)
     url, headers = resolve_coingecko_global_request()
     try:
-        try:
-            resp = http.get(url, headers=headers)
-            resp.raise_for_status()
-            payload = resp.json()
-        except httpx.HTTPError as exc:
-            raise RuntimeError(
-                f"coingecko global failed: {exc}. "
-                "Retry: jarvise ingest --skip-macro"
-            ) from exc
-    finally:
-        if own:
-            http.close()
+        payload = get_json(url, headers=headers, client=client, provider="coingecko_global")
+    except ProviderError as exc:
+        raise RuntimeError(
+            f"coingecko global failed: {exc}. "
+            "Retry: jarvise ingest --skip-macro"
+        ) from exc
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):

@@ -21,6 +21,41 @@ def test_healthz() -> None:
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     assert resp.json()["paper_only"] is True
+    # Unauthenticated probe must not advertise live-trading state.
+    assert "live_trading" not in resp.json()
+
+
+def test_assets_require_basic_auth_when_configured(monkeypatch) -> None:
+    import base64
+
+    from jarvise_web import app as web_app
+
+    monkeypatch.setenv("WEB_BASIC_AUTH_USER", "owner")
+    monkeypatch.setenv("WEB_BASIC_AUTH_PASSWORD", "pw")
+    static = web_app.static_dir()
+    if static is None or not (static / "assets").is_dir():
+        import pytest
+
+        pytest.skip("no built SPA assets in this checkout")
+    client = TestClient(app)
+    anon = client.get("/assets/does-not-exist.js")
+    assert anon.status_code == 401
+    token = base64.b64encode(b"owner:pw").decode()
+    authed = client.get("/assets/does-not-exist.js", headers={"Authorization": f"Basic {token}"})
+    assert authed.status_code == 404  # authenticated, then normal static 404
+
+
+def test_basic_header_check() -> None:
+    import base64
+
+    from jarvise_web.app import _basic_header_ok
+
+    good = "Basic " + base64.b64encode(b"u:p").decode()
+    assert _basic_header_ok(good, "u", "p") is True
+    assert _basic_header_ok(good, "u", "x") is False
+    assert _basic_header_ok("Bearer abc", "u", "p") is False
+    assert _basic_header_ok("Basic ???", "u", "p") is False
+    assert _basic_header_ok(None, "u", "p") is False
 
 
 def _stub_control_deps(monkeypatch) -> None:
@@ -37,8 +72,66 @@ def _stub_control_deps(monkeypatch) -> None:
         return {"exists": True, "points": 0}
 
     monkeypatch.setattr("jarvise_web.app.redis_get", fake_redis_get)
+    monkeypatch.setattr("jarvise_web.app.redis_get_strict", fake_redis_get)
     monkeypatch.setattr("jarvise_web.app.redis_get_json", fake_json)
     monkeypatch.setattr("jarvise_web.app.qdrant_info", fake_qdrant)
+
+
+def test_kill_switch_unreadable_blocks_approve_and_reports_unknown(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Redis down must never read as 'kill-switch off'."""
+    monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
+
+    def boom(key: str):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr("jarvise_web.app.redis_get_strict", boom)
+    monkeypatch.setattr("jarvise_web.app.redis_get_json", lambda key: None)
+    monkeypatch.setattr("jarvise_web.app.qdrant_info", lambda: {"exists": False, "points": 0})
+    db = tmp_path / "ks.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    upsert_pending_approval(
+        conn,
+        {
+            "id": "ks1",
+            "created_at_ms": 1,
+            "expires_at_ms": 10**15,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": None,
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+            "size_pct_equity": 1.0,
+        },
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+
+    status = client.get("/api/status").json()
+    assert status["kill_switch"] is True
+    assert status["kill_switch_state"]["known"] is False
+
+    resp = client.post(
+        "/approvals/approve", data={"id": "ks1"}, headers={"accept": "application/json"}
+    )
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["ok"] is False and "unreadable" in body["error"]
+    # Nothing was filled.
+    conn = open_db(db)
+    try:
+        from jarvise_ingest.db import get_approval, list_paper_orders
+
+        assert get_approval(conn, "ks1")["status"] == "pending"
+        assert list_paper_orders(conn) == []
+    finally:
+        conn.close()
 
 
 def test_dashboard_serves_spa(monkeypatch) -> None:
@@ -169,6 +262,7 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
 
     monkeypatch.setattr("jarvise_web.app.redis_get_json", fake_json)
     monkeypatch.setattr("jarvise_web.app.redis_get", lambda k: "0")
+    monkeypatch.setattr("jarvise_web.app.redis_get_strict", lambda k: "0")
     monkeypatch.setattr("jarvise_web.app.qdrant_info", lambda: {"exists": True, "points": 0})
     client = TestClient(app)
     resp = client.get("/api/status")
@@ -178,6 +272,13 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
     assert "paper_expire" in data
     assert "risk_caps" in data
     assert "max_notional_per_order" in data["risk_caps"]
+    assert data["kill_switch"] is False
+    assert data["kill_switch_state"] == {
+        "engaged": False,
+        "known": True,
+        "reason": None,
+        "error": None,
+    }
 
 
 def test_api_dashboard_bundle(monkeypatch, tmp_path: Path) -> None:

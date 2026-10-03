@@ -34,19 +34,13 @@ Then `systemctl restart docker`.
 
 Volumes: `jarvise_redis`, `jarvise_qdrant`, `jarvise_n8n`, plus bind mounts `data/analytics/`, `data/openclaw/`.
 
-```bash
-# Example: snapshot Qdrant + analytics to a dated tarball
-BACKUP_DIR=~/jarvise-backups/$(date +%F)
-mkdir -p "$BACKUP_DIR"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop qdrant
-docker run --rm -v jarvise_qdrant:/qdrant/storage -v "$BACKUP_DIR":/backup alpine \
-  tar czf /backup/qdrant.tgz -C /qdrant/storage .
-docker compose -f docker-compose.yml -f docker-compose.prod.yml start qdrant
-tar czf "$BACKUP_DIR/analytics.tgz" -C ~/jarvise data/analytics
-tar czf "$BACKUP_DIR/openclaw.tgz" -C ~/jarvise data/openclaw
-```
+Scripted (preferred): [`infra/backup/backup.sh`](../../infra/backup/backup.sh) nightly via root cron → `/opt/jarvise/backups/YYYY-MM-DD/` (SQLite online `.backup` + integrity check, Qdrant/Redis volume tars, checksums, 14-day retention, optional `rsync` to `JARVISE_BACKUP_DEST`). Restore and verify with [`infra/backup/restore.sh`](../../infra/backup/restore.sh). Full procedure, RPO/RTO, and the post-restore smoke list: [disaster-recovery.md](../ops/disaster-recovery.md).
 
-Restore by extracting into the same volume/bind paths, then `up -d`.
+```bash
+cd /opt/jarvise
+bash infra/backup/backup.sh                                   # take one now
+bash infra/backup/restore.sh --from backups/$(date -u +%F) --verify
+```
 
 ## Update path
 
@@ -115,7 +109,15 @@ Redis status keys (JSON via jobs → `publish_redis_status`):
 | `jarvise:rag:last` | `POST /jobs/rag-refresh` |
 | `jarvise:paper:last` | `POST /jobs/paper-run` |
 | `jarvise:paper:expire:last` | `POST /jobs/paper-expire` |
-| `jarvise:kill_switch` | control UI / redis-cli |
+| `jarvise:paper:digest:last` | `POST /jobs/paper-pending-digest` |
+| `jarvise:paper_auto:last` | `POST /jobs/paper-auto-decide` |
+| `jarvise:ingest:health` | `POST /jobs/ingest-health` |
+| `jarvise:live:reconcile:last` | `POST /jobs/live-reconcile` (read-only) |
+| `jarvise:kill_switch` (+ `:reason`) | control UI / `engage_kill_switch` / redis-cli — **reads fail closed**: web approve and jobs treat an unreadable switch as engaged |
+| `jarvise:lock:<job>` | single-flight `SET NX EX` held while a job runs (ingest, paper_run, paper_expire, rag, paper_pending_digest, paper_auto_decide, live_reconcile); a second trigger gets HTTP 409 `<job>_running` |
+| `jarvise:circuit:<provider>:*` | provider circuit breaker (5 consecutive exhausted GET failures → skip 15 min; shows as `circuit_open` in ingest `provider_errors`) |
+
+Job subprocesses have wall-clock limits (`JARVISE_JOB_TIMEOUT_*_S`; defaults ingest 900s, paper-run 300s, expire 120s, rag 900s). A timeout returns exit code 124, publishes `error: timeout after Ns`, and sends a Telegram job-failure alert.
 
 ## Verify Tailscale path (laptop)
 
