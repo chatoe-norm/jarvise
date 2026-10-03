@@ -59,9 +59,7 @@ def sync_balances(
     db_path = db or DEFAULT_DB
     try:
         client = resolve_venue_client(name)
-        result = sync_spot_balances(
-            client=client, db_path=db_path, dry_run=dry_run, venue=name
-        )
+        result = sync_spot_balances(client=client, db_path=db_path, dry_run=dry_run, venue=name)
     except EternaReadApiBlocked as exc:
         msg = str(exc)
         if as_json:
@@ -110,9 +108,7 @@ def sync_balances(
     if as_json:
         typer.echo(json.dumps(payload))
     else:
-        typer.echo(
-            f"venue={result.venue} inserted={result.inserted} assets={len(result.balances)}"
-        )
+        typer.echo(f"venue={result.venue} inserted={result.inserted} assets={len(result.balances)}")
 
 
 @exchange_app.command("check-key")

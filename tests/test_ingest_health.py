@@ -39,8 +39,15 @@ def test_count_indicator_ready_counts_non_null(tmp_path: Path) -> None:
     write_indicators(
         conn,
         [
-            {"symbol": "BTCUSDT", "timeframe": "4h", "timestamp": T0 + 2 * H4,
-             "atr_14": 1.0, "rsi_14": 50.0, "ema_20": 100.0, "ema_200": 100.0},
+            {
+                "symbol": "BTCUSDT",
+                "timeframe": "4h",
+                "timestamp": T0 + 2 * H4,
+                "atr_14": 1.0,
+                "rsi_14": 50.0,
+                "ema_20": 100.0,
+                "ema_200": 100.0,
+            },
         ],
     )
     assert count_indicator_ready(conn, "BTCUSDT", "4h") == 1
@@ -52,8 +59,15 @@ def test_health_ready_and_fresh_no_alerts(tmp_path: Path) -> None:
     write_indicators(
         conn,
         [
-            {"symbol": "BTCUSDT", "timeframe": "4h", "timestamp": T0 + 2 * H4,
-             "atr_14": 1.0, "rsi_14": 50.0, "ema_20": 100.0, "ema_200": 100.0},
+            {
+                "symbol": "BTCUSDT",
+                "timeframe": "4h",
+                "timestamp": T0 + 2 * H4,
+                "atr_14": 1.0,
+                "rsi_14": 50.0,
+                "ema_20": 100.0,
+                "ema_200": 100.0,
+            },
         ],
     )
     newest_close = T0 + 2 * H4 + H4
@@ -89,8 +103,17 @@ def test_health_no_false_alarm_within_one_interval(tmp_path: Path) -> None:
     _candles(conn, "BTCUSDT", 3)
     write_indicators(
         conn,
-        [{"symbol": "BTCUSDT", "timeframe": "4h", "timestamp": T0 + 2 * H4,
-          "atr_14": 1.0, "rsi_14": 50.0, "ema_20": 100.0, "ema_200": 100.0}],
+        [
+            {
+                "symbol": "BTCUSDT",
+                "timeframe": "4h",
+                "timestamp": T0 + 2 * H4,
+                "atr_14": 1.0,
+                "rsi_14": 50.0,
+                "ema_20": 100.0,
+                "ema_200": 100.0,
+            }
+        ],
     )
     newest_close = T0 + 2 * H4 + H4
     report = ingest_health(conn, ["BTCUSDT"], "4h", now_ms=newest_close + 235 * 60_000)

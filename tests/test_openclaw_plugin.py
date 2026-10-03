@@ -51,17 +51,13 @@ def test_binance_intel_urls_are_allowlisted_reads() -> None:
 
 
 def test_cursor_binance_intel_points_at_canonical_skill() -> None:
-    text = (ROOT / ".cursor" / "skills" / "jarvise-binance-intel" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / ".cursor" / "skills" / "jarvise-binance-intel" / "SKILL.md").read_text(encoding="utf-8")
     assert re.match(r"^---\nname: jarvise-binance-intel\n", text)
     assert "plugins/jarvise-openclaw/skills/jarvise-binance-intel/SKILL.md" in text
 
 
 def test_openclaw_example_loads_jarvise_skills() -> None:
-    example = json.loads(
-        (ROOT / "config" / "openclaw" / "openclaw.json.example").read_text(encoding="utf-8")
-    )
+    example = json.loads((ROOT / "config" / "openclaw" / "openclaw.json.example").read_text(encoding="utf-8"))
     assert "/plugins/jarvise-openclaw/skills" in example["skills"]["load"]["extraDirs"]
     assert "_jarvise" not in example
     assert "plugins" not in example

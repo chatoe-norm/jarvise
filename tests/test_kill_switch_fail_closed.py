@@ -74,9 +74,7 @@ def test_engage_sets_keys_and_alerts_once_per_transition(monkeypatch) -> None:
     fake = _FakeRedis()
     monkeypatch.setattr(caps, "_redis_client", lambda url: fake)
     alerts: list[tuple] = []
-    monkeypatch.setattr(
-        caps, "notify_kill_switch", lambda reason, **kw: alerts.append((reason, kw)) or True
-    )
+    monkeypatch.setattr(caps, "notify_kill_switch", lambda reason, **kw: alerts.append((reason, kw)) or True)
     assert engage_kill_switch(reason="max_daily_loss") is True
     assert fake.store["jarvise:kill_switch"] == "1"
     assert fake.store["jarvise:kill_switch:reason"] == "max_daily_loss"
@@ -88,9 +86,7 @@ def test_engage_sets_keys_and_alerts_once_per_transition(monkeypatch) -> None:
 
 def test_engage_failure_returns_false_and_alerts(monkeypatch) -> None:
     alerts: list[tuple] = []
-    monkeypatch.setattr(
-        caps, "notify_kill_switch", lambda reason, **kw: alerts.append((reason, kw)) or True
-    )
+    monkeypatch.setattr(caps, "notify_kill_switch", lambda reason, **kw: alerts.append((reason, kw)) or True)
     monkeypatch.delenv("REDIS_URL", raising=False)
     assert engage_kill_switch(reason="breach") is False
     assert alerts[-1] == ("breach", {"engaged": False, "error": "REDIS_URL unset"})

@@ -52,9 +52,7 @@ def test_fetch_order_book_snapshot_parses(monkeypatch: pytest.MonkeyPatch) -> No
             "asks": [["100.1", "4"], ["102.0", "1"]],
         }
 
-    monkeypatch.setattr(
-        "jarvise_ingest.providers.binance_book._get", fake_get
-    )
+    monkeypatch.setattr("jarvise_ingest.providers.binance_book._get", fake_get)
     row = fetch_order_book_snapshot("BTCUSDT", now_ms=1_700_000_000_000)
     assert row["symbol"] == "BTCUSDT"
     assert abs(row["bid_ask_spread"] - (0.2 / 100.1)) < 1e-9
@@ -250,18 +248,14 @@ def test_gate_provider_error_critical_and_ks(
         called.append(reason)
         return True
 
-    monkeypatch.setattr(
-        "jarvise_risk.market_safety.engage_kill_switch", fake_ks
-    )
+    monkeypatch.setattr("jarvise_risk.market_safety.engage_kill_switch", fake_ks)
     cfg = MarketSafetyConfig(
         enabled=True,
         require_book=True,
         require_derivatives=False,
         require_macro=False,
     )
-    result = evaluate_market_safety(
-        config=cfg, provider_errors=["book:boom"]
-    )
+    result = evaluate_market_safety(config=cfg, provider_errors=["book:boom"])
     assert result.critical
     result = maybe_engage_kill_switch(result)
     assert result.kill_switch_engaged
@@ -341,9 +335,7 @@ def test_apply_safety_forces_flat() -> None:
         "thesis": "Trend up",
         "invalidation_price": 90.0,
     }
-    safety = MarketSafetyResult(
-        ok=False, force_flat=True, critical=False, reasons=["spread_bps=80"]
-    )
+    safety = MarketSafetyResult(ok=False, force_flat=True, critical=False, reasons=["spread_bps=80"])
     out = apply_safety_to_analysis(analysis, safety)
     assert out["action"] == "flat"
     assert out["size_pct_equity"] == 0.0

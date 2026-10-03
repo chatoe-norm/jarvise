@@ -68,8 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jarvise paper",
         description=(
-            "Paper auto-trade: simulated fills from analyze + closed candles. "
-            "No exchange order placement."
+            "Paper auto-trade: simulated fills from analyze + closed candles. No exchange order placement."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -269,9 +268,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         confidence_threshold=args.confidence_threshold,
                     )
                 else:
-                    analysis = analyze_snapshot(
-                        candle, confidence_threshold=args.confidence_threshold
-                    )
+                    analysis = analyze_snapshot(candle, confidence_threshold=args.confidence_threshold)
                 safety = evaluate_from_db(conn, sym)
                 analysis = apply_safety_to_analysis(analysis, safety)
                 if not args.dry_run:
@@ -301,13 +298,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                         "analysis": summary,
                     }
                 else:
-                    queued = enqueue_approval(
-                        conn, analysis=analysis, timeframe=args.timeframe
-                    )
+                    queued = enqueue_approval(conn, analysis=analysis, timeframe=args.timeframe)
                     if queued.get("error") or queued.get("skipped"):
-                        errors.append(
-                            f"{sym}: {queued.get('error') or 'risk cap blocked enqueue'}"
-                        )
+                        errors.append(f"{sym}: {queued.get('error') or 'risk cap blocked enqueue'}")
                         if not args.as_json:
                             print(
                                 f"Error: {sym} enqueue blocked: {queued.get('error')}",
@@ -315,8 +308,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                             )
                 results.append({"queued": queued, "analysis": summary})
                 if not args.as_json and not (
-                    isinstance(queued, dict)
-                    and (queued.get("error") or queued.get("skipped"))
+                    isinstance(queued, dict) and (queued.get("error") or queued.get("skipped"))
                 ):
                     print(f"{sym}: {analysis.get('action')} queued for approval")
     finally:
@@ -405,9 +397,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
 def cmd_reject(args: argparse.Namespace) -> int:
     conn = open_db(args.db)
     try:
-        result = reject_approval(
-            conn, args.approval_id, reason=args.reason
-        )
+        result = reject_approval(conn, args.approval_id, reason=args.reason)
     finally:
         conn.close()
     code = 0 if result.get("ok") else 2
@@ -459,9 +449,7 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             f"sharpe={report.get('sharpe_ratio')} sortino={report.get('sortino_ratio')}"
         )
         if not report.get("ratios_ready"):
-            print(
-                f"(Sharpe/Sortino need ≥{report.get('need_trades_for_ratios')} closed trades)"
-            )
+            print(f"(Sharpe/Sortino need ≥{report.get('need_trades_for_ratios')} closed trades)")
         if report.get("persisted"):
             print("persisted performance_risk_metrics snapshot")
     return 0

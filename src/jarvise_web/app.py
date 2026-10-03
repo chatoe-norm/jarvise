@@ -342,9 +342,7 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
             return None
         symbol = str(row["symbol"])
         candle = load_latest_candle(conn, symbol, str(row["timeframe"]))
-        analysis = (
-            get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
-        )
+        analysis = get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
         account = ensure_paper_account(conn)
         position = get_paper_position(conn, symbol)
         safety = evaluate_from_db(conn, symbol).as_dict()
@@ -478,9 +476,7 @@ def api_analysis(
 ) -> dict[str, Any]:
     sym = symbol.strip().upper() or None
     tf = timeframe.strip() or None
-    rows, total, err = load_analysis_rows(
-        symbol=sym, timeframe=tf, limit=limit, offset=offset
-    )
+    rows, total, err = load_analysis_rows(symbol=sym, timeframe=tf, limit=limit, offset=offset)
     payload: dict[str, Any] = {
         "paper_only": PAPER_ONLY,
         "db": str(db_path()),
@@ -540,9 +536,7 @@ def api_approvals(
 
 
 @app.get("/api/approvals/{approval_id}/recommendation")
-def api_approval_recommendation(
-    approval_id: str, _: None = Depends(require_auth)
-) -> dict[str, Any]:
+def api_approval_recommendation(approval_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
     card = load_recommendation(approval_id)
     if card is None:
         raise HTTPException(status_code=404, detail="approval not found")

@@ -46,7 +46,15 @@ DECISIONS = frozenset({"approve", "reject", "defer"})
 REASON_MAX = 280
 UNPARSEABLE = "auto:claude:unparseable"
 SAME_SIDE_HOLD = "auto:rule:same_side_hold"
-CANDIDATE_FIELDS = ("status", "analysis_id", "action", "size_pct_equity", "confidence_score", "created_at_ms", "expires_at_ms")
+CANDIDATE_FIELDS = (
+    "status",
+    "analysis_id",
+    "action",
+    "size_pct_equity",
+    "confidence_score",
+    "created_at_ms",
+    "expires_at_ms",
+)
 NO_DOCTRINE_MIN_CONF = 0.70
 _TRUE = {"1", "true", "yes", "on"}
 
@@ -139,9 +147,7 @@ def build_brief(
     symbol = str(row["symbol"]).upper()
     timeframe = str(row["timeframe"])
     candle = load_latest_candle(conn, symbol, timeframe) or {}
-    analysis = (
-        get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
-    ) or {}
+    analysis = (get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None) or {}
     account = ensure_paper_account(conn)
     positions = list_paper_positions(conn)
     position = get_paper_position(conn, symbol)
@@ -159,9 +165,7 @@ def build_brief(
             "thesis": analysis.get("thesis"),
             "expires_at_ms": row.get("expires_at_ms"),
         },
-        "indicators": {
-            key: candle.get(key) for key in ("close", "ema_20", "ema_200", "rsi_14", "atr_14")
-        },
+        "indicators": {key: candle.get(key) for key in ("close", "ema_20", "ema_200", "rsi_14", "atr_14")},
         "ledger": {
             "equity": float(account["equity"]),
             "cash": float(account["cash"]),
@@ -372,7 +376,9 @@ def run_auto_decide(
                 doctrine_unavailable = True
                 lookup_error = f"{type(exc).__name__}: {exc}"
             doctrine = [str(h.get("text")) for h in hits if isinstance(h, dict) and h.get("text")]
-            brief = build_brief(conn, row, doctrine=doctrine, now_ms=review_ts, caps=caps, min_conf=cfg.min_conf)
+            brief = build_brief(
+                conn, row, doctrine=doctrine, now_ms=review_ts, caps=caps, min_conf=cfg.min_conf
+            )
             forced = forced_defer_reason(brief)
             if forced:
                 deferred.append({**entry, "reason": f"auto:rule:{forced}"})

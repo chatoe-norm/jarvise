@@ -77,9 +77,7 @@ def _stub_control_deps(monkeypatch) -> None:
     monkeypatch.setattr("jarvise_web.app.qdrant_info", fake_qdrant)
 
 
-def test_kill_switch_unreadable_blocks_approve_and_reports_unknown(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_kill_switch_unreadable_blocks_approve_and_reports_unknown(monkeypatch, tmp_path: Path) -> None:
     """Redis down must never read as 'kill-switch off'."""
     monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
     monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
@@ -117,9 +115,7 @@ def test_kill_switch_unreadable_blocks_approve_and_reports_unknown(
     assert status["kill_switch"] is True
     assert status["kill_switch_state"]["known"] is False
 
-    resp = client.post(
-        "/approvals/approve", data={"id": "ks1"}, headers={"accept": "application/json"}
-    )
+    resp = client.post("/approvals/approve", data={"id": "ks1"}, headers={"accept": "application/json"})
     assert resp.status_code == 503
     body = resp.json()
     assert body["ok"] is False and "unreadable" in body["error"]

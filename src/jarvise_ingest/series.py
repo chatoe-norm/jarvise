@@ -14,9 +14,7 @@ from jarvise_ingest.indicators import indicator_series
 from jarvise_ingest.timeframes import INTERVAL_MS
 
 
-def recompute_indicators(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
-) -> int:
+def recompute_indicators(conn: sqlite3.Connection, symbol: str, timeframe: str) -> int:
     """Rewrite indicator columns for every stored candle; return rows touched."""
     candles = load_candle_series(conn, symbol, timeframe)
     if not candles:

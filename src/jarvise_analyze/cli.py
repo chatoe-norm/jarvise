@@ -115,10 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--apply-paper",
         action="store_true",
-        help=(
-            "With --replay: apply_signal each bar into isolated --db "
-            "(refuses default live ledger path)"
-        ),
+        help=("With --replay: apply_signal each bar into isolated --db (refuses default live ledger path)"),
     )
     return p
 
@@ -196,11 +193,7 @@ def run(argv: list[str] | None = None) -> int:
 
         if args.replay:
             since = _parse_instant(args.since)
-            until = (
-                _parse_instant(args.until)
-                if args.until
-                else datetime.now(UTC)
-            )
+            until = _parse_instant(args.until) if args.until else datetime.now(UTC)
             if since >= until:
                 print(
                     "Error: --since must be before --until.\n  " + REPLAY_EXAMPLE,
@@ -260,9 +253,7 @@ def run(argv: list[str] | None = None) -> int:
                     confidence_threshold=args.confidence_threshold,
                 )
             else:
-                result = analyze_snapshot(
-                    candle, confidence_threshold=args.confidence_threshold
-                )
+                result = analyze_snapshot(candle, confidence_threshold=args.confidence_threshold)
             safety = evaluate_from_db(conn, sym)
             result = apply_safety_to_analysis(result, safety)
             if not args.dry_run:

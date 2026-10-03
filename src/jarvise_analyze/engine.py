@@ -68,9 +68,7 @@ def analyze_snapshot(
         regime = "chaotic"
         lean = "flat"
         confidence = 0.25
-        thesis = (
-            f"Chaotic: ATR {atr_pct:.1%} with momentum conflict vs EMA stack; flat."
-        )
+        thesis = f"Chaotic: ATR {atr_pct:.1%} with momentum conflict vs EMA stack; flat."
     elif ema_gap_pct < RANGE_EMA_PCT:
         regime = "range"
         lean = "flat"
@@ -82,20 +80,14 @@ def analyze_snapshot(
         confidence = _trend_confidence(rsi, side="long")
         if close < ema20:
             confidence = max(0.05, confidence - 0.1)
-        thesis = (
-            f"Trend up: EMA20>{ema200:.4g}; "
-            f"RSI={rsi if rsi is not None else 'n/a'}."
-        )
+        thesis = f"Trend up: EMA20>{ema200:.4g}; RSI={rsi if rsi is not None else 'n/a'}."
     elif bearish_stack:
         regime = "trend_down"
         lean = "short"
         confidence = _trend_confidence(rsi, side="short")
         if close > ema20:
             confidence = max(0.05, confidence - 0.1)
-        thesis = (
-            f"Trend down: EMA20<{ema200:.4g}; "
-            f"RSI={rsi if rsi is not None else 'n/a'}."
-        )
+        thesis = f"Trend down: EMA20<{ema200:.4g}; RSI={rsi if rsi is not None else 'n/a'}."
     else:
         regime = "range"
         lean = "flat"
@@ -106,19 +98,13 @@ def analyze_snapshot(
     size = 0.0
     invalidation = None
     if lean in ("long", "short") and confidence >= confidence_threshold:
-        invalidation = (
-            close - ATR_STOP_MULT * atr
-            if lean == "long"
-            else close + ATR_STOP_MULT * atr
-        )
+        invalidation = close - ATR_STOP_MULT * atr if lean == "long" else close + ATR_STOP_MULT * atr
         size = min(MAX_SIZE_PCT, round(BASE_SIZE_PCT * confidence, 4))
     else:
         action = "flat"
         size = 0.0
         if lean in ("long", "short") and confidence < confidence_threshold:
-            thesis += (
-                f" Confidence {confidence:.2f} < {confidence_threshold:.2f}; FLAT."
-            )
+            thesis += f" Confidence {confidence:.2f} < {confidence_threshold:.2f}; FLAT."
 
     return _result(
         symbol,
@@ -254,8 +240,7 @@ def _result(
     thesis: str,
 ) -> dict[str, Any]:
     material = (
-        f"{symbol}|{timeframe}|{timestamp}|{regime}|{action}|"
-        f"{confidence:.4f}|{invalidation}|{size:.4f}"
+        f"{symbol}|{timeframe}|{timestamp}|{regime}|{action}|{confidence:.4f}|{invalidation}|{size:.4f}"
     )
     analysis_id = hashlib.sha256(material.encode()).hexdigest()[:12]
     return {

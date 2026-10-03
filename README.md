@@ -42,15 +42,24 @@ Owner UI is the Vite/React SPA under [`web/`](web/README.md), served by FastAPI 
 # optional hot UI: cd web && npm install && npm run dev   # :5173 → proxies API
 ```
 
-## Validate (matches CI)
+## Validate and format
 
 ```bash
 .venv/bin/pip install -e ".[dev]"
-./scripts/check.sh
-# optional SPA: cd web && npm ci && npm run build
+make hooks     # install pre-commit + pre-push hooks once
+make format    # Ruff lint fixes, then Ruff formatting
+make check     # format check + ruff + mypy + full pytest coverage gate
+
+# Scoped Python loop (keeps lint/type checks, skips the repo-wide coverage gate)
+./scripts/check.sh tests/test_db_upsert.py -q
+
+# Frontend validation
+cd web && npm ci && npm run build
 ```
 
-Windows (no bash): `.venv\Scripts\ruff check src tests`, then `.venv\Scripts\mypy`, then `.venv\Scripts\python -m pytest --cov=src --cov-report=term --cov-fail-under=70`.
+`scripts/check.sh` automatically uses the active virtual environment or the repo-local `.venv`; shell activation is not required.
+
+Windows (no bash): `.venv\Scripts\ruff format --check src tests scripts`, then `.venv\Scripts\ruff check src tests scripts`, `.venv\Scripts\mypy`, and `.venv\Scripts\python -m pytest --cov=src --cov-report=term --cov-fail-under=70`.
 
 ## Background MCP plane (Phase 2)
 
@@ -140,6 +149,14 @@ Exit codes: `0` finished, `1` startup or missing config, `2` the agent ran and f
 - Ingest HTTP is **GET-only** market data
 - OpenClaw MCP: research/signal context only until manual-approval phase
 - OpenClaw paper notes: `data/openclaw/exports` → `jarvise rag sync-openclaw` → Qdrant `kind=openclaw` (plugin: `plugins/jarvise-openclaw`)
+
+## License
+
+Jarvise is licensed under the [MIT License](LICENSE).
+
+## Financial risk disclaimer
+
+Jarvise is software for research, analytics, and controlled trading workflows. It is not financial, investment, tax, or legal advice. Trading can result in substantial loss; users are responsible for validating the software, protecting credentials, and deciding whether any paper or live action is appropriate. Live trading remains off by default.
 
 ## Specs
 

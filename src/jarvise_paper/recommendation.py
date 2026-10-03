@@ -43,10 +43,7 @@ def doctrine_query(row: Mapping[str, Any]) -> str:
     """
     regime = row.get("regime_state") or "range"
     action = row.get("action") or "flat"
-    return (
-        f"jarvise doctrine {regime} {action} entry risk stop "
-        "capital preservation kill-switch FLAT"
-    )
+    return f"jarvise doctrine {regime} {action} entry risk stop capital preservation kill-switch FLAT"
 
 
 def _f(value: Any) -> float | None:
@@ -60,10 +57,7 @@ def _f(value: Any) -> float | None:
 
 def _headline(rec: str, action: str, conf: float) -> str:
     if action == "flat":
-        return (
-            "แนะนำ: REJECT — สัญญาณ flat "
-            "(approve ไม่เปิดตำแหน่งใหม่; ถ้ามีตำแหน่งเปิดอยู่จะถูกปิด)"
-        )
+        return "แนะนำ: REJECT — สัญญาณ flat (approve ไม่เปิดตำแหน่งใหม่; ถ้ามีตำแหน่งเปิดอยู่จะถูกปิด)"
     if rec == "approve":
         return f"แนะนำ: APPROVE (ความมั่นใจ {conf:.2f})"
     if rec == "approve_with_caution":
@@ -76,9 +70,7 @@ def _what_happened(candle: Mapping[str, Any] | None, safety: Mapping[str, Any] |
     c = candle or {}
     close, ema20, ema200 = _f(c.get("close")), _f(c.get("ema_20")), _f(c.get("ema_200"))
     if close is None or ema20 is None or ema200 is None:
-        lines.append(
-            "ตัวชี้วัดระยะยาว (EMA200) ยังไม่พร้อม — ระบบจะไม่เสนอเทรดจนกว่าข้อมูลครบ"
-        )
+        lines.append("ตัวชี้วัดระยะยาว (EMA200) ยังไม่พร้อม — ระบบจะไม่เสนอเทรดจนกว่าข้อมูลครบ")
     elif close > ema20 > ema200:
         lines.append("ราคาอยู่เหนือเส้นค่าเฉลี่ยทั้งระยะสั้นและระยะยาว = แนวโน้มขาขึ้น")
     elif close < ema20 < ema200:
@@ -134,9 +126,7 @@ def _risk(
     return risk
 
 
-def _checklist(
-    approval: Mapping[str, Any], position: Mapping[str, Any] | None
-) -> list[str]:
+def _checklist(approval: Mapping[str, Any], position: Mapping[str, Any] | None) -> list[str]:
     symbol = str(approval.get("symbol") or "")
     timeframe = str(approval.get("timeframe") or "")
     lines = [f"มีข่าวใหญ่ใน {timeframe} ข้างหน้าหรือไม่ (ระบบไม่เห็นข่าว)"]

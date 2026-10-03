@@ -140,9 +140,7 @@ def enqueue_approval(
     if safety.force_flat:
         engaged = False
         if safety.critical:
-            engaged = engage_kill_switch(
-                reason="market_safety:" + ";".join(safety.reasons)[:400]
-            )
+            engaged = engage_kill_switch(reason="market_safety:" + ";".join(safety.reasons)[:400])
         return {
             "ok": False,
             "skipped": True,
@@ -171,9 +169,7 @@ def enqueue_approval(
             "symbol": symbol,
             "timeframe": timeframe,
         }
-    port = _portfolio_breach(
-        conn, symbol=symbol, action=action, size_pct_equity=size_f
-    )
+    port = _portfolio_breach(conn, symbol=symbol, action=action, size_pct_equity=size_f)
     if port:
         return {
             "ok": False,
@@ -264,9 +260,7 @@ def approve_approval(
     if safety.force_flat:
         engaged = False
         if safety.critical:
-            engaged = engage_kill_switch(
-                reason="market_safety:" + ";".join(safety.reasons)[:400]
-            )
+            engaged = engage_kill_switch(reason="market_safety:" + ";".join(safety.reasons)[:400])
         return {
             "ok": False,
             "approval": row,
@@ -308,9 +302,7 @@ def approve_approval(
         size_pct_equity=size_f,
     )
     if port:
-        return _fail_risk(
-            conn, approval_id, reason=port, ts=ts, row=row, engage_kill=False
-        )
+        return _fail_risk(conn, approval_id, reason=port, ts=ts, row=row, engage_kill=False)
 
     if live_trading_enabled():
         return _approve_live(conn, approval_id, row=row, ts=ts)

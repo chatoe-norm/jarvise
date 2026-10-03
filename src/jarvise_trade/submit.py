@@ -53,10 +53,7 @@ def live_day_loss_breach(conn: Any, *, now_ms: int) -> str | None:
     start, end = _utc_day_bounds_ms(now_ms)
     pnl = sum_live_realized_pnl_utc_day(conn, day_start_ms=start, day_end_ms=end)
     if pnl <= -caps.max_daily_loss_usd:
-        return (
-            f"live_max_daily_loss: day_pnl ${pnl:.2f} <= "
-            f"-${caps.max_daily_loss_usd:.2f}"
-        )
+        return f"live_max_daily_loss: day_pnl ${pnl:.2f} <= -${caps.max_daily_loss_usd:.2f}"
     return None
 
 
@@ -148,11 +145,7 @@ def submit_live_for_approval(
 
     caps = load_risk_caps()
     equity = _live_equity_usd(conn)
-    notional = (
-        estimated_notional(equity=equity, size_pct_equity=size_f)
-        if size_f is not None
-        else 0.0
-    )
+    notional = estimated_notional(equity=equity, size_pct_equity=size_f) if size_f is not None else 0.0
     if side is None or notional <= 0:
         row = insert_live_order(
             conn,
@@ -180,9 +173,7 @@ def submit_live_for_approval(
         }
 
     if notional > caps.max_notional_per_order:
-        reason = (
-            f"max_notional: ${notional:.2f} > ${caps.max_notional_per_order:.2f}"
-        )
+        reason = f"max_notional: ${notional:.2f} > ${caps.max_notional_per_order:.2f}"
         row = insert_live_order(
             conn,
             {
@@ -351,7 +342,13 @@ def submit_live_for_approval(
         err = f"pre-submit order query failed: {exc}"
         row = insert_live_order(
             conn,
-            {**base_row, "id": _order_id(approval_id, ts), "created_at_ms": ts, "status": "error", "error": err},
+            {
+                **base_row,
+                "id": _order_id(approval_id, ts),
+                "created_at_ms": ts,
+                "status": "error",
+                "error": err,
+            },
         )
         return {"ok": False, "live_order": row, "error": err, "paper_only": False}
     if prior is not None:

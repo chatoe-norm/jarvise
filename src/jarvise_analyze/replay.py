@@ -36,9 +36,7 @@ def replay_range(
     by_symbol: dict[str, int] = {}
 
     for sym in symbols:
-        candles = load_candles_in_range(
-            conn, sym, timeframe, since_ms=since_ms, until_ms=until_ms
-        )
+        candles = load_candles_in_range(conn, sym, timeframe, since_ms=since_ms, until_ms=until_ms)
         if not candles:
             errors.append(f"{sym} {timeframe}: no stored candles in range")
             continue
@@ -46,9 +44,7 @@ def replay_range(
         for candle in candles:
             bars += 1
             by_symbol[sym] += 1
-            result = analyze_snapshot(
-                candle, confidence_threshold=confidence_threshold
-            )
+            result = analyze_snapshot(candle, confidence_threshold=confidence_threshold)
             if not dry_run:
                 upsert_analysis_output(conn, result)
             analyses.append(result)

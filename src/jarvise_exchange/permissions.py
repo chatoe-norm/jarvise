@@ -45,10 +45,7 @@ def audit_key_permissions(perms: dict[str, Any]) -> dict[str, Any]:
     withdraw = bool(perms.get("enableWithdrawals"))
     internal = bool(perms.get("enableInternalTransfer"))
     universal = bool(perms.get("permitsUniversalTransfer"))
-    spot = bool(
-        perms.get("enableSpotAndMarginTrading")
-        or perms.get("enableSpotTrading")
-    )
+    spot = bool(perms.get("enableSpotAndMarginTrading") or perms.get("enableSpotTrading"))
     reading = bool(perms.get("enableReading", True))
     futures = bool(perms.get("enableFutures"))
     margin = bool(perms.get("enableMargin"))

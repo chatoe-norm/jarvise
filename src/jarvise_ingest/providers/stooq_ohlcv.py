@@ -71,9 +71,7 @@ def fetch_stooq_ohlcv(
 ) -> list[dict[str, Any]]:
     """Newest ``limit`` closed daily (or hourly) bars from Stooq CSV."""
     if timeframe not in _INTERVAL:
-        raise ValueError(
-            f"stooq supports timeframes {sorted(_INTERVAL)}; got {timeframe!r}"
-        )
+        raise ValueError(f"stooq supports timeframes {sorted(_INTERVAL)}; got {timeframe!r}")
     if limit < 1:
         raise ValueError("limit must be >= 1")
     ticker = stooq_ticker(symbol)

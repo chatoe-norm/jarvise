@@ -343,9 +343,7 @@ def _migrate_analysis_timeframe(conn: sqlite3.Connection) -> None:
     cols = _table_columns(conn, "analysis_output")
     if not cols or "timeframe" in cols:
         return
-    conn.execute(
-        "ALTER TABLE analysis_output ADD COLUMN timeframe TEXT NOT NULL DEFAULT ''"
-    )
+    conn.execute("ALTER TABLE analysis_output ADD COLUMN timeframe TEXT NOT NULL DEFAULT ''")
 
 
 def _migrate_macro_global_mcap(conn: sqlite3.Connection) -> None:
@@ -353,9 +351,7 @@ def _migrate_macro_global_mcap(conn: sqlite3.Connection) -> None:
     cols = _table_columns(conn, "macro_onchain_sentiment")
     if not cols or "global_market_cap_usd" in cols:
         return
-    conn.execute(
-        "ALTER TABLE macro_onchain_sentiment ADD COLUMN global_market_cap_usd REAL"
-    )
+    conn.execute("ALTER TABLE macro_onchain_sentiment ADD COLUMN global_market_cap_usd REAL")
 
 
 def _migrate_paper_orders_fee_bps(conn: sqlite3.Connection) -> None:
@@ -384,9 +380,7 @@ def _migrate_live_orders_reconcile(conn: sqlite3.Connection) -> None:
     for name, typ in _LIVE_ORDER_RECONCILE_COLUMNS:
         if name not in cols:
             conn.execute(f"ALTER TABLE live_orders ADD COLUMN {name} {typ}")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_live_orders_client ON live_orders (client_order_id)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_live_orders_client ON live_orders (client_order_id)")
 
 
 def _migrate_exchange_balances(conn: sqlite3.Connection) -> None:
@@ -418,9 +412,7 @@ def _migrate_decision_feedback(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE paper_orders ADD COLUMN approval_id TEXT")
         if "decision_source" not in cols:
             conn.execute("ALTER TABLE paper_orders ADD COLUMN decision_source TEXT")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_paper_orders_approval ON paper_orders (approval_id)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_approval ON paper_orders (approval_id)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS paper_decision_outcomes (
@@ -464,9 +456,7 @@ def _migrate_decision_feedback(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at ON paper_auto_runs (at_ms DESC)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at ON paper_auto_runs (at_ms DESC)")
 
 
 # Ordered, numbered migrations. PRAGMA user_version records the last applied step so a
@@ -537,9 +527,7 @@ def upsert_market_technicals(conn: sqlite3.Connection, rows: list[dict]) -> int:
     return len(rows)
 
 
-def load_candle_series(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
-) -> list[sqlite3.Row]:
+def load_candle_series(conn: sqlite3.Connection, symbol: str, timeframe: str) -> list[sqlite3.Row]:
     cur = conn.execute(
         "SELECT timestamp, high, low, close FROM market_technicals "
         "WHERE symbol=? AND timeframe=? ORDER BY timestamp",
@@ -608,9 +596,7 @@ def append_derivatives(
     """
     written = 0
     for row in rows:
-        previous = conn.execute(
-            latest_sql, (row["symbol"], row["timestamp"])
-        ).fetchone()
+        previous = conn.execute(latest_sql, (row["symbol"], row["timestamp"])).fetchone()
         if previous is not None and _metrics_equal(previous, row):
             continue
         payload = {
@@ -628,9 +614,7 @@ def append_derivatives(
     return written
 
 
-def as_of_derivatives(
-    conn: sqlite3.Connection, symbol: str, as_of_ms: int
-) -> list[dict]:
+def as_of_derivatives(conn: sqlite3.Connection, symbol: str, as_of_ms: int) -> list[dict]:
     """Latest version of each event-time row that was known by `as_of_ms`."""
     sql = """
     SELECT d.symbol, d.timestamp, d.ingested_at,
@@ -687,8 +671,7 @@ def count_indicator_ready(
     if column not in _INDICATOR_COLUMNS:
         raise ValueError(f"unknown indicator column: {column}")
     cur = conn.execute(
-        f"SELECT COUNT(*) FROM market_technicals "
-        f"WHERE symbol=? AND timeframe=? AND {column} IS NOT NULL",
+        f"SELECT COUNT(*) FROM market_technicals WHERE symbol=? AND timeframe=? AND {column} IS NOT NULL",
         (symbol.upper(), timeframe),
     )
     return int(cur.fetchone()[0])
@@ -812,9 +795,7 @@ def latest_derivatives_as_of(
     return rows[-1] if rows else None
 
 
-def load_latest_candle(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
-) -> dict | None:
+def load_latest_candle(conn: sqlite3.Connection, symbol: str, timeframe: str) -> dict | None:
     cur = conn.execute(
         """
         SELECT symbol, timestamp, timeframe, open, high, low, close, volume,
@@ -953,9 +934,7 @@ def list_analysis_output(
 STARTING_PAPER_EQUITY = 10_000.0
 
 
-def reset_paper_ledger(
-    conn: sqlite3.Connection, *, starting_equity: float = STARTING_PAPER_EQUITY
-) -> None:
+def reset_paper_ledger(conn: sqlite3.Connection, *, starting_equity: float = STARTING_PAPER_EQUITY) -> None:
     """Wipe paper fills/positions and reset cash/equity (for isolated backtests)."""
     conn.execute("DELETE FROM paper_orders")
     conn.execute("DELETE FROM paper_positions")
@@ -979,9 +958,7 @@ def ensure_paper_account(
     conn: sqlite3.Connection, *, starting_equity: float = STARTING_PAPER_EQUITY
 ) -> dict[str, float]:
     """Ensure paper_account keys exist; return cash/equity/starting_equity."""
-    row = conn.execute(
-        "SELECT value FROM paper_account WHERE key='starting_equity'"
-    ).fetchone()
+    row = conn.execute("SELECT value FROM paper_account WHERE key='starting_equity'").fetchone()
     if row is None:
         conn.executemany(
             "INSERT INTO paper_account (key, value) VALUES (?, ?)",
@@ -1213,9 +1190,7 @@ def list_paper_decision_outcomes(
     return [dict(row) for row in cur.fetchall()]
 
 
-def load_latest_analysis(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
-) -> dict | None:
+def load_latest_analysis(conn: sqlite3.Connection, symbol: str, timeframe: str) -> dict | None:
     cur = conn.execute(
         """
         SELECT analysis_id, timestamp, symbol, timeframe, regime_state,
@@ -1265,8 +1240,7 @@ def record_membership(
 ) -> int:
     """Insert one membership interval; return 1 if new, 0 if already present."""
     existing = conn.execute(
-        "SELECT 1 FROM universe_membership "
-        "WHERE universe_id=? AND symbol=? AND listed_at=?",
+        "SELECT 1 FROM universe_membership WHERE universe_id=? AND symbol=? AND listed_at=?",
         (universe_id, symbol.upper(), listed_at),
     ).fetchone()
     if existing is not None:
@@ -1283,9 +1257,7 @@ def record_membership(
     return 1
 
 
-def universe_as_of(
-    conn: sqlite3.Connection, universe_id: str, as_of_ms: int
-) -> list[str]:
+def universe_as_of(conn: sqlite3.Connection, universe_id: str, as_of_ms: int) -> list[str]:
     """Symbols eligible in `universe_id` at knowledge/event cutoff `as_of_ms`."""
     cur = conn.execute(
         """
@@ -1516,11 +1488,7 @@ def resolve_approval(
     paper_order_ids_json: str | None = None,
     resolved_at_ms: int | None = None,
 ) -> dict | None:
-    resolved = (
-        int(resolved_at_ms)
-        if resolved_at_ms is not None
-        else int(time.time() * 1000)
-    )
+    resolved = int(resolved_at_ms) if resolved_at_ms is not None else int(time.time() * 1000)
     cur = conn.execute(
         """
         UPDATE approval_queue SET
@@ -1553,9 +1521,7 @@ def expire_pending_approvals(conn: sqlite3.Connection, *, now_ms: int) -> int:
     return int(cur.rowcount)
 
 
-def list_expired_pending_approvals(
-    conn: sqlite3.Connection, *, now_ms: int
-) -> list[dict]:
+def list_expired_pending_approvals(conn: sqlite3.Connection, *, now_ms: int) -> list[dict]:
     cur = conn.execute(
         f"""
         SELECT {_APPROVAL_COLUMNS}
@@ -1779,9 +1745,7 @@ def update_live_order_fill(
     return get_live_order(conn, order_id)
 
 
-def sum_live_realized_pnl_utc_day(
-    conn: sqlite3.Connection, *, day_start_ms: int, day_end_ms: int
-) -> float:
+def sum_live_realized_pnl_utc_day(conn: sqlite3.Connection, *, day_start_ms: int, day_end_ms: int) -> float:
     """Sum realized_pnl_usd for live_orders created in [day_start_ms, day_end_ms)."""
     cur = conn.execute(
         """

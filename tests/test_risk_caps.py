@@ -183,9 +183,7 @@ def test_timeout_same_side_holds(tmp_path: Path) -> None:
         timeframe="4h",
         now_ms=2_000,
     )
-    conn.execute(
-        "UPDATE approval_queue SET expires_at_ms = 1500 WHERE id = ?", (row["id"],)
-    )
+    conn.execute("UPDATE approval_queue SET expires_at_ms = 1500 WHERE id = ?", (row["id"],))
     conn.commit()
     _seed_candle(conn, "BTCUSDT", "4h", 105.0, ts=1_700_000_100_000)
     out = expire_approvals(conn, now_ms=3_000)
@@ -230,9 +228,7 @@ def test_timeout_opposite_side_applies_flat(tmp_path: Path) -> None:
         timeframe="4h",
         now_ms=2_000,
     )
-    conn.execute(
-        "UPDATE approval_queue SET expires_at_ms = 1500 WHERE id = ?", (row["id"],)
-    )
+    conn.execute("UPDATE approval_queue SET expires_at_ms = 1500 WHERE id = ?", (row["id"],))
     conn.commit()
     _seed_candle(conn, "BTCUSDT", "4h", 105.0, ts=1_700_000_100_000)
     out = expire_approvals(conn, now_ms=3_000)
@@ -246,9 +242,7 @@ def test_timeout_opposite_side_applies_flat(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_portfolio_blocks_third_symbol_without_kill_switch(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_portfolio_blocks_third_symbol_without_kill_switch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("JARVISE_MAX_OPEN_POSITIONS", "2")
     monkeypatch.setenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", "50")
     monkeypatch.setenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", "50")

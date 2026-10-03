@@ -101,9 +101,7 @@ def test_paper_run_and_status(tmp_path: Path, capsys, monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     db = tmp_path / "a.db"
     _seed(db)
-    code = run(
-        ["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)]
-    )
+    code = run(["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -139,9 +137,7 @@ def test_paper_run_kill_switch(tmp_path: Path, capsys, monkeypatch):
         "kill_switch_engaged",
         lambda: True,
     )
-    code = run(
-        ["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)]
-    )
+    code = run(["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)])
     assert code == 3
     payload = json.loads(capsys.readouterr().out)
     assert payload["skipped"] is True

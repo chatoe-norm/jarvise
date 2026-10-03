@@ -65,9 +65,7 @@ def test_record_membership_is_idempotent_for_same_interval(tmp_path: Path):
     )
     assert record_membership(conn, **kwargs) == 1
     assert record_membership(conn, **kwargs) == 0
-    assert (
-        conn.execute("SELECT COUNT(*) FROM universe_membership").fetchone()[0] == 1
-    )
+    assert conn.execute("SELECT COUNT(*) FROM universe_membership").fetchone()[0] == 1
     conn.close()
 
 

@@ -138,11 +138,7 @@ def apply_signal(
     fills: list[dict[str, Any]] = []
     cash = float(account["cash"])
     realized_delta = 0.0
-    use_fee_bps = (
-        load_paper_fee_bps(symbol=symbol)
-        if fee_bps is None
-        else max(0.0, float(fee_bps))
-    )
+    use_fee_bps = load_paper_fee_bps(symbol=symbol) if fee_bps is None else max(0.0, float(fee_bps))
     stamp_approval = str(approval_id) if approval_id else None
     stamp_source = str(decision_source) if decision_source else None
 
@@ -151,9 +147,7 @@ def apply_signal(
     use_slip = effective_slip_bps(slip_bps=slip_bps, bid_ask_spread=spread)
 
     # Working copy of positions for dry-run
-    working: dict[str, dict] = {
-        str(p["symbol"]).upper(): dict(p) for p in list_paper_positions(conn)
-    }
+    working: dict[str, dict] = {str(p["symbol"]).upper(): dict(p) for p in list_paper_positions(conn)}
 
     def _record_fill(side: str, qty: float, price: float, reason: str) -> None:
         nonlocal cash
@@ -188,9 +182,7 @@ def apply_signal(
         want = None if action == "flat" else action
         if want != pos_side:
             close_side = "sell" if pos_side == "long" else "buy"
-            px = fill_price(
-                mid_price, side=close_side, slip_bps=slip_bps, bid_ask_spread=spread
-            )
+            px = fill_price(mid_price, side=close_side, slip_bps=slip_bps, bid_ask_spread=spread)
             qty = float(pos["qty"])
             entry = float(pos["entry_price"])
             if pos_side == "long":
@@ -207,9 +199,7 @@ def apply_signal(
         equity_now = mark_equity(cash, list(working.values()), {symbol: mid_price})
         target_notional = max(0.0, equity_now) * (size_pct / 100.0)
         open_side = "buy" if action == "long" else "sell"
-        px = fill_price(
-            mid_price, side=open_side, slip_bps=slip_bps, bid_ask_spread=spread
-        )
+        px = fill_price(mid_price, side=open_side, slip_bps=slip_bps, bid_ask_spread=spread)
         if px > 0 and target_notional > 0:
             qty = target_notional / px
             _record_fill(open_side, qty, px, f"open_{action}")
