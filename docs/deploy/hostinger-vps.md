@@ -208,7 +208,15 @@ sudo /opt/jarvise/infra/deploy/vps-deploy.sh
 
 ## 9. Backups
 
-See [ops.md](ops.md) for volume backup and restore.
+Install the nightly cron once (root):
+
+```bash
+# /etc/cron.d/jarvise-backup
+15 3 * * * root cd /opt/jarvise && bash infra/backup/backup.sh >> /var/log/jarvise-backup.log 2>&1
+45 3 * * 0 root cd /opt/jarvise && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T jobs jarvise db prune --older-than 180d --json >> /var/log/jarvise-prune.log 2>&1
+```
+
+Set `JARVISE_BACKUP_DEST` in `/opt/jarvise/.env` for the off-box rsync copy. Details and restore: [ops.md](ops.md), [disaster-recovery.md](../ops/disaster-recovery.md).
 
 ## Hard rules
 

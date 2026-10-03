@@ -34,19 +34,13 @@ Then `systemctl restart docker`.
 
 Volumes: `jarvise_redis`, `jarvise_qdrant`, `jarvise_n8n`, plus bind mounts `data/analytics/`, `data/openclaw/`.
 
-```bash
-# Example: snapshot Qdrant + analytics to a dated tarball
-BACKUP_DIR=~/jarvise-backups/$(date +%F)
-mkdir -p "$BACKUP_DIR"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop qdrant
-docker run --rm -v jarvise_qdrant:/qdrant/storage -v "$BACKUP_DIR":/backup alpine \
-  tar czf /backup/qdrant.tgz -C /qdrant/storage .
-docker compose -f docker-compose.yml -f docker-compose.prod.yml start qdrant
-tar czf "$BACKUP_DIR/analytics.tgz" -C ~/jarvise data/analytics
-tar czf "$BACKUP_DIR/openclaw.tgz" -C ~/jarvise data/openclaw
-```
+Scripted (preferred): [`infra/backup/backup.sh`](../../infra/backup/backup.sh) nightly via root cron → `/opt/jarvise/backups/YYYY-MM-DD/` (SQLite online `.backup` + integrity check, Qdrant/Redis volume tars, checksums, 14-day retention, optional `rsync` to `JARVISE_BACKUP_DEST`). Restore and verify with [`infra/backup/restore.sh`](../../infra/backup/restore.sh). Full procedure, RPO/RTO, and the post-restore smoke list: [disaster-recovery.md](../ops/disaster-recovery.md).
 
-Restore by extracting into the same volume/bind paths, then `up -d`.
+```bash
+cd /opt/jarvise
+bash infra/backup/backup.sh                                   # take one now
+bash infra/backup/restore.sh --from backups/$(date -u +%F) --verify
+```
 
 ## Update path
 
