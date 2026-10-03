@@ -142,6 +142,7 @@ UIs in this phase: n8n (`:5678`), Command Dashboard (`:8080` — Home / Paper / 
 | Doctrine | NotebookLM → `jarvise rag sync-notebook` → Qdrant | Rules / risk; not a price feed |
 | Research overlay | [tradingview-mcp](https://github.com/atilaahmettaner/tradingview-mcp) (Cursor MCP) | Screener / MTF / chat backtest — **do not** silent-merge into `market_technicals` or drive paper/live fills alone |
 | Research overlay / venue candidate | [Eterna MCP](https://github.com/EternaHybridExchange/eterna-mcp) (`mcp.eterna.exchange`, **not wired**) | Agent read-only research and future venue evaluation only — **never** paper fills or live orders via MCP; trading and funding SDK methods denied until the live checklist. Map: [eterna-for-jarvise.md](exchange/eterna-for-jarvise.md) |
+| Research overlay | [coincap-mcp](https://github.com/QuantGeekDev/coincap-mcp) (`npx coincap-mcp`, **not wired**) | Spot-check prices / list assets via CoinCap public API — **do not** silent-merge into SQLite or paper; not a macro source. Map: [coincap-for-jarvise.md](market-data/coincap-for-jarvise.md) |
 
 Trade **worldwide** (not Binance-only). New venues/accounts must plug into Jarvise with efficiency, stability, and security (no withdrawal keys; live stays ladder-gated).
 

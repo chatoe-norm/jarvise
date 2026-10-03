@@ -180,6 +180,31 @@
       "future_adapter": "VenueClient.list_spot_balances() over a GET-only path first (evaluate https://ai.eterna.exchange/.well-known/api-catalog); spot only; live only after docs/ops/live-enable-checklist.md"
     },
     {
+      "name": "CoinCap MCP",
+      "role": "Research overlay only: community stdio MCP (npx coincap-mcp) over CoinCap public REST for spot-check prices and asset list. Not wired; never a SQLite writer, macro provider, or paper trigger.",
+      "status": "overlay_not_wired",
+      "transport": "stdio",
+      "package": "coincap-mcp",
+      "base_url": "https://api.coincap.io/v2",
+      "auth": "none",
+      "docs": [
+        "https://github.com/QuantGeekDev/coincap-mcp",
+        "https://smithery.ai/server/coincap-mcp"
+      ],
+      "jarvise_map": "docs/market-data/coincap-for-jarvise.md",
+      "tools": [
+        "bitcoin price → GET /v2/assets/bitcoin",
+        "get crypto price → GET /v2/assets/{id}",
+        "list assets → GET /v2/assets"
+      ],
+      "forbidden": [
+        "silent-merge of CoinCap prices / market caps / asset lists into market_technicals, macro_onchain_sentiment, or the paper ledger",
+        "use as market_safety macro (BTC dominance / global mcap) — that stays CoinGecko GET /api/v3/global",
+        "install on VPS jobs / n8n path",
+        "index CoinCap docs into jarvise_doctrine"
+      ]
+    },
+    {
       "name": "CoinMarketCap",
       "role": "Dominance, Fear & Greed, Altcoin Season, global metrics",
       "mvp_endpoints": [
