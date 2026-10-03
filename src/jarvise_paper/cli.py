@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
-from jarvise_risk import apply_safety_to_analysis, evaluate_from_db
+from jarvise_risk import apply_safety_to_analysis, evaluate_from_db, read_kill_switch
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_paper_account,
@@ -50,16 +50,8 @@ def _parse_symbols(raw: list[str] | None) -> list[str]:
 
 
 def kill_switch_engaged() -> bool:
-    url = os.environ.get("REDIS_URL")
-    if not url:
-        return False
-    try:
-        import redis
-
-        val = redis.Redis.from_url(url, decode_responses=True).get("jarvise:kill_switch")
-        return val in {"1", "true", "on", "yes"}
-    except Exception:
-        return True
+    """Local CLI: no REDIS_URL = standalone (not engaged); unreachable Redis = engaged."""
+    return read_kill_switch(strict=False)
 
 
 def build_parser() -> argparse.ArgumentParser:

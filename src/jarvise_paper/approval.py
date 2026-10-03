@@ -80,21 +80,24 @@ def _fail_risk(
     ts: int,
     row: dict | None = None,
 ) -> dict[str, Any]:
-    engage_kill_switch(reason=reason)
+    engaged = engage_kill_switch(reason=reason)
     failed = mark_approval_failed(
         conn,
         approval_id,
         resolve_reason=reason,
         resolved_at_ms=ts,
     )
-    return {
+    out: dict[str, Any] = {
         "ok": False,
         "approval": failed or row or get_approval(conn, approval_id),
         "fills": [],
         "error": reason,
         "paper_only": True,
-        "kill_switch_engaged": True,
+        "kill_switch_engaged": bool(engaged),
     }
+    if not engaged:
+        out["kill_switch_error"] = "engage failed (Redis unset/unreachable); owner alerted"
+    return out
 
 
 def enqueue_approval(
@@ -110,13 +113,16 @@ def enqueue_approval(
     analysis = apply_safety_to_analysis(analysis, safety)
     action = str(analysis.get("action") or "flat")
     if safety.force_flat:
+        engaged = False
         if safety.critical:
-            engage_kill_switch(reason="market_safety:" + ";".join(safety.reasons)[:400])
+            engaged = engage_kill_switch(
+                reason="market_safety:" + ";".join(safety.reasons)[:400]
+            )
         return {
             "ok": False,
             "skipped": True,
             "error": "market_safety: " + ("; ".join(safety.reasons) or "unsafe"),
-            "kill_switch_engaged": bool(safety.critical),
+            "kill_switch_engaged": bool(engaged),
             "paper_only": True,
             "symbol": symbol,
             "timeframe": timeframe,
@@ -129,12 +135,12 @@ def enqueue_approval(
         size_pct_equity=float(size) if size is not None else None,
     )
     if breach:
-        engage_kill_switch(reason=breach)
+        engaged = engage_kill_switch(reason=breach)
         return {
             "ok": False,
             "skipped": True,
             "error": breach,
-            "kill_switch_engaged": True,
+            "kill_switch_engaged": bool(engaged),
             "paper_only": True,
             "symbol": symbol,
             "timeframe": timeframe,
@@ -213,14 +219,18 @@ def approve_approval(
         }
     safety = evaluate_from_db(conn, str(row["symbol"]), now_ms=ts)
     if safety.force_flat:
+        engaged = False
         if safety.critical:
-            engage_kill_switch(reason="market_safety:" + ";".join(safety.reasons)[:400])
+            engaged = engage_kill_switch(
+                reason="market_safety:" + ";".join(safety.reasons)[:400]
+            )
         return {
             "ok": False,
             "approval": row,
             "fills": [],
             "error": "market_safety: " + ("; ".join(safety.reasons) or "unsafe"),
             "paper_only": True,
+            "kill_switch_engaged": bool(engaged),
             "market_safety": safety.as_dict(),
         }
     if int(row["expires_at_ms"]) <= ts:

@@ -49,6 +49,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "jarvise_doctrine")
 PAPER_ONLY = os.environ.get("JARVISE_PAPER_ONLY", "true").lower() in {"1", "true", "yes"}
 KILL_SWITCH_KEY = "jarvise:kill_switch"
+KILL_SWITCH_REASON_KEY = "jarvise:kill_switch:reason"
 INGEST_KEY = "jarvise:ingest:last"
 RAG_KEY = "jarvise:rag:last"
 PAPER_KEY = "jarvise:paper:last"
@@ -87,7 +88,12 @@ def db_path() -> Path:
 def _redis():
     import redis
 
-    return redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    return redis.Redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=3.0,
+        socket_timeout=3.0,
+    )
 
 
 def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
@@ -157,9 +163,15 @@ def format_status_pre(payload: Any) -> str:
     return str(payload)
 
 
+def redis_get_strict(key: str) -> str | None:
+    """Raise on Redis failure. Used where "unknown" must not read as "off" (kill-switch)."""
+    return _redis().get(key)
+
+
 def redis_get(key: str) -> str | None:
+    """Soft read for status panels: Redis failure → None."""
     try:
-        return _redis().get(key)
+        return redis_get_strict(key)
     except Exception:
         return None
 
@@ -243,19 +255,34 @@ def load_paper_ledger() -> tuple[dict[str, Any], str | None]:
         return {"account": None, "positions": [], "orders": []}, str(exc)
 
 
-def kill_switch_engaged() -> bool:
+def kill_switch_state() -> dict[str, Any]:
+    """Fail-closed kill-switch read: Redis unreachable → engaged=True, known=False."""
     try:
-        return (redis_get(KILL_SWITCH_KEY) or "0") in {"1", "true", "on", "yes"}
-    except Exception:
-        return True
+        raw = redis_get_strict(KILL_SWITCH_KEY)
+    except Exception as exc:  # noqa: BLE001 — unknown must block, never read as "off"
+        return {
+            "engaged": True,
+            "known": False,
+            "reason": None,
+            "error": f"{type(exc).__name__}",
+        }
+    engaged = str(raw or "0").strip().lower() in {"1", "true", "on", "yes"}
+    reason = redis_get(KILL_SWITCH_REASON_KEY) if engaged else None
+    return {"engaged": engaged, "known": True, "reason": reason, "error": None}
+
+
+def kill_switch_engaged() -> bool:
+    return bool(kill_switch_state()["engaged"])
 
 
 def status_payload() -> dict[str, Any]:
     live = live_trading_enabled()
+    ks = kill_switch_state()
     return {
         "paper_only": PAPER_ONLY and not live,
         "live_trading": live,
-        "kill_switch": kill_switch_engaged(),
+        "kill_switch": bool(ks["engaged"]),
+        "kill_switch_state": ks,
         "ingest": redis_get_json(INGEST_KEY),
         "rag": redis_get_json(RAG_KEY),
         "paper": redis_get_json(PAPER_KEY),
@@ -548,10 +575,21 @@ async def approvals_approve(
     id: str = Form(...),
     _: None = Depends(require_auth),
 ) -> Any:
-    engaged = kill_switch_engaged()
+    ks = kill_switch_state()
+    if not ks["known"]:
+        # Fail closed: an unreadable switch must never let an approve through.
+        detail = {
+            "ok": False,
+            "error": f"kill_switch unreadable ({ks.get('error') or 'redis'}); approve blocked",
+            "kill_switch_state": ks,
+            "id": id,
+        }
+        if wants_json(request):
+            return JSONResponse(detail, status_code=503)
+        return RedirectResponse("/", status_code=303)
     conn = open_db(db_path())
     try:
-        result = approve_approval(conn, id, kill_switch=engaged)
+        result = approve_approval(conn, id, kill_switch=bool(ks["engaged"]))
     finally:
         conn.close()
     if wants_json(request):

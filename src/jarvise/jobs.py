@@ -18,25 +18,25 @@ from jarvise_ingest.db import list_approvals, open_db
 from jarvise_ingest.health import ingest_health
 from jarvise_notify import notify_auto_decide, notify_ingest_health, notify_pending_digest
 from jarvise_paper.auto_decide import run_auto_decide
+from jarvise_risk import kill_switch_state
 
 
 def kill_switch_engaged() -> bool:
-    redis_url = os.environ.get("REDIS_URL")
-    if not redis_url:
-        return False
-    try:
-        import redis
-    except ImportError:
-        return False
-    value = redis.Redis.from_url(redis_url, decode_responses=True).get("jarvise:kill_switch")
-    return value in {"1", "true", "on", "yes"}
+    """Fail closed: unset REDIS_URL, missing driver, or a connection error all count as engaged."""
+    return bool(kill_switch_state(strict=True)["engaged"])
 
 
 def _skipped() -> dict[str, Any]:
+    state = kill_switch_state(strict=True)
+    if state["known"]:
+        reason = "kill_switch engaged"
+    else:
+        reason = f"kill_switch unreadable: {state.get('error') or 'unknown'}"
     return {
         "ok": False,
         "skipped": True,
-        "reason": "kill_switch engaged",
+        "reason": reason,
+        "kill_switch_known": bool(state["known"]),
         "paper_only": True,
         "at_ms": int(time.time() * 1000),
     }
