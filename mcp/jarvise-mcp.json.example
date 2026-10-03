@@ -40,6 +40,22 @@
         "NOTE": "Research overlay only — screener/MTF/chat backtest. Do not write OHLCV into jarvise.db or drive paper/live fills from TV signals alone. Pin Python 3.13 (3.14 unsupported)."
       }
     },
+    "coingecko": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.api.coingecko.com/mcp"],
+      "env": {
+        "JARVISE_PAPER_ONLY": "true",
+        "NOTE": "Research overlay only — never silent-merge MCP into SQLite/paper. Numeric macro stays GET /api/v3/global via ingest. Map: docs/market-data/coingecko-for-jarvise.md"
+      }
+    },
+    "coingecko-docs": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://docs.coingecko.com/mcp"],
+      "env": {
+        "JARVISE_PAPER_ONLY": "true",
+        "NOTE": "Technical docs lookup only — do not index CoinGecko Learn into jarvise_doctrine"
+      }
+    },
     "openclaw": {
       "command": "openclaw",
       "args": [
@@ -76,6 +92,7 @@
       "For a remote Tailscale gateway, change --url to ws://$TAILSCALE_IP:18789 and pass a token file.",
       "Write path remains: jarvise ingest → data/analytics/jarvise.db (venue-agnostic contract; Binance klines are the current default provider, not a forever lock)",
       "TradingView MCP (community tradingview-mcp-server): research overlay only — never silent-merge into market_technicals",
+      "CoinGecko MCP / Docs MCP: research overlay only — never fill paper; do not enable Agent SKILL or x402",
       "RAG path: jarvise rag refresh → Qdrant jarvise_doctrine (includes sync-openclaw)",
       "OpenClaw paper notes: data/openclaw/exports → jarvise rag sync-openclaw"
     ]

@@ -48,7 +48,7 @@ Same rule as TradingView MCP: agents may use CoinGecko AI tools for research; nu
 
 | Tool | Endpoint / install | Jarvise stance |
 |------|--------------------|----------------|
-| CoinGecko MCP (free, keyless) | `https://mcp.api.coingecko.com/mcp` | **Optional research overlay** — shared rate limits; not wired yet; never fill paper |
+| CoinGecko MCP (free, keyless) | `https://mcp.api.coingecko.com/mcp` | **Optional research overlay** — Cursor `mcp-remote`; never fill paper |
 | CoinGecko MCP (API key) | `https://mcp.pro-api.coingecko.com/mcp` or local `@coingecko/coingecko-mcp` | **Optional research overlay** — higher limits; keys in env only if enabled later |
 | Docs MCP | `https://docs.coingecko.com/mcp` | **Optional** agent doc lookup — technical only, not doctrine |
 | Agent SKILL | `npx skills add coingecko/skills` | **Exclude by default** — full API surface; may push SDK patterns that conflict with ingest |
@@ -59,9 +59,9 @@ Same rule as TradingView MCP: agents may use CoinGecko AI tools for research; nu
 
 Prefer Streamable HTTP `/mcp` over legacy `/sse` if MCP is enabled later. MCP tool calls count toward CoinGecko API rate limits / credits.
 
-## MCP notes (reference only — not installed)
+## MCP notes (Cursor overlay)
 
-Cursor / Claude-style remote config examples from CoinGecko docs:
+Cursor / Claude-style remote config (see also `mcp/jarvise-mcp.json.example`):
 
 - Free: `npx mcp-remote https://mcp.api.coingecko.com/mcp`
 - Keyed: `npx mcp-remote https://mcp.pro-api.coingecko.com/mcp`
