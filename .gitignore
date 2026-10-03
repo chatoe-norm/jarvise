@@ -67,3 +67,8 @@ data/analytics/sources/openclaw/*
 # SQLite WAL side files
 *.db-wal
 *.db-shm
+
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
