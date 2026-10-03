@@ -213,6 +213,9 @@ services:
     mem_limit: 1g
     cpus: 1.0
     pids_limit: 256
+    # The gateway holds an owner lease in its state dir; a SIGKILL after the default 10s leaves it
+    # stale and the next start loops "lease still active" for minutes. Give it time to drain.
+    stop_grace_period: 90s
     ports:
       - "127.0.0.1:${OPENCLAW_PORT:-18789}:18789"
     environment:
