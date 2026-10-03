@@ -6,7 +6,7 @@
 - End-state product goal is auto-trade plus an analytics UI plus exchange accounts (e.g. Binance as one option); climb paper → manual approval → autonomy — do not jump to live orders.
 - Treat the Gemini notebook as trading doctrine, not a live price or order-book feed.
 - Use fetch/Firecrawl subagents for historical and current market data; combine that with notebook rules before any trade call.
-- Prefer Auto/Composer for cost; do not switch to Claude/GPT unless asked or Auto/Composer fails.
+- Prefer Grok for implementation (chat picker + pstack workers); use Claude only for review, synthesizer, or hardest tasks; do not switch to GPT/Opus unless asked.
 - Prefer paper analytics fixes that make backtests reproducible (closed candles only, warm-up withholding, gap reporting, `--since` backfill) over knowledge-vault scaffolding.
 - Prefer free-first GET-only market-safety providers (Binance book, Binance Futures public derivatives when no CoinGlass key, CoinGecko macro; CoinGlass optional when keyed) over scraping TradingView into SQLite truth.
 - Prefer Command Dashboard UX: approval-first Home with KPIs/charts/infographics; do not ship raw JSON/`pre` dumps as the primary owner surface; modern minimal professional control-room look.
