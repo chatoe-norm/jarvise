@@ -63,3 +63,7 @@ data/analytics/sources/openclaw/*
 
 # SDD scratch
 .superpowers/
+
+# SQLite WAL side files
+*.db-wal
+*.db-shm

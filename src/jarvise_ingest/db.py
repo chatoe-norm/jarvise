@@ -187,8 +187,20 @@ CREATE TABLE IF NOT EXISTS live_orders (
 );
 CREATE INDEX IF NOT EXISTS idx_live_orders_created
     ON live_orders (created_at_ms);
-CREATE INDEX IF NOT EXISTS idx_live_orders_client
-    ON live_orders (client_order_id);
+-- idx_live_orders_client is created by migration 5 (after the column exists on legacy DBs).
+
+-- Read-only exchange spot wallet snapshots (P3). Amounts as TEXT decimal strings.
+CREATE TABLE IF NOT EXISTS exchange_balances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    free TEXT NOT NULL,
+    locked TEXT NOT NULL,
+    total TEXT NOT NULL,
+    fetched_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_balances_venue_fetched
+    ON exchange_balances (venue, fetched_at_ms DESC);
 
 -- Second-layer LLM reviews for paper approvals (auto-decide audit). Paper only.
 CREATE TABLE IF NOT EXISTS approval_llm_reviews (
@@ -212,15 +224,45 @@ _DERIV_METRIC_KEYS = (
 )
 
 
+BUSY_TIMEOUT_MS = 5000
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
+    """Open SQLite with durability + concurrency pragmas.
+
+    WAL lets jobs, web, and the CLI read while one writer commits; busy_timeout turns
+    "database is locked" into a short wait; synchronous=NORMAL is safe under WAL.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=BUSY_TIMEOUT_MS / 1000.0)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        # Read-only filesystems or exotic mounts may refuse WAL; keep working with the default.
+        pass
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+
+
+def db_pragmas(conn: sqlite3.Connection) -> dict[str, Any]:
+    return {
+        "user_version": schema_version(conn),
+        "journal_mode": str(conn.execute("PRAGMA journal_mode").fetchone()[0]),
+        "synchronous": int(conn.execute("PRAGMA synchronous").fetchone()[0]),
+        "busy_timeout_ms": int(conn.execute("PRAGMA busy_timeout").fetchone()[0]),
+        "foreign_keys": bool(conn.execute("PRAGMA foreign_keys").fetchone()[0]),
+    }
 
 
 def _migrate_derivatives_bitemporal(conn: sqlite3.Connection) -> None:
@@ -306,14 +348,60 @@ def _migrate_live_orders_reconcile(conn: sqlite3.Connection) -> None:
     )
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+def _migrate_exchange_balances(conn: sqlite3.Connection) -> None:
+    """exchange_balances used to live in jarvise_exchange.db; SCHEMA_SQL now owns it."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS exchange_balances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            venue TEXT NOT NULL,
+            asset TEXT NOT NULL,
+            free TEXT NOT NULL,
+            locked TEXT NOT NULL,
+            total TEXT NOT NULL,
+            fetched_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_exchange_balances_venue_fetched "
+        "ON exchange_balances (venue, fetched_at_ms DESC)"
+    )
+
+
+# Ordered, numbered migrations. PRAGMA user_version records the last applied step so a
+# multi-step evolution runs exactly once per database. ``repair=True`` marks cheap,
+# idempotent additive steps (column sniff + ALTER ADD) that also re-run on every open so
+# schema drift self-heals; the destructive bitemporal rebuild is version-gated only.
+MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
+    (1, "derivatives_bitemporal", _migrate_derivatives_bitemporal, False),
+    (2, "analysis_timeframe", _migrate_analysis_timeframe, True),
+    (3, "macro_global_mcap", _migrate_macro_global_mcap, True),
+    (4, "paper_orders_fee_bps", _migrate_paper_orders_fee_bps, True),
+    (5, "live_orders_reconcile", _migrate_live_orders_reconcile, True),
+    (6, "exchange_balances", _migrate_exchange_balances, True),
+)
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """Create missing tables, apply numbered migrations above user_version, re-run repairs.
+
+    Returns the list of ``version:name`` steps that advanced user_version.
+    """
     conn.executescript(SCHEMA_SQL)
-    _migrate_derivatives_bitemporal(conn)
-    _migrate_analysis_timeframe(conn)
-    _migrate_macro_global_mcap(conn)
-    _migrate_paper_orders_fee_bps(conn)
-    _migrate_live_orders_reconcile(conn)
+    current = schema_version(conn)
+    applied: list[str] = []
+    for version, name, fn, repair in MIGRATIONS:
+        if version <= current:
+            if repair:
+                fn(conn)
+            continue
+        fn(conn)
+        conn.execute(f"PRAGMA user_version = {int(version)}")
+        applied.append(f"{version}:{name}")
     conn.commit()
+    return applied
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:

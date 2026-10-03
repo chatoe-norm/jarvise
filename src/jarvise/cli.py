@@ -12,6 +12,7 @@ import typer
 from jarvise import config as store
 from jarvise import __version__
 from jarvise_exchange.cli import exchange_app
+from jarvise_ingest.db_cli import db_app
 from jarvise_trade.cli import trade_app
 
 ROOT_EPILOG = """Examples:
@@ -24,6 +25,8 @@ ROOT_EPILOG = """Examples:
   jarvise paper status --json
   jarvise exchange sync-balances --json
   jarvise trade reconcile --dry-run --json
+  jarvise db status --json
+  jarvise db prune --older-than 180d --dry-run --json
 """
 
 STATUS_EPILOG = """Examples:
@@ -91,6 +94,7 @@ rag_app = typer.Typer(
 app.add_typer(rag_app, name="rag")
 app.add_typer(exchange_app, name="exchange")
 app.add_typer(trade_app, name="trade")
+app.add_typer(db_app, name="db")
 
 
 class OutputFormat(str, Enum):
