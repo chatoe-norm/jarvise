@@ -5,5 +5,5 @@ typer>=0.27.2
 cryptography>=44
 redis==8.1.0
 qdrant-client==1.19.1
-sentence-transformers>=5.6.0
+sentence-transformers>=6.1.0
 notebooklm-mcp-cli==0.13.0
