@@ -12,6 +12,13 @@ from jarvise_ingest.http import ProviderError, get_json
 
 COINGECKO_PUBLIC_GLOBAL = "https://api.coingecko.com/api/v3/global"
 COINGECKO_PRO_GLOBAL = "https://pro-api.coingecko.com/api/v3/global"
+_AUTH_STATUSES = frozenset({400, 401, 403})
+_KEY_ENVS = (
+    "COINGECKO_PRO_API_KEY",
+    "COINGECKO_DEMO_API_KEY",
+    "COINGECKO_API_KEY",
+    "CoinGecko_API_KEY",
+)
 
 
 def _env_key(*names: str) -> str:
@@ -22,21 +29,44 @@ def _env_key(*names: str) -> str:
     return ""
 
 
+def _accept_headers(*, pro_key: str = "", demo_key: str = "") -> dict[str, str]:
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if pro_key:
+        headers["x-cg-pro-api-key"] = pro_key
+    elif demo_key:
+        headers["x-cg-demo-api-key"] = demo_key
+    return headers
+
+
 def resolve_coingecko_global_request() -> tuple[str, dict[str, str]]:
     """Return (url, headers) for GET /global.
 
-    Priority: Pro key → Demo / generic / legacy key → keyless public.
+    Priority: ``COINGECKO_ENVIRONMENT=pro`` + any key → Pro host;
+    else Pro key → Pro host; Demo / generic / legacy key → public host; else keyless public.
     """
-    headers: dict[str, str] = {"Accept": "application/json"}
+    any_key = _env_key(*_KEY_ENVS)
+    env = (os.environ.get("COINGECKO_ENVIRONMENT") or "").strip().lower()
+    if env in {"pro", "paid"} and any_key:
+        return COINGECKO_PRO_GLOBAL, _accept_headers(pro_key=any_key)
     pro = _env_key("COINGECKO_PRO_API_KEY")
     if pro:
-        headers["x-cg-pro-api-key"] = pro
-        return COINGECKO_PRO_GLOBAL, headers
+        return COINGECKO_PRO_GLOBAL, _accept_headers(pro_key=pro)
     demo = _env_key("COINGECKO_DEMO_API_KEY", "COINGECKO_API_KEY", "CoinGecko_API_KEY")
     if demo:
-        headers["x-cg-demo-api-key"] = demo
-        return COINGECKO_PUBLIC_GLOBAL, headers
-    return COINGECKO_PUBLIC_GLOBAL, headers
+        return COINGECKO_PUBLIC_GLOBAL, _accept_headers(demo_key=demo)
+    return COINGECKO_PUBLIC_GLOBAL, _accept_headers()
+
+
+def alternate_coingecko_global_request(
+    url: str, headers: dict[str, str]
+) -> tuple[str, dict[str, str]] | None:
+    """Swap Pro vs public host+header when a key is present (Pro key on public URL → 400)."""
+    key = (headers.get("x-cg-pro-api-key") or headers.get("x-cg-demo-api-key") or "").strip()
+    if not key:
+        return None
+    if "pro-api.coingecko.com" in url:
+        return COINGECKO_PUBLIC_GLOBAL, _accept_headers(demo_key=key)
+    return COINGECKO_PRO_GLOBAL, _accept_headers(pro_key=key)
 
 
 def fetch_global_macro(
@@ -49,7 +79,15 @@ def fetch_global_macro(
     try:
         payload = get_json(url, headers=headers, client=client, provider="coingecko_global")
     except ProviderError as exc:
-        raise RuntimeError(f"coingecko global failed: {exc}. Retry: jarvise ingest --skip-macro") from exc
+        alt = alternate_coingecko_global_request(url, headers) if exc.status in _AUTH_STATUSES else None
+        if alt is None:
+            raise RuntimeError(f"coingecko global failed: {exc}. Retry: jarvise ingest --skip-macro") from exc
+        try:
+            payload = get_json(alt[0], headers=alt[1], client=client, provider="coingecko_global")
+        except ProviderError as exc2:
+            raise RuntimeError(
+                f"coingecko global failed: {exc2}. Retry: jarvise ingest --skip-macro"
+            ) from exc2
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):
