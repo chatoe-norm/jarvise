@@ -72,3 +72,6 @@ data/analytics/sources/openclaw/*
 .coverage
 .coverage.*
 htmlcov/
+
+# Model / HF cache written by jobs (HF_HOME=/app/data/.cache/hf)
+data/.cache/
