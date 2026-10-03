@@ -19,6 +19,7 @@ from jarvise_ingest.health import ingest_health
 from jarvise_notify import notify_auto_decide, notify_ingest_health, notify_pending_digest
 from jarvise_paper.auto_decide import run_auto_decide
 from jarvise_risk import kill_switch_state
+from jarvise_trade import reconcile_live_orders
 
 
 def kill_switch_engaged() -> bool:
@@ -260,6 +261,28 @@ def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
         _AUTO_DECIDE_LOCK.release()
 
 
+def run_live_reconcile() -> tuple[int, dict[str, Any]]:
+    """Read-only venue reconciliation of open live orders. Runs regardless of kill-switch
+    (it places nothing) and is a no-op when live has never been enabled."""
+    key = "jarvise:live:reconcile:last"
+    now = int(time.time() * 1000)
+    raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+    path = Path(raw)
+    if not path.exists():
+        payload = {"ok": True, "skipped": True, "reason": "no_database", "open": 0, "read_only": True, "at_ms": now}
+        _publish_best_effort(key, payload)
+        return 0, payload
+    conn = open_db(path)
+    try:
+        payload = reconcile_live_orders(conn, now_ms=now)
+    except Exception as exc:  # noqa: BLE001
+        payload = {"ok": False, "read_only": True, "error": f"{type(exc).__name__}: {exc}", "at_ms": now}
+    finally:
+        conn.close()
+    _publish_best_effort(key, payload)
+    return (0 if payload.get("ok") else 1), payload
+
+
 def run_doctrine_search(query: str, limit: int) -> dict[str, Any]:
     """GET-only doctrine lookup for web cards and the auto-decide brief."""
     hits = doctrine_snippets(query, limit=limit)
@@ -292,6 +315,7 @@ ROUTES = {
     ("POST", "/jobs/paper-pending-digest"): "paper_pending_digest",
     ("POST", "/jobs/ingest-health"): "ingest_health",
     ("POST", "/jobs/paper-auto-decide"): "paper_auto_decide",
+    ("POST", "/jobs/live-reconcile"): "live_reconcile",
 }
 
 
@@ -356,6 +380,10 @@ class JobHandler(BaseHTTPRequestHandler):
         if action == "paper_auto_decide":
             code, body = run_paper_auto_decide()
             self._send(200 if code == 0 else 409 if code == 3 else 500, body)
+            return
+        if action == "live_reconcile":
+            code, body = run_live_reconcile()
+            self._send(200 if code == 0 else 500, body)
             return
         self._send(404, {"ok": False, "error": "not found"})
 

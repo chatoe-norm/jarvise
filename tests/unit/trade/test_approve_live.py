@@ -115,8 +115,17 @@ def test_approve_live_mocked_submit(
     client = MagicMock(spec=httpx.Client)
     client.post.return_value = mock_resp
 
-    with patch("jarvise_trade.submit.place_spot_market_order") as place:
-        place.return_value = {"orderId": 777, "status": "FILLED"}
+    with patch("jarvise_trade.submit.place_spot_market_order") as place, patch(
+        "jarvise_trade.submit.query_order", return_value=None
+    ) as query:
+        place.return_value = {
+            "orderId": 777,
+            "clientOrderId": "jrv-" + row["id"],
+            "status": "FILLED",
+            "executedQty": "0.00500000",
+            "cummulativeQuoteQty": "500.00000000",
+            "fills": [{"price": "100000", "qty": "0.005"}],
+        }
         with patch(
             "jarvise_trade.submit.fetch_api_restrictions",
             return_value={
@@ -130,11 +139,21 @@ def test_approve_live_mocked_submit(
 
     assert result["ok"] is True
     assert result["paper_only"] is False
-    assert result["live_order"]["status"] == "submitted"
-    assert result["live_order"]["venue_order_id"] == "777"
+    live = result["live_order"]
+    assert live["status"] == "filled"
+    assert live["venue_status"] == "FILLED"
+    assert live["venue_order_id"] == "777"
+    assert live["client_order_id"] == "jrv-" + row["id"]
+    assert live["executed_qty"] == 0.005
+    assert live["cummulative_quote_qty"] == 500.0
+    assert live["fills_count"] == 1
     assert list_paper_orders(conn) == []
     assert get_approval(conn, row["id"])["status"] == "approved"
     assert place.call_count == 1
+    # Pre-submit venue query ran once with the deterministic client order id.
+    assert query.call_count == 1
+    assert query.call_args.kwargs["orig_client_order_id"] == "jrv-" + row["id"]
+    assert place.call_args.kwargs["new_client_order_id"] == "jrv-" + row["id"]
 
 
 def test_approve_live_blocks_withdraw_key(

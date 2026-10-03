@@ -177,10 +177,18 @@ CREATE TABLE IF NOT EXISTS live_orders (
     error TEXT,
     kill_switch_clear INTEGER NOT NULL,
     caps_ok INTEGER NOT NULL,
-    realized_pnl_usd REAL
+    realized_pnl_usd REAL,
+    client_order_id TEXT,
+    venue_status TEXT,
+    executed_qty REAL,
+    cummulative_quote_qty REAL,
+    fills_count INTEGER,
+    reconciled_at_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_live_orders_created
     ON live_orders (created_at_ms);
+CREATE INDEX IF NOT EXISTS idx_live_orders_client
+    ON live_orders (client_order_id);
 
 -- Second-layer LLM reviews for paper approvals (auto-decide audit). Paper only.
 CREATE TABLE IF NOT EXISTS approval_llm_reviews (
@@ -275,12 +283,36 @@ def _migrate_paper_orders_fee_bps(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE paper_orders ADD COLUMN fee_bps REAL")
 
 
+_LIVE_ORDER_RECONCILE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("client_order_id", "TEXT"),
+    ("venue_status", "TEXT"),
+    ("executed_qty", "REAL"),
+    ("cummulative_quote_qty", "REAL"),
+    ("fills_count", "INTEGER"),
+    ("reconciled_at_ms", "INTEGER"),
+)
+
+
+def _migrate_live_orders_reconcile(conn: sqlite3.Connection) -> None:
+    """Add idempotency + fill reconciliation columns to legacy live_orders."""
+    cols = _table_columns(conn, "live_orders")
+    if not cols:
+        return
+    for name, typ in _LIVE_ORDER_RECONCILE_COLUMNS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE live_orders ADD COLUMN {name} {typ}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_live_orders_client ON live_orders (client_order_id)"
+    )
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     _migrate_derivatives_bitemporal(conn)
     _migrate_analysis_timeframe(conn)
     _migrate_macro_global_mcap(conn)
     _migrate_paper_orders_fee_bps(conn)
+    _migrate_live_orders_reconcile(conn)
     conn.commit()
 
 
@@ -1324,8 +1356,11 @@ def get_latest_llm_review(conn: sqlite3.Connection, approval_id: str) -> dict | 
 _LIVE_ORDER_COLUMNS = (
     "id, created_at_ms, approval_id, venue, symbol, side, order_type, "
     "requested_qty, requested_notional_usd, status, venue_order_id, "
-    "venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd"
+    "venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd, "
+    "client_order_id, venue_status, executed_qty, cummulative_quote_qty, "
+    "fills_count, reconciled_at_ms"
 )
+LIVE_ORDER_OPEN_STATUSES = ("submitted", "partially_filled")
 
 
 def insert_live_order(conn: sqlite3.Connection, row: dict) -> dict:
@@ -1335,8 +1370,10 @@ def insert_live_order(conn: sqlite3.Connection, row: dict) -> dict:
         INSERT INTO live_orders (
             id, created_at_ms, approval_id, venue, symbol, side, order_type,
             requested_qty, requested_notional_usd, status, venue_order_id,
-            venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            venue_response_json, error, kill_switch_clear, caps_ok, realized_pnl_usd,
+            client_order_id, venue_status, executed_qty, cummulative_quote_qty,
+            fills_count, reconciled_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["id"],
@@ -1355,6 +1392,12 @@ def insert_live_order(conn: sqlite3.Connection, row: dict) -> dict:
             int(row.get("kill_switch_clear", 0)),
             int(row.get("caps_ok", 0)),
             row.get("realized_pnl_usd"),
+            row.get("client_order_id"),
+            row.get("venue_status"),
+            row.get("executed_qty"),
+            row.get("cummulative_quote_qty"),
+            row.get("fills_count"),
+            row.get("reconciled_at_ms"),
         ),
     )
     conn.commit()
@@ -1368,6 +1411,77 @@ def get_live_order(conn: sqlite3.Connection, order_id: str) -> dict | None:
     )
     row = cur.fetchone()
     return dict(row) if row else None
+
+
+def get_live_order_by_client_id(conn: sqlite3.Connection, client_order_id: str) -> dict | None:
+    """Latest live order row carrying this venue client order id (idempotency lookup)."""
+    cur = conn.execute(
+        f"""
+        SELECT {_LIVE_ORDER_COLUMNS} FROM live_orders
+        WHERE client_order_id = ?
+        ORDER BY created_at_ms DESC
+        LIMIT 1
+        """,
+        (client_order_id,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def list_live_orders_open(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict]:
+    """Live orders not yet terminal on the venue (need reconciliation)."""
+    placeholders = ",".join("?" for _ in LIVE_ORDER_OPEN_STATUSES)
+    cur = conn.execute(
+        f"""
+        SELECT {_LIVE_ORDER_COLUMNS} FROM live_orders
+        WHERE status IN ({placeholders}) AND client_order_id IS NOT NULL
+        ORDER BY created_at_ms ASC
+        LIMIT ?
+        """,
+        (*LIVE_ORDER_OPEN_STATUSES, max(1, min(int(limit), 1000))),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def update_live_order_fill(
+    conn: sqlite3.Connection,
+    order_id: str,
+    *,
+    status: str,
+    venue_status: str | None,
+    executed_qty: float | None,
+    cummulative_quote_qty: float | None,
+    fills_count: int | None,
+    venue_order_id: str | None,
+    venue_response_json: str | None,
+    reconciled_at_ms: int,
+    error: str | None = None,
+) -> dict | None:
+    """Write reconciled fill state for one live order."""
+    conn.execute(
+        """
+        UPDATE live_orders
+        SET status = ?, venue_status = ?, executed_qty = ?, cummulative_quote_qty = ?,
+            fills_count = ?, venue_order_id = COALESCE(?, venue_order_id),
+            venue_response_json = COALESCE(?, venue_response_json),
+            reconciled_at_ms = ?, error = COALESCE(?, error)
+        WHERE id = ?
+        """,
+        (
+            status,
+            venue_status,
+            executed_qty,
+            cummulative_quote_qty,
+            fills_count,
+            venue_order_id,
+            venue_response_json,
+            int(reconciled_at_ms),
+            error,
+            order_id,
+        ),
+    )
+    conn.commit()
+    return get_live_order(conn, order_id)
 
 
 def sum_live_realized_pnl_utc_day(

@@ -51,9 +51,13 @@ curl -sS http://127.0.0.1:8080/healthz   # via Tailscale IP in practice
 
 1. Ensure one small pending approval (`long`, tiny size under caps).
 2. Approve once on `/analytics` (or Command Dashboard Home).
-3. Confirm Telegram alert path still works; check `live_orders` row status `submitted`.
-4. Confirm the fill hit the **Jarvise sub-account** balance, not the main account.
-5. Kill-switch still blocks approve.
+3. Confirm Telegram alert path still works; check the `live_orders` row: `client_order_id` is `jrv-<approval id>`, `status` is `filled` (or `partially_filled`), `executed_qty` / `cummulative_quote_qty` populated.
+4. Run `docker compose exec jobs jarvise trade reconcile --json` — expect `open: 0` (or the partial fill moving to `filled`).
+5. Import + activate `infra/n8n/workflows/jarvise-live-reconcile.json` (hourly read-only `GET /api/v3/order` by client order id; places nothing).
+6. Confirm the fill hit the **Jarvise sub-account** balance, not the main account.
+7. Kill-switch still blocks approve; with Redis stopped, approve on Home returns "kill_switch unreadable" and nothing is submitted.
+
+Idempotency: every live order carries `newClientOrderId = jrv-<approval id>`. A retried approve (same id) first checks the ledger, then the venue, and never POSTs twice; a lost response after POST is recovered by the same query.
 
 ## Current VPS status (2026-10-01)
 

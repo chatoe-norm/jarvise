@@ -287,6 +287,26 @@ def test_paper_auto_decide_route(monkeypatch) -> None:
     assert handler._status == 200
 
 
+def test_live_reconcile_route_and_noop(monkeypatch, tmp_path) -> None:
+    from jarvise.jobs import run_live_reconcile
+
+    db = tmp_path / "live.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    monkeypatch.delenv("BINANCE_TRADE_API_KEY", raising=False)
+    published: list = []
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda k, p: published.append((k, p)))
+    code, body = run_live_reconcile()
+    assert code == 0 and body["ok"] is True and body["open"] == 0 and body["read_only"] is True
+    assert published[0][0] == "jarvise:live:reconcile:last"
+
+    handler = _Handler()
+    handler.path = "/jobs/live-reconcile"
+    handler.command = "POST"
+    handler._dispatch()
+    assert handler._status == 200
+
+
 def test_paper_auto_decide_crash_still_publishes(monkeypatch, tmp_path) -> None:
     db = tmp_path / "crash.db"
     open_db(db).close()
