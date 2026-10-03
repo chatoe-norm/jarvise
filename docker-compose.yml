@@ -11,6 +11,10 @@ services:
     image: redis:7.4.11-alpine
     restart: unless-stopped
     networks: [jarvise_net]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -26,6 +30,11 @@ services:
     image: qdrant/qdrant:v1.19.1
     restart: unless-stopped
     networks: [jarvise_net]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
     ports:
       - "127.0.0.1:6333:6333"
       - "127.0.0.1:6334:6334"
@@ -42,6 +51,10 @@ services:
     image: n8nio/n8n:2.40.0
     restart: unless-stopped
     networks: [jarvise_net]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 256
     ports:
       - "127.0.0.1:${N8N_PORT:-5678}:5678"
     environment:
@@ -78,9 +91,19 @@ services:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.worker
+      args:
+        JARVISE_UID: ${JARVISE_UID:-1000}
+        JARVISE_GID: ${JARVISE_GID:-1000}
     image: jarvise-worker:local
     restart: "no"
     networks: [jarvise_net]
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2500m
+    cpus: 1.5
+    pids_limit: 256
     environment:
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_URL=http://qdrant:6333
@@ -92,12 +115,13 @@ services:
       - JARVISE_PAPER_ONLY=true
       - JARVISE_ROOT=/app
       - NLM_PROFILE=${NLM_PROFILE:-chatoe}
-      - NOTEBOOKLM_MCP_CLI_PATH=/root/.nlm
+      - NOTEBOOKLM_MCP_CLI_PATH=/home/jarvise/.nlm
+      - HF_HOME=/app/data/.cache/hf
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
       - ./secrets:/opt/jarvise/secrets:ro
-      - ${NLM_HOME:-./data/nlm}:/root/.nlm
+      - ${NLM_HOME:-./data/nlm}:/home/jarvise/.nlm
     depends_on:
       redis:
         condition: service_healthy
@@ -109,10 +133,20 @@ services:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.worker
+      args:
+        JARVISE_UID: ${JARVISE_UID:-1000}
+        JARVISE_GID: ${JARVISE_GID:-1000}
     image: jarvise-worker:local
     restart: unless-stopped
     networks: [jarvise_net]
     command: ["python", "-m", "jarvise.jobs"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 2500m
+    cpus: 1.5
+    pids_limit: 512
     environment:
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_URL=http://qdrant:6333
@@ -141,7 +175,9 @@ services:
       - JARVISE_MAX_DAILY_LOSS_USD=${JARVISE_MAX_DAILY_LOSS_USD:-100}
       - JARVISE_DRAWDOWN_LOCK_PCT=${JARVISE_DRAWDOWN_LOCK_PCT:-5}
       - NLM_PROFILE=${NLM_PROFILE:-chatoe}
-      - NOTEBOOKLM_MCP_CLI_PATH=/root/.nlm
+      - NOTEBOOKLM_MCP_CLI_PATH=/home/jarvise/.nlm
+      - HF_HOME=/app/data/.cache/hf
+      - JARVISE_HTTP_RETRIES=${JARVISE_HTTP_RETRIES:-3}
       - JARVISE_JOBS_TOKEN=${JARVISE_JOBS_TOKEN:-}
       - JOBS_PORT=8090
       - JARVISE_DB=${JARVISE_DB:-/app/data/analytics/jarvise.db}
@@ -156,7 +192,7 @@ services:
       - ./data:/app/data
       - ./config:/app/config:ro
       - ./secrets:/opt/jarvise/secrets:ro
-      - ${NLM_HOME:-./data/nlm}:/root/.nlm
+      - ${NLM_HOME:-./data/nlm}:/home/jarvise/.nlm
     depends_on:
       redis:
         condition: service_healthy
@@ -173,6 +209,10 @@ services:
     image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.5}
     restart: unless-stopped
     networks: [jarvise_net]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
     ports:
       - "127.0.0.1:${OPENCLAW_PORT:-18789}:18789"
     environment:
@@ -208,9 +248,19 @@ services:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.web
+      args:
+        JARVISE_UID: ${JARVISE_UID:-1000}
+        JARVISE_GID: ${JARVISE_GID:-1000}
     image: jarvise-web:local
     restart: unless-stopped
     networks: [jarvise_net]
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
     ports:
       - "127.0.0.1:${WEB_PORT:-8080}:8080"
     environment:

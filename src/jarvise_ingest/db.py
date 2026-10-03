@@ -1228,7 +1228,7 @@ def upsert_pending_approval(conn: sqlite3.Connection, row: dict) -> dict:
             {**payload, "id": approval_id},
         )
         conn.commit()
-    return dict(get_approval(conn, approval_id))
+    return dict(get_approval(conn, approval_id) or {})
 
 
 def claim_approval_for_fill(

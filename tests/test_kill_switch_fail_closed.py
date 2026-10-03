@@ -9,12 +9,12 @@ from jarvise_notify import format_kill_switch_message
 from jarvise_paper import cli as paper_cli
 from jarvise_risk import (
     KillSwitchUnavailable,
+    caps,
     engage_kill_switch,
     engage_kill_switch_strict,
     kill_switch_state,
     read_kill_switch,
 )
-from jarvise_risk import caps
 
 
 class _FakeRedis:

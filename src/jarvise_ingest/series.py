@@ -64,7 +64,7 @@ def find_gaps(
     step = INTERVAL_MS[timeframe]
     candles = load_candle_series(conn, symbol, timeframe)
     gaps: list[tuple[int, int, int]] = []
-    for previous, following in zip(candles, candles[1:]):
+    for previous, following in zip(candles, candles[1:], strict=False):
         distance = following["timestamp"] - previous["timestamp"]
         if distance > step:
             missing = distance // step - 1

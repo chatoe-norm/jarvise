@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from jarvise_ingest.db import (
@@ -46,7 +46,7 @@ def _parse_instant(raw: str) -> datetime:
     """ISO-8601 date or datetime; a bare date means midnight UTC."""
     value = datetime.fromisoformat(raw)
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return value
 
 
@@ -190,7 +190,7 @@ def run(argv: list[str] | None = None) -> int:
         try:
             if universe_id == PAPER_CORE:
                 seed_paper_core(resolve_conn)
-            as_of_ms = int((until or datetime.now(timezone.utc)).timestamp() * 1000)
+            as_of_ms = int((until or datetime.now(UTC)).timestamp() * 1000)
             from_universe = universe_as_of(resolve_conn, universe_id, as_of_ms)
         finally:
             resolve_conn.close()

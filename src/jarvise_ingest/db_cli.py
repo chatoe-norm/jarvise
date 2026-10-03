@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 
@@ -26,7 +26,7 @@ db_app = typer.Typer(
 
 @db_app.command("status")
 def status(
-    db: Annotated[Optional[Path], typer.Option("--db")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Show user_version, journal mode, and row counts. Opening also applies pending migrations."""
@@ -56,7 +56,7 @@ def status(
 @db_app.command("prune")
 def prune_cmd(
     older_than: Annotated[str, typer.Option("--older-than", help="e.g. 180d, 12h")] = "180d",
-    db: Annotated[Optional[Path], typer.Option("--db")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     vacuum: Annotated[bool, typer.Option("--vacuum", help="VACUUM after delete")] = False,
     as_json: Annotated[bool, typer.Option("--json")] = False,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 
@@ -26,7 +26,7 @@ trade_app = typer.Typer(
 
 @trade_app.command("reconcile")
 def reconcile(
-    db: Annotated[Optional[Path], typer.Option("--db")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Query the venue but write nothing")] = False,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:

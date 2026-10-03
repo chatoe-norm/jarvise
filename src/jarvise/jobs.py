@@ -232,7 +232,7 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
             if proc.returncode == TIMEOUT_EXIT_CODE:
                 timed_out = True
 
-        payload: dict[str, Any] = {
+        payload = {
             "ok": exit_code == 0,
             "paper_only": True,
             "exit_code": exit_code,

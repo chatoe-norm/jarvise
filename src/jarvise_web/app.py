@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -433,11 +434,11 @@ def exchange_payload() -> dict[str, Any]:
 
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
+    # Unauthenticated liveness probe: no mode flags beyond paper_only (live state is on /api/status).
     live = live_trading_enabled()
     return {
         "ok": True,
         "paper_only": PAPER_ONLY and not live,
-        "live_trading": live,
     }
 
 
@@ -661,8 +662,38 @@ def spa_routes(_: None = Depends(require_auth)) -> FileResponse:
     return spa_index()
 
 
+class _AssetsBasicAuth(StaticFiles):
+    """StaticFiles cannot take Depends(); enforce the same Basic Auth on bundled assets."""
+
+    async def __call__(self, scope, receive, send) -> None:  # type: ignore[override]
+        user = os.environ.get("WEB_BASIC_AUTH_USER") or ""
+        password = os.environ.get("WEB_BASIC_AUTH_PASSWORD") or ""
+        if (user or password) and scope.get("type") == "http":
+            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers") or []}
+            if not _basic_header_ok(headers.get("authorization"), user, password):
+                response = JSONResponse(
+                    {"detail": "Auth required"},
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    headers={"WWW-Authenticate": "Basic"},
+                )
+                await response(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
+
+
+def _basic_header_ok(header: str | None, user: str, password: str) -> bool:
+    if not header or not header.lower().startswith("basic "):
+        return False
+    try:
+        raw = base64.b64decode(header.split(" ", 1)[1].strip()).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    given_user, _, given_pass = raw.partition(":")
+    return secrets.compare_digest(given_user, user) and secrets.compare_digest(given_pass, password)
+
+
 _static = static_dir()
 if _static is not None:
     assets = _static / "assets"
     if assets.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+        app.mount("/assets", _AssetsBasicAuth(directory=str(assets)), name="assets")

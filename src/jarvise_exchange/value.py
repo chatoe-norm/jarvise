@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
-from typing import Callable
 
 import httpx
 
@@ -71,11 +71,12 @@ def value_spot_balances(
             total += usd
             priced += 1
             continue
-        unit = get_price(asset)
-        if unit is None:
+        price = get_price(asset)
+        if price is None:
             rows.append(ValuedBalance(balance=bal, usd=None, price_usd=None))
             unpriced += 1
             continue
+        unit = price
         usd = bal.total * unit
         rows.append(ValuedBalance(balance=bal, usd=usd, price_usd=unit))
         total += usd

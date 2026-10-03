@@ -17,7 +17,7 @@ from jarvise_ingest.db import (
     insert_live_order,
     sum_live_realized_pnl_utc_day,
 )
-from jarvise_risk import check_caps, estimated_notional, load_risk_caps
+from jarvise_risk import estimated_notional, load_risk_caps
 from jarvise_trade.auth import resolve_trade_auth
 from jarvise_trade.binance_market import (
     client_order_id_for_approval,

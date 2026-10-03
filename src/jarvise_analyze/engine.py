@@ -32,7 +32,7 @@ def analyze_snapshot(
     ema20 = _num(candle.get("ema_20"))
     ema200 = _num(candle.get("ema_200"))
 
-    if None in (close, atr, ema20, ema200) or close <= 0:
+    if close is None or atr is None or ema20 is None or ema200 is None or close <= 0:
         return _result(
             symbol,
             timeframe,

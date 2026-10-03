@@ -87,10 +87,10 @@ def circuit_open_until(provider: str) -> float | None:
             return None
         except Exception:  # noqa: BLE001
             pass
-    until = _LOCAL_OPEN_UNTIL.get(provider)
-    if until is None or until <= time.time():
+    local_until = _LOCAL_OPEN_UNTIL.get(provider)
+    if local_until is None or local_until <= time.time():
         return None
-    return until
+    return local_until
 
 
 def record_provider_success(provider: str) -> None:

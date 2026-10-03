@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
 from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
-from jarvise_risk import apply_safety_to_analysis, evaluate_from_db, read_kill_switch
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_paper_account,
@@ -33,6 +31,7 @@ from jarvise_paper.approval import (
 )
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
+from jarvise_risk import apply_safety_to_analysis, evaluate_from_db, read_kill_switch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"

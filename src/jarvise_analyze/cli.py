@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
@@ -43,8 +43,8 @@ def _parse_symbols(raw: list[str] | None) -> list[str]:
 def _parse_instant(raw: str) -> datetime:
     value = datetime.fromisoformat(raw)
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _is_default_live_db(path: Path) -> bool:
@@ -193,7 +193,7 @@ def run(argv: list[str] | None = None) -> int:
             until = (
                 _parse_instant(args.until)
                 if args.until
-                else datetime.now(timezone.utc)
+                else datetime.now(UTC)
             )
             if since >= until:
                 print(

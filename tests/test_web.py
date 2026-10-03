@@ -21,6 +21,41 @@ def test_healthz() -> None:
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     assert resp.json()["paper_only"] is True
+    # Unauthenticated probe must not advertise live-trading state.
+    assert "live_trading" not in resp.json()
+
+
+def test_assets_require_basic_auth_when_configured(monkeypatch) -> None:
+    import base64
+
+    from jarvise_web import app as web_app
+
+    monkeypatch.setenv("WEB_BASIC_AUTH_USER", "owner")
+    monkeypatch.setenv("WEB_BASIC_AUTH_PASSWORD", "pw")
+    static = web_app.static_dir()
+    if static is None or not (static / "assets").is_dir():
+        import pytest
+
+        pytest.skip("no built SPA assets in this checkout")
+    client = TestClient(app)
+    anon = client.get("/assets/does-not-exist.js")
+    assert anon.status_code == 401
+    token = base64.b64encode(b"owner:pw").decode()
+    authed = client.get("/assets/does-not-exist.js", headers={"Authorization": f"Basic {token}"})
+    assert authed.status_code == 404  # authenticated, then normal static 404
+
+
+def test_basic_header_check() -> None:
+    import base64
+
+    from jarvise_web.app import _basic_header_ok
+
+    good = "Basic " + base64.b64encode(b"u:p").decode()
+    assert _basic_header_ok(good, "u", "p") is True
+    assert _basic_header_ok(good, "u", "x") is False
+    assert _basic_header_ok("Bearer abc", "u", "p") is False
+    assert _basic_header_ok("Basic ???", "u", "p") is False
+    assert _basic_header_ok(None, "u", "p") is False
 
 
 def _stub_control_deps(monkeypatch) -> None:

@@ -136,7 +136,7 @@ def test_provider_wraps_error_with_retry_hint() -> None:
 def test_circuit_opens_after_threshold_and_skips(monkeypatch) -> None:
     monkeypatch.delenv("REDIS_URL", raising=False)
     provider = "flaky"
-    for i in range(jhttp.CIRCUIT_FAILURE_THRESHOLD):
+    for _ in range(jhttp.CIRCUIT_FAILURE_THRESHOLD):
         client, _ = _client([httpx.Response(503, content=b"")])
         with pytest.raises(ProviderError) as info:
             get_json("https://x/api", client=client, retries=0, provider=provider)
