@@ -33,9 +33,12 @@ flowchart LR
 One-time install:
 
 ```powershell
-python -m venv .venv
+# Python 3.12 required (3.11+ ok; prefer 3.12)
+py -3.12 -m venv .venv
 .venv\Scripts\pip install -e ".[dev]"
 ```
+
+On macOS/Linux: `python3.12 -m venv .venv`, then use `.venv/bin/…`.
 
 Entrypoint: `.venv\Scripts\jarvise` (see [`src/jarvise/cli.py`](../src/jarvise/cli.py)). On macOS/Linux use `.venv/bin/jarvise`.
 
@@ -48,10 +51,10 @@ Entrypoint: `.venv\Scripts\jarvise` (see [`src/jarvise/cli.py`](../src/jarvise/c
 | `jarvise exchange ...` | Read-only spot balance sync (Binance first; no order placement). `/analytics` shows ~USD via public USDT tickers. |
 | `jarvise rag ...` | Sync doctrine → Qdrant |
 
-Daily local examples:
+Daily local examples (ingest and analyze must use the **same** timeframe):
 
 ```powershell
-.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 200 --json
+.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 4h --limit 200 --json
 .venv\Scripts\jarvise analyze --symbol BTCUSDT --timeframe 4h --json
 .venv\Scripts\jarvise paper run --symbol BTCUSDT --timeframe 4h --json
 .venv\Scripts\jarvise paper status --json
@@ -163,7 +166,7 @@ Windows note for TradingView MCP: pin `uvx --python 3.13` (3.14 not supported ye
 - [README quick start](../README.md)
 - [Product roadmap (P0–P5)](superpowers/specs/2026-09-23-product-roadmap-design.md)
 - [P1 Analytics UI plan](superpowers/plans/2026-09-23-p1-analytics-ui.md) — `/analytics` on VPS (`http://$TAILSCALE_IP:8080/analytics`)
-- [shadcn/ui for Jarvise](ux-ui/shadcn-for-jarvise.md) — future UX rewrite knowledge only (shipped UI stays FastAPI HTML)
+- [shadcn/ui for Jarvise](ux-ui/shadcn-for-jarvise.md) — shadcn knowledge for the shipped Command Dashboard SPA (`web/`)
 - [P2 Paper auto-trade plan](superpowers/plans/2026-09-23-p2-paper-auto-trade.md) — `jarvise paper run|status`
 - [P3 Exchange read-only plan](superpowers/plans/2026-09-23-p3-exchange-readonly.md) — `jarvise exchange sync-balances`, `/analytics` spot panel
 - [P4 Manual approval paper slice plan](superpowers/plans/2026-09-23-p4-manual-approval-paper-slice.md) — queue, CLI approve/reject/expire, `/analytics` card
