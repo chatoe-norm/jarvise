@@ -8,7 +8,13 @@ import sys
 import time
 from pathlib import Path
 
-from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
+from jarvise_analyze.engine import (
+    CONFIDENCE_THRESHOLD,
+    analyze_mtf,
+    analyze_snapshot,
+    htf_timeframe,
+    mtf_enabled,
+)
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_paper_account,
@@ -22,7 +28,12 @@ from jarvise_ingest.db import (
     upsert_analysis_output,
 )
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
-from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_ingest.universe import (
+    PAPER_CORE,
+    PAPER_EQUITY,
+    seed_paper_core,
+    seed_paper_equity,
+)
 from jarvise_paper.approval import (
     approve_approval,
     enqueue_approval,
@@ -75,7 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Analyze (unless skipped); default enqueues for approve",
     )
     run_p.add_argument("--symbol", action="append", dest="symbols")
-    run_p.add_argument("--universe", help=f"Universe id (seeded: {PAPER_CORE})")
+    run_p.add_argument(
+        "--universe",
+        help=f"Universe id (seeded: {PAPER_CORE}, {PAPER_EQUITY})",
+    )
     run_p.add_argument(
         "--timeframe",
         default="4h",
@@ -156,6 +170,8 @@ def _resolve_symbols(conn, args) -> list[str]:
     if universe:
         if universe == PAPER_CORE:
             seed_paper_core(conn)
+        elif universe == PAPER_EQUITY:
+            seed_paper_equity(conn)
         as_of_ms = int(time.time() * 1000)
         from_universe = universe_as_of(conn, universe, as_of_ms)
         seen: set[str] = set()
@@ -245,9 +261,17 @@ def cmd_run(args: argparse.Namespace) -> int:
                     errors.append(f"{sym} {args.timeframe}: no analysis_output")
                     continue
             else:
-                analysis = analyze_snapshot(
-                    candle, confidence_threshold=args.confidence_threshold
-                )
+                if mtf_enabled() and args.timeframe != htf_timeframe():
+                    htf_candle = load_latest_candle(conn, sym, htf_timeframe())
+                    analysis = analyze_mtf(
+                        candle,
+                        htf_candle,
+                        confidence_threshold=args.confidence_threshold,
+                    )
+                else:
+                    analysis = analyze_snapshot(
+                        candle, confidence_threshold=args.confidence_threshold
+                    )
                 safety = evaluate_from_db(conn, sym)
                 analysis = apply_safety_to_analysis(analysis, safety)
                 if not args.dry_run:

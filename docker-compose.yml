@@ -304,6 +304,53 @@ services:
       retries: 10
       start_period: 20s
 
+  # Lean observability (T2.4). Opt-in: docker compose --profile obs up -d
+  # Bind 127.0.0.1 / Tailscale only — never public IPv4. Keep mem limits for T4Trip.
+  prometheus:
+    profiles: [obs]
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    networks: [jarvise_net]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - jarvise_prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    depends_on:
+      - web
+      - jobs
+
+  grafana:
+    profiles: [obs]
+    image: grafana/grafana:11.3.1
+    restart: unless-stopped
+    networks: [jarvise_net]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-jarvise}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-change-me}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://127.0.0.1:3000}
+    volumes:
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - jarvise_grafana:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 networks:
   jarvise_net:
     driver: bridge
@@ -312,3 +359,5 @@ volumes:
   jarvise_redis:
   jarvise_qdrant:
   jarvise_n8n:
+  jarvise_prometheus:
+  jarvise_grafana:

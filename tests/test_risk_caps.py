@@ -85,6 +85,10 @@ def test_load_risk_caps_from_env(monkeypatch) -> None:
 
 def test_approve_breach_fails_and_engages_kill(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("JARVISE_MAX_NOTIONAL_PER_ORDER", "50")
+    # Room for 10% size during enqueue; approve then hits per-order notional.
+    monkeypatch.setenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_CORRELATED_BUCKET_PCT", "50")
     monkeypatch.delenv("REDIS_URL", raising=False)
     engaged: list[str] = []
 
@@ -240,6 +244,92 @@ def test_timeout_opposite_side_applies_flat(tmp_path: Path) -> None:
     assert get_approval(conn, row["id"])["resolve_reason"] == "timeout_flat"
     assert list_paper_orders(conn)
     conn.close()
+
+
+def test_portfolio_blocks_third_symbol_without_kill_switch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("JARVISE_MAX_OPEN_POSITIONS", "2")
+    monkeypatch.setenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_CORRELATED_BUCKET_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_NOTIONAL_PER_ORDER", "5000")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    engaged: list[str] = []
+    conn = open_db(tmp_path / "port.db")
+    ensure_paper_account(conn)
+    for i, sym in enumerate(("BTCUSDT", "ETHUSDT")):
+        _seed_candle(conn, sym, "4h", 100.0, ts=1_700_000_000_000 + i)
+        apply_signal(
+            conn,
+            analysis={
+                "analysis_id": f"o{i}",
+                "symbol": sym,
+                "action": "long",
+                "size_pct_equity": 2.0,
+                "regime_state": "trend_up",
+                "confidence_score": 0.7,
+            },
+            mid_price=100.0,
+            timeframe="4h",
+            now_ms=1_000 + i,
+        )
+    _seed_candle(conn, "SOLUSDT", "4h", 50.0, ts=1_700_000_000_100)
+    with patch("jarvise_paper.approval.engage_kill_switch", lambda **k: engaged.append("x") or True):
+        out = enqueue_approval(
+            conn,
+            analysis={
+                "analysis_id": "sol1",
+                "symbol": "SOLUSDT",
+                "action": "long",
+                "size_pct_equity": 2.0,
+                "regime_state": "trend_up",
+                "confidence_score": 0.7,
+            },
+            timeframe="4h",
+            now_ms=3_000,
+        )
+    assert out.get("skipped") is True
+    assert "max_open_positions" in (out.get("error") or "")
+    assert out.get("kill_switch_engaged") is False
+    assert engaged == []
+    conn.close()
+
+
+def test_portfolio_bucket_cap(tmp_path: Path, monkeypatch) -> None:
+    from jarvise_risk.caps import RiskCaps, check_portfolio_caps
+
+    caps = RiskCaps(
+        max_notional_per_order=5000.0,
+        max_daily_loss_usd=100.0,
+        drawdown_lock_pct=5.0,
+        max_open_positions=5,
+        max_gross_notional_pct=50.0,
+        max_symbol_notional_pct=50.0,
+        max_correlated_bucket_pct=10.0,
+    )
+    positions = [
+        {
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "qty": 1.0,
+            "entry_price": 600.0,  # 6% of 10k
+            "entry_ts": 1,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+        }
+    ]
+    # ETH candidate 5% → bucket 11% > 10%
+    breach = check_portfolio_caps(
+        caps,
+        equity=10_000.0,
+        positions=positions,
+        symbol="ETHUSDT",
+        action="long",
+        size_pct_equity=5.0,
+    )
+    assert breach is not None
+    assert "crypto_majors" in breach
 
 
 def test_drawdown_blocks_approve(tmp_path: Path, monkeypatch) -> None:

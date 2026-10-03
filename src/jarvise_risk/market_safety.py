@@ -261,6 +261,12 @@ def evaluate_from_db(
         latest_macro_sentiment,
         latest_order_book,
     )
+    from jarvise_ingest.providers.stooq_ohlcv import is_equity_symbol
+
+    # US equity / ETF paper path has no Binance book or crypto derivatives.
+    if is_equity_symbol(symbol):
+        skip_book = True
+        skip_derivatives = True
 
     cfg = load_market_safety_config(
         skip_book=skip_book,

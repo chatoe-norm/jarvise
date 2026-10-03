@@ -23,12 +23,24 @@ from jarvise_ingest.db import (
 
 # Binance spot taker (no BNB discount) — owner-protective paper EV default.
 FEE_BPS = 10.0
+# Liquid US ETF retail-ish default when symbol is equity (override via env).
+EQUITY_FEE_BPS = 2.0
 SLIP_BPS = 5.0
 STRATEGY_ID = "paper"
 
 
-def load_paper_fee_bps() -> float:
-    """Paper fee in bps. Env ``JARVISE_PAPER_FEE_BPS`` overrides; clamped to >= 0."""
+def load_paper_fee_bps(*, symbol: str | None = None) -> float:
+    """Paper fee in bps. Equity symbols use ``JARVISE_PAPER_EQUITY_FEE_BPS`` (default 2)."""
+    from jarvise_ingest.providers.stooq_ohlcv import is_equity_symbol
+
+    if symbol and is_equity_symbol(symbol):
+        raw = os.environ.get("JARVISE_PAPER_EQUITY_FEE_BPS")
+        if raw is None or str(raw).strip() == "":
+            return float(EQUITY_FEE_BPS)
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return float(EQUITY_FEE_BPS)
     raw = os.environ.get("JARVISE_PAPER_FEE_BPS")
     if raw is None or str(raw).strip() == "":
         return float(FEE_BPS)
@@ -103,6 +115,8 @@ def apply_signal(
     fee_bps: float | None = None,
     slip_bps: float = SLIP_BPS,
     now_ms: int | None = None,
+    approval_id: str | None = None,
+    decision_source: str | None = None,
 ) -> dict[str, Any]:
     """Apply one analysis action to the paper ledger.
 
@@ -111,6 +125,7 @@ def apply_signal(
     - same side already open: no-op hold
 
     Fee defaults to Binance-spot-taker-equivalent 10 bps (``JARVISE_PAPER_FEE_BPS``).
+    Optional ``approval_id`` / ``decision_source`` stamp fills for T2.1 attribution.
     """
     ensure_paper_account(conn)
     account = get_paper_account(conn)
@@ -123,7 +138,13 @@ def apply_signal(
     fills: list[dict[str, Any]] = []
     cash = float(account["cash"])
     realized_delta = 0.0
-    use_fee_bps = load_paper_fee_bps() if fee_bps is None else max(0.0, float(fee_bps))
+    use_fee_bps = (
+        load_paper_fee_bps(symbol=symbol)
+        if fee_bps is None
+        else max(0.0, float(fee_bps))
+    )
+    stamp_approval = str(approval_id) if approval_id else None
+    stamp_source = str(decision_source) if decision_source else None
 
     book = latest_order_book(conn, symbol)
     spread = None if book is None else book.get("bid_ask_spread")
@@ -155,6 +176,8 @@ def apply_signal(
             "slip_bps": use_slip,
             "analysis_id": analysis_id,
             "reason": reason,
+            "approval_id": stamp_approval,
+            "decision_source": stamp_source,
         }
         fills.append(order)
         if not dry_run:

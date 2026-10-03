@@ -25,9 +25,15 @@ from jarvise_ingest.providers.binance_klines import (
 )
 from jarvise_ingest.providers.coingecko_global import fetch_global_macro
 from jarvise_ingest.providers.derivatives import fetch_derivatives, select_provider
+from jarvise_ingest.providers.stooq_ohlcv import fetch_stooq_ohlcv, is_equity_symbol
 from jarvise_ingest.series import find_gaps, recompute_indicators
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
-from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_ingest.universe import (
+    PAPER_CORE,
+    PAPER_EQUITY,
+    seed_paper_core,
+    seed_paper_equity,
+)
 from jarvise_risk import evaluate_from_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +45,9 @@ BACKFILL_EXAMPLE = (
 )
 UNIVERSE_EXAMPLE = (
     "jarvise ingest --universe paper_core --timeframe 4h --skip-derivatives --json"
+)
+EQUITY_EXAMPLE = (
+    "jarvise ingest --universe paper_equity --timeframe 1d --skip-book --skip-derivatives --json"
 )
 
 
@@ -190,6 +199,8 @@ def run(argv: list[str] | None = None) -> int:
         try:
             if universe_id == PAPER_CORE:
                 seed_paper_core(resolve_conn)
+            elif universe_id == PAPER_EQUITY:
+                seed_paper_equity(resolve_conn)
             as_of_ms = int((until or datetime.now(UTC)).timestamp() * 1000)
             from_universe = universe_as_of(resolve_conn, universe_id, as_of_ms)
         finally:
@@ -299,8 +310,17 @@ def run(argv: list[str] | None = None) -> int:
                 print(f"Error: {exc}", file=sys.stderr)
 
         for sym in symbols:
+            equity = is_equity_symbol(sym) or universe_id == PAPER_EQUITY
             try:
-                if since:
+                if equity:
+                    if since:
+                        raise ValueError(
+                            "stooq equity ingest does not support --since paging yet; "
+                            f"use --limit (see: {EQUITY_EXAMPLE})"
+                        )
+                    candles = fetch_stooq_ohlcv(sym, args.timeframe, limit=limit)
+                    provider_name = "stooq"
+                elif since:
                     candles = fetch_klines_range(
                         sym,
                         args.timeframe,
@@ -308,16 +328,22 @@ def run(argv: list[str] | None = None) -> int:
                         until_ms=int(until.timestamp() * 1000) if until else None,
                         page_limit=limit,
                     )
+                    provider_name = "binance"
                 else:
                     candles = fetch_klines(sym, args.timeframe, limit)
+                    provider_name = "binance"
                 n = upsert_market_technicals(conn, candles)
                 derived = recompute_indicators(conn, sym, args.timeframe)
-                gaps = find_gaps(conn, sym, args.timeframe)
+                gaps = find_gaps(
+                    conn, sym, args.timeframe, asset_class="equity" if equity else "crypto"
+                )
                 market_summary[sym] = {
                     "timeframe": args.timeframe,
                     "upserted": n,
                     "indicators_recomputed": derived,
                     "gaps": len(gaps),
+                    "provider": provider_name,
+                    "asset_class": "equity" if equity else "crypto",
                 }
                 if not args.as_json:
                     print(
@@ -334,7 +360,8 @@ def run(argv: list[str] | None = None) -> int:
                 errors.append(str(exc))
                 print(f"Error: {exc}", file=sys.stderr)
 
-            if args.skip_book:
+            skip_book = args.skip_book or equity
+            if skip_book:
                 skipped.append(f"book:{sym}")
             else:
                 try:
@@ -357,7 +384,7 @@ def run(argv: list[str] | None = None) -> int:
                     provider_errors[sym].append(f"book:{exc}")
                     print(f"Error: {exc}", file=sys.stderr)
 
-            if args.skip_derivatives:
+            if args.skip_derivatives or equity:
                 skipped.append(f"derivatives:{sym}")
             else:
                 try:
@@ -384,8 +411,8 @@ def run(argv: list[str] | None = None) -> int:
             safety = evaluate_from_db(
                 conn,
                 sym,
-                skip_book=args.skip_book,
-                skip_derivatives=args.skip_derivatives,
+                skip_book=args.skip_book or equity,
+                skip_derivatives=args.skip_derivatives or equity,
                 skip_macro=args.skip_macro,
                 provider_errors=provider_errors.get(sym) or None,
                 engage_ks=True,

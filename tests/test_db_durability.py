@@ -45,7 +45,15 @@ def test_migrations_are_numbered_and_idempotent(tmp_path: Path) -> None:
     versions = [v for v, _, _, _ in MIGRATIONS]
     assert versions == list(range(1, len(MIGRATIONS) + 1))
     # Only the destructive bitemporal rebuild is version-gated; additive steps self-heal.
-    assert [repair for _, _, _, repair in MIGRATIONS] == [False, True, True, True, True, True]
+    assert [repair for _, _, _, repair in MIGRATIONS] == [
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+    ]
     conn = open_db(tmp_path / "m.db")
     assert schema_version(conn) == SCHEMA_VERSION
     # Second migrate advances nothing.

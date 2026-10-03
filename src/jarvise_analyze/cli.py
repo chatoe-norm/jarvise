@@ -9,7 +9,13 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
+from jarvise_analyze.engine import (
+    CONFIDENCE_THRESHOLD,
+    analyze_mtf,
+    analyze_snapshot,
+    htf_timeframe,
+    mtf_enabled,
+)
 from jarvise_analyze.replay import replay_range
 from jarvise_ingest.db import (
     load_latest_candle,
@@ -246,9 +252,17 @@ def run(argv: list[str] | None = None) -> int:
             if candle is None:
                 errors.append(f"{sym} {args.timeframe}: no stored candles")
                 continue
-            result = analyze_snapshot(
-                candle, confidence_threshold=args.confidence_threshold
-            )
+            if mtf_enabled() and args.timeframe != htf_timeframe():
+                htf_candle = load_latest_candle(conn, sym, htf_timeframe())
+                result = analyze_mtf(
+                    candle,
+                    htf_candle,
+                    confidence_threshold=args.confidence_threshold,
+                )
+            else:
+                result = analyze_snapshot(
+                    candle, confidence_threshold=args.confidence_threshold
+                )
             safety = evaluate_from_db(conn, sym)
             result = apply_safety_to_analysis(result, safety)
             if not args.dry_run:

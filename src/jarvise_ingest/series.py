@@ -52,21 +52,28 @@ def recompute_indicators(
 
 
 def find_gaps(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    asset_class: str | None = None,
 ) -> list[tuple[int, int, int]]:
     """Missing stretches as (last before, first after, candles absent).
 
     Indicators are computed across the stored series as if it were continuous, so
     a hole silently shifts every value after it. Gaps are reported rather than
     rejected: a venue outage is a data problem, but for stocks and ETFs a weekend
-    is not.
+    is not (1d equity: ignore holes of ≤3 calendar days).
     """
     step = INTERVAL_MS[timeframe]
     candles = load_candle_series(conn, symbol, timeframe)
     gaps: list[tuple[int, int, int]] = []
+    equity_daily = (asset_class or "").lower() == "equity" and timeframe == "1d"
     for previous, following in zip(candles, candles[1:], strict=False):
         distance = following["timestamp"] - previous["timestamp"]
         if distance > step:
             missing = distance // step - 1
+            if equity_daily and missing <= 3:
+                continue
             gaps.append((previous["timestamp"], following["timestamp"], int(missing)))
     return gaps

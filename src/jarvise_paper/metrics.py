@@ -14,6 +14,12 @@ from jarvise_ingest.db import (
     list_paper_positions,
     upsert_performance_risk_metrics,
 )
+from jarvise_paper.feedback import (
+    WINDOW_30D_MS,
+    auto_ev_gate_status,
+    metrics_by_decision_source,
+    sync_decision_outcomes,
+)
 
 PAPER_STRATEGY_ID = "paper"
 MIN_TRADES_FOR_RATIOS = 30
@@ -134,6 +140,8 @@ def _sharpe_sortino(returns: list[float]) -> tuple[float | None, float | None]:
 def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
     orders = list_paper_orders_asc(conn)
     trades, unmatched, open_from_orders = reconstruct_closed_trades(orders)
+    orders_by_id = {str(o["order_id"]): o for o in orders}
+    sync_decision_outcomes(conn, trades, orders_by_id)
     positions = list_paper_positions(conn)
     open_count = max(len(positions), open_from_orders)
 
@@ -156,6 +164,15 @@ def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, 
     equity = float(account.get("equity") or STARTING_PAPER_EQUITY)
     daily_pnl = round(equity - STARTING_PAPER_EQUITY, 8)
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    by_source = metrics_by_decision_source(conn)
+    by_source_30d = metrics_by_decision_source(conn, since_ms=ts - WINDOW_30D_MS)
+    gate = auto_ev_gate_status(conn, now_ms=ts)
+
+    # Enrich reconstructed trades with attribution from open fills.
+    for trade in trades:
+        open_o = orders_by_id.get(str(trade["open_order_id"])) or {}
+        trade["approval_id"] = open_o.get("approval_id")
+        trade["decision_source"] = open_o.get("decision_source") or "unknown"
 
     return {
         "ok": True,
@@ -181,6 +198,9 @@ def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, 
         "starting_equity": STARTING_PAPER_EQUITY,
         "equity": equity,
         "trades": trades,
+        "by_decision_source": by_source,
+        "by_decision_source_30d": by_source_30d,
+        "auto_ev_gate": gate,
     }
 
 
