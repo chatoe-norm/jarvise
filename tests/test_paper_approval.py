@@ -1,6 +1,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_approval,
@@ -16,6 +18,15 @@ from jarvise_paper.approval import (
     expire_approvals,
     reject_approval,
 )
+
+
+@pytest.fixture(autouse=True)
+def _portfolio_room_for_legacy_sizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests use size_pct up to 10%; portfolio defaults cap symbol at 6%."""
+    monkeypatch.setenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_CORRELATED_BUCKET_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_OPEN_POSITIONS", "10")
 
 
 def _seed_candle(conn, symbol: str, timeframe: str, close: float, ts: int = 1_700_000_000_000) -> None:

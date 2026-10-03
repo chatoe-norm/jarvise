@@ -61,12 +61,13 @@ def test_ingest_also_fetches_paper_timeframe(monkeypatch) -> None:
     assert code == 0
     assert body["ok"] is True
     assert "1h" in body["timeframes"] and "4h" in body["timeframes"]
+    assert "1d" in body["timeframes"]  # HTF for analyzer MTF (T2.3)
     tfs = []
     for cmd in captured:
         assert "--timeframe" in cmd
         assert "--skip-derivatives" not in cmd
         tfs.append(cmd[cmd.index("--timeframe") + 1])
-    assert tfs == ["1h", "4h"]
+    assert tfs == ["1h", "4h", "1d"]
 
 
 def test_jobs_healthz() -> None:

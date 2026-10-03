@@ -29,6 +29,15 @@ export type PaperAutoStatus = {
   duration_s?: number;
   at_ms?: number;
   telegram_sent?: boolean;
+  auto_ev_gate?: {
+    enabled?: boolean;
+    blocked?: boolean;
+    min_ev?: number | null;
+    min_n?: number;
+    n?: number;
+    ev?: number | null;
+    reason?: string | null;
+  };
 };
 
 export type StatusPayload = {
@@ -99,6 +108,15 @@ export type PaperPayload = {
   error?: string;
 };
 
+export type SourceMetrics = {
+  closed_trades?: number;
+  wins?: number;
+  losses?: number;
+  scratches?: number;
+  expected_value_ev?: number | null;
+  win_rate?: number | null;
+};
+
 export type MetricsPayload = {
   ok?: boolean;
   closed_trades?: number;
@@ -113,6 +131,17 @@ export type MetricsPayload = {
   ratios_ready?: boolean;
   need_trades_for_ratios?: number;
   unmatched_orders?: number;
+  by_decision_source?: Record<string, SourceMetrics>;
+  by_decision_source_30d?: Record<string, SourceMetrics>;
+  auto_ev_gate?: {
+    enabled?: boolean;
+    blocked?: boolean;
+    min_ev?: number | null;
+    min_n?: number;
+    n?: number;
+    ev?: number | null;
+    reason?: string | null;
+  };
   error?: string;
 };
 

@@ -2,11 +2,13 @@
 
 Uses stored indicators only. Doctrine: structure first, oscillators as context,
 stops >= 1.5x ATR, FLAT below confidence threshold, never full Kelly.
+Optional HTF confirm (T2.3) via ``analyze_mtf`` / ``JARVISE_ANALYZE_MTF``.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import Any
 
 CONFIDENCE_THRESHOLD = 0.55
@@ -15,6 +17,18 @@ RANGE_EMA_PCT = 0.015
 CHAOTIC_ATR_PCT = 0.05
 MAX_SIZE_PCT = 2.0
 BASE_SIZE_PCT = 1.5
+DEFAULT_HTF = "1d"
+_TRUE = frozenset({"1", "true", "yes", "on"})
+
+
+def mtf_enabled() -> bool:
+    """HTF confirm on by default once wired; set JARVISE_ANALYZE_MTF=false to disable."""
+    raw = (os.environ.get("JARVISE_ANALYZE_MTF") or "true").strip().lower()
+    return raw in _TRUE
+
+
+def htf_timeframe() -> str:
+    return (os.environ.get("JARVISE_ANALYZE_HTF") or DEFAULT_HTF).strip() or DEFAULT_HTF
 
 
 def analyze_snapshot(
@@ -117,6 +131,77 @@ def analyze_snapshot(
         size=size,
         thesis=thesis,
     )
+
+
+def analyze_mtf(
+    ltf_candle: dict[str, Any],
+    htf_candle: dict[str, Any] | None,
+    *,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+) -> dict[str, Any]:
+    """LTF signal only when HTF regime agrees; else force flat (fail-closed)."""
+    ltf = analyze_snapshot(ltf_candle, confidence_threshold=confidence_threshold)
+    if htf_candle is None:
+        return _force_flat(
+            ltf,
+            reason="htf_missing",
+            thesis_suffix=" HTF candle missing; stay flat.",
+        )
+    htf = analyze_snapshot(htf_candle, confidence_threshold=confidence_threshold)
+    htf_regime = str(htf.get("regime_state") or "")
+    ltf["htf_regime"] = htf_regime
+    ltf["htf_timeframe"] = str(htf_candle.get("timeframe") or "")
+    if ltf["action"] == "flat":
+        ltf["thesis"] = f"{ltf['thesis']} HTF={htf_regime}."
+        return ltf
+    if htf_regime == "chaotic":
+        return _force_flat(
+            ltf,
+            reason="htf_conflict",
+            thesis_suffix=f" HTF chaotic; flatten LTF {ltf['action']}.",
+        )
+    if htf_regime == "range":
+        return _force_flat(
+            ltf,
+            reason="htf_range",
+            thesis_suffix=" HTF range; no directional LTF.",
+        )
+    if htf_regime == "trend_up" and ltf["action"] != "long":
+        return _force_flat(
+            ltf,
+            reason="htf_conflict",
+            thesis_suffix=f" HTF trend_up conflicts with LTF {ltf['action']}.",
+        )
+    if htf_regime == "trend_down" and ltf["action"] != "short":
+        return _force_flat(
+            ltf,
+            reason="htf_conflict",
+            thesis_suffix=f" HTF trend_down conflicts with LTF {ltf['action']}.",
+        )
+    ltf["thesis"] = f"{ltf['thesis']} HTF {htf_regime} confirms."
+    ltf["mtf_reason"] = "htf_confirm"
+    return ltf
+
+
+def _force_flat(
+    base: dict[str, Any],
+    *,
+    reason: str,
+    thesis_suffix: str,
+) -> dict[str, Any]:
+    out = dict(base)
+    out["action"] = "flat"
+    out["size_pct_equity"] = 0.0
+    out["invalidation_price"] = None
+    out["thesis"] = f"{base.get('thesis') or ''}{thesis_suffix}".strip()
+    out["mtf_reason"] = reason
+    # Re-hash analysis_id so MTF flats do not collide with the unfiltered LTF id.
+    material = (
+        f"{out['symbol']}|{out['timeframe']}|{out['timestamp']}|{out['regime_state']}|"
+        f"flat|{out['confidence_score']:.4f}|None|0.0000|{reason}"
+    )
+    out["analysis_id"] = hashlib.sha256(material.encode()).hexdigest()[:12]
+    return out
 
 
 def _num(value: Any) -> float | None:

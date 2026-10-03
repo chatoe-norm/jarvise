@@ -28,6 +28,7 @@ from jarvise_ingest.db import (
     set_approval_resolve_reason,
 )
 from jarvise_paper.approval import approve_approval, reject_approval
+from jarvise_paper.feedback import auto_ev_gate_status, persist_auto_run
 from jarvise_paper.llm_openrouter import OpenRouterError, OpenRouterParseError, chat_json
 from jarvise_paper.recommendation import doctrine_query
 from jarvise_risk import (
@@ -275,11 +276,28 @@ def run_auto_decide(
         "at_ms": ts,
     }
     if not cfg.enabled:
-        return {**base, "skipped": True, "reason": "auto_decide_disabled"}
+        out = {**base, "skipped": True, "reason": "auto_decide_disabled"}
+        persist_auto_run(conn, out)
+        return out
     if kill_switch:
-        return {**base, "ok": False, "skipped": True, "reason": "kill_switch engaged"}
+        out = {**base, "ok": False, "skipped": True, "reason": "kill_switch engaged"}
+        persist_auto_run(conn, out)
+        return out
     if live_trading_enabled():
-        return {**base, "ok": False, "skipped": True, "reason": "live_trading_enabled"}
+        out = {**base, "ok": False, "skipped": True, "reason": "live_trading_enabled"}
+        persist_auto_run(conn, out)
+        return out
+    gate = auto_ev_gate_status(conn, now_ms=ts)
+    if gate.get("blocked"):
+        out = {
+            **base,
+            "ok": True,
+            "skipped": True,
+            "reason": "auto_ev_gate",
+            "auto_ev_gate": gate,
+        }
+        persist_auto_run(conn, out)
+        return out
 
     lookup = doctrine_lookup or _default_doctrine
     caps = load_risk_caps()
@@ -311,6 +329,8 @@ def run_auto_decide(
                     kill_switch=_kill_switch_now(kill_switch, kill_switch_check),
                     now_ms=apply_ts,
                     expected_analysis_id=row.get("analysis_id"),
+                    decision_source="auto_rule",
+                    resolve_reason=SAME_SIDE_HOLD,
                 )
                 if result.get("paper_only") is False:
                     engage_kill_switch(reason="auto_decide: live path reached")
@@ -323,12 +343,6 @@ def run_auto_decide(
                         "reason": SAME_SIDE_HOLD,
                         "fills": len(result.get("fills") or []),
                     }
-                    try:
-                        set_approval_resolve_reason(
-                            conn, row["id"], SAME_SIDE_HOLD, resolved_at_ms=apply_ts
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        hold_entry["audit_error"] = f"{type(exc).__name__}: {exc}"
                     approved.append(hold_entry)
                 else:
                     apply_failed.append(
@@ -420,6 +434,8 @@ def run_auto_decide(
                     kill_switch=_kill_switch_now(kill_switch, kill_switch_check),
                     now_ms=apply_ts,
                     expected_analysis_id=row.get("analysis_id"),
+                    decision_source="auto_claude",
+                    resolve_reason="auto:claude:approve",
                 )
                 if result.get("paper_only") is False:
                     # Must be unreachable: live is checked before every apply. Fail loud and stop everything.
@@ -429,12 +445,6 @@ def run_auto_decide(
                     break
                 if result.get("ok"):
                     approved.append({**entry, "fills": len(result.get("fills") or [])})
-                    try:
-                        set_approval_resolve_reason(
-                            conn, row["id"], "auto:claude:approve", resolved_at_ms=apply_ts
-                        )
-                    except Exception as exc:  # noqa: BLE001 — the fill already happened; the label is best-effort
-                        approved[-1]["audit_error"] = f"{type(exc).__name__}: {exc}"
                 else:
                     inner = str(result.get("error") or "approve failed")
                     after = get_approval(conn, row["id"])
@@ -476,7 +486,7 @@ def run_auto_decide(
                 continue
             deferred.append({"id": rest["id"], "symbol": rest.get("symbol"), "reason": "run_halted"})
 
-    return {
+    out = {
         **base,
         "ok": halted is None,
         "processed": processed,
@@ -489,4 +499,7 @@ def run_auto_decide(
         "doctrine_error": lookup_error,
         "duration_s": round(time.monotonic() - started, 3),
         "halted": halted,
+        "auto_ev_gate": gate,
     }
+    persist_auto_run(conn, out)
+    return out

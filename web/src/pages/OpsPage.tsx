@@ -107,6 +107,9 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
                 {auto.doctrine_unavailable ? " · doctrine unavailable" : ""}
                 {auto.error ? ` · ${auto.error}` : ""}
                 {auto.halted ? ` · halted: ${auto.halted}` : ""}
+                {auto.auto_ev_gate?.blocked
+                  ? ` · EV gate blocked (N=${auto.auto_ev_gate.n}, EV=${auto.auto_ev_gate.ev})`
+                  : ""}
               </span>
             </div>
             <div className="grid grid-cols-5 gap-2">
@@ -229,6 +232,27 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                 </div>
               ))
             : "—"}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Observability</CardTitle>
+          <CardDescription>
+            Prometheus scrapes <code>/metrics</code> on web and jobs. Start with{" "}
+            <code>docker compose --profile obs up -d</code> (Tailscale / 127.0.0.1 only).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-3 text-sm">
+          <a className="underline" href="http://127.0.0.1:3000" target="_blank" rel="noreferrer">
+            Grafana :3000
+          </a>
+          <a className="underline" href="http://127.0.0.1:9090" target="_blank" rel="noreferrer">
+            Prometheus :9090
+          </a>
+          <a className="underline" href="/metrics" target="_blank" rel="noreferrer">
+            Web /metrics
+          </a>
         </CardContent>
       </Card>
 

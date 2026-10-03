@@ -8,8 +8,14 @@ from typing import Annotated
 
 import typer
 
-from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
+from jarvise_exchange.binance_spot import resolve_binance_auth
+from jarvise_exchange.eterna_spot import EternaReadApiBlocked
 from jarvise_exchange.permissions import audit_key_permissions, fetch_api_restrictions
+from jarvise_exchange.registry import (
+    default_venue,
+    list_supported_venues,
+    resolve_venue_client,
+)
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_trade.auth import resolve_trade_auth
 
@@ -26,34 +32,56 @@ exchange_app = typer.Typer(
 )
 
 
+@exchange_app.command("venues")
+def venues_cmd(
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    rows = list_supported_venues()
+    if as_json:
+        typer.echo(json.dumps({"ok": True, "venues": rows, "default": default_venue()}))
+        return
+    typer.echo(f"default={default_venue()}")
+    for row in rows:
+        typer.echo(f"{row['venue']}: {row['status']} ({row['role']})")
+
+
 @exchange_app.command("sync-balances")
 def sync_balances(
     db: Annotated[Path | None, typer.Option("--db")] = None,
+    venue: Annotated[
+        str | None,
+        typer.Option("--venue", help="binance (default) or eterna"),
+    ] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    try:
-        auth = resolve_binance_auth()
-    except (OSError, ValueError, TypeError) as exc:
-        typer.echo(f"Binance auth config error: {exc}", err=True)
-        raise typer.Exit(2) from exc
-    if auth is None:
-        typer.echo(
-            "Missing Binance auth.\n"
-            "HMAC example:\n"
-            "  export BINANCE_API_KEY=...\n"
-            "  export BINANCE_API_SECRET=...\n"
-            "Ed25519/RSA example:\n"
-            "  export BINANCE_API_KEY=...\n"
-            "  export BINANCE_API_PRIVATE_KEY_PATH=/path/to/private.pem\n"
-            "  jarvise exchange sync-balances --json",
-            err=True,
-        )
-        raise typer.Exit(2)
+    name = (venue or default_venue()).strip().lower()
     db_path = db or DEFAULT_DB
     try:
-        client = BinanceSpotClient(auth)
-        result = sync_spot_balances(client=client, db_path=db_path, dry_run=dry_run)
+        client = resolve_venue_client(name)
+        result = sync_spot_balances(
+            client=client, db_path=db_path, dry_run=dry_run, venue=name
+        )
+    except EternaReadApiBlocked as exc:
+        msg = str(exc)
+        if as_json:
+            typer.echo(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": msg,
+                        "venue": "eterna",
+                        "blocked": True,
+                        "read_only": True,
+                    }
+                )
+            )
+        else:
+            typer.echo(msg, err=True)
+        raise typer.Exit(2) from exc
+    except (OSError, ValueError, TypeError) as exc:
+        typer.echo(f"exchange auth/config error: {exc}", err=True)
+        raise typer.Exit(2) from exc
     except Exception as exc:  # noqa: BLE001
         msg = f"exchange sync failed: {exc}"
         if as_json:

@@ -40,6 +40,18 @@ def _fenv(name: str, default: float) -> float:
 DEFAULT_MAX_NOTIONAL = 2000.0
 DEFAULT_MAX_DAILY_LOSS = 100.0
 DEFAULT_DRAWDOWN_LOCK_PCT = 5.0
+DEFAULT_MAX_OPEN_POSITIONS = 2
+DEFAULT_MAX_GROSS_NOTIONAL_PCT = 10.0
+DEFAULT_MAX_SYMBOL_NOTIONAL_PCT = 6.0
+DEFAULT_MAX_CORRELATED_BUCKET_PCT = 10.0
+
+# Correlated exposure buckets (T2.2). Symbols may appear in at most one bucket.
+CRYPTO_MAJORS = frozenset({"BTCUSDT", "ETHUSDT"})
+US_EQUITY = frozenset({"SPY", "QQQ"})
+BUCKETS: dict[str, frozenset[str]] = {
+    "crypto_majors": CRYPTO_MAJORS,
+    "us_equity": US_EQUITY,
+}
 
 
 @dataclass(frozen=True)
@@ -47,12 +59,20 @@ class RiskCaps:
     max_notional_per_order: float
     max_daily_loss_usd: float
     drawdown_lock_pct: float
+    max_open_positions: int = DEFAULT_MAX_OPEN_POSITIONS
+    max_gross_notional_pct: float = DEFAULT_MAX_GROSS_NOTIONAL_PCT
+    max_symbol_notional_pct: float = DEFAULT_MAX_SYMBOL_NOTIONAL_PCT
+    max_correlated_bucket_pct: float = DEFAULT_MAX_CORRELATED_BUCKET_PCT
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[str, float | int]:
         return {
             "max_notional_per_order": self.max_notional_per_order,
             "max_daily_loss_usd": self.max_daily_loss_usd,
             "drawdown_lock_pct": self.drawdown_lock_pct,
+            "max_open_positions": self.max_open_positions,
+            "max_gross_notional_pct": self.max_gross_notional_pct,
+            "max_symbol_notional_pct": self.max_symbol_notional_pct,
+            "max_correlated_bucket_pct": self.max_correlated_bucket_pct,
         }
 
 
@@ -65,6 +85,18 @@ def load_risk_caps() -> RiskCaps:
         drawdown_lock_pct=_fenv(
             "JARVISE_DRAWDOWN_LOCK_PCT", DEFAULT_DRAWDOWN_LOCK_PCT
         ),
+        max_open_positions=max(
+            0, int(_fenv("JARVISE_MAX_OPEN_POSITIONS", float(DEFAULT_MAX_OPEN_POSITIONS)))
+        ),
+        max_gross_notional_pct=_fenv(
+            "JARVISE_MAX_GROSS_NOTIONAL_PCT", DEFAULT_MAX_GROSS_NOTIONAL_PCT
+        ),
+        max_symbol_notional_pct=_fenv(
+            "JARVISE_MAX_SYMBOL_NOTIONAL_PCT", DEFAULT_MAX_SYMBOL_NOTIONAL_PCT
+        ),
+        max_correlated_bucket_pct=_fenv(
+            "JARVISE_MAX_CORRELATED_BUCKET_PCT", DEFAULT_MAX_CORRELATED_BUCKET_PCT
+        ),
     )
 
 
@@ -76,6 +108,18 @@ def estimated_notional(
     return max(0.0, float(equity)) * (max(0.0, float(size_pct_equity)) / 100.0)
 
 
+def position_notional(pos: dict[str, Any]) -> float:
+    return abs(float(pos.get("qty") or 0.0) * float(pos.get("entry_price") or 0.0))
+
+
+def symbol_bucket(symbol: str) -> str | None:
+    sym = str(symbol).upper()
+    for name, members in BUCKETS.items():
+        if sym in members:
+            return name
+    return None
+
+
 def check_caps(
     caps: RiskCaps,
     *,
@@ -84,7 +128,7 @@ def check_caps(
     size_pct_equity: float | None = None,
     action: str | None = None,
 ) -> str | None:
-    """Return breach reason or None if OK."""
+    """Return account/order breach reason or None if OK (engage kill-switch on breach)."""
     start = float(starting_equity) if starting_equity else 0.0
     eq = float(equity)
     if start > 0:
@@ -105,6 +149,66 @@ def check_caps(
         if notional > caps.max_notional_per_order:
             return (
                 f"max_notional: ${notional:.2f} > ${caps.max_notional_per_order:.2f}"
+            )
+    return None
+
+
+def check_portfolio_caps(
+    caps: RiskCaps,
+    *,
+    equity: float,
+    positions: list[dict[str, Any]],
+    symbol: str,
+    action: str | None,
+    size_pct_equity: float | None = None,
+) -> str | None:
+    """Multi-symbol book limits. Soft breach — block without engaging kill-switch."""
+    act = (action or "").lower()
+    if act not in {"long", "short"} or size_pct_equity is None:
+        return None
+    eq = max(0.0, float(equity))
+    if eq <= 0:
+        return "portfolio: equity <= 0"
+    sym = str(symbol).upper()
+    cand_notional = estimated_notional(equity=eq, size_pct_equity=float(size_pct_equity))
+    by_sym = {str(p["symbol"]).upper(): p for p in positions}
+    existing = by_sym.get(sym)
+    # Same-side hold does not change book exposure.
+    if existing is not None and str(existing.get("side") or "").lower() == act:
+        return None
+
+    projected: dict[str, float] = {
+        s: position_notional(p) for s, p in by_sym.items() if s != sym
+    }
+    projected[sym] = cand_notional
+
+    if len(projected) > caps.max_open_positions:
+        return (
+            f"max_open_positions: {len(projected)} > {caps.max_open_positions}"
+        )
+
+    gross = sum(projected.values())
+    gross_pct = (gross / eq) * 100.0
+    if gross_pct > caps.max_gross_notional_pct:
+        return (
+            f"max_gross_notional_pct: {gross_pct:.2f}% > {caps.max_gross_notional_pct:.2f}%"
+        )
+
+    sym_pct = (cand_notional / eq) * 100.0
+    if sym_pct > caps.max_symbol_notional_pct:
+        return (
+            f"max_symbol_notional_pct: {sym_pct:.2f}% > {caps.max_symbol_notional_pct:.2f}%"
+        )
+
+    bucket = symbol_bucket(sym)
+    if bucket is not None:
+        members = BUCKETS[bucket]
+        bucket_notional = sum(n for s, n in projected.items() if s in members)
+        bucket_pct = (bucket_notional / eq) * 100.0
+        if bucket_pct > caps.max_correlated_bucket_pct:
+            return (
+                f"max_correlated_bucket_pct[{bucket}]: "
+                f"{bucket_pct:.2f}% > {caps.max_correlated_bucket_pct:.2f}%"
             )
     return None
 

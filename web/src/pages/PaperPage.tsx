@@ -104,6 +104,77 @@ export function PaperPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Auto-decide quality</CardTitle>
+          <CardDescription>
+            Closed-trade EV by decision source (30d). Soft gate never loosens risk.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          {(() => {
+            const src = metrics?.by_decision_source_30d || {};
+            const keys = Object.keys(src);
+            if (keys.length === 0) {
+              return (
+                <p className="text-[var(--color-muted)]">
+                  No attributed closed trades yet. Approve fills stamp{" "}
+                  <code>decision_source</code> for later EV splits.
+                </p>
+              );
+            }
+            const gate = metrics?.auto_ev_gate;
+            return (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="text-[var(--color-muted)]">
+                      <tr className="border-b border-[var(--color-border)]">
+                        <th className="py-2 pr-3">Source</th>
+                        <th className="py-2 pr-3">N</th>
+                        <th className="py-2 pr-3">EV</th>
+                        <th className="py-2 pr-3">Win rate</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {keys.map((k) => {
+                        const row = src[k];
+                        return (
+                          <tr key={k} className="border-b border-[var(--color-border)]/60">
+                            <td className="py-2 pr-3 font-medium">{k}</td>
+                            <td className="py-2 pr-3 tabular-nums">{row?.closed_trades ?? 0}</td>
+                            <td className="py-2 pr-3 tabular-nums">
+                              {formatNum(row?.expected_value_ev)}
+                            </td>
+                            <td className="py-2 pr-3 tabular-nums">
+                              {row?.win_rate != null
+                                ? `${formatNum(Number(row.win_rate) * 100)}%`
+                                : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {gate?.enabled ? (
+                  <p className="text-xs text-[var(--color-muted)]">
+                    Soft EV gate:{" "}
+                    {gate.blocked
+                      ? `blocking auto-decide (EV ${formatNum(gate.ev)} < ${formatNum(gate.min_ev)}, N=${gate.n})`
+                      : `armed (min EV ${formatNum(gate.min_ev)}, need N≥${gate.min_n}; now N=${gate.n}, EV ${formatNum(gate.ev)})`}
+                  </p>
+                ) : (
+                  <p className="text-xs text-[var(--color-muted)]">
+                    Soft EV gate off — set <code>JARVISE_AUTO_DECIDE_MIN_EV</code> to enable.
+                  </p>
+                )}
+              </>
+            );
+          })()}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Open positions</CardTitle>
         </CardHeader>
         <CardContent>

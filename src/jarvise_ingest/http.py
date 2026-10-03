@@ -258,3 +258,77 @@ def get_json(
         if own:
             http.close()
     raise ProviderError(f"{provider or 'http'} GET exhausted retries", provider=provider, attempts=attempts)
+
+
+def get_text(
+    url: UrlLike,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    client: httpx.Client | None = None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    retries: int | None = None,
+    provider: str = "",
+) -> str:
+    """GET and return response text with the same retry/circuit semantics as get_json."""
+    max_retries = default_retries() if retries is None else max(0, int(retries))
+    open_until = circuit_open_until(provider)
+    if open_until is not None:
+        remaining = max(0, int(open_until - time.time()))
+        raise ProviderError(
+            f"{provider} circuit_open: skipping for {remaining}s after repeated failures",
+            provider=provider,
+            retryable=True,
+            circuit_open=True,
+        )
+    own = client is None
+    http = client or httpx.Client(timeout=timeout)
+    attempts: list[str] = []
+    try:
+        for attempt in range(max_retries + 1):
+            target = url() if callable(url) else url
+            try:
+                resp = http.get(target, params=params, headers=headers)
+            except httpx.HTTPError as exc:
+                attempts.append(f"{type(exc).__name__}")
+                if attempt >= max_retries:
+                    record_provider_failure(provider)
+                    raise ProviderError(
+                        f"{provider or 'http'} GET failed after {attempt + 1} attempt(s): {exc}",
+                        provider=provider,
+                        retryable=True,
+                        attempts=attempts,
+                    ) from exc
+                _sleep(backoff_delay(attempt))
+                continue
+
+            status = resp.status_code
+            if status in RETRY_STATUSES:
+                attempts.append(f"HTTP {status}")
+                if attempt >= max_retries:
+                    record_provider_failure(provider)
+                    raise ProviderError(
+                        f"{provider or 'http'} GET failed after {attempt + 1} attempt(s): HTTP {status}",
+                        provider=provider,
+                        status=status,
+                        retryable=True,
+                        attempts=attempts,
+                    )
+                delay = retry_after_seconds(resp)
+                _sleep(delay if delay is not None else backoff_delay(attempt))
+                continue
+            if status >= 400:
+                attempts.append(f"HTTP {status}")
+                raise ProviderError(
+                    f"{provider or 'http'} GET failed: HTTP {status} {resp.text[:160]}",
+                    provider=provider,
+                    status=status,
+                    retryable=False,
+                    attempts=attempts,
+                )
+            record_provider_success(provider)
+            return resp.text
+    finally:
+        if own:
+            http.close()
+    raise ProviderError(f"{provider or 'http'} GET exhausted retries", provider=provider, attempts=attempts)

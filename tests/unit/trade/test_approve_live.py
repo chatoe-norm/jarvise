@@ -18,6 +18,14 @@ from jarvise_ingest.db import (
 from jarvise_paper.approval import approve_approval, enqueue_approval
 
 
+@pytest.fixture(autouse=True)
+def _portfolio_room_for_legacy_sizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_CORRELATED_BUCKET_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_OPEN_POSITIONS", "10")
+
+
 def _seed_candle(conn, symbol: str, timeframe: str, close: float) -> None:
     upsert_market_technicals(
         conn,

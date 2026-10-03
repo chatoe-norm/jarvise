@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +34,7 @@ from jarvise_ingest.db import (
     load_latest_candle,
     open_db,
 )
+from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
@@ -440,6 +441,26 @@ def healthz() -> dict[str, Any]:
         "ok": True,
         "paper_only": PAPER_ONLY and not live,
     }
+
+
+@app.get("/metrics")
+def metrics() -> PlainTextResponse:
+    """Prometheus scrape endpoint (unauthenticated; bind Tailscale/private only)."""
+    ks = kill_switch_state()
+    set_gauge("jarvise_kill_switch", 1.0 if ks.get("engaged") else 0.0)
+    pending = 0
+    try:
+        conn = open_db(db_path())
+        try:
+            pending = len(list_approvals(conn, status="pending", limit=500))
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pending = -1
+    set_gauge("jarvise_paper_queue_pending", float(pending))
+    set_gauge("jarvise_live_trading", 1.0 if live_trading_enabled() else 0.0)
+    body = render_prometheus()
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/api/status")

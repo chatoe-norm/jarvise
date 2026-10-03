@@ -1,6 +1,6 @@
 """Paper analyzer: regime + confidence + invalidation + size. No orders."""
 
-from jarvise_analyze.engine import analyze_snapshot
+from jarvise_analyze.engine import analyze_mtf, analyze_snapshot
 
 
 def _snap(**overrides):
@@ -84,3 +84,42 @@ def test_analysis_id_is_stable_for_same_inputs():
     b = analyze_snapshot(_snap())
     assert a["analysis_id"] == b["analysis_id"]
     assert len(a["analysis_id"]) == 12
+
+
+def _htf(**overrides):
+    base = _snap(timeframe="1d", timestamp=1_699_000_000_000)
+    base.update(overrides)
+    return base
+
+
+def test_mtf_confirms_aligned_trend():
+    out = analyze_mtf(_snap(), _htf())
+    assert out["action"] == "long"
+    assert out["mtf_reason"] == "htf_confirm"
+    assert out["htf_regime"] == "trend_up"
+
+
+def test_mtf_flattens_on_htf_range():
+    out = analyze_mtf(
+        _snap(),
+        _htf(close=100.0, ema_20=100.1, ema_200=99.9, atr_14=1.0, rsi_14=50.0),
+    )
+    assert out["action"] == "flat"
+    assert out["mtf_reason"] == "htf_range"
+    assert out["size_pct_equity"] == 0.0
+
+
+def test_mtf_flattens_on_htf_conflict():
+    # LTF long, HTF bearish
+    out = analyze_mtf(
+        _snap(),
+        _htf(close=90.0, ema_20=89.0, ema_200=100.0, rsi_14=40.0),
+    )
+    assert out["action"] == "flat"
+    assert out["mtf_reason"] == "htf_conflict"
+
+
+def test_mtf_missing_htf_fail_closed():
+    out = analyze_mtf(_snap(), None)
+    assert out["action"] == "flat"
+    assert out["mtf_reason"] == "htf_missing"

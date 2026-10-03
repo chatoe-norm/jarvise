@@ -125,7 +125,9 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     fee_bps REAL,
     slip_bps REAL NOT NULL,
     analysis_id TEXT,
-    reason TEXT
+    reason TEXT,
+    approval_id TEXT,
+    decision_source TEXT
 );
 
 CREATE TABLE IF NOT EXISTS paper_positions (
@@ -214,6 +216,45 @@ CREATE TABLE IF NOT EXISTS approval_llm_reviews (
 );
 CREATE INDEX IF NOT EXISTS idx_approval_llm_reviews_approval
     ON approval_llm_reviews (approval_id, created_at_ms);
+
+-- Closed-trade outcomes attributed to the approving decision (T2.1 feedback).
+CREATE TABLE IF NOT EXISTS paper_decision_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    approval_id TEXT,
+    open_order_id TEXT NOT NULL,
+    close_order_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    pnl_usd REAL NOT NULL,
+    r_multiple REAL,
+    hold_ms INTEGER,
+    decision_source TEXT NOT NULL,
+    prompt_version TEXT,
+    closed_at_ms INTEGER NOT NULL,
+    UNIQUE(open_order_id, close_order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_decision_outcomes_source_closed
+    ON paper_decision_outcomes (decision_source, closed_at_ms);
+
+-- Durable auto-decide run summaries (Redis last-run alone is not enough).
+CREATE TABLE IF NOT EXISTS paper_auto_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms INTEGER NOT NULL,
+    model TEXT,
+    prompt_version TEXT,
+    ok INTEGER NOT NULL,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    reason TEXT,
+    processed INTEGER,
+    approved_n INTEGER,
+    rejected_n INTEGER,
+    deferred_n INTEGER,
+    apply_failed_n INTEGER,
+    duration_s REAL,
+    payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at
+    ON paper_auto_runs (at_ms DESC);
 """
 
 _DERIV_METRIC_KEYS = (
@@ -369,6 +410,65 @@ def _migrate_exchange_balances(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_decision_feedback(conn: sqlite3.Connection) -> None:
+    """Stamp paper fills with approval attribution + durable outcome/auto-run tables."""
+    cols = _table_columns(conn, "paper_orders")
+    if cols:
+        if "approval_id" not in cols:
+            conn.execute("ALTER TABLE paper_orders ADD COLUMN approval_id TEXT")
+        if "decision_source" not in cols:
+            conn.execute("ALTER TABLE paper_orders ADD COLUMN decision_source TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_paper_orders_approval ON paper_orders (approval_id)"
+        )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_decision_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            approval_id TEXT,
+            open_order_id TEXT NOT NULL,
+            close_order_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            pnl_usd REAL NOT NULL,
+            r_multiple REAL,
+            hold_ms INTEGER,
+            decision_source TEXT NOT NULL,
+            prompt_version TEXT,
+            closed_at_ms INTEGER NOT NULL,
+            UNIQUE(open_order_id, close_order_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paper_decision_outcomes_source_closed "
+        "ON paper_decision_outcomes (decision_source, closed_at_ms)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_auto_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at_ms INTEGER NOT NULL,
+            model TEXT,
+            prompt_version TEXT,
+            ok INTEGER NOT NULL,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            reason TEXT,
+            processed INTEGER,
+            approved_n INTEGER,
+            rejected_n INTEGER,
+            deferred_n INTEGER,
+            apply_failed_n INTEGER,
+            duration_s REAL,
+            payload_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at ON paper_auto_runs (at_ms DESC)"
+    )
+
+
 # Ordered, numbered migrations. PRAGMA user_version records the last applied step so a
 # multi-step evolution runs exactly once per database. ``repair=True`` marks cheap,
 # idempotent additive steps (column sniff + ALTER ADD) that also re-run on every open so
@@ -380,6 +480,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (4, "paper_orders_fee_bps", _migrate_paper_orders_fee_bps, True),
     (5, "live_orders_reconcile", _migrate_live_orders_reconcile, True),
     (6, "exchange_balances", _migrate_exchange_balances, True),
+    (7, "decision_feedback", _migrate_decision_feedback, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -917,14 +1018,18 @@ def set_paper_account_value(conn: sqlite3.Connection, key: str, value: float) ->
 def insert_paper_order(conn: sqlite3.Connection, row: dict) -> None:
     payload = dict(row)
     payload.setdefault("fee_bps", None)
+    payload.setdefault("approval_id", None)
+    payload.setdefault("decision_source", None)
     conn.execute(
         """
         INSERT INTO paper_orders (
             order_id, ts, symbol, timeframe, side, qty, price,
-            fee_usd, fee_bps, slip_bps, analysis_id, reason
+            fee_usd, fee_bps, slip_bps, analysis_id, reason,
+            approval_id, decision_source
         ) VALUES (
             :order_id, :ts, :symbol, :timeframe, :side, :qty, :price,
-            :fee_usd, :fee_bps, :slip_bps, :analysis_id, :reason
+            :fee_usd, :fee_bps, :slip_bps, :analysis_id, :reason,
+            :approval_id, :decision_source
         )
         """,
         payload,
@@ -983,7 +1088,8 @@ def list_paper_orders(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict
     cur = conn.execute(
         """
         SELECT order_id, ts, symbol, timeframe, side, qty, price,
-               fee_usd, fee_bps, slip_bps, analysis_id, reason
+               fee_usd, fee_bps, slip_bps, analysis_id, reason,
+               approval_id, decision_source
         FROM paper_orders
         ORDER BY ts DESC
         LIMIT ?
@@ -998,11 +1104,112 @@ def list_paper_orders_asc(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.execute(
         """
         SELECT order_id, ts, symbol, timeframe, side, qty, price,
-               fee_usd, fee_bps, slip_bps, analysis_id, reason
+               fee_usd, fee_bps, slip_bps, analysis_id, reason,
+               approval_id, decision_source
         FROM paper_orders
         ORDER BY ts ASC, order_id ASC
         """
     )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def upsert_paper_decision_outcome(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_decision_outcomes (
+            approval_id, open_order_id, close_order_id, symbol, side,
+            pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+        ) VALUES (
+            :approval_id, :open_order_id, :close_order_id, :symbol, :side,
+            :pnl_usd, :r_multiple, :hold_ms, :decision_source, :prompt_version, :closed_at_ms
+        )
+        ON CONFLICT(open_order_id, close_order_id) DO UPDATE SET
+            approval_id=excluded.approval_id,
+            symbol=excluded.symbol,
+            side=excluded.side,
+            pnl_usd=excluded.pnl_usd,
+            r_multiple=excluded.r_multiple,
+            hold_ms=excluded.hold_ms,
+            decision_source=excluded.decision_source,
+            prompt_version=excluded.prompt_version,
+            closed_at_ms=excluded.closed_at_ms
+        """,
+        {
+            "approval_id": row.get("approval_id"),
+            "open_order_id": str(row["open_order_id"]),
+            "close_order_id": str(row["close_order_id"]),
+            "symbol": str(row["symbol"]).upper(),
+            "side": str(row["side"]),
+            "pnl_usd": float(row["pnl_usd"]),
+            "r_multiple": row.get("r_multiple"),
+            "hold_ms": row.get("hold_ms"),
+            "decision_source": str(row.get("decision_source") or "unknown"),
+            "prompt_version": row.get("prompt_version"),
+            "closed_at_ms": int(row["closed_at_ms"]),
+        },
+    )
+
+
+def insert_paper_auto_run(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_auto_runs (
+            at_ms, model, prompt_version, ok, skipped, reason, processed,
+            approved_n, rejected_n, deferred_n, apply_failed_n, duration_s, payload_json
+        ) VALUES (
+            :at_ms, :model, :prompt_version, :ok, :skipped, :reason, :processed,
+            :approved_n, :rejected_n, :deferred_n, :apply_failed_n, :duration_s, :payload_json
+        )
+        """,
+        {
+            "at_ms": int(row["at_ms"]),
+            "model": row.get("model"),
+            "prompt_version": row.get("prompt_version"),
+            "ok": 1 if row.get("ok") else 0,
+            "skipped": 1 if row.get("skipped") else 0,
+            "reason": row.get("reason"),
+            "processed": row.get("processed"),
+            "approved_n": row.get("approved_n"),
+            "rejected_n": row.get("rejected_n"),
+            "deferred_n": row.get("deferred_n"),
+            "apply_failed_n": row.get("apply_failed_n"),
+            "duration_s": row.get("duration_s"),
+            "payload_json": row.get("payload_json"),
+        },
+    )
+    conn.commit()
+
+
+def list_paper_decision_outcomes(
+    conn: sqlite3.Connection,
+    *,
+    since_ms: int | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    lim = max(1, min(int(limit), 5_000))
+    if since_ms is None:
+        cur = conn.execute(
+            """
+            SELECT id, approval_id, open_order_id, close_order_id, symbol, side,
+                   pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+            FROM paper_decision_outcomes
+            ORDER BY closed_at_ms DESC
+            LIMIT ?
+            """,
+            (lim,),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT id, approval_id, open_order_id, close_order_id, symbol, side,
+                   pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+            FROM paper_decision_outcomes
+            WHERE closed_at_ms >= ?
+            ORDER BY closed_at_ms DESC
+            LIMIT ?
+            """,
+            (int(since_ms), lim),
+        )
     return [dict(row) for row in cur.fetchall()]
 
 

@@ -25,6 +25,7 @@ from jarvise_notify import (
     notify_job_failure,
     notify_pending_digest,
 )
+from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
 from jarvise_risk import kill_switch_state
 from jarvise_trade import reconcile_live_orders
@@ -204,9 +205,13 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
             return 3, _running("ingest")
         symbols = os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")
         paper_tf = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+        # 1h microstructure + paper TF + 1d HTF for analyzer MTF confirm (T2.3).
         timeframes = ["1h"]
-        if paper_tf != "1h":
+        if paper_tf not in timeframes:
             timeframes.append(paper_tf)
+        htf = (os.environ.get("JARVISE_ANALYZE_HTF") or "1d").strip() or "1d"
+        if htf not in timeframes:
+            timeframes.append(htf)
 
         by_tf: dict[str, Any] = {}
         exit_code = 0
@@ -450,6 +455,7 @@ def _parse_stdout(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 ROUTES = {
     ("GET", "/healthz"): "health",
+    ("GET", "/metrics"): "metrics",
     ("GET", "/doctrine"): "doctrine",
     ("POST", "/jobs/ingest"): "ingest",
     ("POST", "/jobs/rag-refresh"): "rag",
@@ -460,7 +466,6 @@ ROUTES = {
     ("POST", "/jobs/paper-auto-decide"): "paper_auto_decide",
     ("POST", "/jobs/live-reconcile"): "live_reconcile",
 }
-
 
 class JobHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
@@ -487,6 +492,12 @@ class JobHandler(BaseHTTPRequestHandler):
         if action == "health":
             self._send(200, {"ok": True, "paper_only": True})
             return
+        if action == "metrics":
+            ks = kill_switch_state(strict=False)
+            set_gauge("jarvise_kill_switch", 1.0 if ks.get("engaged") else 0.0)
+            metrics_body = render_prometheus()
+            self._send_text(200, metrics_body)
+            return
         if action == "doctrine":
             params = parse_qs(self.path.partition("?")[2])
             query = (params.get("q") or [""])[0]
@@ -496,44 +507,40 @@ class JobHandler(BaseHTTPRequestHandler):
                 limit = 3
             self._send(200, run_doctrine_search(query, limit))
             return
-        if action == "ingest":
-            code, body = run_ingest()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
+        runners = {
+            "ingest": run_ingest,
+            "rag": run_rag_refresh,
+            "paper_run": run_paper_run,
+            "paper_expire": run_paper_expire,
+            "paper_pending_digest": run_paper_pending_digest,
+            "ingest_health": run_ingest_health,
+            "paper_auto_decide": run_paper_auto_decide,
+            "live_reconcile": run_live_reconcile,
+        }
+        runner = runners.get(action or "")
+        if runner is None or action is None:
+            self._send(404, {"ok": False, "error": "not found"})
             return
-        if action == "rag":
-            code, body = run_rag_refresh()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        if action == "paper_run":
-            code, body = run_paper_run()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        if action == "paper_expire":
-            code, body = run_paper_expire()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        if action == "paper_pending_digest":
-            code, body = run_paper_pending_digest()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
+        started = time.monotonic()
+        code, payload = runner()
+        observe_job(action, ok=(code == 0), duration_s=time.monotonic() - started)
         if action == "ingest_health":
-            code, body = run_ingest_health()
-            self._send(200 if code == 0 else 500, body)
-            return
-        if action == "paper_auto_decide":
-            code, body = run_paper_auto_decide()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        if action == "live_reconcile":
-            code, body = run_live_reconcile()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        self._send(404, {"ok": False, "error": "not found"})
+            self._send(200 if code == 0 else 500, payload)
+        else:
+            self._send(200 if code == 0 else 409 if code == 3 else 500, payload)
 
     def _send(self, status: int, body: dict[str, Any]) -> None:
         raw = json.dumps(body).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _send_text(self, status: int, body: str) -> None:
+        raw = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)

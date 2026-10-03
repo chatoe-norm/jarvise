@@ -1,0 +1,14 @@
+# Scrape Jarvise web + jobs on the compose network. Profile: obs.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: jarvise-web
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["web:8080"]
+  - job_name: jarvise-jobs
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["jobs:8090"]

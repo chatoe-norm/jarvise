@@ -1,0 +1,61 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Kill switch",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "jarvise_kill_switch", "refId": "A" }
+      ],
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Paper queue pending",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        { "expr": "jarvise_paper_queue_pending", "refId": "A" }
+      ],
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "Job runs",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "expr": "sum by (job, result) (rate(jarvise_job_runs_total[5m]))",
+          "refId": "A",
+          "legendFormat": "{{job}} {{result}}"
+        }
+      ],
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "Job duration (avg)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "expr": "rate(jarvise_job_duration_seconds_sum[5m]) / clamp_min(rate(jarvise_job_duration_seconds_count[5m]), 1e-9)",
+          "refId": "A",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "id": 4
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["jarvise"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Jarvise overview",
+  "uid": "jarvise-overview",
+  "version": 1
+}
