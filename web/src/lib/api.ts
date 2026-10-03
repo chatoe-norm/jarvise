@@ -67,6 +67,24 @@ export type ApprovalRow = {
   status?: string;
 };
 
+export type OhlcvBar = {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+};
+
+export type OhlcvPayload = {
+  ok: boolean;
+  approval_id: string;
+  symbol: string;
+  timeframe: string;
+  bars: OhlcvBar[];
+  invalidation_price: number | null;
+  action: string;
+};
+
 export type RecommendationPayload = {
   ok: boolean;
   approval_id: string;
@@ -227,6 +245,8 @@ export const api = {
     request<RecommendationPayload>(
       `/api/approvals/${encodeURIComponent(id)}/recommendation`,
     ),
+  ohlcv: (id: string) =>
+    request<OhlcvPayload>(`/api/approvals/${encodeURIComponent(id)}/ohlcv`),
   exchange: () => request<ExchangePayload>("/api/exchange"),
   approve: (id: string) =>
     request<{ ok: boolean }>("/approvals/approve", {

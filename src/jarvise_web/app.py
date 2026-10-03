@@ -32,6 +32,7 @@ from jarvise_ingest.db import (
     list_paper_orders,
     list_paper_positions,
     load_latest_candle,
+    load_recent_ohlcv,
     open_db,
 )
 from jarvise_obs.metrics import render_prometheus, set_gauge
@@ -541,6 +542,51 @@ def api_approval_recommendation(approval_id: str, _: None = Depends(require_auth
     if card is None:
         raise HTTPException(status_code=404, detail="approval not found")
     return card
+
+
+@app.get("/api/approvals/{approval_id}/ohlcv")
+def api_approval_ohlcv(
+    approval_id: str,
+    _: None = Depends(require_auth),
+    limit: int = Query(48, ge=1, le=120),
+) -> dict[str, Any]:
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="approval not found")
+    conn = open_db(path)
+    try:
+        row = get_approval(conn, approval_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="approval not found")
+        symbol = str(row["symbol"])
+        timeframe = str(row["timeframe"])
+        action = str(row.get("action") or "flat")
+        raw = load_recent_ohlcv(conn, symbol, timeframe, limit=limit)
+        analysis_id = row.get("analysis_id")
+        analysis = get_analysis_output(conn, str(analysis_id)) if analysis_id else None
+        inv = (analysis or {}).get("invalidation_price")
+        invalidation = float(inv) if inv is not None else None
+    finally:
+        conn.close()
+    bars = [
+        {
+            "t": int(b["timestamp"]),
+            "o": float(b["open"]),
+            "h": float(b["high"]),
+            "l": float(b["low"]),
+            "c": float(b["close"]),
+        }
+        for b in raw
+    ]
+    return {
+        "ok": True,
+        "approval_id": approval_id,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "bars": bars,
+        "invalidation_price": invalidation,
+        "action": action,
+    }
 
 
 @app.get("/api/exchange")
