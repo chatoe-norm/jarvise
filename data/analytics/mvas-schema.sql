@@ -1,11 +1,12 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
--- Runtime owner: src/jarvise_ingest/db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 7).
+-- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 9).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
 -- Notebook: Jarvise : Crypto Trader (14e11c63-e2ee-4b49-898f-b0cc4c61cb4e)
+
 
 -- Timestamps: INTEGER Unix milliseconds (UTC)
 CREATE TABLE IF NOT EXISTS market_technicals (
@@ -23,6 +24,13 @@ CREATE TABLE IF NOT EXISTS market_technicals (
     adx_14 REAL,
     ema_20 REAL,
     ema_200 REAL,
+    sma_20 REAL,
+    macd_line REAL,
+    macd_signal REAL,
+    macd_hist REAL,
+    bb_mid REAL,
+    bb_upper REAL,
+    bb_lower REAL,
     PRIMARY KEY (symbol, timestamp, timeframe)
 );
 
@@ -128,7 +136,10 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     entry_price REAL NOT NULL,
     entry_ts INTEGER NOT NULL,
     unrealized_pnl REAL NOT NULL DEFAULT 0,
-    realized_pnl REAL NOT NULL DEFAULT 0
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    stop_price REAL,
+    stop_source TEXT,
+    approval_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS approval_queue (
@@ -142,6 +153,7 @@ CREATE TABLE IF NOT EXISTS approval_queue (
     regime_state TEXT,
     confidence_score REAL,
     size_pct_equity REAL,
+    invalidation_price REAL,
     status TEXT NOT NULL,
     resolved_at_ms INTEGER,
     resolve_reason TEXT,
@@ -153,6 +165,13 @@ CREATE INDEX IF NOT EXISTS idx_approval_queue_symbol_tf_status
     ON approval_queue (symbol, timeframe, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_queue_pending_symbol_tf
     ON approval_queue (symbol, timeframe) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
+    ts INTEGER PRIMARY KEY,
+    equity REAL NOT NULL,
+    cash REAL NOT NULL,
+    source TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS live_orders (
     id TEXT NOT NULL PRIMARY KEY,

@@ -77,6 +77,15 @@ Expire timed-out pendings (no position change):
 
 `.venv/bin/jarvise paper expire --json`
 
+Backfill stops on open paper positions (dry-run first):
+
+`.venv/bin/jarvise paper backfill-stops --dry-run --json`
+`.venv/bin/jarvise paper backfill-stops --apply --json`
+
+Mark-to-market + stop exits + daily halt:
+
+`.venv/bin/jarvise paper risk-monitor --json`
+
 Expectancy (round-trips after fees):
 
 `.venv/bin/jarvise paper metrics --json`  

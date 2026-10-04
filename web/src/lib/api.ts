@@ -1,3 +1,5 @@
+import { dashboardSchema, paperSchema, statusSchema } from "@/lib/schemas";
+
 export type IngestHealthStatus = {
   ok: boolean;
   timeframe: string;
@@ -52,6 +54,10 @@ export type StatusPayload = {
   paper_auto?: PaperAutoStatus | null;
   risk_caps: Record<string, unknown>;
   qdrant: Record<string, unknown>;
+  fear_greed_index?: number | null;
+  altcoin_season_index?: number | null;
+  sentiment_note?: string | null;
+  auth_warning?: string | null;
 };
 
 export type ApprovalRow = {
@@ -239,6 +245,7 @@ export type DashboardPayload = {
 async function request<T>(
   path: string,
   init?: RequestInit,
+  schema?: { parse: (data: unknown) => T },
 ): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
@@ -253,15 +260,19 @@ async function request<T>(
   }
   const ct = resp.headers.get("content-type") || "";
   if (ct.includes("application/json")) {
-    return (await resp.json()) as T;
+    const data: unknown = await resp.json();
+    if (schema) {
+      return schema.parse(data);
+    }
+    return data as T;
   }
   return {} as T;
 }
 
 export const api = {
-  dashboard: () => request<DashboardPayload>("/api/dashboard"),
-  status: () => request<StatusPayload>("/api/status"),
-  paper: () => request<PaperPayload>("/api/paper"),
+  dashboard: () => request<DashboardPayload>("/api/dashboard", undefined, dashboardSchema),
+  status: () => request<StatusPayload>("/api/status", undefined, statusSchema),
+  paper: () => request<PaperPayload>("/api/paper", undefined, paperSchema),
   metrics: () => request<MetricsPayload>("/api/paper/metrics"),
   analysis: (
     symbol = "",

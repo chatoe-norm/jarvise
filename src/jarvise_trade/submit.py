@@ -13,32 +13,130 @@ import httpx
 from jarvise_exchange.permissions import audit_key_permissions, fetch_api_restrictions
 from jarvise_ingest.db import (
     get_live_order_by_client_id,
-    get_paper_account,
     insert_live_order,
+    live_spot_inventory,
     sum_live_realized_pnl_utc_day,
 )
 from jarvise_risk import estimated_notional, load_risk_caps, utc_day_bounds_ms
 from jarvise_trade.auth import resolve_trade_auth
 from jarvise_trade.binance_market import (
     client_order_id_for_approval,
+    client_order_id_for_stop,
     place_spot_market_order,
+    place_spot_stop_loss_limit,
     query_order,
     summarize_fill,
 )
+from jarvise_trade.pnl import realized_pnl_usd
 
 # Statuses that mean "the venue already has this order" — never POST again.
 _VENUE_HAS_ORDER_STATUSES = frozenset({"submitted", "partially_filled", "filled"})
 
 
-def _live_equity_usd(conn: Any) -> float:
+def _place_protective_stop(
+    conn: Any,
+    *,
+    auth: Any,
+    approval: dict[str, Any],
+    approval_id: str,
+    symbol: str,
+    fill: dict[str, Any],
+    ts: int,
+    http_client: httpx.Client | None,
+) -> dict[str, Any] | None:
+    qty = fill.get("executed_qty")
+    inv = approval.get("invalidation_price")
+    if qty is None or float(qty) <= 0 or inv is None:
+        return None
+    stop = float(inv)
+    limit_px = stop * 0.999 if stop > 0 else stop
+    cid = client_order_id_for_stop(approval_id)
+    try:
+        payload = place_spot_stop_loss_limit(
+            auth,
+            symbol=symbol,
+            side="SELL",
+            quantity=float(qty),
+            stop_price=stop,
+            limit_price=limit_px,
+            client=http_client,
+            timestamp_ms=ts,
+            new_client_order_id=cid,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return insert_live_order(
+            conn,
+            {
+                "id": _order_id(approval_id + "stop", ts),
+                "created_at_ms": ts,
+                "approval_id": approval_id,
+                "venue": "binance",
+                "symbol": symbol,
+                "side": "SELL",
+                "order_type": "STOP_LOSS_LIMIT",
+                "requested_qty": float(qty),
+                "status": "error",
+                "error": f"protective_stop_failed: {exc}",
+                "kill_switch_clear": 1,
+                "caps_ok": 1,
+                "client_order_id": cid,
+                "realized_pnl_usd": 0.0,
+            },
+        )
+    summary = summarize_fill(payload)
+    return insert_live_order(
+        conn,
+        {
+            "id": _order_id(approval_id + "stop", ts),
+            "created_at_ms": ts,
+            "approval_id": approval_id,
+            "venue": "binance",
+            "symbol": symbol,
+            "side": "SELL",
+            "order_type": "STOP_LOSS_LIMIT",
+            "requested_qty": float(qty),
+            "status": summary["status"],
+            "venue_order_id": summary["venue_order_id"],
+            "venue_status": summary["venue_status"],
+            "executed_qty": summary["executed_qty"],
+            "cummulative_quote_qty": summary["cummulative_quote_qty"],
+            "fills_count": summary["fills_count"],
+            "venue_response_json": json.dumps(payload) if isinstance(payload, dict) else None,
+            "kill_switch_clear": 1,
+            "caps_ok": 1,
+            "client_order_id": cid,
+            "realized_pnl_usd": 0.0,
+        },
+    )
+
+
+def _live_equity_usd(_conn: Any) -> float:
     raw = (os.environ.get("JARVISE_LIVE_EQUITY_USD") or "").strip()
-    if raw:
+    if not raw:
+        raise ValueError("live_equity_unknown")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("live_equity_unknown") from exc
+    if value <= 0:
+        raise ValueError("live_equity_unknown")
+    return value
+
+
+def live_preflight(_conn: Any, approval: dict[str, Any]) -> str | None:
+    action = str(approval.get("action") or "flat").lower()
+    if action == "short":
+        return "spot live submit does not support short opens"
+    if action == "long":
+        inv = approval.get("invalidation_price")
+        if inv is None:
+            return "missing_invalidation"
         try:
-            return max(0.0, float(raw))
-        except ValueError:
-            pass
-    acct = get_paper_account(conn)
-    return float(acct.get("equity") or 0.0)
+            if float(inv) <= 0:
+                return "missing_invalidation"
+        except (TypeError, ValueError):
+            return "missing_invalidation"
+    return None
 
 
 def live_day_loss_breach(conn: Any, *, now_ms: int) -> str | None:
@@ -61,7 +159,7 @@ def _side_for_action(action: str) -> str | None:
     if act == "long":
         return "BUY"
     if act == "flat":
-        return None  # no HTTP unless inventory path later
+        return "SELL"
     if act == "short":
         raise ValueError("spot live submit does not support short opens")
     return None
@@ -84,6 +182,48 @@ def submit_live_for_approval(
     action = str(approval.get("action") or "flat")
     size = approval.get("size_pct_equity")
     size_f = float(size) if size is not None else None
+
+    pre = live_preflight(conn, approval)
+    if pre:
+        row = insert_live_order(
+            conn,
+            {
+                "id": _order_id(approval_id, ts),
+                "created_at_ms": ts,
+                "approval_id": approval_id,
+                "venue": "binance",
+                "symbol": symbol,
+                "side": "NONE",
+                "order_type": "MARKET",
+                "status": "blocked",
+                "error": pre,
+                "kill_switch_clear": 1,
+                "caps_ok": 0,
+            },
+        )
+        return {"ok": False, "live_order": row, "error": pre, "paper_only": False}
+
+    try:
+        equity = _live_equity_usd(conn)
+    except ValueError as exc:
+        err = str(exc)
+        row = insert_live_order(
+            conn,
+            {
+                "id": _order_id(approval_id, ts),
+                "created_at_ms": ts,
+                "approval_id": approval_id,
+                "venue": "binance",
+                "symbol": symbol,
+                "side": "NONE",
+                "order_type": "MARKET",
+                "status": "blocked",
+                "error": err,
+                "kill_switch_clear": 1,
+                "caps_ok": 0,
+            },
+        )
+        return {"ok": False, "live_order": row, "error": err, "paper_only": False}
 
     day_breach = live_day_loss_breach(conn, now_ms=ts)
     if day_breach:
@@ -139,8 +279,18 @@ def submit_live_for_approval(
 
     caps = load_risk_caps()
     equity = _live_equity_usd(conn)
-    notional = estimated_notional(equity=equity, size_pct_equity=size_f) if size_f is not None else 0.0
-    if side is None or notional <= 0:
+    sell_qty: float | None = None
+    if side == "SELL":
+        inv_qty, avg_entry = live_spot_inventory(conn, symbol)
+        if inv_qty <= 0:
+            side = None
+            notional = 0.0
+        else:
+            sell_qty = inv_qty
+            notional = inv_qty * avg_entry if avg_entry > 0 else 0.0
+    else:
+        notional = estimated_notional(equity=equity, size_pct_equity=size_f) if size_f is not None else 0.0
+    if side is None or (side == "BUY" and notional <= 0) or (side == "SELL" and (sell_qty or 0) <= 0):
         row = insert_live_order(
             conn,
             {
@@ -305,7 +455,8 @@ def submit_live_for_approval(
         "symbol": symbol,
         "side": side,
         "order_type": "MARKET",
-        "requested_notional_usd": notional,
+        "requested_notional_usd": notional if side == "BUY" else None,
+        "requested_qty": sell_qty if side == "SELL" else None,
         "kill_switch_clear": 1,
         "caps_ok": 1,
         "client_order_id": client_order_id,
@@ -361,7 +512,13 @@ def submit_live_for_approval(
                 "fills_count": fill["fills_count"],
                 "venue_response_json": json.dumps(prior),
                 "reconciled_at_ms": ts,
-                "realized_pnl_usd": 0.0,
+                "realized_pnl_usd": realized_pnl_usd(
+                    conn,
+                    side=side,
+                    symbol=symbol,
+                    executed_qty=fill["executed_qty"],
+                    quote_qty=fill["cummulative_quote_qty"],
+                ),
                 "error": "recovered: venue already held this client order id",
             },
         )
@@ -380,7 +537,7 @@ def submit_live_for_approval(
             symbol=symbol,
             side=side,
             quote_order_qty=notional if side == "BUY" else None,
-            quantity=None if side == "BUY" else notional,  # SELL path reserved
+            quantity=sell_qty if side == "SELL" else None,
             client=http_client,
             timestamp_ms=ts,
             new_client_order_id=client_order_id,
@@ -415,7 +572,13 @@ def submit_live_for_approval(
                     "fills_count": fill["fills_count"],
                     "venue_response_json": json.dumps(recovered),
                     "reconciled_at_ms": ts,
-                    "realized_pnl_usd": 0.0,
+                    "realized_pnl_usd": realized_pnl_usd(
+                        conn,
+                        side=side,
+                        symbol=symbol,
+                        executed_qty=fill["executed_qty"],
+                        quote_qty=fill["cummulative_quote_qty"],
+                    ),
                     "error": f"submit response lost ({type(exc).__name__}); recovered via order query",
                 },
             )
@@ -460,12 +623,31 @@ def submit_live_for_approval(
             "fills_count": fill["fills_count"],
             "venue_response_json": json.dumps(payload),
             "reconciled_at_ms": ts if fill["venue_status"] else None,
-            "realized_pnl_usd": 0.0,
+            "realized_pnl_usd": realized_pnl_usd(
+                conn,
+                side=side,
+                symbol=symbol,
+                executed_qty=fill["executed_qty"],
+                quote_qty=fill["cummulative_quote_qty"],
+            ),
         },
     )
+    stop_row = None
+    if side == "BUY" and fill["status"] in {"filled", "partially_filled", "submitted"}:
+        stop_row = _place_protective_stop(
+            conn,
+            auth=auth,
+            approval=approval,
+            approval_id=approval_id,
+            symbol=symbol,
+            fill=fill,
+            ts=ts,
+            http_client=http_client,
+        )
     return {
         "ok": True,
         "live_order": row,
+        "stop_order": stop_row,
         "venue_response": payload,
         "error": None,
         "paper_only": False,

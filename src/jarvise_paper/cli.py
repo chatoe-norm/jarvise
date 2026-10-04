@@ -42,6 +42,8 @@ from jarvise_paper.approval import (
 )
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
+from jarvise_paper.risk_monitor import run_risk_monitor
+from jarvise_paper.stops import backfill_stops
 from jarvise_risk import apply_safety_to_analysis, evaluate_from_db, read_kill_switch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -150,6 +152,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Upsert snapshot into performance_risk_metrics",
     )
+
+    bf = sub.add_parser("backfill-stops", help="Attach stops to open paper positions")
+    bf.add_argument("--db", type=Path, default=DEFAULT_DB)
+    bf.add_argument("--dry-run", action="store_true")
+    bf.add_argument("--apply", action="store_true")
+    bf.add_argument("--json", action="store_true", dest="as_json")
+
+    rm = sub.add_parser("risk-monitor", help="MTM, stop exits, daily halt")
+    rm.add_argument("--db", type=Path, default=DEFAULT_DB)
+    rm.add_argument("--json", action="store_true", dest="as_json")
     return p
 
 
@@ -455,6 +467,38 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_stops(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.apply:
+        print("Error: pass --dry-run or --apply", file=sys.stderr)
+        return 2
+    conn = open_db(args.db)
+    try:
+        result = backfill_stops(conn, dry_run=not args.apply)
+    finally:
+        conn.close()
+    if args.as_json:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        print(
+            f"dry_run={result.get('dry_run')} would_update={result.get('would_update')} "
+            f"updated={result.get('updated')}"
+        )
+    return 0
+
+
+def cmd_risk_monitor(args: argparse.Namespace) -> int:
+    conn = open_db(args.db)
+    try:
+        result = run_risk_monitor(conn)
+    finally:
+        conn.close()
+    if args.as_json:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        print(f"halted={result.get('halted')} stops={result.get('stops')}")
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -472,6 +516,10 @@ def run(argv: list[str] | None = None) -> int:
         return cmd_expire(args)
     if args.cmd == "metrics":
         return cmd_metrics(args)
+    if args.cmd == "backfill-stops":
+        return cmd_backfill_stops(args)
+    if args.cmd == "risk-monitor":
+        return cmd_risk_monitor(args)
     return 2
 
 

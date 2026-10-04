@@ -13,6 +13,7 @@ APPROVAL = {
     "action": "long",
     "regime_state": "trend_up",
     "confidence_score": 0.75,
+    "invalidation_price": 97.0,
     "size_pct_equity": 1.125,
     "expires_at_ms": 9_999_999_999_999,
     "status": "pending",

@@ -6,6 +6,7 @@ the owner-facing SPA. Do not import LLM / network here.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -23,9 +24,12 @@ def _num(value: Any) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _rsi_conflicts(bullish: bool, bearish: bool, rsi: float | None) -> bool:

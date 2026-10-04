@@ -86,6 +86,7 @@ def test_digest_with_rows(monkeypatch: pytest.MonkeyPatch) -> None:
             "symbol": "ETHUSDT",
             "timeframe": "4h",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 2,
         }
     ]

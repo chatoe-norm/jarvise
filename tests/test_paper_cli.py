@@ -62,6 +62,7 @@ def _seed_long_analysis(db: Path, *, symbol: str = "BTCUSDT", timeframe: str = "
             "confidence_score": 0.9,
             "action": "long",
             "invalidation_price": None,
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "thesis": "cli test",
         },

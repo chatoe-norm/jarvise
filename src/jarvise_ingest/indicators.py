@@ -31,6 +31,66 @@ def ema(values: Sequence[float], period: int) -> list[float | None]:
     return out
 
 
+def sma(values: Sequence[float], period: int) -> list[float | None]:
+    out: list[float | None] = [None] * len(values)
+    if period < 1:
+        raise ValueError("period must be >= 1")
+    if len(values) < period:
+        return out
+    window = 0.0
+    for i, value in enumerate(values):
+        window += value
+        if i >= period:
+            window -= values[i - period]
+        if i >= period - 1:
+            out[i] = window / period
+    return out
+
+
+def bollinger(
+    values: Sequence[float], period: int = 20, num_std: float = 2.0
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    mid = sma(values, period)
+    upper: list[float | None] = [None] * len(values)
+    lower: list[float | None] = [None] * len(values)
+    for i, center in enumerate(mid):
+        if center is None:
+            continue
+        window = values[i - period + 1 : i + 1]
+        mean = center
+        var = sum((x - mean) ** 2 for x in window) / period  # population std, ddof=0
+        std = math.sqrt(var)
+        upper[i] = mean + num_std * std
+        lower[i] = mean - num_std * std
+    return mid, upper, lower
+
+
+def macd(
+    values: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    fast_ema = ema(values, fast)
+    slow_ema = ema(values, slow)
+    line: list[float | None] = [None] * len(values)
+    for i, (a, b) in enumerate(zip(fast_ema, slow_ema, strict=True)):
+        if a is None or b is None:
+            continue
+        line[i] = a - b
+    compact = [x for x in line if x is not None]
+    sig_compact = ema(compact, signal) if compact else []
+    signal_out: list[float | None] = [None] * len(values)
+    hist: list[float | None] = [None] * len(values)
+    compact_i = 0
+    for i, macd_val in enumerate(line):
+        if macd_val is None:
+            continue
+        sig_val = sig_compact[compact_i] if compact_i < len(sig_compact) else None
+        compact_i += 1
+        signal_out[i] = sig_val
+        if sig_val is not None:
+            hist[i] = macd_val - sig_val
+    return line, signal_out, hist
+
+
 def rsi(closes: Sequence[float], period: int = 14) -> list[float | None]:
     out: list[float | None] = [None] * len(closes)
     if len(closes) <= period:
@@ -74,13 +134,16 @@ def atr(
     out: list[float | None] = [None] * n
     if n == 0:
         return out
-    true_ranges: list[float] = [highs[0] - lows[0]]
-    for i in range(1, n):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1]),
-        )
+    true_ranges: list[float] = []
+    for i in range(n):
+        if i == 0:
+            tr = highs[0] - lows[0]
+        else:
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
         true_ranges.append(tr)
     if n < period:
         return out
@@ -111,9 +174,18 @@ def indicator_series(
     closes: Sequence[float],
 ) -> dict[str, list[float | None]]:
     """Indicator columns for a whole series, warm-up values withheld as NULL."""
+    bb_mid, bb_upper, bb_lower = bollinger(closes, 20, 2.0)
+    macd_line, macd_signal, macd_hist = macd(closes)
     return {
         "atr_14": _withhold_until(atr(highs, lows, closes, 14), warm_from(13, 1 / 14)),
         "rsi_14": _withhold_until(rsi(closes, 14), warm_from(14, 1 / 14)),
         "ema_20": _withhold_until(ema(closes, 20), warm_from(19, 2 / 21)),
         "ema_200": _withhold_until(ema(closes, 200), warm_from(199, 2 / 201)),
+        "sma_20": sma(closes, 20),
+        "macd_line": macd_line,
+        "macd_signal": macd_signal,
+        "macd_hist": macd_hist,
+        "bb_mid": bb_mid,
+        "bb_upper": bb_upper,
+        "bb_lower": bb_lower,
     }

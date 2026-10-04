@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import math
 from typing import Any
 
 CONFIDENCE_THRESHOLD = 0.55
@@ -193,7 +194,13 @@ def _force_flat(
 def _num(value: Any) -> float | None:
     if value is None:
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _rsi_conflicts(bullish: bool, bearish: bool, rsi: float | None) -> bool:

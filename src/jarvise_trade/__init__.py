@@ -2,9 +2,10 @@
 
 from jarvise_trade.flags import live_trading_enabled
 from jarvise_trade.reconcile import reconcile_live_orders
-from jarvise_trade.submit import submit_live_for_approval
+from jarvise_trade.submit import live_preflight, submit_live_for_approval
 
 __all__ = [
+    "live_preflight",
     "live_trading_enabled",
     "reconcile_live_orders",
     "submit_live_for_approval",

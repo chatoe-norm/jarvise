@@ -34,6 +34,7 @@ def recompute_indicators(conn: sqlite3.Connection, symbol: str, timeframe: str) 
         closes.append(float(candle["close"]))
 
     computed = indicator_series(highs, lows, closes)
+    macd_line, macd_signal, macd_hist = computed["macd_line"], computed["macd_signal"], computed["macd_hist"]
     updates = [
         {
             "symbol": symbol,
@@ -43,6 +44,13 @@ def recompute_indicators(conn: sqlite3.Connection, symbol: str, timeframe: str) 
             "rsi_14": computed["rsi_14"][i],
             "ema_20": computed["ema_20"][i],
             "ema_200": computed["ema_200"][i],
+            "sma_20": computed["sma_20"][i],
+            "macd_line": macd_line[i],
+            "macd_signal": macd_signal[i],
+            "macd_hist": macd_hist[i],
+            "bb_mid": computed["bb_mid"][i],
+            "bb_upper": computed["bb_upper"][i],
+            "bb_lower": computed["bb_lower"][i],
         }
         for i, candle in enumerate(candles)
     ]

@@ -428,6 +428,7 @@ def test_apply_signal_uses_book_spread(tmp_path: Path) -> None:
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,

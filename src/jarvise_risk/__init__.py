@@ -3,6 +3,7 @@
 from jarvise_risk.caps import (
     BUCKETS,
     CRYPTO_MAJORS,
+    HARD_MAX_RISK_PER_TRADE_PCT,
     KILL_SWITCH_KEY,
     KILL_SWITCH_REASON_KEY,
     US_EQUITY,
@@ -15,8 +16,10 @@ from jarvise_risk.caps import (
     estimated_notional,
     kill_switch_state,
     load_risk_caps,
+    max_risk_per_trade_pct,
     position_notional,
     read_kill_switch,
+    risk_at_stop_pct,
     symbol_bucket,
     utc_day_bounds_ms,
 )
@@ -35,6 +38,7 @@ __all__ = [
     "CRYPTO_MAJORS",
     "KILL_SWITCH_KEY",
     "KILL_SWITCH_REASON_KEY",
+    "HARD_MAX_RISK_PER_TRADE_PCT",
     "KillSwitchUnavailable",
     "MarketSafetyConfig",
     "MarketSafetyResult",
@@ -51,9 +55,11 @@ __all__ = [
     "kill_switch_state",
     "load_market_safety_config",
     "load_risk_caps",
+    "max_risk_per_trade_pct",
     "maybe_engage_kill_switch",
     "position_notional",
     "read_kill_switch",
+    "risk_at_stop_pct",
     "symbol_bucket",
     "utc_day_bounds_ms",
 ]

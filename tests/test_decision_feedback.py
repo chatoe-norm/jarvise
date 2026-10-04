@@ -50,7 +50,7 @@ def test_decision_source_from_reason() -> None:
 
 def test_schema_version_seven_has_feedback_tables(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "fb.db")
-    assert schema_version(conn) == SCHEMA_VERSION == 7
+    assert schema_version(conn) == SCHEMA_VERSION
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "paper_decision_outcomes" in tables
     assert "paper_auto_runs" in tables
@@ -70,6 +70,7 @@ def test_approve_stamps_approval_id_on_fills(tmp_path: Path, monkeypatch) -> Non
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 1.5,
             "regime_state": "trend_up",
             "confidence_score": 0.8,
@@ -105,6 +106,7 @@ def test_metrics_split_by_decision_source(tmp_path: Path) -> None:
             "analysis_id": "o1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -121,6 +123,7 @@ def test_metrics_split_by_decision_source(tmp_path: Path) -> None:
             "analysis_id": "c1",
             "symbol": "BTCUSDT",
             "action": "flat",
+            "invalidation_price": 97.0,
             "size_pct_equity": 0.0,
             "regime_state": "range",
             "confidence_score": 0.4,
@@ -138,6 +141,7 @@ def test_metrics_split_by_decision_source(tmp_path: Path) -> None:
             "analysis_id": "o2",
             "symbol": "ETHUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -154,6 +158,7 @@ def test_metrics_split_by_decision_source(tmp_path: Path) -> None:
             "analysis_id": "c2",
             "symbol": "ETHUSDT",
             "action": "flat",
+            "invalidation_price": 97.0,
             "size_pct_equity": 0.0,
             "regime_state": "range",
             "confidence_score": 0.4,

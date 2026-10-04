@@ -23,6 +23,8 @@ from jarvise_ingest.providers.binance_klines import (
     fetch_klines,
     fetch_klines_range,
 )
+from jarvise_ingest.providers.alternative_fng import fetch_fear_greed
+from jarvise_ingest.providers.cmc_altseason import fetch_altseason
 from jarvise_ingest.providers.coingecko_global import fetch_global_macro
 from jarvise_ingest.providers.derivatives import fetch_derivatives, select_provider
 from jarvise_ingest.providers.stooq_ohlcv import fetch_stooq_ohlcv, is_equity_symbol
@@ -282,11 +284,21 @@ def run(argv: list[str] | None = None) -> int:
         else:
             try:
                 macro_row = fetch_global_macro()
+                try:
+                    macro_row["fear_greed_index"] = fetch_fear_greed()
+                except Exception as fng_exc:  # noqa: BLE001 — context only
+                    errors.append(str(fng_exc))
+                try:
+                    macro_row["altcoin_season_index"] = fetch_altseason()
+                except Exception as alt_exc:  # noqa: BLE001
+                    errors.append(str(alt_exc))
                 n = upsert_macro_sentiment(conn, macro_row)
                 macro_summary["global"] = {
                     "upserted": n,
                     "btc_dominance_pct": macro_row.get("btc_dominance_pct"),
                     "global_market_cap_usd": macro_row.get("global_market_cap_usd"),
+                    "fear_greed_index": macro_row.get("fear_greed_index"),
+                    "altcoin_season_index": macro_row.get("altcoin_season_index"),
                 }
                 if not args.as_json:
                     print(

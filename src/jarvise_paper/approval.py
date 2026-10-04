@@ -22,12 +22,15 @@ from jarvise_ingest.db import (
     mark_approval_failed,
     resolve_approval,
     set_approval_paper_order_ids,
+    set_approval_resolve_reason,
+    transaction,
     upsert_pending_approval,
 )
 from jarvise_notify import notify_pending_enqueue
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.feedback import decision_source_from_reason
 from jarvise_paper.metrics import paper_utc_day_realized_pnl
+from jarvise_paper.schemas import parse_signal
 from jarvise_risk import (
     apply_safety_to_analysis,
     check_caps,
@@ -66,10 +69,18 @@ def _risk_breach(
     action: str | None,
     size_pct_equity: float | None,
     now_ms: int,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    stop_price: float | None = None,
 ) -> str | None:
     caps = load_risk_caps()
     acct = _account_snapshot(conn)
     day_pnl = paper_utc_day_realized_pnl(list_paper_orders_asc(conn), now_ms=now_ms)
+    entry = None
+    if symbol and timeframe:
+        candle = load_latest_candle(conn, symbol, timeframe)
+        if candle and candle.get("close") is not None:
+            entry = float(candle["close"])
     return check_caps(
         caps,
         equity=float(acct["equity"]),
@@ -77,6 +88,8 @@ def _risk_breach(
         size_pct_equity=size_pct_equity,
         action=action,
         utc_day_realized_pnl_usd=day_pnl,
+        entry_price=entry,
+        stop_price=stop_price,
     )
 
 
@@ -138,8 +151,21 @@ def enqueue_approval(
     now_ms: int | None = None,
 ) -> dict[str, Any]:
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    try:
+        parsed = parse_signal(analysis)
+        analysis = {**analysis, **parsed.model_dump()}
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "skipped": True,
+            "error": f"invalid_signal: {exc}",
+            "kill_switch_engaged": False,
+            "paper_only": True,
+        }
     symbol = str(analysis["symbol"]).upper()
-    safety = evaluate_from_db(conn, symbol, now_ms=ts)
+    safety = evaluate_from_db(
+        conn, symbol, now_ms=ts, intended_side=str(analysis.get("action") or "")
+    )
     analysis = apply_safety_to_analysis(analysis, safety)
     action = str(analysis.get("action") or "flat")
     if safety.force_flat:
@@ -158,14 +184,20 @@ def enqueue_approval(
         }
     size = analysis.get("size_pct_equity")
     size_f = float(size) if size is not None else None
+    stop_raw = analysis.get("invalidation_price")
+    stop_f = float(stop_raw) if stop_raw is not None else None
     breach = _risk_breach(
         conn,
         action=action,
         size_pct_equity=size_f,
         now_ms=ts,
+        symbol=symbol,
+        timeframe=timeframe,
+        stop_price=stop_f,
     )
     if breach:
-        engaged = engage_kill_switch(reason=breach)
+        engage = not str(breach).startswith("missing_invalidation")
+        engaged = engage_kill_switch(reason=breach) if engage else False
         return {
             "ok": False,
             "skipped": True,
@@ -199,6 +231,7 @@ def enqueue_approval(
             "regime_state": analysis.get("regime_state"),
             "confidence_score": analysis.get("confidence_score"),
             "size_pct_equity": analysis.get("size_pct_equity"),
+            "invalidation_price": analysis.get("invalidation_price"),
             "status": "pending",
         },
     )
@@ -262,7 +295,7 @@ def approve_approval(
             "error": "kill_switch engaged",
             "paper_only": True,
         }
-    safety = evaluate_from_db(conn, str(row["symbol"]), now_ms=ts)
+    safety = evaluate_from_db(conn, str(row["symbol"]), now_ms=ts, intended_side=str(row.get("action") or ""))
     if safety.force_flat:
         engaged = False
         if safety.critical:
@@ -294,14 +327,26 @@ def approve_approval(
     size = row.get("size_pct_equity")
     size_f = float(size) if size is not None else None
     action = str(row.get("action") or "flat")
+    stop_raw = row.get("invalidation_price")
+    stop_f = float(stop_raw) if stop_raw is not None else None
     breach = _risk_breach(
         conn,
         action=action,
         size_pct_equity=size_f,
         now_ms=ts,
+        symbol=str(row["symbol"]),
+        timeframe=str(row["timeframe"]),
+        stop_price=stop_f,
     )
     if breach:
-        return _fail_risk(conn, approval_id, reason=breach, ts=ts, row=row)
+        return _fail_risk(
+            conn,
+            approval_id,
+            reason=breach,
+            ts=ts,
+            row=row,
+            engage_kill=not str(breach).startswith("missing_invalidation"),
+        )
     port = _portfolio_breach(
         conn,
         symbol=str(row["symbol"]),
@@ -330,33 +375,61 @@ def approve_approval(
             "error": "no stored candles",
             "paper_only": True,
         }
-    claimed = claim_approval_for_fill(
-        conn,
-        approval_id,
-        now_ms=ts,
-        resolve_reason=claim_reason,
-        expected_analysis_id=expected_analysis_id,
-    )
-    if claimed is None:
-        return _claim_failure(conn, approval_id, ts=ts)
-    analysis = {
-        "analysis_id": claimed.get("analysis_id"),
-        "symbol": claimed["symbol"],
-        "action": claimed["action"],
-        "regime_state": claimed.get("regime_state"),
-        "confidence_score": claimed.get("confidence_score"),
-        "size_pct_equity": claimed.get("size_pct_equity"),
-    }
+    claimed = None
     try:
-        applied = apply_signal(
+        with transaction(conn):
+            claimed = claim_approval_for_fill(
+                conn,
+                approval_id,
+                now_ms=ts,
+                resolve_reason=claim_reason,
+                expected_analysis_id=expected_analysis_id,
+                commit=False,
+            )
+            if claimed is None:
+                raise RuntimeError("claim_failed")
+            analysis = {
+                "analysis_id": claimed.get("analysis_id"),
+                "symbol": claimed["symbol"],
+                "action": claimed["action"],
+                "regime_state": claimed.get("regime_state"),
+                "confidence_score": claimed.get("confidence_score"),
+                "size_pct_equity": claimed.get("size_pct_equity"),
+                "invalidation_price": claimed.get("invalidation_price"),
+            }
+            applied = apply_signal(
+                conn,
+                analysis=analysis,
+                mid_price=float(candle["close"]),
+                timeframe=str(claimed["timeframe"]),
+                now_ms=ts,
+                approval_id=approval_id,
+                decision_source=source,
+                in_transaction=True,
+            )
+            order_ids = [f.get("order_id") for f in applied.get("fills") or [] if f.get("order_id")]
+            updated = set_approval_paper_order_ids(
+                conn,
+                approval_id,
+                json.dumps(order_ids) if order_ids else None,
+                commit=False,
+            )
+    except RuntimeError as exc:
+        if str(exc) == "claim_failed":
+            return _claim_failure(conn, approval_id, ts=ts)
+        failed = mark_approval_failed(
             conn,
-            analysis=analysis,
-            mid_price=float(candle["close"]),
-            timeframe=str(claimed["timeframe"]),
-            now_ms=ts,
-            approval_id=approval_id,
-            decision_source=source,
+            approval_id,
+            resolve_reason=str(exc),
+            resolved_at_ms=ts,
         )
+        return {
+            "ok": False,
+            "approval": failed or get_approval(conn, approval_id),
+            "fills": [],
+            "error": str(exc),
+            "paper_only": True,
+        }
     except Exception as exc:  # noqa: BLE001
         failed = mark_approval_failed(
             conn,
@@ -371,12 +444,6 @@ def approve_approval(
             "error": str(exc),
             "paper_only": True,
         }
-    order_ids = [f.get("order_id") for f in applied.get("fills") or [] if f.get("order_id")]
-    updated = set_approval_paper_order_ids(
-        conn,
-        approval_id,
-        json.dumps(order_ids) if order_ids else None,
-    )
     return {
         "ok": True,
         "approval": updated or claimed,
@@ -425,14 +492,7 @@ def _approve_live(
         }
 
     if result.get("skipped"):
-        conn.execute(
-            """
-            UPDATE approval_queue SET resolve_reason = ?
-            WHERE id = ?
-            """,
-            ("live_skipped", approval_id),
-        )
-        conn.commit()
+        set_approval_resolve_reason(conn, approval_id, "live_skipped")
 
     return {
         "ok": True,

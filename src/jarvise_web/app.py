@@ -26,19 +26,18 @@ from jarvise_ingest.db import (
     get_analysis_output,
     get_approval,
     get_latest_llm_review,
-    get_paper_account,
     get_paper_position,
+    latest_macro_sentiment,
     list_analysis_output,
     list_approvals,
-    list_paper_orders,
-    list_paper_positions,
     load_candle_at,
     load_latest_candle,
     load_recent_ohlcv,
     open_db,
 )
-from jarvise_obs.metrics import render_prometheus, set_gauge
+from jarvise_web.schemas import ApprovalsResponse, DashboardResponse
 from jarvise_paper.approval import approve_approval, reject_approval
+from jarvise_paper.ledger import load_paper_ledger
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
 from jarvise_risk import evaluate_from_db, load_risk_caps
@@ -99,6 +98,16 @@ def _redis():
         socket_connect_timeout=3.0,
         socket_timeout=3.0,
     )
+
+
+def live_auth_gap() -> str | None:
+    if not live_trading_enabled():
+        return None
+    user = os.environ.get("WEB_BASIC_AUTH_USER") or ""
+    password = os.environ.get("WEB_BASIC_AUTH_PASSWORD") or ""
+    if not user or not password:
+        return "live_trading requires WEB_BASIC_AUTH_USER and WEB_BASIC_AUTH_PASSWORD"
+    return None
 
 
 def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
@@ -240,24 +249,8 @@ def load_analysis_rows(
         return [], 0, str(exc)
 
 
-def load_paper_ledger() -> tuple[dict[str, Any], str | None]:
-    path = db_path()
-    if not path.exists():
-        return {"account": None, "positions": [], "orders": []}, f"Database not found: {path}"
-    try:
-        conn = open_db(path)
-        try:
-            ensure_paper_account(conn)
-            payload = {
-                "account": get_paper_account(conn),
-                "positions": list_paper_positions(conn),
-                "orders": list_paper_orders(conn, limit=20),
-            }
-        finally:
-            conn.close()
-        return payload, None
-    except Exception as exc:  # noqa: BLE001
-        return {"account": None, "positions": [], "orders": []}, str(exc)
+def load_paper_snapshot() -> tuple[dict[str, Any], str | None]:
+    return load_paper_ledger(db_path())
 
 
 def kill_switch_state() -> dict[str, Any]:
@@ -283,9 +276,18 @@ def kill_switch_engaged() -> bool:
 def status_payload() -> dict[str, Any]:
     live = live_trading_enabled()
     ks = kill_switch_state()
+    macro = None
+    path = db_path()
+    if path.exists():
+        conn = open_db(path)
+        try:
+            macro = latest_macro_sentiment(conn)
+        finally:
+            conn.close()
     return {
         "paper_only": PAPER_ONLY and not live,
         "live_trading": live,
+        "auth_warning": live_auth_gap(),
         "kill_switch": bool(ks["engaged"]),
         "kill_switch_state": ks,
         "ingest": redis_get_json(INGEST_KEY),
@@ -296,6 +298,13 @@ def status_payload() -> dict[str, Any]:
         "ingest_health": redis_get_json(INGEST_HEALTH_KEY),
         "risk_caps": load_risk_caps().as_dict(),
         "qdrant": qdrant_info(),
+        "fear_greed_index": None if not macro else macro.get("fear_greed_index"),
+        "altcoin_season_index": None if not macro else macro.get("altcoin_season_index"),
+        "sentiment_note": (
+            None
+            if macro and macro.get("fear_greed_index") is not None
+            else "ไม่มีข้อมูล"
+        ),
     }
 
 
@@ -560,7 +569,7 @@ def api_analysis_explain(analysis_id: str, _: None = Depends(require_auth)) -> d
 
 @app.get("/api/paper")
 def api_paper(_: None = Depends(require_auth)) -> dict[str, Any]:
-    ledger, err = load_paper_ledger()
+    ledger, err = load_paper_snapshot()
     payload: dict[str, Any] = {
         "paper_only": PAPER_ONLY,
         "db": str(db_path()),
@@ -583,7 +592,7 @@ def api_paper_metrics(_: None = Depends(require_auth)) -> dict[str, Any]:
     return load_metrics()
 
 
-@app.get("/api/approvals")
+@app.get("/api/approvals", response_model=ApprovalsResponse)
 def api_approvals(
     _: None = Depends(require_auth),
     status_filter: str = Query("pending", alias="status"),
@@ -658,7 +667,7 @@ def api_exchange(_: None = Depends(require_auth)) -> dict[str, Any]:
     return exchange_payload()
 
 
-@app.get("/api/dashboard")
+@app.get("/api/dashboard", response_model=DashboardResponse)
 def api_dashboard(_: None = Depends(require_auth)) -> dict[str, Any]:
     path = db_path()
     approvals: list[dict[str, Any]] = []
@@ -685,6 +694,11 @@ async def set_kill_switch(
     state: str = Form(...),
     _: None = Depends(require_auth),
 ) -> Any:
+    gap = live_auth_gap()
+    if gap:
+        if wants_json(request):
+            return JSONResponse({"ok": False, "error": gap}, status_code=403)
+        raise HTTPException(status_code=403, detail=gap)
     value = "1" if state.lower() in {"on", "1", "true", "engage"} else "0"
     try:
         _redis().set(KILL_SWITCH_KEY, value)
@@ -701,6 +715,12 @@ async def approvals_approve(
     id: str = Form(...),
     _: None = Depends(require_auth),
 ) -> Any:
+    gap = live_auth_gap()
+    if gap:
+        detail = {"ok": False, "error": gap, "id": id}
+        if wants_json(request):
+            return JSONResponse(detail, status_code=403)
+        raise HTTPException(status_code=403, detail=gap)
     ks = kill_switch_state()
     if not ks["known"]:
         # Fail closed: an unreadable switch must never let an approve through.
