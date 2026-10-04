@@ -117,6 +117,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=("With --replay: apply_signal each bar into isolated --db (refuses default live ledger path)"),
     )
+    p.add_argument(
+        "--paper-policy",
+        choices=["naive", "rules"],
+        default="naive",
+        help=(
+            "With --apply-paper: naive = fill every bar (engine may flip). "
+            "rules = same-side hold, opposite defer, FLAT closes (no Claude)"
+        ),
+    )
     return p
 
 
@@ -183,6 +192,12 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.paper_policy == "rules" and not args.apply_paper:
+        print(
+            "Error: --paper-policy rules requires --apply-paper.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
 
     started = time.perf_counter()
     conn = open_db(args.db)
@@ -211,15 +226,20 @@ def run(argv: list[str] | None = None) -> int:
                 confidence_threshold=args.confidence_threshold,
                 apply_paper=args.apply_paper,
                 dry_run=args.dry_run,
+                paper_policy=args.paper_policy,
             )
             report["db"] = str(args.db.resolve())
             report["universe"] = args.universe
             report["duration_s"] = round(time.perf_counter() - started, 3)
-            report["note"] = (
-                "replay + paper fills (isolated db); no exchange orders"
-                if args.apply_paper
-                else "replay analysis only; no order placement"
-            )
+            if args.apply_paper and args.paper_policy == "rules":
+                report["note"] = (
+                    "replay + paper fills (isolated db, rules policy: hold/defer/flat); "
+                    "no Claude; no exchange orders"
+                )
+            elif args.apply_paper:
+                report["note"] = "replay + paper fills (isolated db); no exchange orders"
+            else:
+                report["note"] = "replay analysis only; no order placement"
             if args.as_json:
                 print(json.dumps(report, separators=(",", ":")))
             else:

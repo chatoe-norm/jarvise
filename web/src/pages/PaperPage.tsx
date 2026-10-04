@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type MetricsPayload, type PaperPayload } from "@/lib/api";
 import { buildEquityPoints } from "@/lib/equity";
-import { formatNum } from "@/lib/utils";
+import { decisionSourceLabel } from "@/lib/copy";
+import { formatNum, formatQty } from "@/lib/utils";
 
 export function PaperPage() {
   const [paper, setPaper] = useState<PaperPayload | null>(null);
@@ -139,7 +140,7 @@ export function PaperPage() {
                         const row = src[k];
                         return (
                           <tr key={k} className="border-b border-[var(--color-border)]/60">
-                            <td className="py-2 pr-3 font-medium">{k}</td>
+                            <td className="py-2 pr-3 font-medium">{decisionSourceLabel(k)}</td>
                             <td className="py-2 pr-3 tabular-nums">{row?.closed_trades ?? 0}</td>
                             <td className="py-2 pr-3 tabular-nums">
                               {formatNum(row?.expected_value_ev)}
@@ -208,7 +209,7 @@ export function PaperPage() {
                     <tr key={i} className="border-b border-[var(--color-border)]/60">
                       <td className="py-2 pr-3">{String(p.symbol ?? "")}</td>
                       <td className="py-2 pr-3">{String(p.side ?? "")}</td>
-                      <td className="py-2 pr-3 tabular-nums">{formatNum(p.qty)}</td>
+                      <td className="py-2 pr-3 tabular-nums">{formatQty(p.qty)}</td>
                       <td className="py-2 pr-3 tabular-nums">{formatNum(p.entry_price)}</td>
                       <td className="py-2 pr-3 tabular-nums">
                         {stop != null ? formatNum(stop) : "—"}

@@ -12,7 +12,7 @@ import {
 import { ConfidenceLadder } from "@/components/ConfidenceLadder";
 import { api, type AnalysisExplainPayload, type AnalysisSummary } from "@/lib/api";
 import { outcomeCopy, parseAnalysisOutcome } from "@/lib/copy";
-import { formatDecisionStamp, formatNum } from "@/lib/utils";
+import { formatDecisionStamp, formatNum, formatThesisDisplay } from "@/lib/utils";
 
 const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
 
@@ -258,7 +258,7 @@ export function DecisionsPage() {
                               {formatNum(r.size_pct_equity)}
                             </td>
                             <td className="py-2 max-w-md text-[var(--color-muted)]">
-                              {String(r.thesis ?? "")}
+                              {formatThesisDisplay(r.thesis)}
                             </td>
                           </tr>
                           {isOpen ? (

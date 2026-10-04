@@ -5,7 +5,7 @@ import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { DashboardPayload, PaperAutoStatus, StatusPayload } from "@/lib/api";
-import { ownerReasonCopy } from "@/lib/copy";
+import { resolveReasonLabel } from "@/lib/copy";
 import { buildEquityPoints } from "@/lib/equity";
 import { relativeAge } from "@/lib/utils";
 
@@ -128,7 +128,7 @@ function LastAutoDecideCard({
                 <Badge variant={kindVariant(e.kind)}>{e.kind}</Badge>
                 <span className="font-medium">{e.symbol || e.id}</span>
               </div>
-              <p className="text-[var(--color-muted)]">{ownerReasonCopy(e.reason)}</p>
+              <p className="text-[var(--color-muted)]">{resolveReasonLabel(e.reason)}</p>
             </li>
           ))}
         </ul>

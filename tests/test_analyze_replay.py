@@ -5,8 +5,9 @@ import shutil
 from pathlib import Path
 
 from jarvise_analyze.cli import DEFAULT_DB, run
-from jarvise_analyze.replay import replay_range
+from jarvise_analyze.replay import _rules_disposition, replay_range
 from jarvise_ingest.db import (
+    get_paper_position,
     list_paper_orders,
     open_db,
     upsert_market_technicals,
@@ -137,3 +138,128 @@ def test_apply_paper_isolated_fills(tmp_path: Path, capsys) -> None:
 def test_replay_requires_since(capsys) -> None:
     assert run(["--symbol", "BTCUSDT", "--replay"]) == 2
     assert "--since" in capsys.readouterr().err
+
+
+def test_paper_policy_rules_requires_apply_paper(capsys) -> None:
+    assert (
+        run(
+            [
+                "--symbol",
+                "BTCUSDT",
+                "--replay",
+                "--since",
+                "2020-01-01",
+                "--paper-policy",
+                "rules",
+                "--db",
+                str(Path("nope.db")),
+            ]
+        )
+        == 2
+    )
+    assert "--apply-paper" in capsys.readouterr().err
+
+
+def _seed_up_then_down(db: Path, *, n_up: int = 400, n_down: int = 400) -> None:
+    conn = open_db(db)
+    rows = []
+    ts = 1_600_000_000_000
+    close = 100.0
+    for i in range(n_up):
+        close = 100.0 + i * 0.8
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": ts + i * 14_400_000,
+                "timeframe": "4h",
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 10.0,
+            }
+        )
+    base = n_up
+    peak = close
+    for i in range(n_down):
+        close = peak - (i + 1) * 1.2
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": ts + (base + i) * 14_400_000,
+                "timeframe": "4h",
+                "open": close + 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 10.0,
+            }
+        )
+    upsert_market_technicals(conn, rows)
+    recompute_indicators(conn, "BTCUSDT", "4h")
+    conn.close()
+
+
+def test_rules_policy_defers_opposite_instead_of_flipping(tmp_path: Path) -> None:
+    naive_db = tmp_path / "naive.db"
+    rules_db = tmp_path / "rules.db"
+    _seed_up_then_down(naive_db)
+    shutil.copy(naive_db, rules_db)
+    since_ms = 1_600_000_000_000
+    until_ms = 1_600_000_000_000 + 799 * 14_400_000
+    naive_conn = open_db(naive_db)
+    naive = replay_range(
+        naive_conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=since_ms,
+        until_ms=until_ms,
+        apply_paper=True,
+        paper_policy="naive",
+        confidence_threshold=0.45,
+    )
+    naive_conn.close()
+    rules_conn = open_db(rules_db)
+    rules = replay_range(
+        rules_conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=since_ms,
+        until_ms=until_ms,
+        apply_paper=True,
+        paper_policy="rules",
+        confidence_threshold=0.45,
+    )
+    rules_pos = rules_conn.execute("SELECT side FROM paper_positions WHERE symbol='BTCUSDT'").fetchone()
+    rules_conn.close()
+    assert naive["ok"] and rules["ok"]
+    assert rules["policy_counts"]["hold"] > 0
+    assert naive["fills"] >= 1
+    assert rules["fills"] >= 1
+    if rules_pos is not None:
+        assert rules_pos[0] == "long"
+
+
+def test_rules_disposition_opposite_is_defer(tmp_path: Path) -> None:
+    db = tmp_path / "hold.db"
+    _seed_trend(db, n=700)
+    since_ms = 1_600_000_000_000 + 500 * 14_400_000
+    until_ms = 1_600_000_000_000 + 699 * 14_400_000
+    conn = open_db(db)
+    report = replay_range(
+        conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=since_ms,
+        until_ms=until_ms,
+        apply_paper=True,
+        paper_policy="rules",
+        confidence_threshold=0.45,
+    )
+    assert report["fills"] >= 1
+    pos = get_paper_position(conn, "BTCUSDT")
+    assert pos is not None and pos["side"] == "long"
+    assert (
+        _rules_disposition(conn, {"symbol": "BTCUSDT", "action": "short", "size_pct_equity": 1.0}) == "defer"
+    )
+    conn.close()

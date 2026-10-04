@@ -103,6 +103,10 @@ Historical replay (stored candles only):
 cp data/analytics/jarvise.db /tmp/jarvise-bt.db
 .venv/bin/jarvise analyze --replay --since 2024-01-01 --until 2024-06-01 \
   --universe paper_core --timeframe 4h --db /tmp/jarvise-bt.db --apply-paper --json
+
+# closer to paper auto-decide code gates (same-side hold, opposite defer; no Claude)
+.venv/bin/jarvise analyze --replay --since 2024-01-01 --universe paper_core --timeframe 4h \
+  --db /tmp/jarvise-bt.db --apply-paper --paper-policy rules --json
 ```
 
 On Windows use `.venv\Scripts\jarvise` instead of `.venv/bin/jarvise`. Set `JARVISE_APPROVAL_TIMEOUT_MIN` in `.env` (see `.env.example`).
