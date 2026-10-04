@@ -1,27 +1,28 @@
 # PROJECT_CONTEXT.md — Jarvise
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
-**Generated:** 2026-09-25; **status refreshed:** 2026-10-03 (19:20 ICT).
-**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** shipped on `main` ([PR #83](https://github.com/chatoe-norm/jarvise/pull/83); flat_exit [#85](https://github.com/chatoe-norm/jarvise/pull/85)); VPS Deploy green. Live submit **code** stays gated off. **Coverage verdict:** intelligence + hardened paper autotrade + Approve→live *door* — **not** unattended live (P5). **Next:** prove paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
+**Generated:** 2026-09-25; **status refreshed:** 2026-10-04 (~10:55 ICT).
+**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** shipped on `main` ([PR #83](https://github.com/chatoe-norm/jarvise/pull/83); flat_exit [#85](https://github.com/chatoe-norm/jarvise/pull/85)); Command Dashboard Option C (#92); pullback-entry doctrine (#96/#97) live on VPS. Live submit **code** stays gated off. **Coverage verdict:** intelligence + hardened paper autotrade + Approve→live *door* — **not** unattended live (P5). **Next:** prove paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
-### Status at a glance (2026-10-03)
+### Status at a glance (2026-10-04)
 
 | Area | State |
 |------|--------|
 | Ladder | **P0–P4-C (gated)** on `main` + paper excellence Tier 0–2 (#60, #83). |
 | Autotrade coverage | **Paper + gated Approve path: yes.** **Unattended live (P5): no** — see §5.1. |
 | Live trading | **Off by default** — `jarvise_trade` + `live_orders`; flag `JARVISE_LIVE_TRADING=false`. |
-| Shipped UX | Command Dashboard SPA (`web/`: Home / Paper / Decisions / Exchange / Ops) + FastAPI JSON; approval-first Home. |
+| Shipped UX | Command Dashboard SPA (`web/`: Home / Paper / Decisions / Exchange / Ops) + FastAPI JSON; approval-first Home; confidence ladders + Exchange dust/Earn labels (#92). |
 | Paper path | `paper run` → enqueue → manual Approve **or** auto-decide (+ soft EV gate) → paper fill when flag off. |
+| Doctrine | Pullback-entry note indexed in Qdrant; `doctrine_query` includes `pullback EMA20` on VPS jobs/web (#96/#97). |
 | Equity paper | Universe `paper_equity` (SPY/QQQ) via Stooq 1d; paper-only; no broker live. |
 | VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**, pending digest / auto-decide as configured. |
 | Next | Prove auto-decide EV via feedback; optional checklist live enable; stabilize before P5. |
-| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false` (compose-wired). Open BTC long `auto_claude` (not closed yet). Closed `auto_*` **n=0**; gate unset. Restore MTF/`MIN_EV` after N≈10. Live stays false. |
+| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false` (compose-wired). Open count 1; latest ETH 0.65 deferred (Claude, pre-pullback-query recreate). Closed `auto_*` **n=0**; gate unset. Restore MTF/`MIN_EV` after N≈10. Live stays false. |
 | Risk | Per-order + portfolio book caps (open/gross/symbol/bucket) + market safety; timeout → FLAT (paper). |
 | Obs | `GET /metrics` (web + jobs); compose profile `obs` **running** on VPS (Prometheus `:9090` + Grafana `:3000`, Tailscale-bound, 256m). |
 | P4-C | Implemented: Approve → caps → `jarvise_trade` MARKET POST → `live_orders`; no paper mirror when live. |
-| VPS | Deploy green after #83/#85/#86; healthz `paper_only:true`. n8n paper-run last success **2026-10-03T09:00Z** (4h cadence). Live flag stays false. |
+| VPS | healthz `paper_only:true`; equity ~$9,995.36; jobs/web recreated 2026-10-04 with pullback query. Prefer web+jobs-only rebuild if full bake hangs. Live flag stays false. |
 
 ---
 
@@ -340,7 +341,7 @@ Paper-EV ladder (2026-10-03). **n8n does not auto-complete step 3.**
 5. **Optional live enable** — only via checklist (`BINANCE_TRADE_*` + `JARVISE_LIVE_TRADING=true`) after step 3.
 6. **Stabilize gated live** — smoke Approve → live on a tiny size; then consider P5. **Do not start P5 before this.**
 
-**Step-3 status snapshot (2026-10-03 ~18:52 ICT):** n8n paper-run **success at 09:00 UTC** (then 05:00 / 01:00; 4.0h gaps). Closed trades still 2× `unknown`; **`auto_*` closed n=0**; equity ~$9,995.10. Open: BTCUSDT long `auto_claude` (`d4cef2f4497fd0e4`, entry ~84742, small unrealized loss). Gate unset; `JARVISE_ANALYZE_MTF=false` in `.env` and jobs container; live false. Next paper-run ~**13:00 UTC / 20:00 ICT**. Step 3 still waits for ~10 closed `auto_*`.
+**Step-3 status snapshot (2026-10-04 ~10:55 ICT):** Closed trades still 2× `unknown`; **`auto_*` closed n=0**; equity ~$9,995.36; open_count=1. Latest analysis: BTC 0.75 long / ETH 0.65 long (pullback band). Last auto-decide: BTC `same_side_hold`, ETH deferred (Claude: 0.65 + “no clear doctrine” — run predates jobs/web pullback-query recreate). Pullback note now ranks first on VPS RAG (`score≈0.83` for full `doctrine_query`). Gate unset; `JARVISE_ANALYZE_MTF=false`; live false. Step 3 still waits for ~10 closed `auto_*`.
 
 ### Post-MVP backlog (do not start without a roadmap update)
 
