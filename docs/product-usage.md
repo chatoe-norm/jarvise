@@ -111,6 +111,8 @@ On Windows use `.venv\Scripts\jarvise` instead of `.venv/bin/jarvise`. Set `JARV
 
 Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`, Tailscale only.
 
+**Local vs VPS SQLite (not the same book):** `data/analytics/jarvise.db` is gitignored. A laptop Dashboard (`:8080` / Vite `:5173` / another local port) reads a local file that is often missing, so `ensure_paper_account` seeds **$10,000**. The 24/7 book is `/opt/jarvise/data/analytics/jarvise.db` on a compose bind-mount. Deploy updates code only (`git checkout -f`); it does **not** call `reset_paper_ledger` and does **not** `compose down -v`. Replay `--apply-paper` may wipe an **isolated copy** only. To inspect the same numbers locally, copy that VPS file read-only — do not expect `git pull` to reset or sync the ledger.
+
 **Automatic** (n8n → jobs service in [`src/jarvise/jobs.py`](../src/jarvise/jobs.py)):
 
 - Every ~15 minutes: `POST /jobs/ingest` → refresh market data (includes Alternative.me Fear & Greed as context)
