@@ -1,8 +1,8 @@
 # PROJECT_CONTEXT.md — Jarvise
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
-**Generated:** 2026-09-25; **status refreshed:** 2026-10-04 (~10:55 ICT).
-**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** shipped on `main` ([PR #83](https://github.com/chatoe-norm/jarvise/pull/83); flat_exit [#85](https://github.com/chatoe-norm/jarvise/pull/85)); Command Dashboard Option C (#92); pullback-entry doctrine (#96/#97) live on VPS. Live submit **code** stays gated off. **Coverage verdict:** intelligence + hardened paper autotrade + Approve→live *door* — **not** unattended live (P5). **Next:** prove paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
+**Generated:** 2026-09-25; **status refreshed:** 2026-10-04 (~12:15 ICT).
+**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** shipped on `main` ([PR #83](https://github.com/chatoe-norm/jarvise/pull/83); flat_exit [#85](https://github.com/chatoe-norm/jarvise/pull/85)); Command Dashboard Option C (#92); pullback-entry doctrine (#96/#97) live on VPS. First post-pullback paper fill: ETH `auto_claude` (12:01 ICT). Live submit **code** stays gated off. **Coverage verdict:** intelligence + hardened paper autotrade + Approve→live *door* — **not** unattended live (P5). **Next:** prove paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
 ### Status at a glance (2026-10-04)
@@ -18,11 +18,11 @@
 | Equity paper | Universe `paper_equity` (SPY/QQQ) via Stooq 1d; paper-only; no broker live. |
 | VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**, pending digest / auto-decide as configured. |
 | Next | Prove auto-decide EV via feedback; optional checklist live enable; stabilize before P5. |
-| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false` (compose-wired). Open count 1; latest ETH 0.65 deferred (Claude, pre-pullback-query recreate). Closed `auto_*` **n=0**; gate unset. Restore MTF/`MIN_EV` after N≈10. Live stays false. |
+| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false` (compose-wired). Open count **2** (BTC + ETH `auto_claude`). Closed `auto_*` **n=0**; gate unset. Restore MTF/`MIN_EV` after N≈10. Live stays false. |
 | Risk | Per-order + portfolio book caps (open/gross/symbol/bucket) + market safety; timeout → FLAT (paper). |
 | Obs | `GET /metrics` (web + jobs); compose profile `obs` **running** on VPS (Prometheus `:9090` + Grafana `:3000`, Tailscale-bound, 256m). |
 | P4-C | Implemented: Approve → caps → `jarvise_trade` MARKET POST → `live_orders`; no paper mirror when live. |
-| VPS | healthz `paper_only:true`; equity ~$9,995.36; jobs/web recreated 2026-10-04 with pullback query. Prefer web+jobs-only rebuild if full bake hangs. Live flag stays false. |
+| VPS | healthz `paper_only:true`; equity ~$9,995.17; pullback doctrine live. Prefer web+jobs-only rebuild if full bake hangs. Live flag stays false. |
 
 ---
 
@@ -341,7 +341,7 @@ Paper-EV ladder (2026-10-03). **n8n does not auto-complete step 3.**
 5. **Optional live enable** — only via checklist (`BINANCE_TRADE_*` + `JARVISE_LIVE_TRADING=true`) after step 3.
 6. **Stabilize gated live** — smoke Approve → live on a tiny size; then consider P5. **Do not start P5 before this.**
 
-**Step-3 status snapshot (2026-10-04 ~10:55 ICT):** Closed trades still 2× `unknown`; **`auto_*` closed n=0**; equity ~$9,995.36; open_count=1. Latest analysis: BTC 0.75 long / ETH 0.65 long (pullback band). Last auto-decide: BTC `same_side_hold`, ETH deferred (Claude: 0.65 + “no clear doctrine” — run predates jobs/web pullback-query recreate). Pullback note now ranks first on VPS RAG (`score≈0.83` for full `doctrine_query`). Gate unset; `JARVISE_ANALYZE_MTF=false`; live false. Step 3 still waits for ~10 closed `auto_*`.
+**Step-3 status snapshot (2026-10-04 ~12:15 ICT):** Closed trades still 2× `unknown`; **`auto_*` closed n=0** (open fills do not count). Equity ~$9,995.17; open_count=2. **07:00 ICT** analysis wrote BTC+ETH 4h `trend_up` long @ **0.75** (no paper-run at :00 — cadence 00/04/08/12). **08:00** still used prior ETH 0.65 → Claude defer → `timeout_flat` 10:00. **12:00** enqueued the 07:00 analyses: BTC `same_side_hold`; ETH `f1fb9a2918c494ac` Claude **approve** citing pullback doctrine → paper buy @ ~2695.79 (`decision_source=auto_claude`, analysis `40181af099d4`). Gate unset; `JARVISE_ANALYZE_MTF=false`; live false. Step 3 still waits for ~10 **closed** `auto_*`.
 
 ### Post-MVP backlog (do not start without a roadmap update)
 
