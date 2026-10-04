@@ -1232,9 +1232,7 @@ def list_analysis_outcomes(
     out: dict[str, dict] = {}
     for aid in unique:
         approval_row: dict | None = latest.get(aid)
-        json_ids = _parse_order_id_json(
-            approval_row.get("paper_order_ids_json") if approval_row else None
-        )
+        json_ids = _parse_order_id_json(approval_row.get("paper_order_ids_json") if approval_row else None)
         if json_ids:
             fills = len(json_ids)
             fill_reasons = [
