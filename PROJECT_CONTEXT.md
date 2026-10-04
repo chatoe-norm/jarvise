@@ -1,8 +1,8 @@
 # PROJECT_CONTEXT.md — Jarvise
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
-**Generated:** 2026-09-25; **status refreshed:** 2026-10-04 (~12:15 ICT).
-**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** shipped on `main` ([PR #83](https://github.com/chatoe-norm/jarvise/pull/83); flat_exit [#85](https://github.com/chatoe-norm/jarvise/pull/85)); Command Dashboard Option C (#92); pullback-entry doctrine (#96/#97) live on VPS. First post-pullback paper fill: ETH `auto_claude` (12:01 ICT). Live submit **code** stays gated off. **Coverage verdict:** intelligence + hardened paper autotrade + Approve→live *door* — **not** unattended live (P5). **Next:** prove paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
+**Generated:** 2026-09-25; **status refreshed:** 2026-10-04 (~14:15 ICT).
+**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** on `main`; capital-safety / integrity slice ([PR #102](https://github.com/chatoe-norm/jarvise/pull/102)) deployed. Paper stops backfilled on open BTC+ETH; n8n **Jarvise risk monitor** (15m) active. Live submit **code** stays gated off. **Coverage verdict:** intelligence + hardened paper autotrade + Approve→live *door* — **not** unattended live (P5). **Next:** prove paper EV (`auto_*` closed n=0) → optional checklist live smoke → stabilize P4-C → only then P5.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
 ### Status at a glance (2026-10-04)
@@ -16,13 +16,13 @@
 | Paper path | `paper run` → enqueue → manual Approve **or** auto-decide (+ soft EV gate) → paper fill when flag off. |
 | Doctrine | Pullback-entry note indexed in Qdrant; `doctrine_query` includes `pullback EMA20` on VPS jobs/web (#96/#97). |
 | Equity paper | Universe `paper_equity` (SPY/QQQ) via Stooq 1d; paper-only; no broker live. |
-| VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**, pending digest / auto-decide as configured. |
+| VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**, **risk-monitor 15m**, pending digest / auto-decide as configured. Live-reconcile **not** imported (flag off). |
 | Next | Prove auto-decide EV via feedback; optional checklist live enable; stabilize before P5. |
-| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false` (compose-wired). Open count **2** (BTC + ETH `auto_claude`). Closed `auto_*` **n=0**; gate unset. Restore MTF/`MIN_EV` after N≈10. Live stays false. |
+| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false` (compose-wired). Open count **2** (BTC + ETH `auto_claude`, stops backfilled). Closed `auto_*` **n=0**; gate unset. Restore MTF/`MIN_EV` after N≈10. Live stays false. |
 | Risk | Per-order + portfolio book caps (open/gross/symbol/bucket) + market safety; timeout → FLAT (paper). |
 | Obs | `GET /metrics` (web + jobs); compose profile `obs` **running** on VPS (Prometheus `:9090` + Grafana `:3000`, Tailscale-bound, 256m). |
 | P4-C | Implemented: Approve → caps → `jarvise_trade` MARKET POST → `live_orders`; no paper mirror when live. |
-| VPS | healthz `paper_only:true`; equity ~$9,995.17; pullback doctrine live. Prefer web+jobs-only rebuild if full bake hangs. Live flag stays false. |
+| VPS | healthz `paper_only:true`; equity ~$9,995.63; F&G **65** (context); pullback doctrine live. Prefer web+jobs-only rebuild if full bake hangs. Live flag stays false. |
 
 ---
 
@@ -129,21 +129,21 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - Indicators (`indicators.py`): ATR-14, RSI-14, EMA-20, EMA-200 recomputed over the full stored series; values withheld until seed influence < 1%.
 - Derivatives router (`providers/derivatives.py`): **Binance Futures public** funding + OI hist by default (no key); CoinGlass v4 when `COINGLASS_API_KEY` set (OI/funding/liquidations + best-effort L/S) → `derivatives_analytics` bitemporal.
 - Binance public book (`providers/binance_book.py`): `ticker/bookTicker` + `depth` → `order_book_microstructure` (spread, ±1% depth USD).
-- CoinGecko global (`providers/coingecko_global.py`): BTC dominance + total market cap → `macro_onchain_sentiment`. CoinGecko AI Integration (MCP/CLI/SKILL) is an optional research overlay only — see `docs/market-data/coingecko-for-jarvise.md`; not a SQLite writer.
+- CoinGecko global (`providers/coingecko_global.py`): BTC dominance + total market cap → `macro_onchain_sentiment`. **Fear & Greed** (`providers/alternative_fng.py`, Alternative.me GET) is written as context only (not a trade gate). Altcoin Season only when `CMC_API_KEY` is set and the payload parses. CoinGecko AI Integration (MCP/CLI/SKILL) is an optional research overlay only — see `docs/market-data/coingecko-for-jarvise.md`; not a SQLite writer.
 - Market-safety gate (`jarvise_risk.market_safety`): FLAT + block enqueue/approve on unsafe/stale/anomalous data; kill-switch on critical failures when `JARVISE_MARKET_SAFETY=1` (default on). Flags: `--skip-book`, `--skip-macro`, `--skip-derivatives`.
 - Point-in-time universe (`universe.py`): `paper_core` = BTCUSDT, ETHUSDT; `paper_equity` = SPY, QQQ → `universe_membership`; blocks survivorship bias.
 - Stooq equity OHLCV (`providers/stooq_ohlcv.py`): free CSV GET for `paper_equity` 1d; book/deriv streams auto-skipped for equities; weekend 1d holes not reported as gaps.
-- SQLite schema + migrations (`db.py`, `user_version` 7; documented in `data/analytics/mvas-schema.sql`) including `paper_decision_outcomes` / `paper_auto_runs`.
+- SQLite schema + migrations (`db.py`, `user_version` 9; documented in `data/analytics/mvas-schema.sql`) including `paper_decision_outcomes` / `paper_auto_runs` and `paper_positions.stop_price`.
 
 **Analysis** (`src/jarvise_analyze/`)
 - `jarvise analyze --symbol|--universe --timeframe [--confidence-threshold] [--dry-run] --json`: classifies the **latest closed candle** into `analysis_output` (regime, action, confidence, invalidation, size, thesis, deterministic `analysis_id`).
 - **MTF (Tier 2):** `analyze_mtf` — LTF = `JARVISE_PAPER_TIMEFRAME`, HTF confirm from `JARVISE_ANALYZE_HTF` (default `1d`); directional LTF forced flat on HTF range/chaotic/conflict or missing HTF (`mtf_reason`). Disable with `JARVISE_ANALYZE_MTF=false`.
 
 **Paper trading** (`src/jarvise_paper/`)
-- `engine.apply_signal`: flat closes; long/short closes opposite then opens sized by `size_pct_equity`; same side = hold; fees/slippage; MTM; writes `paper_orders`, `paper_positions`, `paper_account`, `performance_risk_metrics.daily_pnl_usd`; fills stamp `approval_id` + `decision_source`.
+- `engine.apply_signal`: flat closes; long/short closes opposite then opens sized by `size_pct_equity`; same side = hold; fees/slippage; MTM; **1% equity risk-at-stop** ceiling; writes `paper_orders`, `paper_positions` (incl. `stop_price`), `paper_account`, `performance_risk_metrics.daily_pnl_usd`; fills stamp `approval_id` + `decision_source`. `stops.py` + `risk_monitor.py`: ATR/invalidation stops, MTM daily halt.
 - `approval.py` (**on `main`**): enqueue / approve / reject / expire; statuses `pending | approved | rejected | timed_out | failed`; approve uses the latest closed candle at approve time; atomic claim-before-fill; unique pending index per (symbol, timeframe); kill-switch fail-closed; portfolio book caps on enqueue + approve.
 - `auto_decide.py` + `feedback.py`: optional auto Approve/Reject; outcomes sync; metrics by `decision_source`; soft EV gate (`JARVISE_AUTO_DECIDE_MIN_EV` / `_MIN_EV_N`) skips auto when 30d auto EV is below floor.
-- CLI: `jarvise paper run [--auto-fill] | queue [--all] | approve <id> | reject <id> [--reason] | expire | status | metrics`. Default `run` **enqueues** (no fill); `--auto-fill` is the escape hatch. Kill-switch → exit 3, nothing written.
+- CLI: `jarvise paper run [--auto-fill] | queue [--all] | approve <id> | reject <id> [--reason] | expire | status | metrics | backfill-stops | risk-monitor`. Default `run` **enqueues** (no fill); `--auto-fill` is the escape hatch. Kill-switch → exit 3, nothing written. Open positions without stops: dry-run then `--apply`.
 
 **Risk** (`src/jarvise_risk/`)
 - Per-order notional / UTC-day realized `max_daily_loss` / drawdown lock; portfolio caps `JARVISE_MAX_OPEN_POSITIONS`, `JARVISE_MAX_GROSS_NOTIONAL_PCT`, `JARVISE_MAX_SYMBOL_NOTIONAL_PCT`, `JARVISE_MAX_CORRELATED_BUCKET_PCT` (soft block, no kill-switch); market-safety FLAT/kill on critical; expose caps on Ops.
@@ -171,7 +171,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 **Workspace CLI** (`src/jarvise/cli.py`, Typer): `status | init | config get|set|import`; every command has flags, `--help` examples, idempotent re-runs, no prompts.
 
 **Background plane / infra**
-- `src/jarvise/jobs.py`: `GET /healthz`, `GET /metrics`, `POST /jobs/ingest` (1h + paper TF + HTF), `POST /jobs/rag-refresh`, `POST /jobs/paper-run`, `POST /jobs/paper-expire`, `POST /jobs/paper-pending-digest`, `POST /jobs/ingest-health`, `POST /jobs/paper-auto-decide`, `POST /jobs/live-reconcile`; kill-switch → HTTP 409; optional `X-Jarvise-Token`; single-flight locks.
+- `src/jarvise/jobs.py`: `GET /healthz`, `GET /metrics`, `POST /jobs/ingest` (1h + paper TF + HTF), `POST /jobs/rag-refresh`, `POST /jobs/paper-run`, `POST /jobs/paper-expire`, `POST /jobs/paper-pending-digest`, `POST /jobs/ingest-health`, `POST /jobs/paper-auto-decide`, `POST /jobs/risk-monitor`, `POST /jobs/live-reconcile`; kill-switch → HTTP 409; optional `X-Jarvise-Token`; single-flight locks.
 - `docker-compose.yml` (+ `.prod.yml` Tailscale binding): Redis, Qdrant, n8n, OpenClaw (OpenRouter `openrouter/auto`, paper-only), worker/jobs, web; optional `--profile obs`.
 - CI: `.github/workflows/ci.yml` (pytest on `ubuntu-latest`, PRs + main) → `deploy.yml` (self-hosted runner `srv1269762`, label `jarvise`, runs `/opt/jarvise/infra/deploy/vps-deploy.sh` on green main).
 - OpenClaw plugin `plugins/jarvise-openclaw/` (skills: binance-intel, doctrine-rag, paper-research) → notes drop-folder → RAG `kind=openclaw`.
@@ -197,7 +197,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 
 - **Live timeout / venue flatten** (paper timeout→FLAT only).
 - **P5 autonomy** flag and scheduler path (correctly absent).
-- **On-chain / sentiment writers** for remaining `macro_onchain_sentiment` fields (fear/greed, ETF, netflow); spoof-wall heuristics.
+- **On-chain / sentiment writers** for remaining `macro_onchain_sentiment` fields (ETF, netflow/reserve); spoof-wall heuristics. Fear & Greed is shipped (context only).
 - **Broker equity live** (paper Stooq only).
 - **Real second-venue REST** balances/orders (Eterna remains fixture/blocker; Binance is the only live-capable adapter, still gated).
 - **Multi-venue routing** / smart order routing.
@@ -342,11 +342,11 @@ Paper-EV ladder (2026-10-03). **n8n does not auto-complete step 3.**
 5. **Optional live enable** — only via checklist (`BINANCE_TRADE_*` + `JARVISE_LIVE_TRADING=true`) after step 3.
 6. **Stabilize gated live** — smoke Approve → live on a tiny size; then consider P5. **Do not start P5 before this.**
 
-**Step-3 status snapshot (2026-10-04 ~12:15 ICT):** Closed trades still 2× `unknown`; **`auto_*` closed n=0** (open fills do not count). Equity ~$9,995.17; open_count=2. **07:00 ICT** analysis wrote BTC+ETH 4h `trend_up` long @ **0.75** (no paper-run at :00 — cadence 00/04/08/12). **08:00** still used prior ETH 0.65 → Claude defer → `timeout_flat` 10:00. **12:00** enqueued the 07:00 analyses: BTC `same_side_hold`; ETH `f1fb9a2918c494ac` Claude **approve** citing pullback doctrine → paper buy @ ~2695.79 (`decision_source=auto_claude`, analysis `40181af099d4`). Gate unset; `JARVISE_ANALYZE_MTF=false`; live false. Step 3 still waits for ~10 **closed** `auto_*`.
+**Step-3 status snapshot (2026-10-04 ~14:15 ICT):** Closed trades still 2× `unknown`; **`auto_*` closed n=0** (open BTC+ETH `auto_claude` do not count). Equity ~$9,995.63; open_count=2 with **stops** (BTC 83288 / ETH 2654, `stop_source=backfill`). Ingest writing F&G **65**; altseason null (no usable CMC field). n8n `jrvsRiskMon15m001` imported + published; last `risk_monitor` no hits, `halted=false`. Gate unset; `JARVISE_ANALYZE_MTF=false`; `JARVISE_LIVE_TRADING=false`. Step 3 still waits for ~10 **closed** `auto_*`.
 
 ### Post-MVP backlog (do not start without a roadmap update)
 
-P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (fear/greed, ETF flows, netflow) and ADX/volume analyzer inputs; broker equity live; real second-venue REST (beyond Eterna fixture); multi-venue routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
+P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (ETF flows, netflow) and ADX/volume analyzer inputs; broker equity live; real second-venue REST (beyond Eterna fixture); multi-venue routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
 
 *(Shipped post-MVP, not backlog: HTF MTF confirm, Stooq `paper_equity` paper ingest, Telegram alerts, VenueClient registry + Eterna stub, Prometheus/Grafana profile, decision feedback + portfolio caps, flat_exit rule — see Tier 2 / #83, #85.)*
 
@@ -364,6 +364,7 @@ P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (fear/g
 - **2026-10-01** — P4-C APPROVED + implemented (`jarvise_trade`, `live_orders`, Approve branch); `JARVISE_LIVE_TRADING` default false; market-safety ingest.
 - **2026-10 (pre-#83)** — Command Dashboard SPA; paper auto-decide; Telegram pending alerts; hardening Tier 0–1 (PR #60: fail-closed kill-switch, WAL/backups, job locks, retries).
 - **2026-10-03** — Paper excellence **Tier 2** (PR [#83](https://github.com/chatoe-norm/jarvise/pull/83)): decision feedback + soft EV gate, portfolio caps, MTF, `/metrics`+obs profile, Eterna VenueClient stub, Stooq `paper_equity`. Merged to `main`; **VPS Deploy green**. Follow-ups: flat_exit [#85](https://github.com/chatoe-norm/jarvise/pull/85); compose env wiring [#86](https://github.com/chatoe-norm/jarvise/pull/86); VPS sampling `JARVISE_ANALYZE_MTF=false`; first tagged open (`auto_claude` BTC, still open as of 18:52 ICT).
+- **2026-10-04** — Integrity / capital-safety (PR [#102](https://github.com/chatoe-norm/jarvise/pull/102)): paper stops + 1% risk-at-stop + atomic fills + MTM halt, F&G context, pydantic/zod, gated live SELL/STOP/PnL. Merged; **VPS Deploy green**. Open BTC+ETH stops backfilled; n8n risk-monitor 15m published. Live flag false. Closed `auto_*` still n=0.
 
 Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature has landed via spec/plan first.
 
