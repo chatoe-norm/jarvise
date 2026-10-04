@@ -104,7 +104,7 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
               <Badge variant={auto.ok ? "ok" : "danger"}>{auto.ok ? "ran" : "error"}</Badge>
               <span className="text-xs text-[var(--color-muted)]">
                 {auto.model} · {relativeAge(auto.at_ms)} · {auto.duration_s ?? "—"}s
-                {auto.doctrine_unavailable ? " · doctrine unavailable" : ""}
+                {auto.doctrine_unavailable ? " · trading rules unavailable" : ""}
                 {auto.error ? ` · ${auto.error}` : ""}
                 {auto.halted ? ` · halted: ${auto.halted}` : ""}
                 {auto.auto_ev_gate?.blocked
@@ -189,7 +189,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       <div>
         <h1 className="text-xl font-semibold">Ops</h1>
         <p className="text-sm text-[var(--color-muted)]">
-          Kill switch, pipeline health, doctrine index — not day-to-day trading.
+          Kill switch, pipeline health, trading-rules index — not day-to-day trading.
         </p>
       </div>
 
@@ -312,7 +312,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
 
       <Card>
         <CardHeader>
-          <CardTitle>Qdrant doctrine</CardTitle>
+          <CardTitle>Qdrant trading rules</CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-[var(--color-muted)]">
           {status?.qdrant

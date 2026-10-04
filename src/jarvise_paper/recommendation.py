@@ -165,7 +165,7 @@ def build_recommendation(
     what = _what_happened(candle, safety)
     if conf < APPROVE_CONF and not doctrine:
         what.append(
-            f"ความมั่นใจ {conf:.2f} < {APPROVE_CONF:.2f} และไม่พบ doctrine ตรงสัญญาณ "
+            f"ความมั่นใจ {conf:.2f} < {APPROVE_CONF:.2f} และไม่พบกฎการเทรดตรงสัญญาณ "
             "→ auto-decide จะ defer ให้เจ้าของตัดสินใจเอง"
         )
     return {

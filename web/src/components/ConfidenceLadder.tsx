@@ -50,12 +50,12 @@ export function ConfidenceLadder({
       </div>
       <p className="text-xs text-[var(--color-muted)]">
         {formatNum(flat)} = FLAT gate · {formatNum(approve)} = auto-approve
-        without doctrine
+        without trading rules
         {breakdown.total < flat
           ? " · below FLAT → analyzer forces flat"
           : breakdown.total < approve
-            ? " · mid band → caution / may defer without doctrine"
-            : " · above doctrine-free gate"}
+            ? " · mid band → caution / may defer without trading rules"
+            : " · above trading-rules-free gate"}
       </p>
     </div>
   );
