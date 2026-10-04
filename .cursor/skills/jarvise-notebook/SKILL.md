@@ -5,7 +5,7 @@ description: Queries the Jarvise Gemini Notebook (crypto trading knowledge base)
 
 # Jarvise Notebook
 
-Trading knowledge lives in Gemini Notebook **Jarvise : Crypto Trader**. Read [`config/notebook.json`](../../../config/notebook.json) for id, alias, and profile. Query it before analyzing markets or recommending trades. Local extracts: `data/analytics/sources/jarvise-doctrine.txt`, `jarvise-analyzer-stack.txt`, `binance-api-intro-jarvise.txt`, `binance-skills-hub-jarvise.txt`, `shadcn-ui-installation-jarvise.txt`, `api-map.json` (synced 2026-09-22; Binance digests 2026-09-23; shadcn digest 2026-09-29). Agent maps: [`docs/exchange/binance-for-jarvise.md`](../../../docs/exchange/binance-for-jarvise.md), [`docs/ux-ui/shadcn-for-jarvise.md`](../../../docs/ux-ui/shadcn-for-jarvise.md).
+Trading knowledge lives in Gemini Notebook **Jarvise : Crypto Trader**. Read [`config/notebook.json`](../../../config/notebook.json) for id, alias, and profile. Query it before analyzing markets or recommending trades. Local extracts: `data/analytics/sources/jarvise-doctrine.txt`, `jarvise-doctrine-pullback-entry.txt`, `jarvise-analyzer-stack.txt`, `binance-api-intro-jarvise.txt`, `binance-skills-hub-jarvise.txt`, `shadcn-ui-installation-jarvise.txt`, `api-map.json` (synced 2026-09-22; Binance digests 2026-09-23; shadcn digest 2026-09-29; pullback note 2026-10-04). Agent maps: [`docs/exchange/binance-for-jarvise.md`](../../../docs/exchange/binance-for-jarvise.md), [`docs/ux-ui/shadcn-for-jarvise.md`](../../../docs/ux-ui/shadcn-for-jarvise.md).
 
 ## Notebook
 
