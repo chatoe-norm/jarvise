@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_exchange.value import value_spot_balances
+from jarvise_analyze.explain import confidence_breakdown
 from jarvise_ingest.db import (
     count_analysis_output,
     ensure_paper_account,
@@ -31,6 +32,7 @@ from jarvise_ingest.db import (
     list_approvals,
     list_paper_orders,
     list_paper_positions,
+    load_candle_at,
     load_latest_candle,
     load_recent_ohlcv,
     open_db,
@@ -342,8 +344,14 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         if row is None:
             return None
         symbol = str(row["symbol"])
-        candle = load_latest_candle(conn, symbol, str(row["timeframe"]))
+        timeframe = str(row["timeframe"])
+        candle = load_latest_candle(conn, symbol, timeframe)
         analysis = get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
+        signal_candle = None
+        if analysis is not None and analysis.get("timestamp") is not None:
+            signal_candle = load_candle_at(
+                conn, symbol, timeframe, int(analysis["timestamp"])
+            )
         account = ensure_paper_account(conn)
         position = get_paper_position(conn, symbol)
         safety = evaluate_from_db(conn, symbol).as_dict()
@@ -371,7 +379,48 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         safety=safety,
         doctrine=fetch_doctrine(doctrine_query(row)),
         claude=claude,
+        signal_candle=signal_candle,
     )
+
+
+def load_analysis_explain(analysis_id: str) -> dict[str, Any] | None:
+    """Confidence ladder for one analysis_output row (SPA Decisions expand)."""
+    path = db_path()
+    if not path.exists():
+        return None
+    conn = open_db(path)
+    try:
+        analysis = get_analysis_output(conn, analysis_id)
+        if analysis is None:
+            return None
+        symbol = str(analysis["symbol"])
+        timeframe = str(analysis["timeframe"])
+        ts = int(analysis["timestamp"])
+        candle = load_candle_at(conn, symbol, timeframe, ts)
+    finally:
+        conn.close()
+    if candle is None:
+        breakdown = confidence_breakdown({})
+    else:
+        breakdown = confidence_breakdown(candle)
+    candle_out: dict[str, Any] | None = None
+    if candle is not None:
+        candle_out = {
+            "close": candle.get("close"),
+            "ema_20": candle.get("ema_20"),
+            "ema_200": candle.get("ema_200"),
+            "rsi_14": candle.get("rsi_14"),
+            "atr_14": candle.get("atr_14"),
+        }
+    return {
+        "ok": True,
+        "analysis_id": analysis_id,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "timestamp": ts,
+        "candle": candle_out,
+        "breakdown": breakdown,
+    }
 
 
 def exchange_payload() -> dict[str, Any]:
@@ -392,6 +441,8 @@ def exchange_payload() -> dict[str, Any]:
         return {"ok": True, "available": False, "error": result.error or "sync failed"}
     balances_out: list[dict[str, Any]] = []
     total_usd: float | None = None
+    priced_count = 0
+    unpriced_count = 0
     if result.balances:
         try:
             valued = value_spot_balances(result.balances)
@@ -399,6 +450,7 @@ def exchange_payload() -> dict[str, Any]:
             logger.warning("exchange value soft-fail: %s", type(exc).__name__)
             valued = None
         if valued is None:
+            unpriced_count = len(result.balances)
             for b in result.balances:
                 balances_out.append(
                     {
@@ -407,10 +459,13 @@ def exchange_payload() -> dict[str, Any]:
                         "locked": str(b.locked),
                         "total": str(b.total),
                         "usd": None,
+                        "pricing": None,
                     }
                 )
         else:
             total_usd = float(valued.total_usd)
+            priced_count = int(valued.priced_count)
+            unpriced_count = int(valued.unpriced_count)
             for row in valued.rows:
                 b = row.balance
                 balances_out.append(
@@ -420,6 +475,7 @@ def exchange_payload() -> dict[str, Any]:
                         "locked": str(b.locked),
                         "total": str(b.total),
                         "usd": float(row.usd) if row.usd is not None else None,
+                        "pricing": row.pricing,
                     }
                 )
     return {
@@ -429,6 +485,8 @@ def exchange_payload() -> dict[str, Any]:
         "fetched_at_ms": result.fetched_at_ms,
         "balances": balances_out,
         "total_usd": total_usd,
+        "priced_count": priced_count,
+        "unpriced_count": unpriced_count,
     }
 
 
@@ -491,6 +549,14 @@ def api_analysis(
         payload["error"] = err
     else:
         payload["ok"] = True
+    return payload
+
+
+@app.get("/api/analysis/{analysis_id}/explain")
+def api_analysis_explain(analysis_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+    payload = load_analysis_explain(analysis_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="analysis not found")
     return payload
 
 

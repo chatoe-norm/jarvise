@@ -1,8 +1,29 @@
 import { useEffect, useState } from "react";
 import { UsdBars } from "@/components/Charts";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type ExchangePayload } from "@/lib/api";
 import { formatNum, relativeAge } from "@/lib/utils";
+
+function UsdCell({
+  usd,
+  pricing,
+}: {
+  usd: number | null;
+  pricing?: string | null;
+}) {
+  if (usd != null) {
+    return (
+      <span className="inline-flex flex-wrap items-center gap-2">
+        <span className="tabular-nums">{formatNum(usd)}</span>
+        {pricing?.startsWith("earn_") ? (
+          <Badge variant="muted">Earn</Badge>
+        ) : null}
+      </span>
+    );
+  }
+  return <Badge variant="muted">unpriced · no USDT market</Badge>;
+}
 
 export function ExchangePage() {
   const [data, setData] = useState<ExchangePayload | null>(null);
@@ -22,6 +43,8 @@ export function ExchangePage() {
     data?.balances
       ?.filter((b) => b.usd != null && b.usd > 0)
       .map((b) => ({ asset: b.asset, usd: Number(b.usd) })) || [];
+  const unpriced = data?.unpriced_count ?? 0;
+  const balanceCount = data?.balances?.length ?? 0;
 
   return (
     <div className="space-y-6">
@@ -50,10 +73,18 @@ export function ExchangePage() {
               <CardDescription>
                 {data.venue} · fetched {relativeAge(data.fetched_at_ms)} · total{" "}
                 {formatNum(data.total_usd)}
+                {unpriced > 0 ? ` · ${unpriced} unpriced` : ""}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <UsdBars rows={bars} />
+              <UsdBars
+                rows={bars}
+                emptyMessage={
+                  balanceCount > 0 && unpriced > 0
+                    ? `All ${unpriced} balances unpriced (dust / no USDT market on ${data.venue || "binance"})`
+                    : "No priced balances."
+                }
+              />
             </CardContent>
           </Card>
           <Card>
@@ -81,8 +112,8 @@ export function ExchangePage() {
                         <td className="py-2 pr-3 tabular-nums">{b.free}</td>
                         <td className="py-2 pr-3 tabular-nums">{b.locked}</td>
                         <td className="py-2 pr-3 tabular-nums">{b.total}</td>
-                        <td className="py-2 tabular-nums">
-                          {b.usd != null ? formatNum(b.usd) : "—"}
+                        <td className="py-2">
+                          <UsdCell usd={b.usd} pricing={b.pricing} />
                         </td>
                       </tr>
                     ))}

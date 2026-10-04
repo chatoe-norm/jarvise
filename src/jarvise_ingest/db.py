@@ -811,6 +811,27 @@ def load_latest_candle(conn: sqlite3.Connection, symbol: str, timeframe: str) ->
     return dict(row) if row is not None else None
 
 
+def load_candle_at(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    timestamp: int,
+) -> dict | None:
+    """Single closed candle at exact timestamp (for confidence explainability)."""
+    cur = conn.execute(
+        """
+        SELECT symbol, timestamp, timeframe, open, high, low, close, volume,
+               atr_14, rsi_14, ema_20, ema_200
+        FROM market_technicals
+        WHERE symbol=? AND timeframe=? AND timestamp=?
+        LIMIT 1
+        """,
+        (symbol.upper(), timeframe, int(timestamp)),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
 def load_recent_ohlcv(
     conn: sqlite3.Connection,
     symbol: str,
