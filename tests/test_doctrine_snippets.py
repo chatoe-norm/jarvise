@@ -54,6 +54,13 @@ def test_preferred_markers() -> None:
     )
     assert is_preferred_doctrine_payload(
         {
+            "kind": "doctrine",
+            "source": "jarvise-doctrine-pullback-entry.txt",
+            "path": "sources/jarvise-doctrine-pullback-entry.txt",
+        }
+    )
+    assert is_preferred_doctrine_payload(
+        {
             "kind": "notebook",
             "source": "jarvise-autonomous-trader-core-protocol-2f474ccb.md",
             "path": "notebook/jarvise-autonomous-trader-core-protocol-2f474ccb.md",

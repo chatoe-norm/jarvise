@@ -1,0 +1,23 @@
+Jarvise doctrine: trend_up pullback entry (paper).
+Owner protocol 2026-10-04. Complements jarvise-doctrine.txt. Does not change analyzer scores or 0.55 / 0.70 gates.
+
+jarvise doctrine trend_up long entry pullback EMA20 risk stop capital preservation kill-switch FLAT.
+
+When the analyzer is trend_up / long and close is only slightly below EMA20 (typical score 0.65 after the −0.10 pullback haircut) with RSI still in the 45–70 context band, that is a valid caution pullback entry — not “no doctrine.” Auto-decide must not defer solely for empty doctrine or “คะแนนต่ำกว่า 0.70 และไม่มีหลักคำสอน” when this note is retrieved.
+
+Allow paper approve_with_caution only when ALL hold:
+- Regime trend_up (EMA20 > EMA200). Action long. Confidence at or above the FLAT gate 0.55.
+- Pullback is shallow: close below EMA20 by a small fraction of ATR (about one wick / less than ~0.5× ATR), not a breakdown.
+- RSI mid-band (about 45–70). Do not treat RSI < 30 as a pullback buy (momentum conflict → stay FLAT).
+- HTF, when MTF is on, must confirm trend_up. HTF chaotic or range → FLAT, no pullback exception.
+- Invalidation / stop remains ≥ 1.5× ATR below entry. Size stays the analyzer’s reduced fraction (never add after a stop; never full Kelly).
+- market_safety reasons empty. Kill-switch clear. Same-symbol opposite-side open → defer. Paper only.
+
+Refuse / stay FLAT / reject when:
+- Close is well below EMA20 (deep break, not a dip).
+- Range or chaotic regime, or HTF conflict.
+- Isolated oscillator without EMA stack.
+- Confidence below 0.55.
+- No written invalidation.
+
+0.70 remains the doctrine-free auto-approve bar. This note supplies the missing doctrine for the mid band (0.55–0.70) on shallow EMA20 pullbacks in trend_up. It does not loosen floors, raise size, or authorize live orders.

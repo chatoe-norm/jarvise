@@ -44,7 +44,10 @@ def doctrine_query(row: Mapping[str, Any]) -> str:
     """
     regime = row.get("regime_state") or "range"
     action = row.get("action") or "flat"
-    return f"jarvise doctrine {regime} {action} entry risk stop capital preservation kill-switch FLAT"
+    return (
+        f"jarvise doctrine {regime} {action} entry pullback EMA20 "
+        "risk stop capital preservation kill-switch FLAT"
+    )
 
 
 def _f(value: Any) -> float | None:

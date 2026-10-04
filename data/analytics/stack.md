@@ -18,6 +18,7 @@ Drive sync: **0 Drive sources, 0 stale**. Web/generated sources indexed in the n
 | `api-map.json` | Provider endpoints and doctrine rules |
 | `mvas-schema.sql` | Minimum viable tables |
 | `sources/jarvise-doctrine.txt` | Owner-protection rules |
+| `sources/jarvise-doctrine-pullback-entry.txt` | trend_up shallow EMA20 pullback = caution entry (paper) |
 | `sources/jarvise-analyzer-stack.txt` | Analyzer layer spec |
 | `sources/binance-api-intro-jarvise.txt` | Binance API intro → Jarvise allowlist/denylist |
 | `sources/binance-skills-hub-jarvise.txt` | Binance Skills Hub adopt/exclude/deny matrix → skill `jarvise-binance-intel` (read-only, no keys) |
