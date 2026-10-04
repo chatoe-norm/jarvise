@@ -206,12 +206,38 @@ export type MetricsPayload = {
   error?: string;
 };
 
+export type AnalysisOutcomeKind =
+  | "filled"
+  | "hold"
+  | "rejected"
+  | "timed_out"
+  | "failed"
+  | "pending"
+  | "not_queued";
+
+export type AnalysisOutcome = {
+  kind: AnalysisOutcomeKind;
+  approval_id: string | null;
+  approval_status: string | null;
+  resolve_reason: string | null;
+  resolved_at_ms: number | null;
+  fills: number;
+  fill_reasons: string[];
+};
+
+export type AnalysisSummary = {
+  by_kind?: Partial<Record<AnalysisOutcomeKind, number>>;
+  by_action?: Record<string, number>;
+  total?: number;
+};
+
 export type AnalysisPayload = {
   ok: boolean;
   rows: Array<Record<string, unknown>>;
   total?: number;
   limit?: number;
   offset?: number;
+  summary?: AnalysisSummary;
   error?: string;
 };
 

@@ -235,6 +235,137 @@ def test_api_analysis_pagination(monkeypatch, tmp_path: Path) -> None:
     default = client.get("/api/analysis")
     assert default.json()["limit"] == 10
     assert len(default.json()["rows"]) == 10
+    assert default.json()["rows"][0]["outcome"]["kind"] == "not_queued"
+    assert default.json()["summary"]["by_kind"]["not_queued"] == 25
+
+
+def test_api_analysis_outcomes(monkeypatch, tmp_path: Path) -> None:
+    from jarvise_ingest.db import insert_paper_order, resolve_approval
+
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    rows = [
+        ("filled-a", "BTCUSDT", "long", 4),
+        ("hold-a", "BTCUSDT", "long", 3),
+        ("rej-a", "ETHUSDT", "long", 2),
+        ("flat-a", "ETHUSDT", "flat", 1),
+    ]
+    for aid, symbol, action, ts_off in rows:
+        upsert_analysis_output(
+            conn,
+            {
+                "analysis_id": aid,
+                "timestamp": 1_700_000_000_000 + ts_off,
+                "symbol": symbol,
+                "timeframe": "4h",
+                "regime_state": "trend_up" if action == "long" else "range",
+                "confidence_score": 0.75 if action == "long" else 0.1,
+                "action": action,
+                "invalidation_price": 90.0,
+                "size_pct_equity": 1.0 if action == "long" else 0.0,
+                "thesis": aid,
+            },
+        )
+    filled = upsert_pending_approval(
+        conn,
+        {
+            "id": "ap-filled",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 9_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": "filled-a",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.75,
+            "size_pct_equity": 1.0,
+            "status": "pending",
+        },
+    )
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "ord-fill",
+            "ts": 1_100,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "side": "buy",
+            "qty": 0.01,
+            "price": 100.0,
+            "fee_usd": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "filled-a",
+            "reason": "open_long",
+            "approval_id": filled["id"],
+            "decision_source": "auto_claude",
+        },
+    )
+    conn.commit()
+    resolve_approval(
+        conn,
+        filled["id"],
+        status="approved",
+        resolve_reason="auto:claude:approve",
+        paper_order_ids_json='["ord-fill"]',
+        resolved_at_ms=1_200,
+    )
+    hold = upsert_pending_approval(
+        conn,
+        {
+            "id": "ap-hold",
+            "created_at_ms": 2_000,
+            "expires_at_ms": 9_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "1h",
+            "analysis_id": "hold-a",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.75,
+            "size_pct_equity": 1.0,
+            "status": "pending",
+        },
+    )
+    resolve_approval(
+        conn,
+        hold["id"],
+        status="approved",
+        resolve_reason="auto:rule:same_side_hold",
+        resolved_at_ms=2_100,
+    )
+    rejected = upsert_pending_approval(
+        conn,
+        {
+            "id": "ap-rej",
+            "created_at_ms": 3_000,
+            "expires_at_ms": 9_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "analysis_id": "rej-a",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.65,
+            "size_pct_equity": 1.0,
+            "status": "pending",
+        },
+    )
+    resolve_approval(conn, rejected["id"], status="rejected", resolve_reason="ui", resolved_at_ms=3_100)
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    payload = client.get("/api/analysis", params={"limit": 10}).json()
+    assert payload["ok"] is True
+    by_id = {row["analysis_id"]: row["outcome"]["kind"] for row in payload["rows"]}
+    assert by_id["filled-a"] == "filled"
+    assert by_id["hold-a"] == "hold"
+    assert by_id["rej-a"] == "rejected"
+    assert by_id["flat-a"] == "not_queued"
+    assert payload["summary"]["by_kind"]["filled"] == 1
+    assert payload["summary"]["by_kind"]["hold"] == 1
+    assert payload["summary"]["by_kind"]["rejected"] == 1
+    assert payload["summary"]["by_kind"]["not_queued"] == 1
+    assert payload["summary"]["total"] == 4
 
 
 def test_parse_status_payload_json_and_legacy_text() -> None:
