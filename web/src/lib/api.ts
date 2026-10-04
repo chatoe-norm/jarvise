@@ -57,6 +57,7 @@ export type StatusPayload = {
   fear_greed_index?: number | null;
   altcoin_season_index?: number | null;
   sentiment_note?: string | null;
+  risk_monitor?: unknown;
   auth_warning?: string | null;
 };
 

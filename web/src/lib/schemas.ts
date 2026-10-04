@@ -9,6 +9,7 @@ export const statusSchema = z
     rag: z.unknown(),
     paper: z.unknown(),
     paper_expire: z.unknown(),
+    risk_monitor: z.unknown().optional(),
     risk_caps: z.record(z.unknown()),
     qdrant: z.record(z.unknown()),
   })

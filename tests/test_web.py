@@ -8,6 +8,7 @@ from jarvise_ingest.db import (
     ensure_paper_account,
     open_db,
     upsert_analysis_output,
+    upsert_macro_sentiment,
     upsert_market_technicals,
     upsert_pending_approval,
 )
@@ -267,6 +268,9 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
     data = resp.json()
     assert "paper" in data
     assert "paper_expire" in data
+    assert "risk_monitor" in data
+    assert "fear_greed_index" in data
+    assert "altcoin_season_index" in data
     assert "risk_caps" in data
     assert "max_notional_per_order" in data["risk_caps"]
     assert data["kill_switch"] is False
@@ -276,6 +280,33 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
         "reason": None,
         "error": None,
     }
+
+
+def test_api_status_fear_greed_from_macro(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    upsert_macro_sentiment(
+        conn,
+        {
+            "timestamp": 1_700_000_000_000,
+            "fear_greed_index": 65,
+            "altcoin_season_index": None,
+            "btc_dominance_pct": 58.5,
+            "exchange_netflow_btc": None,
+            "exchange_reserve_btc": None,
+            "etf_net_flow_usd": None,
+            "global_market_cap_usd": 1.0,
+        },
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    data = client.get("/api/status").json()
+    assert data["fear_greed_index"] == 65
+    assert data["altcoin_season_index"] is None
+    assert data["sentiment_note"] is None
 
 
 def test_api_dashboard_bundle(monkeypatch, tmp_path: Path) -> None:
