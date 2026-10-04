@@ -10,7 +10,8 @@ import {
   PaginationPrevious,
 } from "@/components/ui/pagination";
 import { ConfidenceLadder } from "@/components/ConfidenceLadder";
-import { api, type AnalysisExplainPayload } from "@/lib/api";
+import { api, type AnalysisExplainPayload, type AnalysisSummary } from "@/lib/api";
+import { outcomeCopy, parseAnalysisOutcome } from "@/lib/copy";
 import { formatDecisionStamp, formatNum } from "@/lib/utils";
 
 const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
@@ -20,6 +21,7 @@ export function DecisionsPage() {
   const [timeframe, setTimeframe] = useState("");
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([]);
   const [total, setTotal] = useState(0);
+  const [summary, setSummary] = useState<AnalysisSummary | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(10);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +49,7 @@ export function DecisionsPage() {
         if (!data.ok) setError(data.error || "Failed");
         setRows(data.rows || []);
         setTotal(Number(data.total ?? data.rows?.length ?? 0));
+        setSummary(data.summary ?? null);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -117,6 +120,10 @@ export function DecisionsPage() {
           0.55 = FLAT gate · 0.70 = auto-approve without trading rules · click Conf to
           see the ladder
         </p>
+        <p className="mt-1 text-xs text-[var(--color-muted)]">
+          Outcome = ผลจากคิวอนุมัติ; ถือไม้เดิม = มี position ฝั่งเดียวกันอยู่แล้ว
+          ระบบไม่เพิ่มไม้
+        </p>
       </div>
 
       <Card>
@@ -163,6 +170,7 @@ export function DecisionsPage() {
       <Card>
         <CardHeader>
           <CardTitle>Analysis</CardTitle>
+          {summary ? <OutcomeSummaryChips summary={summary} /> : null}
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -187,6 +195,7 @@ export function DecisionsPage() {
                       <th className="py-2 pr-2">TF</th>
                       <th className="py-2 pr-2">Regime</th>
                       <th className="py-2 pr-2">Action</th>
+                      <th className="py-2 pr-2">Outcome</th>
                       <th className="py-2 pr-2">Conf</th>
                       <th className="py-2 pr-2">Size%</th>
                       <th className="py-2">Thesis</th>
@@ -227,6 +236,9 @@ export function DecisionsPage() {
                                 {String(r.action ?? "—")}
                               </Badge>
                             </td>
+                            <td className="py-2 pr-2">
+                              <OutcomeCell row={r} />
+                            </td>
                             <td className="py-2 pr-2 tabular-nums">
                               {analysisId ? (
                                 <button
@@ -251,7 +263,7 @@ export function DecisionsPage() {
                           </tr>
                           {isOpen ? (
                             <tr className="border-b border-[var(--color-border)]/60 bg-[#121922]/60">
-                              <td colSpan={10} className="px-3 py-3">
+                              <td colSpan={11} className="px-3 py-3">
                                 {explainLoading[analysisId] ? (
                                   <p className="text-xs text-[var(--color-muted)]">
                                     Loading confidence ladder…
@@ -325,6 +337,45 @@ export function DecisionsPage() {
           ) : null}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function OutcomeCell({ row }: { row: Record<string, unknown> }) {
+  const outcome = parseAnalysisOutcome(row.outcome);
+  const copy = outcomeCopy(outcome, String(row.action ?? ""));
+  const title = outcome?.resolve_reason || undefined;
+  return (
+    <div className="min-w-[9rem]" title={title}>
+      <Badge variant={copy.variant}>{copy.label}</Badge>
+      {copy.detail ? (
+        <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">{copy.detail}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function OutcomeSummaryChips({ summary }: { summary: AnalysisSummary }) {
+  const byKind = summary.by_kind || {};
+  const chips: Array<{ label: string; value: number }> = [
+    { label: "ทั้งหมด", value: Number(summary.total ?? 0) },
+    { label: "เปิด/ปิดไม้จริง", value: Number(byKind.filled ?? 0) },
+    { label: "ถือไม้เดิม", value: Number(byKind.hold ?? 0) },
+    { label: "ปฏิเสธ", value: Number(byKind.rejected ?? 0) },
+    { label: "หมดเวลา", value: Number(byKind.timed_out ?? 0) },
+    { label: "ไม่เข้าคิว", value: Number(byKind.not_queued ?? 0) },
+  ];
+  const pending = Number(byKind.pending ?? 0);
+  const failed = Number(byKind.failed ?? 0);
+  if (pending > 0) chips.push({ label: "รออนุมัติ", value: pending });
+  if (failed > 0) chips.push({ label: "ล้มเหลว", value: failed });
+  return (
+    <div className="flex flex-wrap gap-1.5 pt-1">
+      {chips.map((chip) => (
+        <Badge key={chip.label} variant="muted">
+          {chip.label} {chip.value}
+        </Badge>
+      ))}
     </div>
   );
 }

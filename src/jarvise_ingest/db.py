@@ -10,6 +10,7 @@ append a new version; they never overwrite the prior one.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -1135,6 +1136,162 @@ def list_analysis_output(
         params,
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+_SQLITE_IN_CHUNK = 400
+
+
+def _parse_order_id_json(raw: object) -> list[str]:
+    if raw is None or raw == "":
+        return []
+    parsed: object = raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if item is not None and str(item) != ""]
+
+
+def _chunked(values: list[str], size: int = _SQLITE_IN_CHUNK) -> Iterator[list[str]]:
+    for i in range(0, len(values), size):
+        yield values[i : i + size]
+
+
+def list_analysis_outcomes(
+    conn: sqlite3.Connection,
+    analysis_ids: list[str],
+) -> dict[str, dict]:
+    """Latest approval + fill counts keyed by analysis_id (empty ids omitted)."""
+    ids = [str(item) for item in analysis_ids if item]
+    if not ids:
+        return {}
+    unique = list(dict.fromkeys(ids))
+    latest: dict[str, dict] = {}
+    for chunk in _chunked(unique):
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"""
+            SELECT id, analysis_id, status, resolve_reason, resolved_at_ms,
+                   paper_order_ids_json, created_at_ms
+            FROM approval_queue
+            WHERE analysis_id IN ({placeholders})
+            ORDER BY COALESCE(resolved_at_ms, created_at_ms) DESC, created_at_ms DESC
+            """,
+            chunk,
+        )
+        for row in cur.fetchall():
+            aid = str(row["analysis_id"] or "")
+            if not aid or aid in latest:
+                continue
+            latest[aid] = dict(row)
+
+    orders_by_aid: dict[str, list[dict]] = {aid: [] for aid in unique}
+    orders_by_oid: dict[str, dict] = {}
+    for chunk in _chunked(unique):
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"""
+            SELECT order_id, analysis_id, reason, approval_id
+            FROM paper_orders
+            WHERE analysis_id IN ({placeholders})
+            """,
+            chunk,
+        )
+        for row in cur.fetchall():
+            rec = dict(row)
+            aid = str(rec.get("analysis_id") or "")
+            oid = str(rec.get("order_id") or "")
+            if aid:
+                orders_by_aid.setdefault(aid, []).append(rec)
+            if oid:
+                orders_by_oid[oid] = rec
+
+    extra_oids: list[str] = []
+    for queued_row in latest.values():
+        extra_oids.extend(_parse_order_id_json(queued_row.get("paper_order_ids_json")))
+    missing = [oid for oid in dict.fromkeys(extra_oids) if oid and oid not in orders_by_oid]
+    for chunk in _chunked(missing):
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"""
+            SELECT order_id, analysis_id, reason, approval_id
+            FROM paper_orders
+            WHERE order_id IN ({placeholders})
+            """,
+            chunk,
+        )
+        for row in cur.fetchall():
+            rec = dict(row)
+            oid = str(rec.get("order_id") or "")
+            if oid:
+                orders_by_oid[oid] = rec
+
+    out: dict[str, dict] = {}
+    for aid in unique:
+        approval_row: dict | None = latest.get(aid)
+        json_ids = _parse_order_id_json(approval_row.get("paper_order_ids_json") if approval_row else None)
+        if json_ids:
+            fills = len(json_ids)
+            fill_reasons = [
+                str(orders_by_oid[oid].get("reason") or "")
+                for oid in json_ids
+                if oid in orders_by_oid and orders_by_oid[oid].get("reason")
+            ]
+        else:
+            by_aid = orders_by_aid.get(aid) or []
+            fills = len(by_aid)
+            fill_reasons = [str(row.get("reason") or "") for row in by_aid if row.get("reason")]
+        out[aid] = {
+            "approval_id": approval_row.get("id") if approval_row else None,
+            "approval_status": approval_row.get("status") if approval_row else None,
+            "resolve_reason": approval_row.get("resolve_reason") if approval_row else None,
+            "resolved_at_ms": approval_row.get("resolved_at_ms") if approval_row else None,
+            "paper_order_ids_json": approval_row.get("paper_order_ids_json") if approval_row else None,
+            "fills": fills,
+            "fill_reasons": fill_reasons,
+        }
+    return out
+
+
+def iter_analysis_outcome_facts(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+) -> list[dict]:
+    """Action + latest approval/fill facts for every matching analysis_output row."""
+    where, params = _analysis_output_where(symbol=symbol, timeframe=timeframe)
+    cur = conn.execute(
+        f"SELECT analysis_id, action FROM analysis_output {where}",
+        params,
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    outcomes = list_analysis_outcomes(conn, [str(row["analysis_id"]) for row in rows])
+    facts: list[dict] = []
+    for row in rows:
+        aid = str(row.get("analysis_id") or "")
+        o = outcomes.get(aid) or {}
+        approval = None
+        if o.get("approval_id"):
+            approval = {
+                "id": o.get("approval_id"),
+                "status": o.get("approval_status"),
+                "resolve_reason": o.get("resolve_reason"),
+                "resolved_at_ms": o.get("resolved_at_ms"),
+            }
+        facts.append(
+            {
+                "analysis_id": aid,
+                "action": row.get("action"),
+                "approval": approval,
+                "fills": int(o.get("fills") or 0),
+                "fill_reasons": list(o.get("fill_reasons") or []),
+            }
+        )
+    return facts
 
 
 STARTING_PAPER_EQUITY = 10_000.0

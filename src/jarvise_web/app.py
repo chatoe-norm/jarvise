@@ -27,7 +27,9 @@ from jarvise_ingest.db import (
     get_approval,
     get_latest_llm_review,
     get_paper_position,
+    iter_analysis_outcome_facts,
     latest_macro_sentiment,
+    list_analysis_outcomes,
     list_analysis_output,
     list_approvals,
     load_candle_at,
@@ -42,6 +44,7 @@ from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapsho
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
 from jarvise_risk import evaluate_from_db, load_risk_caps
 from jarvise_trade import live_trading_enabled
+from jarvise_web.outcomes import derive_outcome, empty_outcome_summary, summarize_outcomes
 from jarvise_web.schemas import ApprovalsResponse, DashboardResponse
 
 logger = logging.getLogger(__name__)
@@ -219,16 +222,35 @@ def qdrant_info() -> dict[str, Any]:
         return {"exists": False, "error": str(exc)}
 
 
+def _outcome_from_lookup(row: dict[str, Any], lookup: dict[str, dict]) -> dict[str, Any]:
+    o = lookup.get(str(row.get("analysis_id") or "")) or {}
+    approval = None
+    if o.get("approval_id"):
+        approval = {
+            "id": o.get("approval_id"),
+            "status": o.get("approval_status"),
+            "resolve_reason": o.get("resolve_reason"),
+            "resolved_at_ms": o.get("resolved_at_ms"),
+        }
+    return derive_outcome(
+        row.get("action"),
+        approval,
+        o.get("fills") or 0,
+        list(o.get("fill_reasons") or []),
+    )
+
+
 def load_analysis_rows(
     *,
     symbol: str | None = None,
     timeframe: str | None = None,
     limit: int = 10,
     offset: int = 0,
-) -> tuple[list[dict[str, Any]], int, str | None]:
+) -> tuple[list[dict[str, Any]], int, str | None, dict[str, Any]]:
     path = db_path()
+    empty = empty_outcome_summary()
     if not path.exists():
-        return [], 0, f"Database not found: {path}"
+        return [], 0, f"Database not found: {path}", empty
     try:
         conn = open_db(path)
         try:
@@ -244,11 +266,23 @@ def load_analysis_rows(
                 limit=limit,
                 offset=offset,
             )
+            lookup = list_analysis_outcomes(
+                conn,
+                [str(row.get("analysis_id") or "") for row in rows],
+            )
+            for row in rows:
+                row["outcome"] = _outcome_from_lookup(row, lookup)
+            facts = iter_analysis_outcome_facts(
+                conn,
+                symbol=symbol or None,
+                timeframe=timeframe or None,
+            )
+            summary = summarize_outcomes(facts)
         finally:
             conn.close()
-        return rows, total, None
+        return rows, total, None, summary
     except Exception as exc:  # noqa: BLE001
-        return [], 0, str(exc)
+        return [], 0, str(exc), empty
 
 
 def load_paper_snapshot() -> tuple[dict[str, Any], str | None]:
@@ -541,7 +575,7 @@ def api_analysis(
 ) -> dict[str, Any]:
     sym = symbol.strip().upper() or None
     tf = timeframe.strip() or None
-    rows, total, err = load_analysis_rows(symbol=sym, timeframe=tf, limit=limit, offset=offset)
+    rows, total, err, summary = load_analysis_rows(symbol=sym, timeframe=tf, limit=limit, offset=offset)
     payload: dict[str, Any] = {
         "paper_only": PAPER_ONLY,
         "db": str(db_path()),
@@ -549,6 +583,7 @@ def api_analysis(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "summary": summary,
     }
     if err:
         payload["ok"] = False
