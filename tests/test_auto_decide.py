@@ -202,6 +202,9 @@ def test_system_prompt_pins_rules() -> None:
     assert '"defer"' in SYSTEM_PROMPT
     assert "0.70" in SYSTEM_PROMPT
     assert PROMPT_VERSION in SYSTEM_PROMPT
+    assert "กฎการเทรด" in SYSTEM_PROMPT
+    assert "หลักคำสอน" in SYSTEM_PROMPT
+    assert PROMPT_VERSION == "2026-10-04.1"
 
 
 CFG = AutoDecideConfig(

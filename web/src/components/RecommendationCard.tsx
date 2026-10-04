@@ -1,9 +1,10 @@
 // web/src/components/RecommendationCard.tsx
 import type { ReactNode } from "react";
-import { Badge } from "@/components/ui/badge";
 import { CandleChart } from "@/components/CandleChart";
 import { ConfidenceLadder } from "@/components/ConfidenceLadder";
+import { Badge } from "@/components/ui/badge";
 import type { OhlcvPayload, RecommendationPayload } from "@/lib/api";
+import { ownerReasonCopy } from "@/lib/copy";
 import { formatNum } from "@/lib/utils";
 
 const REC_LABEL: Record<
@@ -68,7 +69,7 @@ export function RecommendationCard({
 
       {data.recommendation_source === "claude" && data.claude ? (
         <Section title={`Claude (${data.claude.model}) ตัดสิน: ${data.claude.decision}`}>
-          <p>{data.claude.reason || "—"}</p>
+          <p>{ownerReasonCopy(data.claude.reason)}</p>
         </Section>
       ) : null}
 

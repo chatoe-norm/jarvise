@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type IngestHealthStatus, type PaperAutoStatus, type StatusPayload } from "@/lib/api";
+import { ownerReasonCopy } from "@/lib/copy";
 import { relativeAge } from "@/lib/utils";
 
 function jobSummary(payload: unknown): { ok: boolean | null; label: string } {
@@ -124,7 +125,7 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
               <ul className="list-disc space-y-1 pl-5">
                 {auto.deferred.slice(0, 5).map((d) => (
                   <li key={d.id}>
-                    <span className="font-medium">{d.symbol}</span> — {d.reason}
+                    <span className="font-medium">{d.symbol}</span> — {ownerReasonCopy(d.reason)}
                   </li>
                 ))}
               </ul>
