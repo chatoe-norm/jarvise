@@ -114,7 +114,7 @@ export function DecisionsPage() {
           Latest analysis output — regime, action, and thesis.
         </p>
         <p className="mt-1 text-xs text-[var(--color-muted)]">
-          0.55 = FLAT gate · 0.70 = auto-approve without doctrine · click Conf to
+          0.55 = FLAT gate · 0.70 = auto-approve without trading rules · click Conf to
           see the ladder
         </p>
       </div>

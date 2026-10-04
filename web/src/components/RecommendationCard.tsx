@@ -104,12 +104,12 @@ export function RecommendationCard({
         </dl>
       </Section>
 
-      <Section title="หลักการ (doctrine)">
+      <Section title="กฎการเทรด">
         {data.doctrine.length ? (
           <List items={data.doctrine} />
         ) : (
           <p className="text-[var(--color-muted)]">
-            ยังไม่มีข้อความ doctrine ที่ตรงกับสัญญาณนี้
+            ไม่พบกฎการเทรดที่ตรงสัญญาณ
           </p>
         )}
       </Section>

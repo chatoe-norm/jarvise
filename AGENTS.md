@@ -10,7 +10,7 @@
 - Prefer paper analytics fixes that make backtests reproducible (closed candles only, warm-up withholding, gap reporting, `--since` backfill) over knowledge-vault scaffolding.
 - Prefer free-first GET-only market-safety providers (Binance book, Binance Futures public derivatives when no CoinGlass key, CoinGecko macro; CoinGlass optional when keyed) over scraping TradingView into SQLite truth.
 - Prefer Command Dashboard UX: approval-first Home with KPIs/charts/infographics; show confidence breakdown ladders and defer reasons (not opaque scores alone); label Exchange dust/earn/unpriced balances clearly; do not ship raw JSON/`pre` dumps as the primary owner surface; modern minimal professional control-room look.
-- Prefer explainability and doctrine coverage over mid-stream analyzer confidence retuning while closed `auto_*` sample is still thin; do not loosen 0.55/0.70 floors just to raise trade frequency.
+- Prefer explainability and trading-rules coverage over mid-stream analyzer confidence retuning while closed `auto_*` sample is still thin; do not loosen 0.55/0.70 floors just to raise trade frequency. On the Command Dashboard, owner-facing copy says **กฎการเทรด** (not “หลักคำสอน” / “doctrine”); keep `doctrine_*` identifiers and Qdrant `jarvise_doctrine`.
 
 ## Learned Workspace Facts
 - GitHub remote is `chatoe-norm/jarvise`; push via SSH host `github.com-chatoe-norm`. HTTPS as `normstudiox` is pull-only. GitHub CLI (`gh`) must use account `chatoe-norm`; do not use `normstudiox`.
