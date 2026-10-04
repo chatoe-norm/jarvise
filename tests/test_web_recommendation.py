@@ -67,7 +67,6 @@ def _seed(db: Path) -> None:
             "confidence_score": 0.75,
             "action": "long",
             "invalidation_price": 83500.0,
-            "invalidation_price": 97.0,
             "size_pct_equity": 1.125,
             "thesis": "trend_up",
         },

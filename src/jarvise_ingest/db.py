@@ -817,9 +817,7 @@ def upsert_order_book(conn: sqlite3.Connection, row: dict) -> int:
     return 1
 
 
-def latest_order_book(
-    conn: sqlite3.Connection, symbol: str, *, as_of_ms: int | None = None
-) -> dict | None:
+def latest_order_book(conn: sqlite3.Connection, symbol: str, *, as_of_ms: int | None = None) -> dict | None:
     if as_of_ms is None:
         cur = conn.execute(
             """
@@ -1761,9 +1759,7 @@ def day_open_equity(conn: sqlite3.Connection, day_start_ms: int) -> float | None
     return float(row[0])
 
 
-def cancel_pending_approvals(
-    conn: sqlite3.Connection, *, reason: str, ts: int, commit: bool = True
-) -> int:
+def cancel_pending_approvals(conn: sqlite3.Connection, *, reason: str, ts: int, commit: bool = True) -> int:
     cur = conn.execute(
         """
         UPDATE approval_queue SET

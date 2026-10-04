@@ -37,7 +37,13 @@ SAFE_PERMS = {
 
 
 def _approval(aid: str = "abc123def456") -> dict:
-    return {"id": aid, "symbol": "BTCUSDT", "action": "long", "size_pct_equity": 5.0, "invalidation_price": 97.0}
+    return {
+        "id": aid,
+        "symbol": "BTCUSDT",
+        "action": "long",
+        "size_pct_equity": 5.0,
+        "invalidation_price": 97.0,
+    }
 
 
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:

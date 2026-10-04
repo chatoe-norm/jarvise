@@ -1,7 +1,8 @@
+from pydantic import ValidationError
+
 from jarvise_ingest.providers.alternative_fng import parse_fear_greed
 from jarvise_paper.engine import estimate_impact_bps
 from jarvise_paper.schemas import LlmDecision, parse_signal
-from pydantic import ValidationError
 
 
 def test_parse_fear_greed() -> None:
@@ -17,7 +18,14 @@ def test_estimate_impact_bps() -> None:
 
 def test_signal_schema_rejects_nan_and_unknown_action() -> None:
     try:
-        parse_signal({"symbol": "BTCUSDT", "action": "long", "size_pct_equity": 1.0, "invalidation_price": float("nan")})
+        parse_signal(
+            {
+                "symbol": "BTCUSDT",
+                "action": "long",
+                "size_pct_equity": 1.0,
+                "invalidation_price": float("nan"),
+            }
+        )
         raise AssertionError("expected error")
     except ValidationError:
         pass

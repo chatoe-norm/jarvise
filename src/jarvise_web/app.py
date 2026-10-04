@@ -35,13 +35,14 @@ from jarvise_ingest.db import (
     load_recent_ohlcv,
     open_db,
 )
-from jarvise_web.schemas import ApprovalsResponse, DashboardResponse
+from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.ledger import load_paper_ledger
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
 from jarvise_risk import evaluate_from_db, load_risk_caps
 from jarvise_trade import live_trading_enabled
+from jarvise_web.schemas import ApprovalsResponse, DashboardResponse
 
 logger = logging.getLogger(__name__)
 
@@ -300,11 +301,7 @@ def status_payload() -> dict[str, Any]:
         "qdrant": qdrant_info(),
         "fear_greed_index": None if not macro else macro.get("fear_greed_index"),
         "altcoin_season_index": None if not macro else macro.get("altcoin_season_index"),
-        "sentiment_note": (
-            None
-            if macro and macro.get("fear_greed_index") is not None
-            else "ไม่มีข้อมูล"
-        ),
+        "sentiment_note": (None if macro and macro.get("fear_greed_index") is not None else "ไม่มีข้อมูล"),
     }
 
 

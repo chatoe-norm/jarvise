@@ -8,7 +8,6 @@ from typing import Any
 from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_ingest.db import (
     get_analysis_output,
-    get_paper_position,
     list_paper_orders_asc,
     list_paper_positions,
     load_latest_candle,

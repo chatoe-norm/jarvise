@@ -162,15 +162,11 @@ def evaluate_market_safety(
                 side = (intended_side or "").lower()
                 if side in {"buy", "long"}:
                     if float(ask_d) < cfg.min_depth_usd:
-                        reasons.append(
-                            f"illiquid_depth ask={ask_d} floor={cfg.min_depth_usd}"
-                        )
+                        reasons.append(f"illiquid_depth ask={ask_d} floor={cfg.min_depth_usd}")
                         critical = True
                 elif side in {"sell", "short"}:
                     if float(bid_d) < cfg.min_depth_usd:
-                        reasons.append(
-                            f"illiquid_depth bid={bid_d} floor={cfg.min_depth_usd}"
-                        )
+                        reasons.append(f"illiquid_depth bid={bid_d} floor={cfg.min_depth_usd}")
                         critical = True
                 elif float(bid_d) < cfg.min_depth_usd and float(ask_d) < cfg.min_depth_usd:
                     reasons.append(f"illiquid_depth bid={bid_d} ask={ask_d} floor={cfg.min_depth_usd}")

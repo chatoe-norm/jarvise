@@ -17,13 +17,13 @@ from jarvise_ingest.db import (
     upsert_market_technicals,
     upsert_order_book,
 )
+from jarvise_ingest.providers.alternative_fng import fetch_fear_greed
 from jarvise_ingest.providers.binance_book import fetch_order_book_snapshot
 from jarvise_ingest.providers.binance_klines import (
     MAX_PAGE_LIMIT,
     fetch_klines,
     fetch_klines_range,
 )
-from jarvise_ingest.providers.alternative_fng import fetch_fear_greed
 from jarvise_ingest.providers.cmc_altseason import fetch_altseason
 from jarvise_ingest.providers.coingecko_global import fetch_global_macro
 from jarvise_ingest.providers.derivatives import fetch_derivatives, select_provider

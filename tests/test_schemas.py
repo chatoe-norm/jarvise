@@ -12,12 +12,16 @@ from jarvise_paper.schemas import LlmDecision, OrderIntent, parse_signal
 
 def test_parse_signal_rejects_nan() -> None:
     with pytest.raises(ValidationError):
-        parse_signal({"symbol": "BTCUSDT", "action": "long", "confidence_score": math.nan, "size_pct_equity": 1})
+        parse_signal(
+            {"symbol": "BTCUSDT", "action": "long", "confidence_score": math.nan, "size_pct_equity": 1}
+        )
 
 
 def test_parse_signal_rejects_inf() -> None:
     with pytest.raises(ValidationError):
-        parse_signal({"symbol": "BTCUSDT", "action": "long", "confidence_score": math.inf, "size_pct_equity": 1})
+        parse_signal(
+            {"symbol": "BTCUSDT", "action": "long", "confidence_score": math.inf, "size_pct_equity": 1}
+        )
 
 
 def test_parse_signal_rejects_unknown_action() -> None:

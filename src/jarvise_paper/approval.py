@@ -163,9 +163,7 @@ def enqueue_approval(
             "paper_only": True,
         }
     symbol = str(analysis["symbol"]).upper()
-    safety = evaluate_from_db(
-        conn, symbol, now_ms=ts, intended_side=str(analysis.get("action") or "")
-    )
+    safety = evaluate_from_db(conn, symbol, now_ms=ts, intended_side=str(analysis.get("action") or ""))
     analysis = apply_safety_to_analysis(analysis, safety)
     action = str(analysis.get("action") or "flat")
     if safety.force_flat:

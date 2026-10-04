@@ -8,8 +8,8 @@ Optional HTF confirm (T2.3) via ``analyze_mtf`` / ``JARVISE_ANALYZE_MTF``.
 from __future__ import annotations
 
 import hashlib
-import os
 import math
+import os
 from typing import Any
 
 CONFIDENCE_THRESHOLD = 0.55

@@ -17,7 +17,10 @@ from jarvise_risk.caps import (
 
 def test_risk_at_stop_pct_formula() -> None:
     # 2% notional, 3% stop distance → 0.06% of equity (plus 0 costs)
-    assert abs(risk_at_stop_pct(size_pct_equity=2.0, entry=100.0, stop=97.0, round_trip_cost_bps=0.0) - 0.06) < 1e-9
+    assert (
+        abs(risk_at_stop_pct(size_pct_equity=2.0, entry=100.0, stop=97.0, round_trip_cost_bps=0.0) - 0.06)
+        < 1e-9
+    )
 
 
 def test_env_cannot_raise_ceiling(monkeypatch) -> None:
