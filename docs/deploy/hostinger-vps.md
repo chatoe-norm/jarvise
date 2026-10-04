@@ -200,6 +200,8 @@ Cron fallback (optional):
 
 Pushing to `main` runs CI on a GitHub-hosted runner. After CI succeeds, the self-hosted runner on this VPS (`ghrunner`, label `jarvise`) runs [infra/deploy/vps-deploy.sh](../../infra/deploy/vps-deploy.sh). The runner only makes outbound connections to GitHub. Pull requests never run on it.
 
+That script checks out `origin/main` and recreates containers. The paper ledger stays on the `./data` bind-mount (`jarvise.db` is not in git). A local clone that looks “reset” at $10,000 is a different file — see [product-usage.md](../product-usage.md) §2. Do not add `reset_paper_ledger` or `compose down -v` to deploy.
+
 Manual fallback, from the VPS:
 
 ```bash
