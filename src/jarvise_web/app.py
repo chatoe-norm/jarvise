@@ -349,9 +349,7 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         analysis = get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
         signal_candle = None
         if analysis is not None and analysis.get("timestamp") is not None:
-            signal_candle = load_candle_at(
-                conn, symbol, timeframe, int(analysis["timestamp"])
-            )
+            signal_candle = load_candle_at(conn, symbol, timeframe, int(analysis["timestamp"]))
         account = ensure_paper_account(conn)
         position = get_paper_position(conn, symbol)
         safety = evaluate_from_db(conn, symbol).as_dict()

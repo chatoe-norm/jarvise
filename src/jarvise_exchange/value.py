@@ -83,9 +83,7 @@ def value_spot_balances(
         if asset in STABLE_ASSETS:
             unit = Decimal("1")
             usd = bal.total * unit
-            rows.append(
-                ValuedBalance(balance=bal, usd=usd, price_usd=unit, pricing="stable")
-            )
+            rows.append(ValuedBalance(balance=bal, usd=usd, price_usd=unit, pricing="stable"))
             total += usd
             priced += 1
             continue
@@ -93,9 +91,7 @@ def value_spot_balances(
         price = get_price(asset)
         if price is not None:
             usd = bal.total * price
-            rows.append(
-                ValuedBalance(balance=bal, usd=usd, price_usd=price, pricing="ticker")
-            )
+            rows.append(ValuedBalance(balance=bal, usd=usd, price_usd=price, pricing="ticker"))
             total += usd
             priced += 1
             continue
@@ -105,11 +101,7 @@ def value_spot_balances(
             if under in STABLE_ASSETS:
                 unit = Decimal("1")
                 usd = bal.total * unit
-                rows.append(
-                    ValuedBalance(
-                        balance=bal, usd=usd, price_usd=unit, pricing="earn_stable"
-                    )
-                )
+                rows.append(ValuedBalance(balance=bal, usd=usd, price_usd=unit, pricing="earn_stable"))
                 total += usd
                 priced += 1
                 continue
