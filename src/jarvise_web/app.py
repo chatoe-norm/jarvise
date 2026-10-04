@@ -61,6 +61,7 @@ PAPER_KEY = "jarvise:paper:last"
 PAPER_EXPIRE_KEY = "jarvise:paper:expire:last"
 PAPER_AUTO_KEY = "jarvise:paper_auto:last"
 INGEST_HEALTH_KEY = "jarvise:ingest:health"
+RISK_MONITOR_KEY = "jarvise:risk_monitor:last"
 JOBS_URL = os.environ.get("JARVISE_JOBS_URL", "http://jobs:8090")
 DEFAULT_DB = Path("data/analytics/jarvise.db")
 
@@ -297,6 +298,7 @@ def status_payload() -> dict[str, Any]:
         "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
         "paper_auto": redis_get_json(PAPER_AUTO_KEY),
         "ingest_health": redis_get_json(INGEST_HEALTH_KEY),
+        "risk_monitor": redis_get_json(RISK_MONITOR_KEY),
         "risk_caps": load_risk_caps().as_dict(),
         "qdrant": qdrant_info(),
         "fear_greed_index": None if not macro else macro.get("fear_greed_index"),

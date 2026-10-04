@@ -183,6 +183,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
     { key: "rag", title: "RAG", data: status?.rag },
     { key: "paper", title: "Paper enqueue", data: status?.paper },
     { key: "paper_expire", title: "Paper expire", data: status?.paper_expire },
+    { key: "risk_monitor", title: "Risk monitor", data: status?.risk_monitor },
   ];
 
   return (
@@ -295,6 +296,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                   rag: status?.rag,
                   paper: status?.paper,
                   paper_expire: status?.paper_expire,
+                  risk_monitor: status?.risk_monitor,
                   ingest_health: status?.ingest_health,
                   paper_auto: status?.paper_auto,
                   qdrant: status?.qdrant,

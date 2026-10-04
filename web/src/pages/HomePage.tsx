@@ -4,7 +4,7 @@ import { EquityChart, WinLossChart } from "@/components/Charts";
 import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { DashboardPayload, PaperAutoStatus } from "@/lib/api";
+import type { DashboardPayload, PaperAutoStatus, StatusPayload } from "@/lib/api";
 import { ownerReasonCopy } from "@/lib/copy";
 import { buildEquityPoints } from "@/lib/equity";
 import { relativeAge } from "@/lib/utils";
@@ -55,6 +55,49 @@ function kindVariant(
       return _exhaustive;
     }
   }
+}
+
+function fngBand(value: number): string {
+  if (value < 25) return "กลัวสุดขีด";
+  if (value < 50) return "กลัว";
+  if (value < 75) return "โลภ";
+  return "โลภสุดขีด";
+}
+
+function MarketContextCard({ status }: { status: StatusPayload }) {
+  const fng = status.fear_greed_index;
+  const hasFng = typeof fng === "number" && Number.isFinite(fng);
+  const alt = status.altcoin_season_index;
+  const hasAlt = typeof alt === "number" && Number.isFinite(alt);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Market context</CardTitle>
+        <CardDescription>
+          Fear &amp; Greed and altseason are context only — they never enqueue or size a trade.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-3 sm:grid-cols-2 text-sm">
+        <div>
+          <div className="text-xs text-[var(--color-muted)]">Fear &amp; Greed</div>
+          {hasFng ? (
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <span className="text-2xl font-semibold tabular-nums">{fng}</span>
+              <Badge variant="muted">{fngBand(fng)}</Badge>
+            </div>
+          ) : (
+            <p className="mt-1 text-[var(--color-muted)]">{status.sentiment_note || "ไม่มีข้อมูล"}</p>
+          )}
+        </div>
+        <div>
+          <div className="text-xs text-[var(--color-muted)]">Altcoin season</div>
+          <p className="mt-1 text-[var(--color-muted)]">
+            {hasAlt ? <span className="text-2xl font-semibold tabular-nums text-[var(--color-foreground)]">{alt}</span> : "ไม่มีข้อมูล"}
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function LastAutoDecideCard({
@@ -154,6 +197,8 @@ export function HomePage({
           },
         ]}
       />
+
+      <MarketContextCard status={data.status} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
