@@ -594,3 +594,74 @@ def test_api_ohlcv_seeded_closed_bars_in_order(monkeypatch, tmp_path: Path) -> N
     assert last["o"] == 149.0 and last["c"] == 149.5
     assert body["invalidation_price"] == 90.5
     assert body["action"] == "long"
+
+
+def test_api_analysis_explain_404(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/analysis/missing-id/explain")
+    assert resp.status_code == 404
+
+
+def test_api_analysis_explain_ladder(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ts = 1_700_000_000_000
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "ETHUSDT",
+                "timestamp": ts,
+                "timeframe": "4h",
+                "open": 2680.0,
+                "high": 2700.0,
+                "low": 2670.0,
+                "close": 2687.0,
+                "volume": 1.0,
+            }
+        ],
+    )
+    conn.execute(
+        """
+        UPDATE market_technicals
+        SET atr_14=?, rsi_14=?, ema_20=?, ema_200=?
+        WHERE symbol=? AND timeframe=? AND timestamp=?
+        """,
+        (40.0, 49.0, 2700.0, 2560.0, "ETHUSDT", "4h", ts),
+    )
+    upsert_analysis_output(
+        conn,
+        {
+            "analysis_id": "an-explain",
+            "timestamp": ts,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "regime_state": "trend_up",
+            "confidence_score": 0.65,
+            "action": "long",
+            "invalidation_price": 2600.0,
+            "size_pct_equity": 0.975,
+            "thesis": "Trend up pullback",
+        },
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/analysis/an-explain/explain")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["analysis_id"] == "an-explain"
+    assert body["symbol"] == "ETHUSDT"
+    assert body["candle"]["close"] == 2687.0
+    assert body["breakdown"]["total"] == 0.65
+    assert body["breakdown"]["regime"] == "trend_up"
+    assert body["breakdown"]["gates"]["flat_below"] == 0.55
+    assert body["breakdown"]["gates"]["doctrine_free_approve"] == 0.70
+    assert any(s["delta"] == -0.1 for s in body["breakdown"]["steps"])

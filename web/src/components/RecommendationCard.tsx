@@ -2,6 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { CandleChart } from "@/components/CandleChart";
+import { ConfidenceLadder } from "@/components/ConfidenceLadder";
 import type { OhlcvPayload, RecommendationPayload } from "@/lib/api";
 import { formatNum } from "@/lib/utils";
 
@@ -68,6 +69,12 @@ export function RecommendationCard({
       {data.recommendation_source === "claude" && data.claude ? (
         <Section title={`Claude (${data.claude.model}) ตัดสิน: ${data.claude.decision}`}>
           <p>{data.claude.reason || "—"}</p>
+        </Section>
+      ) : null}
+
+      {data.confidence_breakdown ? (
+        <Section title="ทำไมได้คะแนนนี้">
+          <ConfidenceLadder breakdown={data.confidence_breakdown} />
         </Section>
       ) : null}
 

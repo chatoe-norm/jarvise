@@ -15,11 +15,15 @@ class SpotBalance:
 
 @dataclass(frozen=True)
 class ValuedBalance:
-    """One spot balance with optional ~USD (None = unpriced)."""
+    """One spot balance with optional ~USD (None = unpriced).
+
+    pricing: ``stable`` | ``ticker`` | ``earn_stable`` | ``earn_ticker``; None = unpriced.
+    """
 
     balance: SpotBalance
     usd: Decimal | None
     price_usd: Decimal | None = None
+    pricing: str | None = None
 
 
 @dataclass(frozen=True)

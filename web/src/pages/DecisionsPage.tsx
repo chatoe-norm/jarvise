@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useState, type FormEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,7 +9,8 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/ui/pagination";
-import { api } from "@/lib/api";
+import { ConfidenceLadder } from "@/components/ConfidenceLadder";
+import { api, type AnalysisExplainPayload } from "@/lib/api";
 import { formatDecisionStamp, formatNum } from "@/lib/utils";
 
 const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
@@ -23,6 +24,10 @@ export function DecisionsPage() {
   const [pageSize, setPageSize] = useState<number>(10);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [explains, setExplains] = useState<Record<string, AnalysisExplainPayload>>({});
+  const [explainError, setExplainError] = useState<Record<string, string>>({});
+  const [explainLoading, setExplainLoading] = useState<Record<string, boolean>>({});
 
   const load = useCallback(
     async (
@@ -78,12 +83,39 @@ export function DecisionsPage() {
     void load(symbol, timeframe, clamped, pageSize);
   }
 
+  async function toggleExplain(analysisId: string) {
+    const next = !expanded[analysisId];
+    setExpanded((prev) => ({ ...prev, [analysisId]: next }));
+    if (!next || explains[analysisId] || explainLoading[analysisId]) return;
+    setExplainLoading((prev) => ({ ...prev, [analysisId]: true }));
+    setExplainError((prev) => {
+      const cleared = { ...prev };
+      delete cleared[analysisId];
+      return cleared;
+    });
+    try {
+      const payload = await api.analysisExplain(analysisId);
+      setExplains((prev) => ({ ...prev, [analysisId]: payload }));
+    } catch (err) {
+      setExplainError((prev) => ({
+        ...prev,
+        [analysisId]: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setExplainLoading((prev) => ({ ...prev, [analysisId]: false }));
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">Decisions</h1>
         <p className="text-sm text-[var(--color-muted)]">
           Latest analysis output — regime, action, and thesis.
+        </p>
+        <p className="mt-1 text-xs text-[var(--color-muted)]">
+          0.55 = FLAT gate · 0.70 = auto-approve without doctrine · click Conf to
+          see the ladder
         </p>
       </div>
 
@@ -163,48 +195,84 @@ export function DecisionsPage() {
                   <tbody>
                     {rows.map((r, i) => {
                       const stamp = formatDecisionStamp(r.timestamp);
-                      const rowKey =
+                      const analysisId =
                         r.analysis_id != null && r.analysis_id !== ""
                           ? String(r.analysis_id)
-                          : String(i);
+                          : "";
+                      const rowKey = analysisId || String(i);
+                      const isOpen = Boolean(analysisId && expanded[analysisId]);
                       return (
-                      <tr
-                        key={rowKey}
-                        className="border-b border-[var(--color-border)]/60 align-top"
-                      >
-                        <td className="py-2 pr-2 tabular-nums text-[var(--color-muted)]">
-                          {from + i}
-                        </td>
-                        <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
-                          {stamp.date}
-                        </td>
-                        <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
-                          {stamp.time}
-                        </td>
-                        <td className="py-2 pr-2 font-medium">
-                          {String(r.symbol ?? "")}
-                        </td>
-                        <td className="py-2 pr-2">{String(r.timeframe ?? "")}</td>
-                        <td className="py-2 pr-2">
-                          <Badge variant="muted">
-                            {String(r.regime_state ?? "—")}
-                          </Badge>
-                        </td>
-                        <td className="py-2 pr-2">
-                          <Badge variant="outline">
-                            {String(r.action ?? "—")}
-                          </Badge>
-                        </td>
-                        <td className="py-2 pr-2 tabular-nums">
-                          {formatNum(r.confidence_score)}
-                        </td>
-                        <td className="py-2 pr-2 tabular-nums">
-                          {formatNum(r.size_pct_equity)}
-                        </td>
-                        <td className="py-2 max-w-md text-[var(--color-muted)]">
-                          {String(r.thesis ?? "")}
-                        </td>
-                      </tr>
+                        <Fragment key={rowKey}>
+                          <tr className="border-b border-[var(--color-border)]/60 align-top">
+                            <td className="py-2 pr-2 tabular-nums text-[var(--color-muted)]">
+                              {from + i}
+                            </td>
+                            <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
+                              {stamp.date}
+                            </td>
+                            <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
+                              {stamp.time}
+                            </td>
+                            <td className="py-2 pr-2 font-medium">
+                              {String(r.symbol ?? "")}
+                            </td>
+                            <td className="py-2 pr-2">{String(r.timeframe ?? "")}</td>
+                            <td className="py-2 pr-2">
+                              <Badge variant="muted">
+                                {String(r.regime_state ?? "—")}
+                              </Badge>
+                            </td>
+                            <td className="py-2 pr-2">
+                              <Badge variant="outline">
+                                {String(r.action ?? "—")}
+                              </Badge>
+                            </td>
+                            <td className="py-2 pr-2 tabular-nums">
+                              {analysisId ? (
+                                <button
+                                  type="button"
+                                  className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-accent)]"
+                                  onClick={() => void toggleExplain(analysisId)}
+                                  aria-expanded={isOpen}
+                                >
+                                  {formatNum(r.confidence_score)}
+                                  {isOpen ? " ▾" : " ▸"}
+                                </button>
+                              ) : (
+                                formatNum(r.confidence_score)
+                              )}
+                            </td>
+                            <td className="py-2 pr-2 tabular-nums">
+                              {formatNum(r.size_pct_equity)}
+                            </td>
+                            <td className="py-2 max-w-md text-[var(--color-muted)]">
+                              {String(r.thesis ?? "")}
+                            </td>
+                          </tr>
+                          {isOpen ? (
+                            <tr className="border-b border-[var(--color-border)]/60 bg-[#121922]/60">
+                              <td colSpan={10} className="px-3 py-3">
+                                {explainLoading[analysisId] ? (
+                                  <p className="text-xs text-[var(--color-muted)]">
+                                    Loading confidence ladder…
+                                  </p>
+                                ) : null}
+                                {explainError[analysisId] ? (
+                                  <p className="text-xs text-[var(--color-danger)]">
+                                    {explainError[analysisId]}
+                                  </p>
+                                ) : null}
+                                {explains[analysisId] ? (
+                                  <div className="max-w-lg">
+                                    <ConfidenceLadder
+                                      breakdown={explains[analysisId].breakdown}
+                                    />
+                                  </div>
+                                ) : null}
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
                       );
                     })}
                   </tbody>

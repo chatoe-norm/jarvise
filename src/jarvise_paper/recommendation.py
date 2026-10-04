@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from jarvise_analyze.engine import ATR_STOP_MULT
+from jarvise_analyze.explain import confidence_breakdown
 
 APPROVE_CONF = 0.70
 CAUTION_CONF = 0.55
@@ -151,10 +152,19 @@ def build_recommendation(
     safety: Mapping[str, Any] | None,
     doctrine: list[str],
     claude: Mapping[str, Any] | None,
+    signal_candle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     action = str(approval.get("action") or "flat").lower()
     conf = float(approval.get("confidence_score") or 0.0)
     rec = template_recommendation(action, conf)
+    explain_src = signal_candle if signal_candle is not None else candle
+    breakdown = confidence_breakdown(explain_src or {})
+    what = _what_happened(candle, safety)
+    if conf < APPROVE_CONF and not doctrine:
+        what.append(
+            f"ความมั่นใจ {conf:.2f} < {APPROVE_CONF:.2f} และไม่พบ doctrine ตรงสัญญาณ "
+            "→ auto-decide จะ defer ให้เจ้าของตัดสินใจเอง"
+        )
     return {
         "ok": True,
         "approval_id": approval.get("id"),
@@ -166,11 +176,13 @@ def build_recommendation(
         "recommendation_source": "claude" if claude else "template",
         "confidence_label": confidence_label(conf),
         "headline": _headline(rec, action, conf),
-        "what_happened": _what_happened(candle, safety),
+        "what_happened": what,
         "risk": _risk(approval, candle, analysis, account),
         "doctrine": list(doctrine),
         "checklist": _checklist(approval, position),
         "thesis": (analysis or {}).get("thesis"),
         "claude": dict(claude) if claude else None,
+        "confidence_breakdown": breakdown,
+        "gates": {"flat": CAUTION_CONF, "approve": APPROVE_CONF},
         "paper_only": True,
     }

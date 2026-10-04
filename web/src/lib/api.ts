@@ -85,6 +85,40 @@ export type OhlcvPayload = {
   action: string;
 };
 
+export type ConfidenceStep = {
+  label: string;
+  delta: number;
+};
+
+export type ConfidenceBreakdown = {
+  regime: string;
+  side: string;
+  base: number;
+  steps: ConfidenceStep[];
+  total: number;
+  gates: {
+    flat_below: number;
+    doctrine_free_approve: number;
+  };
+  insufficient: boolean;
+};
+
+export type AnalysisExplainPayload = {
+  ok: boolean;
+  analysis_id: string;
+  symbol: string;
+  timeframe: string;
+  timestamp: number;
+  candle: {
+    close: number | null;
+    ema_20: number | null;
+    ema_200: number | null;
+    rsi_14: number | null;
+    atr_14: number | null;
+  } | null;
+  breakdown: ConfidenceBreakdown;
+};
+
 export type RecommendationPayload = {
   ok: boolean;
   approval_id: string;
@@ -114,6 +148,8 @@ export type RecommendationPayload = {
     model: string;
     at_ms: number;
   } | null;
+  confidence_breakdown?: ConfidenceBreakdown;
+  gates?: { flat: number; approve: number };
 };
 
 export type PaperPayload = {
@@ -183,8 +219,11 @@ export type ExchangePayload = {
     locked: string;
     total: string;
     usd: number | null;
+    pricing?: string | null;
   }>;
   total_usd?: number | null;
+  priced_count?: number;
+  unpriced_count?: number;
   error?: string;
 };
 
@@ -237,6 +276,10 @@ export const api = {
     const qs = q.toString();
     return request<AnalysisPayload>(`/api/analysis${qs ? `?${qs}` : ""}`);
   },
+  analysisExplain: (analysisId: string) =>
+    request<AnalysisExplainPayload>(
+      `/api/analysis/${encodeURIComponent(analysisId)}/explain`,
+    ),
   approvals: (status = "pending") =>
     request<{ ok: boolean; rows: ApprovalRow[] }>(
       `/api/approvals?status=${encodeURIComponent(status)}`,
