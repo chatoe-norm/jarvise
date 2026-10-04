@@ -117,6 +117,7 @@ def evaluate_market_safety(
     config: MarketSafetyConfig | None = None,
     now_ms: int | None = None,
     provider_errors: list[str] | None = None,
+    intended_side: str | None = None,
 ) -> MarketSafetyResult:
     """Return gate outcome. Does not engage kill-switch (caller may)."""
     cfg = config or load_market_safety_config()
@@ -157,9 +158,19 @@ def evaluate_market_safety(
             if bid_d is None or ask_d is None:
                 reasons.append("book_depth_null")
                 critical = True
-            elif float(bid_d) < cfg.min_depth_usd and float(ask_d) < cfg.min_depth_usd:
-                reasons.append(f"illiquid_depth bid={bid_d} ask={ask_d} floor={cfg.min_depth_usd}")
-                critical = True
+            else:
+                side = (intended_side or "").lower()
+                if side in {"buy", "long"}:
+                    if float(ask_d) < cfg.min_depth_usd:
+                        reasons.append(f"illiquid_depth ask={ask_d} floor={cfg.min_depth_usd}")
+                        critical = True
+                elif side in {"sell", "short"}:
+                    if float(bid_d) < cfg.min_depth_usd:
+                        reasons.append(f"illiquid_depth bid={bid_d} floor={cfg.min_depth_usd}")
+                        critical = True
+                elif float(bid_d) < cfg.min_depth_usd and float(ask_d) < cfg.min_depth_usd:
+                    reasons.append(f"illiquid_depth bid={bid_d} ask={ask_d} floor={cfg.min_depth_usd}")
+                    critical = True
 
     if cfg.require_derivatives:
         if derivatives is None:
@@ -239,6 +250,7 @@ def evaluate_from_db(
     now_ms: int | None = None,
     provider_errors: list[str] | None = None,
     engage_ks: bool = False,
+    intended_side: str | None = None,
 ) -> MarketSafetyResult:
     """Load latest snapshots from SQLite and evaluate."""
     from jarvise_ingest.db import (
@@ -268,6 +280,7 @@ def evaluate_from_db(
         config=cfg,
         now_ms=now_ms,
         provider_errors=provider_errors,
+        intended_side=intended_side,
     )
     if engage_ks:
         return maybe_engage_kill_switch(result)

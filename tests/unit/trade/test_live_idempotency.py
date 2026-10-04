@@ -37,7 +37,13 @@ SAFE_PERMS = {
 
 
 def _approval(aid: str = "abc123def456") -> dict:
-    return {"id": aid, "symbol": "BTCUSDT", "action": "long", "size_pct_equity": 5.0}
+    return {
+        "id": aid,
+        "symbol": "BTCUSDT",
+        "action": "long",
+        "size_pct_equity": 5.0,
+        "invalidation_price": 97.0,
+    }
 
 
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,7 +257,8 @@ def test_partial_fill_persisted_and_reconciled(tmp_path: Path, monkeypatch) -> N
         result = submit_live_for_approval(conn, approval=_approval(), now_ms=1_000)
     live = result["live_order"]
     assert live["status"] == "partially_filled" and live["executed_qty"] == 0.002
-    assert [r["id"] for r in list_live_orders_open(conn)] == [live["id"]]
+    open_ids = [r["id"] for r in list_live_orders_open(conn)]
+    assert live["id"] in open_ids
 
     filled = {
         **partial,
@@ -262,7 +269,8 @@ def test_partial_fill_persisted_and_reconciled(tmp_path: Path, monkeypatch) -> N
     }
     with patch("jarvise_trade.reconcile.query_order", return_value=filled):
         rec = reconcile_live_orders(conn, now_ms=5_000)
-    assert rec["ok"] and rec["updated"] == [{"id": live["id"], "from": "partially_filled", "to": "filled"}]
+    assert rec["ok"]
+    assert {"id": live["id"], "from": "partially_filled", "to": "filled"} in rec["updated"]
     row = get_live_order_by_client_id(conn, "jrv-abc123def456")
     assert row["status"] == "filled" and row["executed_qty"] == 0.005 and row["fills_count"] == 3
     assert row["reconciled_at_ms"] == 5_000

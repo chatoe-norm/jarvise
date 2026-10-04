@@ -83,6 +83,7 @@ def _seed(db: Path) -> None:
             "action": "long",
             "regime_state": "trend_up",
             "confidence_score": 0.75,
+            "invalidation_price": 97.0,
             "size_pct_equity": 1.125,
             "status": "pending",
         },

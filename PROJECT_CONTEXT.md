@@ -74,7 +74,7 @@ Multi-tenant SaaS; mobile apps; public HTTPS UI (Tailscale-only for now); Binanc
 ### 2.1 Core Technical Analysis (TA) features — minimum
 
 - Reproducible OHLCV store: closed candles only, paged backfill (`--since/--until`), gap reporting, point-in-time universe (`paper_core`).
-- Indicators recomputed from the full series with warm-up withholding: **ATR-14, RSI-14, EMA-20, EMA-200**.
+- Indicators recomputed from the full series with warm-up withholding: **ATR-14, RSI-14, EMA-20, EMA-200** (MACD/BB/SMA stored as context only).
 - Deterministic analyzer per closed candle → `analysis_output`: **regime** (`trend_up` / `trend_down` / `range` / `chaotic`), **action** (`long` / `short` / `flat`), **confidence** (FLAT below **0.55**), **invalidation** (close ∓ 1.5×ATR), **size % equity** (`min(2.0, 1.5 × confidence)`).
 - Derivatives context (open interest, funding, liquidations) stored bitemporally (revisions never overwrite what was known earlier).
 - Doctrine RAG (NotebookLM + allowlisted fetch/Firecrawl + OpenClaw notes → Qdrant `jarvise_doctrine`) consulted before any trade call.
@@ -83,13 +83,13 @@ Multi-tenant SaaS; mobile apps; public HTTPS UI (Tailscale-only for now); Binanc
 
 ### 2.2 Trading / Execution features — minimum
 
-- **Paper ledger** (`paper_account`, `paper_orders`, `paper_positions`): simulated fills with default **10 bps** fee (Binance spot taker; override `JARVISE_PAPER_FEE_BPS`) and slip `max(5 bps, half bid-ask spread)` when book data exists; one position per symbol; MTM equity; starting equity $10,000.
+- **Paper ledger** (`paper_account`, `paper_orders`, `paper_positions`): simulated fills with default **10 bps** fee (Binance spot taker; override `JARVISE_PAPER_FEE_BPS`) and slip `max(5 bps, half bid-ask spread, depth impact)` when book data exists; **stop-loss** (`stop_price`, 1.5×ATR invalidation) enforced by `jarvise paper risk-monitor` / `POST /jobs/risk-monitor` (FLAT even when kill-switch is engaged); hard **1% equity risk-at-stop** ceiling; one position per symbol; MTM equity snapshots; starting equity $10,000.
 - **Approval queue** (`approval_queue`): `paper run` enqueues by default; owner Approves/Rejects on Command Dashboard / CLI (or auto-decide); TTL (`JARVISE_APPROVAL_TIMEOUT_MIN`, default 60) → `timed_out`; one pending row per (symbol, timeframe); atomic claim; kill-switch fail-closed.
 - **Kill-switch** (Redis `jarvise:kill_switch`) honored by schedules, paper run/approve, and the web toggle.
 - **Exchange read-only**: Binance spot balances (`GET /api/v3/account`, HMAC or Ed25519/RSA) → `exchange_balances`, shown beside the paper ledger; secrets only in VPS `.env`; soft-fail hides the panel.
 - **Performance gate**: expectancy / drawdown metrics from the paper ledger sufficient to judge "clearly positive EV" (doctrine prerequisite for live).
 - **P4-C live path (last MVP rung, owner-gated)**: on Approve when `JARVISE_LIVE_TRADING=true`, size-capped live **spot** MARKET via `jarvise_trade` → `live_orders` audit; hard caps + kill-switch before submit; live flag default **off**.
-- 24/7 operation on the VPS: n8n → jobs API for ingest, RAG refresh, **and** paper run/expire.
+- 24/7 operation on the VPS: n8n → jobs API for ingest, RAG refresh, paper run/expire, **and** risk-monitor (15m).
 
 ### 2.3 On-chain / Sentiment features — minimum
 
@@ -99,9 +99,10 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - Order-book microstructure + BTC dominance / global mcap writers (Binance public book + CoinGecko global) with `jarvise_risk.market_safety` FLAT/kill-switch gate — see `docs/superpowers/specs/2026-10-01-market-safety-ingest-design.md`.
 - Agent-side **Binance Web3 intel** (`jarvise-binance-intel` skill, no keys): token search/meta, **security audit** (audit `HIGH`, `riskType: RISK`, or sell tax → **FLAT veto**), market rank, social hype, smart-money inflow, tokenized US stocks info, Academy risk education.
 - Agent-side **CoinGecko AI tools** (MCP / Docs MCP / CLI — optional, not wired by default): research overlay only; map in `docs/market-data/coingecko-for-jarvise.md`; never doctrine RAG.
+- **Fear & Greed** (Alternative.me, context only) written to `macro_onchain_sentiment.fear_greed_index`. Altcoin Season only when `CMC_API_KEY` is set and the CMC payload contains a usable field; otherwise the dashboard shows **ไม่มีข้อมูล**.
 - Doctrine RAG + OpenClaw research notes as the "sentiment/narrative" layer.
 
-*Post-MVP (schema reserved):* remaining `macro_onchain_sentiment` fields (fear/greed, altcoin season, exchange netflow/reserve, ETF flows) and spoof-wall heuristics on `order_book_microstructure`.
+*Post-MVP (schema reserved):* remaining `macro_onchain_sentiment` fields (exchange netflow/reserve, ETF flows) and spoof-wall heuristics on `order_book_microstructure`.
 
 ---
 

@@ -38,8 +38,13 @@ In `/opt/jarvise/.env`:
 
 ```bash
 JARVISE_LIVE_TRADING=true
+JARVISE_LIVE_EQUITY_USD=10000
+WEB_BASIC_AUTH_USER=...
+WEB_BASIC_AUTH_PASSWORD=...
 # BINANCE_TRADE_* already set
 ```
+
+Live submit **requires** `invalidation_price` on the approval and places a venue `STOP_LOSS_LIMIT` after a BUY fill. Do not enable live until you have verified the stop row in `live_orders`. Paper equity is **never** used to size live orders.
 
 ```bash
 docker compose up -d --force-recreate jobs web

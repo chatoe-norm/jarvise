@@ -11,6 +11,7 @@ import httpx
 from jarvise_ingest.db import list_live_orders_open, update_live_order_fill
 from jarvise_trade.auth import resolve_trade_auth
 from jarvise_trade.binance_market import query_order, summarize_fill
+from jarvise_trade.pnl import realized_pnl_usd
 
 
 def reconcile_live_orders(
@@ -119,6 +120,14 @@ def reconcile_live_orders(
                 venue_order_id=fill["venue_order_id"],
                 venue_response_json=json.dumps(payload),
                 reconciled_at_ms=ts,
+                realized_pnl_usd=realized_pnl_usd(
+                    conn,
+                    side=str(row.get("side") or ""),
+                    symbol=str(row["symbol"]),
+                    executed_qty=fill["executed_qty"],
+                    quote_qty=fill["cummulative_quote_qty"],
+                    exclude_id=oid,
+                ),
             )
     result["ok"] = not result["errors"]
     return result

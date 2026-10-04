@@ -31,6 +31,7 @@ from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.feedback import auto_ev_gate_status, persist_auto_run
 from jarvise_paper.llm_openrouter import OpenRouterError, OpenRouterParseError, chat_json
 from jarvise_paper.recommendation import doctrine_query
+from jarvise_paper.schemas import LlmDecision
 from jarvise_risk import (
     RiskCaps,
     engage_kill_switch,
@@ -202,13 +203,14 @@ def brief_hash(brief: dict[str, Any]) -> str:
 
 def parse_decision(obj: Any) -> tuple[str, str]:
     """Strict contract: exactly {decision, reason}. Anything else → defer/unparseable."""
-    if not isinstance(obj, dict) or set(obj) != {"decision", "reason"}:
+    payload = obj
+    if isinstance(obj, dict) and "decision" in obj:
+        payload = {**obj, "decision": str(obj.get("decision") or "").lower()}
+    try:
+        parsed = LlmDecision.model_validate(payload)
+    except Exception:  # noqa: BLE001 — unparseable → fail closed defer
         return "defer", UNPARSEABLE
-    decision = str(obj.get("decision") or "").strip().lower()
-    if decision not in DECISIONS:
-        return "defer", UNPARSEABLE
-    reason = str(obj.get("reason") or "").strip()[:REASON_MAX]
-    return decision, reason
+    return parsed.decision, parsed.reason[:REASON_MAX]
 
 
 def _default_doctrine(query: str) -> list[dict[str, Any]]:

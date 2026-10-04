@@ -44,6 +44,7 @@ DEFAULT_MAX_OPEN_POSITIONS = 2
 DEFAULT_MAX_GROSS_NOTIONAL_PCT = 10.0
 DEFAULT_MAX_SYMBOL_NOTIONAL_PCT = 6.0
 DEFAULT_MAX_CORRELATED_BUCKET_PCT = 10.0
+HARD_MAX_RISK_PER_TRADE_PCT = 1.0
 
 # Correlated exposure buckets (T2.2). Symbols may appear in at most one bucket.
 CRYPTO_MAJORS = frozenset({"BTCUSDT", "ETHUSDT"})
@@ -99,6 +100,28 @@ def utc_day_bounds_ms(now_ms: int) -> tuple[int, int]:
     return start, start + day_ms
 
 
+def max_risk_per_trade_pct() -> float:
+    """Owner may tighten below 1%; never raise the doctrine ceiling."""
+    raw = _fenv("JARVISE_MAX_RISK_PER_TRADE_PCT", HARD_MAX_RISK_PER_TRADE_PCT)
+    return min(HARD_MAX_RISK_PER_TRADE_PCT, max(0.0, float(raw)))
+
+
+def risk_at_stop_pct(
+    *,
+    size_pct_equity: float,
+    entry: float,
+    stop: float,
+    round_trip_cost_bps: float = 0.0,
+) -> float:
+    """Share of equity lost if the stop fills (size × stop distance + round-trip costs)."""
+    entry_f = float(entry)
+    if entry_f == 0:
+        return 0.0
+    dist = abs(entry_f - float(stop)) / abs(entry_f)
+    cost = max(0.0, float(round_trip_cost_bps)) / 10_000.0
+    return max(0.0, float(size_pct_equity)) * (dist + cost)
+
+
 def estimated_notional(
     *,
     equity: float,
@@ -127,6 +150,10 @@ def check_caps(
     size_pct_equity: float | None = None,
     action: str | None = None,
     utc_day_realized_pnl_usd: float = 0.0,
+    utc_day_mtm_pnl_usd: float | None = None,
+    entry_price: float | None = None,
+    stop_price: float | None = None,
+    round_trip_cost_bps: float = 0.0,
 ) -> str | None:
     """Return account/order breach reason or None if OK (engage kill-switch on breach).
 
@@ -142,12 +169,29 @@ def check_caps(
     day_pnl = float(utc_day_realized_pnl_usd)
     if day_pnl <= -caps.max_daily_loss_usd:
         return f"max_daily_loss: utc_day_pnl ${day_pnl:.2f} <= -${caps.max_daily_loss_usd:.2f}"
+    if utc_day_mtm_pnl_usd is not None and float(utc_day_mtm_pnl_usd) <= -caps.max_daily_loss_usd:
+        return (
+            f"max_daily_loss: utc_day_mtm_pnl ${float(utc_day_mtm_pnl_usd):.2f} "
+            f"<= -${caps.max_daily_loss_usd:.2f}"
+        )
 
     act = (action or "").lower()
     if act in {"long", "short"} and size_pct_equity is not None:
         notional = estimated_notional(equity=eq, size_pct_equity=float(size_pct_equity))
         if notional > caps.max_notional_per_order:
             return f"max_notional: ${notional:.2f} > ${caps.max_notional_per_order:.2f}"
+        if stop_price is None:
+            return "missing_invalidation"
+        if entry_price is not None and float(entry_price) > 0:
+            risk = risk_at_stop_pct(
+                size_pct_equity=float(size_pct_equity),
+                entry=float(entry_price),
+                stop=float(stop_price),
+                round_trip_cost_bps=round_trip_cost_bps,
+            )
+            ceiling = max_risk_per_trade_pct()
+            if risk > ceiling:
+                return f"risk_at_stop: {risk:.2f}% > {ceiling:.2f}%"
     return None
 
 

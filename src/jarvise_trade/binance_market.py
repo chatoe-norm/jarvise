@@ -43,6 +43,59 @@ def client_order_id_for_approval(approval_id: str) -> str:
     return f"{CLIENT_ORDER_PREFIX}{body}"
 
 
+def client_order_id_for_stop(approval_id: str) -> str:
+    return client_order_id_for_approval(f"x{approval_id}")
+
+
+def place_spot_stop_loss_limit(
+    auth: BinanceAuth,
+    *,
+    symbol: str,
+    side: str,
+    quantity: float,
+    stop_price: float,
+    limit_price: float,
+    client: httpx.Client | None = None,
+    base_url: str = BINANCE_BASE,
+    timestamp_ms: int | None = None,
+    new_client_order_id: str | None = None,
+) -> dict[str, Any]:
+    """POST /api/v3/order type=STOP_LOSS_LIMIT (GTC). Venue-side invalidation."""
+    assert_trade_allowlisted("POST", ORDER_PATH)
+    side_u = side.upper()
+    if side_u not in {"BUY", "SELL"}:
+        raise ValueError(f"invalid side: {side}")
+    params: dict[str, Any] = {
+        "symbol": symbol.upper(),
+        "side": side_u,
+        "type": "STOP_LOSS_LIMIT",
+        "timeInForce": "GTC",
+        "quantity": _format_qty(quantity),
+        "price": _format_qty(limit_price),
+        "stopPrice": _format_qty(stop_price),
+        "newOrderRespType": "FULL",
+        "timestamp": int(timestamp_ms if timestamp_ms is not None else time.time() * 1000),
+    }
+    if new_client_order_id:
+        if len(new_client_order_id) > _CLIENT_ORDER_MAX:
+            raise ValueError("new_client_order_id exceeds 36 chars")
+        params["newClientOrderId"] = new_client_order_id
+    url = _signed_url(auth, base_url, params)
+    headers = {"X-MBX-APIKEY": auth.api_key}
+    own = client is None
+    http = client or httpx.Client(timeout=30.0)
+    try:
+        resp = http.post(url, headers=headers)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise ValueError("unexpected order response type")
+        return payload
+    finally:
+        if own:
+            http.close()
+
+
 def _signed_url(auth: BinanceAuth, base_url: str, params: dict[str, Any]) -> str:
     query = urlencode(params)
     signature = signature_for_query(auth, query)

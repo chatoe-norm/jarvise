@@ -94,6 +94,8 @@ def seed_db(path: Path) -> object:
 
 
 def pending(conn, approval_id: str, symbol: str, **over) -> dict:
+    closes = {"BTCUSDT": 85000.0, "ETHUSDT": 3000.0}
+    close = closes.get(symbol, 100.0)
     row = {
         "id": approval_id,
         "created_at_ms": 1_000,
@@ -104,6 +106,7 @@ def pending(conn, approval_id: str, symbol: str, **over) -> dict:
         "action": "long",
         "regime_state": "trend_up",
         "confidence_score": 0.75,
+        "invalidation_price": close * 0.98,
         "size_pct_equity": 1.125,
         "status": "pending",
     }

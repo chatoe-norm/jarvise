@@ -191,19 +191,35 @@ export function PaperPage() {
                     <th className="py-2 pr-3">Side</th>
                     <th className="py-2 pr-3">Qty</th>
                     <th className="py-2 pr-3">Entry</th>
+                    <th className="py-2 pr-3">Stop</th>
+                    <th className="py-2 pr-3">Stop dist</th>
                     <th className="py-2">uPnL</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {positions.map((p, i) => (
+                  {positions.map((p, i) => {
+                    const entry = Number(p.entry_price);
+                    const stop = p.stop_price != null ? Number(p.stop_price) : null;
+                    const dist =
+                      stop != null && Number.isFinite(entry) && entry !== 0
+                        ? (Math.abs(entry - stop) / Math.abs(entry)) * 100
+                        : null;
+                    return (
                     <tr key={i} className="border-b border-[var(--color-border)]/60">
                       <td className="py-2 pr-3">{String(p.symbol ?? "")}</td>
                       <td className="py-2 pr-3">{String(p.side ?? "")}</td>
                       <td className="py-2 pr-3 tabular-nums">{formatNum(p.qty)}</td>
                       <td className="py-2 pr-3 tabular-nums">{formatNum(p.entry_price)}</td>
+                      <td className="py-2 pr-3 tabular-nums">
+                        {stop != null ? formatNum(stop) : "—"}
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums">
+                        {dist != null ? `${formatNum(dist)}%` : "—"}
+                      </td>
                       <td className="py-2 tabular-nums">{formatNum(p.unrealized_pnl)}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

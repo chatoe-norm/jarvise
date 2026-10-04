@@ -53,6 +53,8 @@ def test_migrations_are_numbered_and_idempotent(tmp_path: Path) -> None:
         True,
         True,
         True,
+        True,
+        True,
     ]
     conn = open_db(tmp_path / "m.db")
     assert schema_version(conn) == SCHEMA_VERSION

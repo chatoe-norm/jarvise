@@ -55,6 +55,7 @@ def test_approve_live_flag_off_no_trade_http(tmp_path: Path, monkeypatch: pytest
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
         },
         timeframe="4h",
@@ -70,6 +71,7 @@ def test_approve_live_flag_off_no_trade_http(tmp_path: Path, monkeypatch: pytest
 
 def test_approve_live_missing_keys_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_LIVE_TRADING", "true")
+    monkeypatch.setenv("JARVISE_LIVE_EQUITY_USD", "10000")
     monkeypatch.delenv("BINANCE_TRADE_API_KEY", raising=False)
     monkeypatch.delenv("BINANCE_TRADE_API_SECRET", raising=False)
     conn = open_db(tmp_path / "p.db")
@@ -80,6 +82,7 @@ def test_approve_live_missing_keys_fails_closed(tmp_path: Path, monkeypatch: pyt
             "analysis_id": "a2",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 5.0,
         },
         timeframe="4h",
@@ -106,6 +109,7 @@ def test_approve_live_mocked_submit(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             "analysis_id": "a3",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 5.0,
         },
         timeframe="4h",
@@ -172,6 +176,7 @@ def test_approve_live_blocks_withdraw_key(tmp_path: Path, monkeypatch: pytest.Mo
             "analysis_id": "a5",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 5.0,
         },
         timeframe="4h",
@@ -203,6 +208,7 @@ def test_approve_live_flat_skips_http(tmp_path: Path, monkeypatch: pytest.Monkey
             "analysis_id": "a4",
             "symbol": "BTCUSDT",
             "action": "flat",
+            "invalidation_price": 97.0,
             "size_pct_equity": 0.0,
         },
         timeframe="4h",

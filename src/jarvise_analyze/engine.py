@@ -8,6 +8,7 @@ Optional HTF confirm (T2.3) via ``analyze_mtf`` / ``JARVISE_ANALYZE_MTF``.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from typing import Any
 
@@ -193,7 +194,13 @@ def _force_flat(
 def _num(value: Any) -> float | None:
     if value is None:
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _rsi_conflicts(bullish: bool, bearish: bool, rsi: float | None) -> bool:

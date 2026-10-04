@@ -27,6 +27,7 @@ from jarvise_notify import (
 )
 from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
+from jarvise_paper.risk_monitor import run_risk_monitor as paper_risk_monitor
 from jarvise_risk import kill_switch_state
 from jarvise_trade import reconcile_live_orders
 
@@ -449,6 +450,41 @@ def run_live_reconcile() -> tuple[int, dict[str, Any]]:
         return (0 if payload.get("ok") else 1), payload
 
 
+def run_risk_monitor() -> tuple[int, dict[str, Any]]:
+    """MTM + stop exits + daily halt. Runs even when kill-switch is engaged (stops reduce risk)."""
+    key = "jarvise:risk_monitor:last"
+    now = int(time.time() * 1000)
+    with single_flight("risk_monitor") as acquired:
+        if not acquired:
+            return 3, _running("risk_monitor")
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        if not path.exists():
+            payload = {
+                "ok": False,
+                "skipped": True,
+                "reason": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
+            _publish_best_effort(key, payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            payload = paper_risk_monitor(conn, now_ms=now)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "paper_only": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "at_ms": now,
+            }
+        finally:
+            conn.close()
+        _publish_best_effort(key, payload)
+        return (0 if payload.get("ok") else 1), payload
+
+
 def run_doctrine_search(query: str, limit: int) -> dict[str, Any]:
     """GET-only doctrine lookup for web cards and the auto-decide brief."""
     hits = doctrine_snippets(query, limit=limit)
@@ -483,6 +519,7 @@ ROUTES = {
     ("POST", "/jobs/ingest-health"): "ingest_health",
     ("POST", "/jobs/paper-auto-decide"): "paper_auto_decide",
     ("POST", "/jobs/live-reconcile"): "live_reconcile",
+    ("POST", "/jobs/risk-monitor"): "risk_monitor",
 }
 
 
@@ -500,7 +537,11 @@ class JobHandler(BaseHTTPRequestHandler):
         token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
         if not token:
             return True
-        return self.headers.get("X-Jarvise-Token") == token
+        got = self.headers.get("X-Jarvise-Token") or ""
+        try:
+            return secrets.compare_digest(got, token)
+        except (TypeError, ValueError):
+            return False
 
     def _dispatch(self) -> None:
         if not self._authorized():
@@ -535,6 +576,7 @@ class JobHandler(BaseHTTPRequestHandler):
             "ingest_health": run_ingest_health,
             "paper_auto_decide": run_paper_auto_decide,
             "live_reconcile": run_live_reconcile,
+            "risk_monitor": run_risk_monitor,
         }
         runner = runners.get(action or "")
         if runner is None or action is None:
