@@ -5,6 +5,10 @@ export const statusSchema = z
     paper_only: z.boolean(),
     live_trading: z.boolean(),
     kill_switch: z.boolean(),
+    ingest: z.unknown(),
+    rag: z.unknown(),
+    paper: z.unknown(),
+    paper_expire: z.unknown(),
     risk_caps: z.record(z.unknown()),
     qdrant: z.record(z.unknown()),
   })

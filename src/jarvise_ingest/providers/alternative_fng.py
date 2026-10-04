@@ -21,6 +21,8 @@ def parse_fear_greed(payload: Any) -> int | None:
     if not isinstance(first, dict):
         return None
     raw = first.get("value")
+    if not isinstance(raw, (int, str)):
+        return None
     try:
         value = int(raw)
     except (TypeError, ValueError):

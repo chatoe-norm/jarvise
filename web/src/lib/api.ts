@@ -245,7 +245,7 @@ export type DashboardPayload = {
 async function request<T>(
   path: string,
   init?: RequestInit,
-  schema?: { parse: (data: unknown) => T },
+  schema?: { parse: (data: unknown) => unknown },
 ): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
@@ -262,7 +262,7 @@ async function request<T>(
   if (ct.includes("application/json")) {
     const data: unknown = await resp.json();
     if (schema) {
-      return schema.parse(data);
+      return schema.parse(data) as T;
     }
     return data as T;
   }
