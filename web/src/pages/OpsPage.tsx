@@ -3,7 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type IngestHealthStatus, type PaperAutoStatus, type StatusPayload } from "@/lib/api";
-import { ownerReasonCopy } from "@/lib/copy";
+import { resolveReasonLabel } from "@/lib/copy";
 import { relativeAge } from "@/lib/utils";
 
 function jobSummary(payload: unknown): { ok: boolean | null; label: string } {
@@ -96,7 +96,7 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
               {auto.reason === "auto_decide_disabled" ? "off" : "skipped"}
             </Badge>
             <span className="text-xs text-[var(--color-muted)]">
-              {auto.reason} · {relativeAge(auto.at_ms)}
+              {resolveReasonLabel(auto.reason)} · {relativeAge(auto.at_ms)}
             </span>
           </div>
         ) : (
@@ -125,7 +125,7 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
               <ul className="list-disc space-y-1 pl-5">
                 {auto.deferred.slice(0, 5).map((d) => (
                   <li key={d.id}>
-                    <span className="font-medium">{d.symbol}</span> — {ownerReasonCopy(d.reason)}
+                    <span className="font-medium">{d.symbol}</span> — {resolveReasonLabel(d.reason)}
                   </li>
                 ))}
               </ul>
@@ -242,14 +242,24 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           <CardTitle>Observability</CardTitle>
           <CardDescription>
             Prometheus scrapes <code>/metrics</code> on web and jobs. Start with{" "}
-            <code>docker compose --profile obs up -d</code> (Tailscale / 127.0.0.1 only).
+            <code>docker compose --profile obs up -d</code> (Tailscale host only).
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-3 text-sm">
-          <a className="underline" href="http://127.0.0.1:3000" target="_blank" rel="noreferrer">
+          <a
+            className="underline"
+            href={`http://${typeof window !== "undefined" ? window.location.hostname : "127.0.0.1"}:3000`}
+            target="_blank"
+            rel="noreferrer"
+          >
             Grafana :3000
           </a>
-          <a className="underline" href="http://127.0.0.1:9090" target="_blank" rel="noreferrer">
+          <a
+            className="underline"
+            href={`http://${typeof window !== "undefined" ? window.location.hostname : "127.0.0.1"}:9090`}
+            target="_blank"
+            rel="noreferrer"
+          >
             Prometheus :9090
           </a>
           <a className="underline" href="/metrics" target="_blank" rel="noreferrer">

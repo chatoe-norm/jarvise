@@ -15,6 +15,36 @@ export function ownerReasonCopy(reason: string | null | undefined): string {
   return reason.replaceAll("หลักคำสอน", "กฎการเทรด");
 }
 
+/** Owner-facing auto-decide / rule codes. Stored strings stay unchanged. */
+export function resolveReasonLabel(reason: string | null | undefined): string {
+  if (reason == null || reason === "") return "—";
+  if (reason === "auto:rule:same_side_hold") return "ถือไม้เดิม (ฝั่งเดียวกัน)";
+  if (reason === "auto:rule:opposite_side_open") return "เลื่อน — มีไม้ฝั่งตรงข้าม";
+  if (reason === "auto:rule:no_doctrine_low_conf") {
+    return "เลื่อน — กฎการเทรดไม่พร้อม / ความเชื่อมั่นต่ำ";
+  }
+  if (reason === "auto:rule:flat_exit") return "ปิดไม้ตามสัญญาณ FLAT";
+  if (reason === "auto:claude:approve") return "อนุมัติ — Claude";
+  if (reason === "auto:claude:unparseable") return "เลื่อน — Claude อ่านผลไม่ได้";
+  if (reason.startsWith("auto:claude:reject:")) {
+    const rest = ownerReasonCopy(reason.slice("auto:claude:reject:".length));
+    return rest === "—" ? "ปฏิเสธ — Claude" : `ปฏิเสธ — Claude: ${rest}`;
+  }
+  if (reason.startsWith("auto:claude:error:")) {
+    return `เลื่อน — Claude ผิดพลาด: ${reason.slice("auto:claude:error:".length)}`;
+  }
+  if (reason === "deferred_cap") return "เลื่อน — ถึงเพดานรอบนี้";
+  if (reason === "missing_api_key") return "เลื่อน — ไม่มี API key";
+  if (reason === "auto_decide_disabled") return "ปิด auto-decide";
+  if (reason === "timeout_flat") return "หมดเวลา → FLAT";
+  return ownerReasonCopy(reason);
+}
+
+export function decisionSourceLabel(source: string | null | undefined): string {
+  if (source == null || source === "" || source === "unknown") return "ไม่ระบุแหล่ง";
+  return source;
+}
+
 export function parseAnalysisOutcome(raw: unknown): AnalysisOutcome | null {
   if (raw == null || typeof raw !== "object") return null;
   const rec = raw as Record<string, unknown>;
