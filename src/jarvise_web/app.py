@@ -16,10 +16,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
+from jarvise_analyze.explain import confidence_breakdown
 from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_exchange.value import value_spot_balances
-from jarvise_analyze.explain import confidence_breakdown
 from jarvise_ingest.db import (
     count_analysis_output,
     ensure_paper_account,
