@@ -7,6 +7,7 @@
 - Treat the Gemini notebook as trading doctrine, not a live price or order-book feed.
 - Use fetch/Firecrawl subagents for historical and current market data; combine that with notebook rules before any trade call.
 - Prefer Grok for implementation (chat picker + pstack workers); use Claude only for review, synthesizer, or hardest tasks; do not switch to GPT/Opus unless asked.
+- Owner ship shortcuts: **`fdpy`** = commit → open/update PR → merge to `main` → wait VPS deploy (step by step; does not by itself enable live or change VPS `.env`); **`wdpy`** = wait for in-flight CI/Deploy queue to finish before another `fdpy`. See `.cursor/rules/fdpy-wdpy.mdc`.
 - Prefer paper analytics fixes that make backtests reproducible (closed candles only, warm-up withholding, gap reporting, `--since` backfill) over knowledge-vault scaffolding.
 - Prefer free-first GET-only market-safety providers (Binance book, Binance Futures public derivatives when no CoinGlass key, CoinGecko macro; CoinGlass optional when keyed) over scraping TradingView into SQLite truth.
 - Prefer Command Dashboard UX: approval-first Home with KPIs/charts/infographics; show confidence breakdown ladders and defer reasons (not opaque scores alone); label Exchange dust/earn/unpriced balances clearly; show Fear & Greed as Home Market context only (not a trade signal) and paper risk-monitor on Ops; do not ship raw JSON/`pre` dumps as the primary owner surface; modern minimal professional control-room look.
