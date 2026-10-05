@@ -1,31 +1,58 @@
-"""Binance spot MARKET order POST + read-only order query — allowlisted paths only.
+"""Binance spot order POST / cancel + read-only order, balance and filter reads — allowlisted paths only.
 
-No cancel, no withdraw, no transfer. Every order carries a deterministic
-``newClientOrderId`` derived from the approval id so a retry can be detected on the
-venue instead of double-ordering.
+Cancel is by our own ``origClientOrderId`` only (never cancel-all). No withdraw, no
+transfer. Every order carries a deterministic ``newClientOrderId`` derived from the
+approval id so a retry can be detected on the venue instead of double-ordering.
 """
 
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 
 from jarvise_exchange.binance_spot import (
+    ACCOUNT_PATH,
     BINANCE_BASE,
     BinanceAuth,
+    balances_from_account_payload,
     signature_for_query,
 )
+from jarvise_ingest.http import get_json
 
 ORDER_PATH = "/api/v3/order"
-ALLOWED_TRADE_CALLS = frozenset({("POST", ORDER_PATH), ("GET", ORDER_PATH)})
+EXCHANGE_INFO_PATH = "/api/v3/exchangeInfo"
+ALLOWED_TRADE_CALLS = frozenset(
+    {
+        ("POST", ORDER_PATH),
+        ("GET", ORDER_PATH),
+        ("DELETE", ORDER_PATH),
+        ("GET", ACCOUNT_PATH),
+        ("GET", EXCHANGE_INFO_PATH),
+    }
+)
 CLIENT_ORDER_PREFIX = "jrv-"
 # Binance newClientOrderId: max 36 chars, ^[\.A-Z\:/a-z0-9_-]{1,36}$
 _CLIENT_ORDER_MAX = 36
 ORDER_NOT_FOUND_CODE = -2013
+UNKNOWN_ORDER_CODE = -2011
 TERMINAL_VENUE_STATUSES = frozenset({"FILLED", "CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH"})
+
+
+@dataclass(frozen=True)
+class SymbolFilters:
+    """Venue sizing rules for one spot symbol (zero means "no constraint")."""
+
+    symbol: str
+    base_asset: str
+    step_size: Decimal
+    min_qty: Decimal
+    min_notional: Decimal
+    tick_size: Decimal
 
 
 def assert_trade_allowlisted(method: str, path: str) -> None:
@@ -52,9 +79,9 @@ def place_spot_stop_loss_limit(
     *,
     symbol: str,
     side: str,
-    quantity: float,
-    stop_price: float,
-    limit_price: float,
+    quantity: float | Decimal,
+    stop_price: float | Decimal,
+    limit_price: float | Decimal,
     client: httpx.Client | None = None,
     base_url: str = BINANCE_BASE,
     timestamp_ms: int | None = None,
@@ -96,14 +123,25 @@ def place_spot_stop_loss_limit(
             http.close()
 
 
-def _signed_url(auth: BinanceAuth, base_url: str, params: dict[str, Any]) -> str:
+def _signed_url(auth: BinanceAuth, base_url: str, params: dict[str, Any], path: str = ORDER_PATH) -> str:
     query = urlencode(params)
     signature = signature_for_query(auth, query)
-    return f"{base_url.rstrip('/')}{ORDER_PATH}?{query}&signature={signature}"
+    return f"{base_url.rstrip('/')}{path}?{query}&signature={signature}"
 
 
-def _format_qty(value: float) -> str:
-    return f"{float(value):.8f}".rstrip("0").rstrip(".")
+def _format_qty(value: float | Decimal) -> str:
+    text = format(value, "f") if isinstance(value, Decimal) else f"{float(value):.8f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def floor_to_step(value: float | Decimal, step: Decimal) -> Decimal:
+    """Round down to a multiple of the venue step (LOT_SIZE stepSize / PRICE_FILTER tickSize)."""
+    amount = Decimal(str(value))
+    if amount <= 0:
+        return Decimal("0")
+    if step <= 0:
+        return amount
+    return (amount / step).to_integral_value(rounding=ROUND_DOWN) * step
 
 
 def place_spot_market_order(
@@ -112,7 +150,7 @@ def place_spot_market_order(
     symbol: str,
     side: str,
     quote_order_qty: float | None = None,
-    quantity: float | None = None,
+    quantity: float | Decimal | None = None,
     client: httpx.Client | None = None,
     base_url: str = BINANCE_BASE,
     timestamp_ms: int | None = None,
@@ -206,6 +244,110 @@ def query_order(
     finally:
         if own:
             http.close()
+
+
+def cancel_order(
+    auth: BinanceAuth,
+    *,
+    symbol: str,
+    orig_client_order_id: str,
+    client: httpx.Client | None = None,
+    base_url: str = BINANCE_BASE,
+    timestamp_ms: int | None = None,
+) -> dict[str, Any] | None:
+    """DELETE /api/v3/order by our origClientOrderId. None when the venue reports no open order.
+
+    ``-2011`` also covers an order that already filled or was canceled, so callers
+    re-query before trusting the inventory.
+    """
+    assert_trade_allowlisted("DELETE", ORDER_PATH)
+    params: dict[str, Any] = {
+        "symbol": symbol.upper(),
+        "origClientOrderId": orig_client_order_id,
+        "timestamp": int(timestamp_ms if timestamp_ms is not None else time.time() * 1000),
+    }
+    url = _signed_url(auth, base_url, params)
+    headers = {"X-MBX-APIKEY": auth.api_key}
+    own = client is None
+    http = client or httpx.Client(timeout=30.0)
+    try:
+        resp = http.delete(url, headers=headers)
+        if resp.status_code == 400:
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            if isinstance(body, dict) and int(body.get("code") or 0) == UNKNOWN_ORDER_CODE:
+                return None
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise ValueError("unexpected cancel response type")
+        return payload
+    finally:
+        if own:
+            http.close()
+
+
+def fetch_symbol_filters(
+    symbol: str,
+    *,
+    client: httpx.Client | None = None,
+    base_url: str = BINANCE_BASE,
+) -> SymbolFilters:
+    """Public GET /api/v3/exchangeInfo for one symbol. Raises when LOT_SIZE is absent."""
+    assert_trade_allowlisted("GET", EXCHANGE_INFO_PATH)
+    sym = symbol.upper()
+    payload = get_json(
+        f"{base_url.rstrip('/')}{EXCHANGE_INFO_PATH}",
+        params={"symbol": sym},
+        client=client,
+        provider="binance_exchange_info",
+    )
+    rows = payload.get("symbols") if isinstance(payload, dict) else None
+    info = next((row for row in rows or [] if str(row.get("symbol") or "").upper() == sym), None)
+    if info is None:
+        raise ValueError(f"exchangeInfo has no symbol {sym}")
+    by_type = {str(f.get("filterType")): f for f in info.get("filters") or []}
+    lot = by_type.get("LOT_SIZE")
+    if lot is None:
+        raise ValueError(f"exchangeInfo {sym} has no LOT_SIZE filter")
+    notional = by_type.get("NOTIONAL") or by_type.get("MIN_NOTIONAL") or {}
+    price = by_type.get("PRICE_FILTER") or {}
+    return SymbolFilters(
+        symbol=sym,
+        base_asset=str(info["baseAsset"]).upper(),
+        step_size=Decimal(str(lot.get("stepSize") or "0")).normalize(),
+        min_qty=Decimal(str(lot.get("minQty") or "0")).normalize(),
+        min_notional=Decimal(str(notional.get("minNotional") or "0")).normalize(),
+        tick_size=Decimal(str(price.get("tickSize") or "0")).normalize(),
+    )
+
+
+def fetch_free_balance(
+    auth: BinanceAuth,
+    asset: str,
+    *,
+    client: httpx.Client | None = None,
+    base_url: str = BINANCE_BASE,
+) -> Decimal:
+    """Signed GET /api/v3/account with the trade key; free (unlocked) amount of one asset."""
+    assert_trade_allowlisted("GET", ACCOUNT_PATH)
+
+    def signed_url() -> str:
+        return _signed_url(auth, base_url, {"timestamp": int(time.time() * 1000)}, path=ACCOUNT_PATH)
+
+    payload = get_json(
+        signed_url,
+        headers={"X-MBX-APIKEY": auth.api_key},
+        client=client,
+        provider="binance_trade_account",
+    )
+    wanted = asset.upper()
+    for balance in balances_from_account_payload(payload):
+        if balance.asset.upper() == wanted:
+            return balance.free
+    return Decimal("0")
 
 
 def summarize_fill(payload: dict[str, Any]) -> dict[str, Any]:

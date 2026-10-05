@@ -62,8 +62,9 @@ def test_client_order_id_is_deterministic_and_bounded() -> None:
         client_order_id_for_approval("!!!")
 
 
-def test_allowlist_has_get_and_post_order_only() -> None:
-    assert ALLOWED_TRADE_CALLS == frozenset({("POST", ORDER_PATH), ("GET", ORDER_PATH)})
+def test_allowlist_order_calls_are_post_get_delete_only() -> None:
+    order_calls = {call for call in ALLOWED_TRADE_CALLS if call[1] == ORDER_PATH}
+    assert order_calls == {("POST", ORDER_PATH), ("GET", ORDER_PATH), ("DELETE", ORDER_PATH)}
 
 
 def test_place_order_sends_client_order_id_and_full_resp() -> None:

@@ -402,6 +402,83 @@ def test_live_reconcile_route_and_noop(monkeypatch, tmp_path) -> None:
     assert handler._status == 200
 
 
+def _risk_monitor_env(monkeypatch, tmp_path, *, paper=None) -> list:
+    db = tmp_path / "risk.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    published: list = []
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda k, p: published.append((k, p)))
+    monkeypatch.setattr(
+        "jarvise.jobs.paper_risk_monitor",
+        paper or (lambda conn, now_ms: {"ok": True, "paper_only": True, "halted": False}),
+    )
+    return published
+
+
+def test_risk_monitor_live_off_leaves_paper_payload(monkeypatch, tmp_path) -> None:
+    from jarvise.jobs import run_risk_monitor
+
+    monkeypatch.delenv("JARVISE_LIVE_TRADING", raising=False)
+    published = _risk_monitor_env(monkeypatch, tmp_path)
+
+    def no_live(*_a, **_k):
+        raise AssertionError("live block must not run with the flag off")
+
+    monkeypatch.setattr("jarvise.jobs.live_risk_tick", no_live)
+    code, body = run_risk_monitor()
+    assert code == 0
+    assert body == {"ok": True, "paper_only": True, "halted": False}
+    assert published[0][0] == "jarvise:risk_monitor:last"
+
+
+def test_risk_monitor_live_day_loss_engages_and_flattens(monkeypatch, tmp_path) -> None:
+    from jarvise.jobs import run_risk_monitor
+
+    monkeypatch.setenv("JARVISE_LIVE_TRADING", "true")
+    _risk_monitor_env(monkeypatch, tmp_path)
+    breach = "live_max_daily_loss: day_pnl $-60.00 <= -$50.00"
+    engaged: list = []
+    flattened: list = []
+    monkeypatch.setattr("jarvise_trade.flatten.reconcile_live_orders", lambda conn, **_: {"ok": True})
+    monkeypatch.setattr("jarvise_trade.flatten.live_day_loss_breach", lambda conn, **_: breach)
+    monkeypatch.setattr(
+        "jarvise_trade.flatten.engage_kill_switch", lambda *, reason: engaged.append(reason) or True
+    )
+
+    def fake_flatten(conn, **kwargs):
+        flattened.append(kwargs)
+        return {"ok": True, "ran": True, "sold": [{"symbol": "BTCUSDT"}]}
+
+    monkeypatch.setattr("jarvise_trade.flatten.flatten_live_positions", fake_flatten)
+    code, body = run_risk_monitor()
+    assert code == 0
+    assert engaged == [breach]
+    assert flattened[0]["reason"] == breach
+    assert body["paper_only"] is False
+    assert body["live"]["day_loss_breach"] == breach
+    assert body["live"]["flatten"]["sold"] == [{"symbol": "BTCUSDT"}]
+
+
+def test_risk_monitor_live_block_runs_when_paper_pass_crashes(monkeypatch, tmp_path) -> None:
+    from jarvise.jobs import run_risk_monitor
+
+    monkeypatch.setenv("JARVISE_LIVE_TRADING", "true")
+
+    def paper_crash(conn, now_ms):
+        raise RuntimeError("paper boom")
+
+    _risk_monitor_env(monkeypatch, tmp_path, paper=paper_crash)
+    calls: list = []
+    monkeypatch.setattr(
+        "jarvise.jobs.live_risk_tick", lambda conn, now_ms: calls.append(now_ms) or {"ok": True}
+    )
+    code, body = run_risk_monitor()
+    assert code == 1
+    assert len(calls) == 1
+    assert "paper boom" in body["error"]
+    assert body["live"] == {"ok": True}
+
+
 def test_paper_auto_decide_crash_still_publishes(monkeypatch, tmp_path) -> None:
     db = tmp_path / "crash.db"
     open_db(db).close()

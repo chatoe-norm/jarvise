@@ -2208,6 +2208,33 @@ def live_spot_inventory(
     return qty, avg_entry
 
 
+def list_live_symbols(conn: sqlite3.Connection) -> list[str]:
+    """Symbols with at least one live fill (candidates for non-zero inventory)."""
+    cur = conn.execute(
+        """
+        SELECT DISTINCT symbol FROM live_orders
+        WHERE executed_qty IS NOT NULL AND executed_qty > 0
+        ORDER BY symbol
+        """
+    )
+    return [str(row[0]) for row in cur.fetchall()]
+
+
+def get_latest_live_buy(conn: sqlite3.Connection, symbol: str) -> dict | None:
+    """Most recent filled (or partially filled) live BUY for a symbol."""
+    cur = conn.execute(
+        f"""
+        SELECT {_LIVE_ORDER_COLUMNS} FROM live_orders
+        WHERE symbol = ? AND side = 'BUY' AND executed_qty IS NOT NULL AND executed_qty > 0
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT 1
+        """,
+        (symbol.upper(),),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
 def update_live_order_fill(
     conn: sqlite3.Connection,
     order_id: str,
