@@ -186,7 +186,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - **Analyzer inputs**: close/ATR/RSI/EMA20/EMA200 + optional HTF confirm. Derivatives are ingested but **not consumed as triggers**; no volume confirmation. Schema columns `vwap`, `adx_14` exist but are never computed.
 - **Historical replay**: `jarvise analyze --replay --since …` walks stored closed candles; `--apply-paper` fills only on an isolated `--db` (refuses default live ledger).
 - **24/7 paper operation**: VPS n8n **activated** 2026-09-29 (`Jarvise paper run` / `Jarvise paper expire`). Jobs ingest refreshes `1h` + paper TF + HTF so enqueue/MTF have candles.
-- **Timeout semantics**: paper timeout → `timed_out` + FLAT open positions (`resolve_reason=timeout_flat`). Live venue flatten is out of P4-C.
+- **Timeout semantics**: paper timeout → `timed_out` + FLAT open positions (`resolve_reason=timeout_flat`). Live **kill-switch** flatten shipped 2026-10-05 (gated, see §5.1). Live flatten on approval timeout is still out of scope.
 - **Exchange panel**: raw balances + **~USD** (Binance public USDT ticker; stables face value; unpriced shown as —).
 - **Eterna venue**: registry + fixture path only; no production REST balances.
 - **OpenClaw paper-only**: `OPENCLAW_PAPER_ONLY` is a convention enforced by config/docs, not by Python code.
@@ -195,7 +195,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 
 ### 3.4 Missing entirely
 
-- **Live timeout / venue flatten** (paper timeout→FLAT only).
+- **Live timeout flatten** (paper timeout→FLAT only). Kill-switch flatten exists (gated).
 - **P5 autonomy** flag and scheduler path (correctly absent).
 - **On-chain / sentiment writers** for remaining `macro_onchain_sentiment` fields (ETF, netflow/reserve); spoof-wall heuristics. Fear & Greed is shipped (context only).
 - **Broker equity live** (paper Stooq only).
@@ -312,9 +312,18 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 | Intelligence | OHLCV/book/macro/derivs, analyze, doctrine RAG, MTF HTF | **Covered for crypto paper** |
 | Paper auto | enqueue → auto-decide → fills → feedback / soft EV gate | **Code complete**; VPS `auto_*` EV sample still thin |
 | Manual live (P4-C) | Approve → size-capped spot | **Code complete, flag off**; not smoked on VPS |
+| Live kill-switch flatten | engaged kill-switch → cancel own stops → MARKET SELL live spot | **Code complete, flag off** (2026-10-05); not smoked on VPS |
 | Autonomy (P5) | scheduler places live without per-trade Approve | **Absent by design** |
 
-**Still not “full autotrade”:** prove `by_decision_source_30d` for `auto_*` (N≈10+); owner live checklist smoke; P5 flag/scheduler; live venue flatten on timeout; real second-venue REST (Eterna = fixture); ADX/volume triggers; remaining macro writers; CoinGecko Pro/public URL mismatch on HTF ingest when it fails.
+**Live kill-switch flatten (2026-10-05, dormant while `JARVISE_LIVE_TRADING=false`):**
+- The risk-monitor job (15 min) reconciles live orders and engages the kill-switch on the live daily-loss cap.
+- While the kill-switch is known-engaged, it cancels Jarvise's own `STOP_LOSS_LIMIT` orders by client id and MARKET-sells live spot inventory.
+- The sell is idempotent (`jrv-f<buy row>`). A failed sell re-places the stop, and Telegram flags **UNPROTECTED** if that fails too.
+- Owner CLI: `jarvise trade flatten [--dry-run]`.
+- The same slice fixes live stop/sell sizing: fee-net free balance, floored to `LOT_SIZE` and the price tick.
+- Spec: [`docs/superpowers/specs/2026-10-05-live-killswitch-flatten-design.md`](docs/superpowers/specs/2026-10-05-live-killswitch-flatten-design.md).
+
+**Still not “full autotrade”:** prove `by_decision_source_30d` for `auto_*` (N≈10+); owner live checklist smoke (incl. step 8 flatten); P5 flag/scheduler; live flatten on approval timeout; user-data stream fills; real second-venue REST (Eterna = fixture); ADX/volume triggers; remaining macro writers; CoinGecko Pro/public URL mismatch on HTF ingest when it fails.
 
 **Do not skip the ladder:** paper EV → optional gated live → stabilize P4-C → **then** a separate P5 plan.
 

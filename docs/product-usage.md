@@ -120,7 +120,7 @@ Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`,
 **Automatic** (n8n → jobs service in [`src/jarvise/jobs.py`](../src/jarvise/jobs.py)):
 
 - Every ~15 minutes: `POST /jobs/ingest` → refresh market data (includes Alternative.me Fear & Greed as context)
-- Every ~15 minutes: `POST /jobs/risk-monitor` → paper MTM + stop FLAT + daily halt (runs even if kill-switch is on; **no live orders**)
+- Every ~15 minutes: `POST /jobs/risk-monitor` → paper MTM + stop FLAT + daily halt (runs even if kill-switch is on). With live **off** it places no live orders. With live **on** it also reconciles live orders, engages the kill-switch on the live daily-loss cap, and while the kill-switch is engaged cancels Jarvise's own stops and MARKET-sells live spot positions (owner shortcut: `jarvise trade flatten [--dry-run]`; see [`docs/ops/live-enable-checklist.md`](ops/live-enable-checklist.md)).
 - Every ~6 hours: `POST /jobs/rag-refresh` → refresh doctrine RAG (indexes owner protocol extracts + OpenClaw only; generic Notebook scrapes stay on disk for NotebookLM but are not embedded)
 - Every ~4 hours: `POST /jobs/paper-run` → enqueue paper candidates (`paper_core` @ `4h` by default; **no** `--auto-fill`), then `POST /jobs/paper-auto-decide` → no-op unless `JARVISE_PAPER_AUTO_DECIDE=true`
 - Every ~1 hour: `POST /jobs/paper-expire` → mark timed-out approvals (timeout → **hold** if open paper position is already the same side; otherwise timeout → FLAT)
