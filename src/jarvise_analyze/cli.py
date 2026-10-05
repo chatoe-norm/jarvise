@@ -24,7 +24,7 @@ from jarvise_ingest.db import (
     upsert_analysis_output,
 )
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
-from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_ingest.universe import PAPER_CORE, PAPER_LIQUID, seed_named_universe
 from jarvise_risk import apply_safety_to_analysis, evaluate_from_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--universe",
-        help=f"Analyze eligible symbols from a universe (seeded: {PAPER_CORE})",
+        help=f"Analyze eligible symbols from a universe (seeded: {PAPER_CORE}, {PAPER_LIQUID})",
     )
     p.add_argument(
         "--timeframe",
@@ -132,8 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_symbols(conn, args) -> list[str] | int:
     symbols = _parse_symbols(args.symbols)
     if args.universe:
-        if args.universe == PAPER_CORE:
-            seed_paper_core(conn)
+        seed_named_universe(conn, args.universe)
         as_of_ms = int(time.time() * 1000)
         from_universe = universe_as_of(conn, args.universe, as_of_ms)
         seen: set[str] = set()
