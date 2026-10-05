@@ -29,7 +29,7 @@ from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
 from jarvise_paper.risk_monitor import run_risk_monitor as paper_risk_monitor
 from jarvise_risk import kill_switch_state
-from jarvise_trade import reconcile_live_orders
+from jarvise_trade import live_risk_tick, live_trading_enabled, reconcile_live_orders
 
 # Subprocess wall-clock limits (seconds). A hung CLI must never wedge n8n or the health probe.
 JOB_TIMEOUTS_S: dict[str, float] = {
@@ -451,7 +451,11 @@ def run_live_reconcile() -> tuple[int, dict[str, Any]]:
 
 
 def run_risk_monitor() -> tuple[int, dict[str, Any]]:
-    """MTM + stop exits + daily halt. Runs even when kill-switch is engaged (stops reduce risk)."""
+    """MTM + stop exits + daily halt. Runs even when kill-switch is engaged (stops reduce risk).
+
+    With live trading on, also reconciles live orders, halts on the live day-loss cap, and
+    flattens live spot positions while the kill-switch is engaged — even if the paper pass failed.
+    """
     key = "jarvise:risk_monitor:last"
     now = int(time.time() * 1000)
     with single_flight("risk_monitor") as acquired:
@@ -471,14 +475,27 @@ def run_risk_monitor() -> tuple[int, dict[str, Any]]:
             return 1, payload
         conn = open_db(path)
         try:
-            payload = paper_risk_monitor(conn, now_ms=now)
-        except Exception as exc:  # noqa: BLE001
-            payload = {
-                "ok": False,
-                "paper_only": True,
-                "error": f"{type(exc).__name__}: {exc}",
-                "at_ms": now,
-            }
+            try:
+                payload = paper_risk_monitor(conn, now_ms=now)
+            except Exception as exc:  # noqa: BLE001
+                payload = {
+                    "ok": False,
+                    "paper_only": True,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "at_ms": now,
+                }
+            if live_trading_enabled():
+                try:
+                    live = live_risk_tick(conn, now_ms=now)
+                except Exception as exc:  # noqa: BLE001
+                    live = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                    notify_job_failure("risk_monitor (live flatten)", str(live["error"]))
+                payload = {
+                    **payload,
+                    "ok": bool(payload.get("ok")) and bool(live.get("ok")),
+                    "paper_only": False,
+                    "live": live,
+                }
         finally:
             conn.close()
         _publish_best_effort(key, payload)
