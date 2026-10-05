@@ -31,8 +31,8 @@ from jarvise_ingest.timeframes import ALLOWED_INTERVALS
 from jarvise_ingest.universe import (
     PAPER_CORE,
     PAPER_EQUITY,
-    seed_paper_core,
-    seed_paper_equity,
+    PAPER_LIQUID,
+    seed_named_universe,
 )
 from jarvise_paper.approval import (
     approve_approval,
@@ -89,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--symbol", action="append", dest="symbols")
     run_p.add_argument(
         "--universe",
-        help=f"Universe id (seeded: {PAPER_CORE}, {PAPER_EQUITY})",
+        help=f"Universe id (seeded: {PAPER_CORE}, {PAPER_LIQUID}, {PAPER_EQUITY})",
     )
     run_p.add_argument(
         "--timeframe",
@@ -179,10 +179,7 @@ def _resolve_symbols(conn, args) -> list[str]:
     symbols = _parse_symbols(getattr(args, "symbols", None))
     universe = getattr(args, "universe", None)
     if universe:
-        if universe == PAPER_CORE:
-            seed_paper_core(conn)
-        elif universe == PAPER_EQUITY:
-            seed_paper_equity(conn)
+        seed_named_universe(conn, universe)
         as_of_ms = int(time.time() * 1000)
         from_universe = universe_as_of(conn, universe, as_of_ms)
         seen: set[str] = set()
