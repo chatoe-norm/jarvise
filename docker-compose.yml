@@ -216,7 +216,7 @@ services:
       start_period: 40s
 
   openclaw:
-    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.5}
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.8}
     restart: unless-stopped
     networks: [jarvise_net]
     security_opt: ["no-new-privileges:true"]
