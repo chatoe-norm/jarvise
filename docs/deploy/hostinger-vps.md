@@ -6,18 +6,17 @@ Paper-only stack. No public ports for Redis/Qdrant. Control UIs bind to the Tail
 
 | Item | Value |
 |------|--------|
-| Provider | Hostinger KVM 2 |
-| KVM ID | 1269762 |
-| Hostname | `srv1269762.hstgr.cloud` |
-| Location | Malaysia (Kuala Lumpur) |
+| Provider | Hostinger KVM |
+| KVM ID | 1811101 |
+| Hostname | `srv1811101` |
 | OS | Ubuntu 24.04 LTS |
-| CPU / RAM / disk | 2 cores / 8 GB / 100 GB |
-| Bandwidth | 8 TB |
-| SSH | `root@72.62.244.54` |
-| Backup | Weekly |
-| Plan expires | 2027-01-14 (auto-renew on) |
+| CPU / RAM / disk | 4 cores / 16 GB / ~193 GB |
+| SSH | `Jarvise-VPS` → `root@76.13.218.48` (key `~/.ssh/id_ed25519_jarvise`) |
+| Tailscale | `100.89.171.36` (`jarvise-1811101`) |
+| Co-tenant | LearningYard (Traefik / public web) — do not prune its volumes |
+| Former host | KVM `1269762` / `72.62.244.54` / Tailscale `100.93.110.48` (T4Trip only after 2026-10-07 drain) |
 
-8 GB RAM is enough for OpenClaw plus local embeddings. Control ports stay on Tailscale. Do not publish them on `72.62.244.54`.
+16 GB RAM is enough for OpenClaw plus local embeddings alongside LearningYard. Control ports stay on Tailscale. Do not publish them on `76.13.218.48`.
 
 ## Requirements
 
@@ -31,7 +30,7 @@ Paper-only stack. No public ports for Redis/Qdrant. Control UIs bind to the Tail
 
 ## 1. Provision VPS
 
-This host is already provisioned (KVM 1269762). SSH in as root, then install Docker Engine + Compose v2:
+This host is already provisioned (KVM 1811101). SSH in as root, then install Docker Engine + Compose v2:
 
 ```bash
 curl -fsSL https://get.docker.com | sh
