@@ -220,8 +220,12 @@ services:
     restart: unless-stopped
     networks: [jarvise_net]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 1g
-    cpus: 1.0
+    # Control UI OOMs on the default V8 heap at 1g (gateway RSS passes ~800MiB while
+    # sessions load, then the page stays on "gateway not reachable"). 3g / 2.0 / 2048
+    # leaves headroom for chief+3, longer sessions, and future Control UI features on
+    # the 16 GB co-tenant host (LearningYard).
+    mem_limit: 3g
+    cpus: 2.0
     pids_limit: 256
     # The gateway holds an owner lease in its state dir; a SIGKILL after the default 10s leaves it
     # stale and the next start loops "lease still active" for minutes. Give it time to drain.
@@ -230,12 +234,14 @@ services:
       - "127.0.0.1:${OPENCLAW_PORT:-18789}:18789"
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENCLAW_PAPER_ONLY=true
       - JARVISE_PAPER_ONLY=true
       - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379/0
       - OPENCLAW_GATEWAY_BIND=lan
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
+      - NODE_OPTIONS=--max-old-space-size=2048
     volumes:
       - ./data/openclaw:/home/node/.openclaw
       - ./config/openclaw:/config:ro
