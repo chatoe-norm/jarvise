@@ -1,11 +1,11 @@
 # PROJECT_CONTEXT.md — Jarvise
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
-**Generated:** 2026-09-25; **status refreshed:** 2026-10-06 (~18:30 ICT).
-**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** on `main`. Live kill-switch flatten ([PR #111](https://github.com/chatoe-norm/jarvise/pull/111)) **dormant** while `JARVISE_LIVE_TRADING=false`. Opt-in `paper_liquid` ([PR #112](https://github.com/chatoe-norm/jarvise/pull/112)); VPS ingest BTC/ETH/SOL/BNB; VPS `JARVISE_MAX_OPEN_POSITIONS=4` (repo default 2). OpenClaw **repo** pin `2026.9.8` ([PR #114](https://github.com/chatoe-norm/jarvise/pull/114)); VPS Deploy run 100 **failed** — last green Deploy is `#113`; treat host OpenClaw image as still `2026.9.5` until env + successful pull. **Coverage:** intelligence + paper autotrade + Approve→live *door* — **not** P5. **MVP software:** P0–P4 code complete. **Doctrine MVP:** still waiting on ~10+ closed `auto_*`. **Next:** sample paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
+**Generated:** 2026-09-25; **status refreshed:** 2026-10-07 (~14:00 ICT).
+**Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** on `main`. Runtime cut over to Hostinger KVM **`1811101`** (Tailscale `100.89.171.36`). Live kill-switch flatten ([PR #111](https://github.com/chatoe-norm/jarvise/pull/111)) **dormant** while `JARVISE_LIVE_TRADING=false`. Opt-in `paper_liquid` ([PR #112](https://github.com/chatoe-norm/jarvise/pull/112)); VPS ingest BTC/ETH/SOL/BNB. OpenClaw **repo + host** pin `2026.9.8` ([PR #114](https://github.com/chatoe-norm/jarvise/pull/114); host env bumped 2026-10-07). Docs cutover SoT ([PR #115](https://github.com/chatoe-norm/jarvise/pull/115)) Deploy green on `srv1811101`. **Coverage:** intelligence + paper autotrade + Approve→live *door* — **not** P5. **Doctrine MVP:** still waiting on ~10+ closed `auto_*`. **Next:** sample paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
-### Status at a glance (2026-10-06)
+### Status at a glance (2026-10-07)
 
 | Area | State |
 |------|--------|
@@ -18,13 +18,14 @@
 | Doctrine | Pullback-entry note indexed in Qdrant; `doctrine_query` includes `pullback EMA20` on VPS jobs/web (#96/#97). |
 | Equity paper | Universe `paper_equity` (SPY/QQQ) via Stooq 1d; paper-only; no broker live. |
 | VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**, **risk-monitor 15m**, pending digest / auto-decide as configured. Live-reconcile **not** imported (flag off). |
-| Next | Prove auto-decide EV via closed `auto_*`; optional checklist live enable; stabilize before P5. OpenClaw host bump is a separate ops ask (not this docs snapshot). |
-| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false`. Closed `auto_*` **n=0** as of 2026-10-06 (`auto_ev_gate.n=0`; two closed `unknown` fills do not count). Four open paper longs (BTC/ETH/SOL/BNB). Cap on VPS **4** (repo default 2). Restore MTF/`MIN_EV` after N≈10. Live stays false. |
+| Next | Prove auto-decide EV via closed `auto_*`; optional checklist live enable; stabilize before P5. Host reboot still pending owner OK (`REBOOT_REQUIRED` after 2026-10-07 apt). |
+| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false`. Closed `auto_*` **n=0** as of 2026-10-07. Cap on VPS **4** (repo default 2). Restore MTF/`MIN_EV` after N≈10. Live stays false. |
 | Risk | Per-order + portfolio book caps (open/gross/symbol/bucket) + market safety; timeout → FLAT (paper). |
-| Obs | `GET /metrics` (web + jobs); compose profile `obs` **running** on VPS (Prometheus `:9090` + Grafana `:3000`, Tailscale-bound, 256m). |
+| Obs | `GET /metrics` (web + jobs); compose profile `obs` optional on VPS (Prometheus `:9090` + Grafana `:3000`, Tailscale-bound, 256m). |
 | P4-C | Implemented: Approve → caps → `jarvise_trade` MARKET POST → `live_orders`; no paper mirror when live. |
-| OpenClaw | Repo pin `ghcr.io/openclaw/openclaw:2026.9.8` (#114). VPS image: treat as **`2026.9.5`** until `OPENCLAW_IMAGE` + pull after a green Deploy. |
-| VPS | healthz `{"ok":true,"paper_only":true}` (checked 2026-10-06). Last **green** Deploy: `#113` (run 99). Deploy after `#114` (run 100) **failed**. Prefer web+jobs-only rebuild if full bake hangs. Live flag stays false. |
+| OpenClaw | Repo + VPS `OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.8` (healthy; Control UI `:18789`). Compose defaults **3g / 2.0 CPU / `NODE_OPTIONS=2048`**, `stop_grace_period: 90s`. Small team `chief`+researcher/writer/reviewer (paper-only). |
+| Host | KVM `1811101` / Tailscale `100.89.171.36` / runner `srv1811101`. Ubuntu 24.04 apt upgraded 2026-10-07 (Docker **29.8.2** / Compose **v5.6.0**). Co-tenant LearningYard. Former `1269762` = T4Trip only (Jarvise fully wiped). |
+| VPS | healthz `{"ok":true,"paper_only":true}` (checked 2026-10-07). Last **green** Deploy: `#115` on `srv1811101`. Live flag stays false. |
 
 ---
 
@@ -354,7 +355,7 @@ Paper-EV ladder (2026-10-03). **n8n does not auto-complete step 3.**
 5. **Optional live enable** — only via checklist (`BINANCE_TRADE_*` + `JARVISE_LIVE_TRADING=true`) after step 3.
 6. **Stabilize gated live** — smoke Approve → live on a tiny size; then consider P5. **Do not start P5 before this.**
 
-**Step-3 status snapshot (2026-10-06):** Closed `auto_*` still **n=0** (`auto_ev_gate.n=0`; two closed `unknown` fills do not count). VPS: `paper_liquid` + four open paper longs (BTC/ETH/SOL/BNB); `JARVISE_MAX_OPEN_POSITIONS=4`; `JARVISE_ANALYZE_MTF=false`; `JARVISE_LIVE_TRADING=false`; flatten #111 dormant. OpenClaw repo pin 9.8 (#114); last green Deploy `#113`; Deploy 100 failed. Step 3 still waits for ~10 **closed** `auto_*`.
+**Step-3 status snapshot (2026-10-07):** Closed `auto_*` still **n=0**. VPS: `paper_liquid`; `JARVISE_MAX_OPEN_POSITIONS=4`; `JARVISE_ANALYZE_MTF=false`; `JARVISE_LIVE_TRADING=false`; flatten #111 dormant. Host OpenClaw **2026.9.8**; last green Deploy `#115` on `srv1811101`. Step 3 still waits for ~10 **closed** `auto_*`.
 
 ### Post-MVP backlog (do not start without a roadmap update)
 
@@ -379,7 +380,7 @@ P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (ETF fl
 - **2026-10-04** — Integrity / capital-safety (PR [#102](https://github.com/chatoe-norm/jarvise/pull/102)): paper stops + 1% risk-at-stop + atomic fills + MTM halt, F&G context, pydantic/zod, gated live SELL/STOP/PnL. Merged; **VPS Deploy green**. Open BTC+ETH stops backfilled; n8n risk-monitor 15m published. Live flag false. Closed `auto_*` still n=0.
 - **2026-10-05** — Opt-in `paper_liquid` (PR [#112](https://github.com/chatoe-norm/jarvise/pull/112)); VPS four-spot ingest + cap 4 (env). Live kill-switch flatten (PR [#111](https://github.com/chatoe-norm/jarvise/pull/111)) merged; Deploy green; dormant while live off. Owner ship shortcuts `fdpy`/`wdpy`. Status SoT refresh (PR [#113](https://github.com/chatoe-norm/jarvise/pull/113)).
 - **2026-10-06** — OpenClaw image pin `2026.9.8` (PR [#114](https://github.com/chatoe-norm/jarvise/pull/114)) merged to `main`; VPS Deploy run 100 **failed** (self-hosted logs 404). healthz still `paper_only:true`; OpenClaw UI `:18789` HTTP 200. Host `OPENCLAW_IMAGE` not bumped by `fdpy`. Closed `auto_*` still n=0. Live stays false.
-- **2026-10-07** — Full-stack cutover to Hostinger KVM `1811101` (`76.13.218.48`, Tailscale `100.89.171.36`). Backup/restore from `srv1269762`; self-hosted runner `srv1811101` (label `jarvise`); old Jarvise compose drained (volumes kept); T4Trip remains on `1269762`. Live stays false; closed `auto_*` still n=0.
+- **2026-10-07** — Full-stack cutover to Hostinger KVM `1811101` (`76.13.218.48`, Tailscale `100.89.171.36`). Backup/restore from `srv1269762`; self-hosted runner `srv1811101` (label `jarvise`); old Jarvise compose drained then **fully wiped** on `1269762` (`/opt/jarvise`, volumes, cron, orphan `/opt/actions-runner`; T4Trip + its OpenClaw image kept). Docs SoT cutover (PR [#115](https://github.com/chatoe-norm/jarvise/pull/115)) Deploy green. Host `OPENCLAW_IMAGE` → `2026.9.8`; OpenClaw resources **3g / 2.0 / 2048**. Ubuntu 24.04 apt upgrade (Docker 29.8.2 / Compose v5.6.0); **reboot still pending** owner OK. Live stays false; closed `auto_*` still n=0.
 
 Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature has landed via spec/plan first.
 
@@ -387,7 +388,7 @@ Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature 
 
 ## 7. Operating facts (pointers; details in `AGENTS.md`)
 
-- **Runtime:** Hostinger KVM `srv1811101` (Ubuntu 24.04, 4 vCPU, 16 GB, public `76.13.218.48`), stack at `/opt/jarvise`, private ingress via Tailscale `100.89.171.36`; UIs: web `:8080`, n8n `:5678`, OpenClaw `:18789`, jobs `:8090` (Docker network only). Co-tenant LearningYard on same host; former `srv1269762` / `100.93.110.48` is T4Trip-only after Jarvise drain.
+- **Runtime:** Hostinger KVM `srv1811101` (Ubuntu 24.04, 4 vCPU, 16 GB, public `76.13.218.48`), stack at `/opt/jarvise`, private ingress via Tailscale `100.89.171.36`; UIs: web `:8080`, n8n `:5678`, OpenClaw `:18789`, jobs `:8090` (Docker network only). Co-tenant LearningYard on same host; former `srv1269762` / `100.93.110.48` is T4Trip-only after Jarvise full wipe.
 - **Accounts/tooling:** GitHub `chatoe-norm/jarvise` (push via SSH host `github.com-chatoe-norm`; `gh` account `chatoe-norm`); NotebookLM `nlm` profile `chatoe`, notebook alias `jarvise` (`14e11c63-…`); OpenRouter model `openrouter/auto`.
 - **Local dev:** Python 3.12 venv; `pip install -e '.[dev]'`; `python -m pytest`; Windows uses `.venv\Scripts\jarvise`.
 - **Model/cost preference:** Auto/Composer by default; escalate only when asked or when they fail.

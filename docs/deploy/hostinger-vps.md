@@ -14,7 +14,7 @@ Paper-only stack. No public ports for Redis/Qdrant. Control UIs bind to the Tail
 | SSH | `Jarvise-VPS` → `root@76.13.218.48` (key `~/.ssh/id_ed25519_jarvise`) |
 | Tailscale | `100.89.171.36` (`jarvise-1811101`) |
 | Co-tenant | LearningYard (Traefik / public web) — do not prune its volumes |
-| Former host | KVM `1269762` / `72.62.244.54` / Tailscale `100.93.110.48` (T4Trip only after 2026-10-07 drain) |
+| Former host | KVM `1269762` / `72.62.244.54` / Tailscale `100.93.110.48` (T4Trip only; Jarvise fully wiped 2026-10-07) |
 
 16 GB RAM is enough for OpenClaw plus local embeddings alongside LearningYard. Control ports stay on Tailscale. Do not publish them on `76.13.218.48`.
 
