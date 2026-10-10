@@ -1,7 +1,7 @@
 # Web (FastAPI JSON API + SPA shell). Compiled → web.lock with hashes.
 # Regenerate: uv pip compile requirements/web.in -o requirements/web.lock --generate-hashes --python-platform linux --python-version 3.12
 httpx>=0.28.1
-typer>=0.27.2
+typer>=0.27.3
 cryptography>=44
 fastapi==0.142.1
 uvicorn[standard]==0.54.0
