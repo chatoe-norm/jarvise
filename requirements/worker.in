@@ -6,4 +6,4 @@ cryptography>=44
 redis==8.1.0
 qdrant-client==1.19.1
 sentence-transformers>=5.6.0
-notebooklm-mcp-cli==0.13.0
+notebooklm-mcp-cli==0.15.4
