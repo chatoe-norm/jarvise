@@ -2,7 +2,7 @@
 # Regenerate: uv pip compile requirements/web.in -o requirements/web.lock --generate-hashes --python-platform linux --python-version 3.12
 httpx>=0.28.1
 typer>=0.27.2
-cryptography>=44
+cryptography>=50.0.2
 fastapi==0.142.1
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
