@@ -355,7 +355,7 @@ Paper-EV ladder (2026-10-03). **n8n does not auto-complete step 3.**
 5. **Optional live enable** — only via checklist (`BINANCE_TRADE_*` + `JARVISE_LIVE_TRADING=true`) after step 3.
 6. **Stabilize gated live** — smoke Approve → live on a tiny size; then consider P5. **Do not start P5 before this.**
 
-**Step-3 status snapshot (2026-10-07):** Closed `auto_*` still **n=0**. VPS: `paper_liquid`; `JARVISE_MAX_OPEN_POSITIONS=4`; `JARVISE_ANALYZE_MTF=false`; `JARVISE_LIVE_TRADING=false`; flatten #111 dormant. Host OpenClaw **2026.9.8**; last green Deploy `#115` on `srv1811101`. Step 3 still waits for ~10 **closed** `auto_*`.
+**Step-3 status snapshot (2026-10-13):** Closed trades **11**, all losses, EV about **−$2.26**. `auto_claude` **n=8**, EV about **−$2.05** (stops included). Open: ETH short and SOL short. VPS: `paper_liquid`; `JARVISE_MAX_OPEN_POSITIONS=4`; `JARVISE_ANALYZE_MTF=false`; `JARVISE_LIVE_TRADING=false`. BTC and ETH **1d** history was 209 bars with EMA200 withheld; backfilled from 2021-01-01 to **2111** bars, 0 gaps. Latest daily read after that backfill: BTC `trend_up` / long / confidence **0.65** (close 81850, EMA200 about 75530); ETH `trend_up` / flat / confidence **0.50**. MTF stays off until about **10** closed `auto_*`. A negative EV at that N still does not loosen the 0.55/0.70 floors.
 
 ### Post-MVP backlog (do not start without a roadmap update)
 

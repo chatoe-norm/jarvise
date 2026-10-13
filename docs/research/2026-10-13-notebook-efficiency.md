@@ -32,6 +32,8 @@ Open paper shorts the same day were **ETHUSDT** and **SOLUSDT** (`auto_claude`),
 
 `JARVISE_ANALYZE_MTF` is still **false** on the VPS, so that HTF block is not applied on the 4h pass. Turning it back on is outside this note. The existing gate still stands: wait until about **10** closed `auto_*` outcomes, with stops counted in expectancy, before restoring MTF or touching floors.
 
+On 2026-10-13 the higher-timeframe block also could not see BTC or ETH daily structure. Those 1d series had **209** bars, so EMA200 was withheld and `analyze_mtf` would have treated the higher timeframe as chaotic and forced FLAT. BNB and SOL daily history was already long enough. BTC and ETH were backfilled from 2021-01-01 (**2111** bars, 0 gaps). After that, the latest daily candle reads BTC `trend_up` long at confidence **0.65** (close 81850, EMA200 about 75530) and ETH `trend_up` but FLAT at confidence **0.50**. MTF remains off.
+
 `same_side_hold` (one position per symbol, no pyramiding) is the capital-preservation rule the notebook’s “no add after a stop / no revenge add” language already matches. This note does not change it.
 
 ---
