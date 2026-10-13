@@ -31,7 +31,10 @@ def _is_open(reason: str | None) -> bool:
 
 
 def _is_close(reason: str | None) -> bool:
-    return bool(reason) and str(reason).startswith("close_")
+    text = str(reason or "")
+    # stop_hit is a real round-trip exit. Leaving it out made EV ignore the losses
+    # that actually moved account equity.
+    return text.startswith("close_") or text == "stop_hit"
 
 
 def _position_side_from_open(reason: str) -> str:
@@ -51,7 +54,7 @@ def _trade_pnl(open_o: dict, close_o: dict, *, side: str) -> float:
 
 
 def reconstruct_closed_trades(orders: list[dict]) -> tuple[list[dict], int, int]:
-    """FIFO-pair open_* with close_* per symbol.
+    """FIFO-pair open_* with close_* or stop_hit per symbol.
 
     Returns (trades, unmatched_orders, open_legs_remaining).
     """
