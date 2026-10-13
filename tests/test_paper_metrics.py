@@ -126,6 +126,60 @@ def test_scratch_excluded_from_win_rate() -> None:
     assert 10.0 in pnls
 
 
+def test_stop_hit_counts_as_closed_round_trip() -> None:
+    orders = [
+        {
+            "order_id": "o1",
+            "ts": 1,
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "qty": 0.01,
+            "price": 100.0,
+            "fee_usd": 0.1,
+            "reason": "open_long",
+        },
+        {
+            "order_id": "s1",
+            "ts": 2,
+            "symbol": "BTCUSDT",
+            "side": "sell",
+            "qty": 0.01,
+            "price": 90.0,
+            "fee_usd": 0.1,
+            "reason": "stop_hit",
+        },
+        {
+            "order_id": "o2",
+            "ts": 3,
+            "symbol": "ETHUSDT",
+            "side": "sell",
+            "qty": 1.0,
+            "price": 50.0,
+            "fee_usd": 0.05,
+            "reason": "open_short",
+        },
+        {
+            "order_id": "s2",
+            "ts": 4,
+            "symbol": "ETHUSDT",
+            "side": "buy",
+            "qty": 1.0,
+            "price": 55.0,
+            "fee_usd": 0.05,
+            "reason": "stop_hit",
+        },
+    ]
+    trades, unmatched, open_rem = reconstruct_closed_trades(orders)
+    assert unmatched == 0
+    assert open_rem == 0
+    assert len(trades) == 2
+    by_symbol = {t["symbol"]: t for t in trades}
+    assert by_symbol["BTCUSDT"]["side"] == "long"
+    assert by_symbol["BTCUSDT"]["pnl_usd"] < 0
+    assert by_symbol["ETHUSDT"]["side"] == "short"
+    assert by_symbol["ETHUSDT"]["pnl_usd"] < 0
+
+
 def test_orphan_close_counted_unmatched() -> None:
     orders = [
         {
