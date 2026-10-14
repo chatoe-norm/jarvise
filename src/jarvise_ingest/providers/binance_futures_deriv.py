@@ -22,8 +22,7 @@ def _get(
         return get_json(f"{FAPI_BASE}{path}", params=params, client=client, provider="binance_futures")
     except ProviderError as exc:
         raise RuntimeError(
-            f"binance futures GET {path} failed: {exc}. "
-            "Retry: jarvise ingest --symbol SYM --skip-derivatives"
+            f"binance futures GET {path} failed: {exc}. Retry: jarvise ingest --symbol SYM --skip-derivatives"
         ) from exc
 
 

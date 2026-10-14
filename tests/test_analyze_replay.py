@@ -5,9 +5,11 @@ import shutil
 from pathlib import Path
 
 from jarvise_analyze.cli import DEFAULT_DB, run
-from jarvise_analyze.replay import replay_range
+from jarvise_analyze.replay import _rules_disposition, replay_is_oos, replay_range
 from jarvise_ingest.db import (
+    get_paper_position,
     list_paper_orders,
+    load_candles_in_range,
     open_db,
     upsert_market_technicals,
 )
@@ -137,3 +139,214 @@ def test_apply_paper_isolated_fills(tmp_path: Path, capsys) -> None:
 def test_replay_requires_since(capsys) -> None:
     assert run(["--symbol", "BTCUSDT", "--replay"]) == 2
     assert "--since" in capsys.readouterr().err
+
+
+def test_paper_policy_rules_requires_apply_paper(capsys) -> None:
+    assert (
+        run(
+            [
+                "--symbol",
+                "BTCUSDT",
+                "--replay",
+                "--since",
+                "2020-01-01",
+                "--paper-policy",
+                "rules",
+                "--db",
+                str(Path("nope.db")),
+            ]
+        )
+        == 2
+    )
+    assert "--apply-paper" in capsys.readouterr().err
+
+
+def _seed_up_then_down(db: Path, *, n_up: int = 400, n_down: int = 400) -> None:
+    conn = open_db(db)
+    rows = []
+    ts = 1_600_000_000_000
+    close = 100.0
+    for i in range(n_up):
+        close = 100.0 + i * 0.8
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": ts + i * 14_400_000,
+                "timeframe": "4h",
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 10.0,
+            }
+        )
+    base = n_up
+    peak = close
+    for i in range(n_down):
+        close = peak - (i + 1) * 1.2
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": ts + (base + i) * 14_400_000,
+                "timeframe": "4h",
+                "open": close + 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 10.0,
+            }
+        )
+    upsert_market_technicals(conn, rows)
+    recompute_indicators(conn, "BTCUSDT", "4h")
+    conn.close()
+
+
+def test_rules_policy_defers_opposite_instead_of_flipping(tmp_path: Path) -> None:
+    naive_db = tmp_path / "naive.db"
+    rules_db = tmp_path / "rules.db"
+    _seed_up_then_down(naive_db)
+    shutil.copy(naive_db, rules_db)
+    since_ms = 1_600_000_000_000
+    until_ms = 1_600_000_000_000 + 799 * 14_400_000
+    naive_conn = open_db(naive_db)
+    naive = replay_range(
+        naive_conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=since_ms,
+        until_ms=until_ms,
+        apply_paper=True,
+        paper_policy="naive",
+        confidence_threshold=0.45,
+    )
+    naive_conn.close()
+    rules_conn = open_db(rules_db)
+    rules = replay_range(
+        rules_conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=since_ms,
+        until_ms=until_ms,
+        apply_paper=True,
+        paper_policy="rules",
+        confidence_threshold=0.45,
+    )
+    rules_pos = rules_conn.execute("SELECT side FROM paper_positions WHERE symbol='BTCUSDT'").fetchone()
+    rules_conn.close()
+    assert naive["ok"] and rules["ok"]
+    assert rules["policy_counts"]["hold"] > 0
+    assert naive["fills"] >= 1
+    assert rules["fills"] >= 1
+    if rules_pos is not None:
+        assert rules_pos[0] == "long"
+
+
+def test_rules_disposition_opposite_is_defer(tmp_path: Path) -> None:
+    db = tmp_path / "hold.db"
+    _seed_trend(db, n=700)
+    since_ms = 1_600_000_000_000 + 500 * 14_400_000
+    until_ms = 1_600_000_000_000 + 699 * 14_400_000
+    conn = open_db(db)
+    report = replay_range(
+        conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=since_ms,
+        until_ms=until_ms,
+        apply_paper=True,
+        paper_policy="rules",
+        confidence_threshold=0.45,
+    )
+    assert report["fills"] >= 1
+    pos = get_paper_position(conn, "BTCUSDT")
+    assert pos is not None and pos["side"] == "long"
+    assert (
+        _rules_disposition(conn, {"symbol": "BTCUSDT", "action": "short", "size_pct_equity": 1.0}) == "defer"
+    )
+    conn.close()
+
+
+def test_replay_is_oos_splits_middle_without_shared_bars(tmp_path: Path) -> None:
+    db = tmp_path / "split.db"
+    _seed_trend(db, n=700)
+    start = 1_600_000_000_000
+    step = 14_400_000
+    since_ms = start
+    oos_ms = start + 350 * step
+    until_ms = start + 699 * step
+    conn = open_db(db)
+    report = replay_is_oos(
+        conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=since_ms,
+        oos_since_ms=oos_ms,
+        until_ms=until_ms,
+    )
+    in_rows = load_candles_in_range(conn, "BTCUSDT", "4h", since_ms=since_ms, until_ms=oos_ms - 1)
+    oos_rows = load_candles_in_range(conn, "BTCUSDT", "4h", since_ms=oos_ms, until_ms=until_ms)
+    conn.close()
+    in_ts = {row["timestamp"] for row in in_rows}
+    oos_ts = {row["timestamp"] for row in oos_rows}
+    assert report["ok"] is True
+    assert report["in_sample"]["bars"] == 350
+    assert report["out_of_sample"]["bars"] == 350
+    assert report["in_sample"]["bars"] + report["out_of_sample"]["bars"] == 700
+    assert in_ts.isdisjoint(oos_ts)
+    for window in (report["in_sample"], report["out_of_sample"]):
+        counts = window["action_counts"]
+        assert set(counts) == {"long", "short", "flat"}
+        assert sum(counts.values()) == window["bars"]
+    assert "better EV" in report["note"]
+
+
+def test_oos_ledger_does_not_keep_in_sample_position(tmp_path: Path) -> None:
+    db = tmp_path / "carry.db"
+    _seed_trend(db, n=700)
+    start = 1_600_000_000_000
+    step = 14_400_000
+    # EMA200 is withheld until late in this series, so the cut sits after that warm-up.
+    oos_ms = start + 680 * step
+    conn = open_db(db)
+    report = replay_is_oos(
+        conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=start,
+        oos_since_ms=oos_ms,
+        until_ms=start + 699 * step,
+        apply_paper=True,
+        confidence_threshold=0.45,
+    )
+    orders = conn.execute("SELECT ts FROM paper_orders").fetchall()
+    positions = conn.execute("SELECT entry_ts FROM paper_positions").fetchall()
+    conn.close()
+    assert report["in_sample"]["fills"] >= 1
+    assert all(row[0] >= oos_ms for row in orders)
+    assert all(row[0] >= oos_ms for row in positions)
+
+
+def test_oos_since_outside_range_rejected(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "bad.db"
+    code = run(
+        [
+            "--symbol",
+            "BTCUSDT",
+            "--replay",
+            "--since",
+            "2020-01-01",
+            "--until",
+            "2020-06-01",
+            "--oos-since",
+            "2021-01-01",
+            "--db",
+            str(db),
+        ]
+    )
+    assert code == 2
+    assert "--oos-since" in capsys.readouterr().err
+
+
+def test_oos_since_requires_replay(capsys) -> None:
+    assert run(["--symbol", "BTCUSDT", "--oos-since", "2024-06-01"]) == 2
+    assert "--replay" in capsys.readouterr().err

@@ -17,29 +17,29 @@ from jarvise_ingest.db import (
     upsert_market_technicals,
     upsert_order_book,
 )
+from jarvise_ingest.providers.alternative_fng import fetch_fear_greed
 from jarvise_ingest.providers.binance_book import fetch_order_book_snapshot
 from jarvise_ingest.providers.binance_klines import (
     MAX_PAGE_LIMIT,
     fetch_klines,
     fetch_klines_range,
 )
+from jarvise_ingest.providers.cmc_altseason import fetch_altseason
 from jarvise_ingest.providers.coingecko_global import fetch_global_macro
 from jarvise_ingest.providers.derivatives import fetch_derivatives, select_provider
+from jarvise_ingest.providers.stooq_ohlcv import fetch_stooq_ohlcv, is_equity_symbol
 from jarvise_ingest.series import find_gaps, recompute_indicators
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
-from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_ingest.universe import PAPER_EQUITY, seed_named_universe
 from jarvise_risk import evaluate_from_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
 DEFAULT_LIMIT = 200
 EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 1h --skip-derivatives --json"
-BACKFILL_EXAMPLE = (
-    "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives"
-)
-UNIVERSE_EXAMPLE = (
-    "jarvise ingest --universe paper_core --timeframe 4h --skip-derivatives --json"
-)
+BACKFILL_EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives"
+UNIVERSE_EXAMPLE = "jarvise ingest --universe paper_core --timeframe 4h --skip-derivatives --json"
+EQUITY_EXAMPLE = "jarvise ingest --universe paper_equity --timeframe 1d --skip-book --skip-derivatives --json"
 
 
 def _parse_instant(raw: str) -> datetime:
@@ -79,8 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--universe",
         help=(
-            f"Resolve symbols from a point-in-time universe "
-            f"(seeded: {PAPER_CORE}); may combine with --symbol"
+            "Resolve symbols from a point-in-time universe "
+            "(seeded: paper_core, paper_liquid, paper_equity); may combine with --symbol"
         ),
     )
     p.add_argument(
@@ -148,9 +148,7 @@ def run(argv: list[str] | None = None) -> int:
         return 2
     symbols = _parse_symbols(args.symbols or [])
     if args.until and not args.since:
-        print(
-            f"Error: --until requires --since.\n  {BACKFILL_EXAMPLE}", file=sys.stderr
-        )
+        print(f"Error: --until requires --since.\n  {BACKFILL_EXAMPLE}", file=sys.stderr)
         return 2
     since: datetime | None = None
     until: datetime | None = None
@@ -188,8 +186,7 @@ def run(argv: list[str] | None = None) -> int:
     if universe_id:
         resolve_conn = open_db(args.db)
         try:
-            if universe_id == PAPER_CORE:
-                seed_paper_core(resolve_conn)
+            seed_named_universe(resolve_conn, universe_id)
             as_of_ms = int((until or datetime.now(UTC)).timestamp() * 1000)
             from_universe = universe_as_of(resolve_conn, universe_id, as_of_ms)
         finally:
@@ -280,11 +277,21 @@ def run(argv: list[str] | None = None) -> int:
         else:
             try:
                 macro_row = fetch_global_macro()
+                try:
+                    macro_row["fear_greed_index"] = fetch_fear_greed()
+                except Exception as fng_exc:  # noqa: BLE001 — context only
+                    errors.append(str(fng_exc))
+                try:
+                    macro_row["altcoin_season_index"] = fetch_altseason()
+                except Exception as alt_exc:  # noqa: BLE001
+                    errors.append(str(alt_exc))
                 n = upsert_macro_sentiment(conn, macro_row)
                 macro_summary["global"] = {
                     "upserted": n,
                     "btc_dominance_pct": macro_row.get("btc_dominance_pct"),
                     "global_market_cap_usd": macro_row.get("global_market_cap_usd"),
+                    "fear_greed_index": macro_row.get("fear_greed_index"),
+                    "altcoin_season_index": macro_row.get("altcoin_season_index"),
                 }
                 if not args.as_json:
                     print(
@@ -299,8 +306,17 @@ def run(argv: list[str] | None = None) -> int:
                 print(f"Error: {exc}", file=sys.stderr)
 
         for sym in symbols:
+            equity = is_equity_symbol(sym) or universe_id == PAPER_EQUITY
             try:
-                if since:
+                if equity:
+                    if since:
+                        raise ValueError(
+                            "stooq equity ingest does not support --since paging yet; "
+                            f"use --limit (see: {EQUITY_EXAMPLE})"
+                        )
+                    candles = fetch_stooq_ohlcv(sym, args.timeframe, limit=limit)
+                    provider_name = "stooq"
+                elif since:
                     candles = fetch_klines_range(
                         sym,
                         args.timeframe,
@@ -308,16 +324,20 @@ def run(argv: list[str] | None = None) -> int:
                         until_ms=int(until.timestamp() * 1000) if until else None,
                         page_limit=limit,
                     )
+                    provider_name = "binance"
                 else:
                     candles = fetch_klines(sym, args.timeframe, limit)
+                    provider_name = "binance"
                 n = upsert_market_technicals(conn, candles)
                 derived = recompute_indicators(conn, sym, args.timeframe)
-                gaps = find_gaps(conn, sym, args.timeframe)
+                gaps = find_gaps(conn, sym, args.timeframe, asset_class="equity" if equity else "crypto")
                 market_summary[sym] = {
                     "timeframe": args.timeframe,
                     "upserted": n,
                     "indicators_recomputed": derived,
                     "gaps": len(gaps),
+                    "provider": provider_name,
+                    "asset_class": "equity" if equity else "crypto",
                 }
                 if not args.as_json:
                     print(
@@ -334,7 +354,8 @@ def run(argv: list[str] | None = None) -> int:
                 errors.append(str(exc))
                 print(f"Error: {exc}", file=sys.stderr)
 
-            if args.skip_book:
+            skip_book = args.skip_book or equity
+            if skip_book:
                 skipped.append(f"book:{sym}")
             else:
                 try:
@@ -348,22 +369,17 @@ def run(argv: list[str] | None = None) -> int:
                     }
                     if not args.as_json:
                         spread_bps = float(book_row["bid_ask_spread"]) * 10_000
-                        print(
-                            f"ingested order_book_microstructure: {sym} "
-                            f"spread_bps={spread_bps:.2f}"
-                        )
+                        print(f"ingested order_book_microstructure: {sym} spread_bps={spread_bps:.2f}")
                 except Exception as exc:  # noqa: BLE001
                     errors.append(str(exc))
                     provider_errors[sym].append(f"book:{exc}")
                     print(f"Error: {exc}", file=sys.stderr)
 
-            if args.skip_derivatives:
+            if args.skip_derivatives or equity:
                 skipped.append(f"derivatives:{sym}")
             else:
                 try:
-                    rows, provider = fetch_derivatives(
-                        sym, args.timeframe, limit=min(30, limit)
-                    )
+                    rows, provider = fetch_derivatives(sym, args.timeframe, limit=min(30, limit))
                     n = append_derivatives(conn, rows)
                     coin = rows[0]["symbol"] if rows else sym
                     deriv_summary[coin] = {
@@ -384,8 +400,8 @@ def run(argv: list[str] | None = None) -> int:
             safety = evaluate_from_db(
                 conn,
                 sym,
-                skip_book=args.skip_book,
-                skip_derivatives=args.skip_derivatives,
+                skip_book=args.skip_book or equity,
+                skip_derivatives=args.skip_derivatives or equity,
                 skip_macro=args.skip_macro,
                 provider_errors=provider_errors.get(sym) or None,
                 engage_ks=True,
@@ -437,9 +453,7 @@ def _emit(payload: dict, as_json: bool, *, dry_run: bool) -> None:
                     f"page={info['page_limit']}"
                 )
             else:
-                print(
-                    f"  market_technicals {sym} {info['timeframe']} planned={info['planned']}"
-                )
+                print(f"  market_technicals {sym} {info['timeframe']} planned={info['planned']}")
         for coin, info in payload["derivatives_analytics"].items():
             print(f"  derivatives_analytics {coin} planned={info['planned']}")
         for sym, info in payload.get("order_book_microstructure", {}).items():

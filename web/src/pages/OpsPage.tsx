@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type IngestHealthStatus, type PaperAutoStatus, type StatusPayload } from "@/lib/api";
+import { resolveReasonLabel } from "@/lib/copy";
 import { relativeAge } from "@/lib/utils";
 
 function jobSummary(payload: unknown): { ok: boolean | null; label: string } {
@@ -95,7 +96,7 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
               {auto.reason === "auto_decide_disabled" ? "off" : "skipped"}
             </Badge>
             <span className="text-xs text-[var(--color-muted)]">
-              {auto.reason} · {relativeAge(auto.at_ms)}
+              {resolveReasonLabel(auto.reason)} · {relativeAge(auto.at_ms)}
             </span>
           </div>
         ) : (
@@ -104,9 +105,12 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
               <Badge variant={auto.ok ? "ok" : "danger"}>{auto.ok ? "ran" : "error"}</Badge>
               <span className="text-xs text-[var(--color-muted)]">
                 {auto.model} · {relativeAge(auto.at_ms)} · {auto.duration_s ?? "—"}s
-                {auto.doctrine_unavailable ? " · doctrine unavailable" : ""}
+                {auto.doctrine_unavailable ? " · trading rules unavailable" : ""}
                 {auto.error ? ` · ${auto.error}` : ""}
                 {auto.halted ? ` · halted: ${auto.halted}` : ""}
+                {auto.auto_ev_gate?.blocked
+                  ? ` · EV gate blocked (N=${auto.auto_ev_gate.n}, EV=${auto.auto_ev_gate.ev})`
+                  : ""}
               </span>
             </div>
             <div className="grid grid-cols-5 gap-2">
@@ -121,7 +125,7 @@ function PaperAutoCard({ auto }: { auto: PaperAutoStatus | null | undefined }) {
               <ul className="list-disc space-y-1 pl-5">
                 {auto.deferred.slice(0, 5).map((d) => (
                   <li key={d.id}>
-                    <span className="font-medium">{d.symbol}</span> — {d.reason}
+                    <span className="font-medium">{d.symbol}</span> — {resolveReasonLabel(d.reason)}
                   </li>
                 ))}
               </ul>
@@ -179,6 +183,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
     { key: "rag", title: "RAG", data: status?.rag },
     { key: "paper", title: "Paper enqueue", data: status?.paper },
     { key: "paper_expire", title: "Paper expire", data: status?.paper_expire },
+    { key: "risk_monitor", title: "Risk monitor", data: status?.risk_monitor },
   ];
 
   return (
@@ -186,7 +191,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       <div>
         <h1 className="text-xl font-semibold">Ops</h1>
         <p className="text-sm text-[var(--color-muted)]">
-          Kill switch, pipeline health, doctrine index — not day-to-day trading.
+          Kill switch, pipeline health, trading-rules index — not day-to-day trading.
         </p>
       </div>
 
@@ -234,6 +239,37 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
 
       <Card>
         <CardHeader>
+          <CardTitle>Observability</CardTitle>
+          <CardDescription>
+            Prometheus scrapes <code>/metrics</code> on web and jobs. Start with{" "}
+            <code>docker compose --profile obs up -d</code> (Tailscale host only).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-3 text-sm">
+          <a
+            className="underline"
+            href={`http://${typeof window !== "undefined" ? window.location.hostname : "127.0.0.1"}:3000`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Grafana :3000
+          </a>
+          <a
+            className="underline"
+            href={`http://${typeof window !== "undefined" ? window.location.hostname : "127.0.0.1"}:9090`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Prometheus :9090
+          </a>
+          <a className="underline" href="/metrics" target="_blank" rel="noreferrer">
+            Web /metrics
+          </a>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Pipeline</CardTitle>
           <CardDescription>Last job outcomes from Redis</CardDescription>
         </CardHeader>
@@ -270,6 +306,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                   rag: status?.rag,
                   paper: status?.paper,
                   paper_expire: status?.paper_expire,
+                  risk_monitor: status?.risk_monitor,
                   ingest_health: status?.ingest_health,
                   paper_auto: status?.paper_auto,
                   qdrant: status?.qdrant,
@@ -288,7 +325,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
 
       <Card>
         <CardHeader>
-          <CardTitle>Qdrant doctrine</CardTitle>
+          <CardTitle>Qdrant trading rules</CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-[var(--color-muted)]">
           {status?.qdrant

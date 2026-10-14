@@ -1,6 +1,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_approval,
@@ -16,6 +18,15 @@ from jarvise_paper.approval import (
     expire_approvals,
     reject_approval,
 )
+
+
+@pytest.fixture(autouse=True)
+def _portfolio_room_for_legacy_sizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests use size_pct up to 10%; portfolio defaults cap symbol at 6%."""
+    monkeypatch.setenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_CORRELATED_BUCKET_PCT", "50")
+    monkeypatch.setenv("JARVISE_MAX_OPEN_POSITIONS", "10")
 
 
 def _seed_candle(conn, symbol: str, timeframe: str, close: float, ts: int = 1_700_000_000_000) -> None:
@@ -46,6 +57,7 @@ def test_enqueue_approve_fills_paper(tmp_path: Path) -> None:
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -73,6 +85,7 @@ def test_reject_and_expire_do_not_fill(tmp_path: Path) -> None:
             "analysis_id": "e1",
             "symbol": "ETHUSDT",
             "action": "long",
+            "invalidation_price": 48.5,
             "size_pct_equity": 5.0,
             "regime_state": "trend_up",
             "confidence_score": 0.6,
@@ -89,6 +102,7 @@ def test_reject_and_expire_do_not_fill(tmp_path: Path) -> None:
             "analysis_id": "e2",
             "symbol": "ETHUSDT",
             "action": "short",
+            "invalidation_price": 51.0,
             "size_pct_equity": 5.0,
             "regime_state": "trend_down",
             "confidence_score": 0.6,
@@ -114,6 +128,7 @@ def test_kill_switch_blocks_approve(tmp_path: Path) -> None:
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -137,6 +152,7 @@ def test_approve_after_expiry_refuses_no_position(tmp_path: Path) -> None:
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -167,6 +183,7 @@ def test_double_approve_cannot_double_fill(tmp_path: Path) -> None:
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -193,6 +210,7 @@ def test_claim_before_fill_and_apply_failure_marks_failed(tmp_path: Path) -> Non
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,

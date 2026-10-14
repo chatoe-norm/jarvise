@@ -72,9 +72,7 @@ def test_404_is_not_retried() -> None:
 
 
 def test_timeout_retried_then_exhausted() -> None:
-    client, seen = _client(
-        [httpx.ReadTimeout("t"), httpx.ConnectError("c"), httpx.ReadTimeout("t")]
-    )
+    client, seen = _client([httpx.ReadTimeout("t"), httpx.ConnectError("c"), httpx.ReadTimeout("t")])
     with pytest.raises(ProviderError) as info:
         get_json("https://x/api", client=client, retries=2, provider="p")
     assert len(seen) == 3
@@ -184,7 +182,9 @@ def test_exchange_signed_get_retries_with_fresh_signature() -> None:
     client, seen = _client(
         [
             httpx.Response(503, content=b""),
-            httpx.Response(200, content=json.dumps({"balances": [{"asset": "BTC", "free": "1", "locked": "0"}]}).encode()),
+            httpx.Response(
+                200, content=json.dumps({"balances": [{"asset": "BTC", "free": "1", "locked": "0"}]}).encode()
+            ),
         ]
     )
     balances = BinanceSpotClient(auth, client=client).list_spot_balances()

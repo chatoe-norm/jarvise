@@ -16,17 +16,25 @@ from jarvise_ingest.db import (
     get_paper_account,
     get_paper_position,
     list_expired_pending_approvals,
+    list_paper_orders_asc,
+    list_paper_positions,
     load_latest_candle,
     mark_approval_failed,
     resolve_approval,
     set_approval_paper_order_ids,
+    set_approval_resolve_reason,
+    transaction,
     upsert_pending_approval,
 )
 from jarvise_notify import notify_pending_enqueue
 from jarvise_paper.engine import apply_signal
+from jarvise_paper.feedback import decision_source_from_reason
+from jarvise_paper.metrics import paper_utc_day_realized_pnl
+from jarvise_paper.schemas import parse_signal
 from jarvise_risk import (
     apply_safety_to_analysis,
     check_caps,
+    check_portfolio_caps,
     engage_kill_switch,
     evaluate_from_db,
     load_risk_caps,
@@ -60,15 +68,47 @@ def _risk_breach(
     *,
     action: str | None,
     size_pct_equity: float | None,
+    now_ms: int,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    stop_price: float | None = None,
 ) -> str | None:
     caps = load_risk_caps()
     acct = _account_snapshot(conn)
+    day_pnl = paper_utc_day_realized_pnl(list_paper_orders_asc(conn), now_ms=now_ms)
+    entry = None
+    if symbol and timeframe:
+        candle = load_latest_candle(conn, symbol, timeframe)
+        if candle and candle.get("close") is not None:
+            entry = float(candle["close"])
     return check_caps(
         caps,
         equity=float(acct["equity"]),
         starting_equity=float(acct["starting_equity"]),
         size_pct_equity=size_pct_equity,
         action=action,
+        utc_day_realized_pnl_usd=day_pnl,
+        entry_price=entry,
+        stop_price=stop_price,
+    )
+
+
+def _portfolio_breach(
+    conn: Any,
+    *,
+    symbol: str,
+    action: str | None,
+    size_pct_equity: float | None,
+) -> str | None:
+    caps = load_risk_caps()
+    acct = _account_snapshot(conn)
+    return check_portfolio_caps(
+        caps,
+        equity=float(acct["equity"]),
+        positions=list_paper_positions(conn),
+        symbol=symbol,
+        action=action,
+        size_pct_equity=size_pct_equity,
     )
 
 
@@ -79,8 +119,11 @@ def _fail_risk(
     reason: str,
     ts: int,
     row: dict | None = None,
+    engage_kill: bool = True,
 ) -> dict[str, Any]:
-    engaged = engage_kill_switch(reason=reason)
+    engaged = False
+    if engage_kill:
+        engaged = engage_kill_switch(reason=reason)
     failed = mark_approval_failed(
         conn,
         approval_id,
@@ -95,7 +138,7 @@ def _fail_risk(
         "paper_only": True,
         "kill_switch_engaged": bool(engaged),
     }
-    if not engaged:
+    if engage_kill and not engaged:
         out["kill_switch_error"] = "engage failed (Redis unset/unreachable); owner alerted"
     return out
 
@@ -108,16 +151,25 @@ def enqueue_approval(
     now_ms: int | None = None,
 ) -> dict[str, Any]:
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    try:
+        parsed = parse_signal(analysis)
+        analysis = {**analysis, **parsed.model_dump()}
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "skipped": True,
+            "error": f"invalid_signal: {exc}",
+            "kill_switch_engaged": False,
+            "paper_only": True,
+        }
     symbol = str(analysis["symbol"]).upper()
-    safety = evaluate_from_db(conn, symbol, now_ms=ts)
+    safety = evaluate_from_db(conn, symbol, now_ms=ts, intended_side=str(analysis.get("action") or ""))
     analysis = apply_safety_to_analysis(analysis, safety)
     action = str(analysis.get("action") or "flat")
     if safety.force_flat:
         engaged = False
         if safety.critical:
-            engaged = engage_kill_switch(
-                reason="market_safety:" + ";".join(safety.reasons)[:400]
-            )
+            engaged = engage_kill_switch(reason="market_safety:" + ";".join(safety.reasons)[:400])
         return {
             "ok": False,
             "skipped": True,
@@ -129,18 +181,37 @@ def enqueue_approval(
             "market_safety": safety.as_dict(),
         }
     size = analysis.get("size_pct_equity")
+    size_f = float(size) if size is not None else None
+    stop_raw = analysis.get("invalidation_price")
+    stop_f = float(stop_raw) if stop_raw is not None else None
     breach = _risk_breach(
         conn,
         action=action,
-        size_pct_equity=float(size) if size is not None else None,
+        size_pct_equity=size_f,
+        now_ms=ts,
+        symbol=symbol,
+        timeframe=timeframe,
+        stop_price=stop_f,
     )
     if breach:
-        engaged = engage_kill_switch(reason=breach)
+        engage = not str(breach).startswith("missing_invalidation")
+        engaged = engage_kill_switch(reason=breach) if engage else False
         return {
             "ok": False,
             "skipped": True,
             "error": breach,
             "kill_switch_engaged": bool(engaged),
+            "paper_only": True,
+            "symbol": symbol,
+            "timeframe": timeframe,
+        }
+    port = _portfolio_breach(conn, symbol=symbol, action=action, size_pct_equity=size_f)
+    if port:
+        return {
+            "ok": False,
+            "skipped": True,
+            "error": port,
+            "kill_switch_engaged": False,
             "paper_only": True,
             "symbol": symbol,
             "timeframe": timeframe,
@@ -158,6 +229,7 @@ def enqueue_approval(
             "regime_state": analysis.get("regime_state"),
             "confidence_score": analysis.get("confidence_score"),
             "size_pct_equity": analysis.get("size_pct_equity"),
+            "invalidation_price": analysis.get("invalidation_price"),
             "status": "pending",
         },
     )
@@ -198,8 +270,12 @@ def approve_approval(
     kill_switch: bool,
     now_ms: int | None = None,
     expected_analysis_id: str | None = None,
+    decision_source: str | None = None,
+    resolve_reason: str | None = None,
 ) -> dict[str, Any]:
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    claim_reason = resolve_reason or "paper_fill"
+    source = decision_source or decision_source_from_reason(claim_reason)
     row = get_approval(conn, approval_id)
     if row is None or row["status"] != "pending":
         return {
@@ -217,13 +293,11 @@ def approve_approval(
             "error": "kill_switch engaged",
             "paper_only": True,
         }
-    safety = evaluate_from_db(conn, str(row["symbol"]), now_ms=ts)
+    safety = evaluate_from_db(conn, str(row["symbol"]), now_ms=ts, intended_side=str(row.get("action") or ""))
     if safety.force_flat:
         engaged = False
         if safety.critical:
-            engaged = engage_kill_switch(
-                reason="market_safety:" + ";".join(safety.reasons)[:400]
-            )
+            engaged = engage_kill_switch(reason="market_safety:" + ";".join(safety.reasons)[:400])
         return {
             "ok": False,
             "approval": row,
@@ -249,13 +323,36 @@ def approve_approval(
         }
 
     size = row.get("size_pct_equity")
+    size_f = float(size) if size is not None else None
+    action = str(row.get("action") or "flat")
+    stop_raw = row.get("invalidation_price")
+    stop_f = float(stop_raw) if stop_raw is not None else None
     breach = _risk_breach(
         conn,
-        action=str(row.get("action") or "flat"),
-        size_pct_equity=float(size) if size is not None else None,
+        action=action,
+        size_pct_equity=size_f,
+        now_ms=ts,
+        symbol=str(row["symbol"]),
+        timeframe=str(row["timeframe"]),
+        stop_price=stop_f,
     )
     if breach:
-        return _fail_risk(conn, approval_id, reason=breach, ts=ts, row=row)
+        return _fail_risk(
+            conn,
+            approval_id,
+            reason=breach,
+            ts=ts,
+            row=row,
+            engage_kill=not str(breach).startswith("missing_invalidation"),
+        )
+    port = _portfolio_breach(
+        conn,
+        symbol=str(row["symbol"]),
+        action=action,
+        size_pct_equity=size_f,
+    )
+    if port:
+        return _fail_risk(conn, approval_id, reason=port, ts=ts, row=row, engage_kill=False)
 
     if live_trading_enabled():
         return _approve_live(conn, approval_id, row=row, ts=ts)
@@ -276,27 +373,61 @@ def approve_approval(
             "error": "no stored candles",
             "paper_only": True,
         }
-    claimed = claim_approval_for_fill(
-        conn, approval_id, now_ms=ts, expected_analysis_id=expected_analysis_id
-    )
-    if claimed is None:
-        return _claim_failure(conn, approval_id, ts=ts)
-    analysis = {
-        "analysis_id": claimed.get("analysis_id"),
-        "symbol": claimed["symbol"],
-        "action": claimed["action"],
-        "regime_state": claimed.get("regime_state"),
-        "confidence_score": claimed.get("confidence_score"),
-        "size_pct_equity": claimed.get("size_pct_equity"),
-    }
+    claimed = None
     try:
-        applied = apply_signal(
+        with transaction(conn):
+            claimed = claim_approval_for_fill(
+                conn,
+                approval_id,
+                now_ms=ts,
+                resolve_reason=claim_reason,
+                expected_analysis_id=expected_analysis_id,
+                commit=False,
+            )
+            if claimed is None:
+                raise RuntimeError("claim_failed")
+            analysis = {
+                "analysis_id": claimed.get("analysis_id"),
+                "symbol": claimed["symbol"],
+                "action": claimed["action"],
+                "regime_state": claimed.get("regime_state"),
+                "confidence_score": claimed.get("confidence_score"),
+                "size_pct_equity": claimed.get("size_pct_equity"),
+                "invalidation_price": claimed.get("invalidation_price"),
+            }
+            applied = apply_signal(
+                conn,
+                analysis=analysis,
+                mid_price=float(candle["close"]),
+                timeframe=str(claimed["timeframe"]),
+                now_ms=ts,
+                approval_id=approval_id,
+                decision_source=source,
+                in_transaction=True,
+            )
+            order_ids = [f.get("order_id") for f in applied.get("fills") or [] if f.get("order_id")]
+            updated = set_approval_paper_order_ids(
+                conn,
+                approval_id,
+                json.dumps(order_ids) if order_ids else None,
+                commit=False,
+            )
+    except RuntimeError as exc:
+        if str(exc) == "claim_failed":
+            return _claim_failure(conn, approval_id, ts=ts)
+        failed = mark_approval_failed(
             conn,
-            analysis=analysis,
-            mid_price=float(candle["close"]),
-            timeframe=str(claimed["timeframe"]),
-            now_ms=ts,
+            approval_id,
+            resolve_reason=str(exc),
+            resolved_at_ms=ts,
         )
+        return {
+            "ok": False,
+            "approval": failed or get_approval(conn, approval_id),
+            "fills": [],
+            "error": str(exc),
+            "paper_only": True,
+        }
     except Exception as exc:  # noqa: BLE001
         failed = mark_approval_failed(
             conn,
@@ -311,12 +442,6 @@ def approve_approval(
             "error": str(exc),
             "paper_only": True,
         }
-    order_ids = [f.get("order_id") for f in applied.get("fills") or [] if f.get("order_id")]
-    updated = set_approval_paper_order_ids(
-        conn,
-        approval_id,
-        json.dumps(order_ids) if order_ids else None,
-    )
     return {
         "ok": True,
         "approval": updated or claimed,
@@ -324,6 +449,7 @@ def approve_approval(
         "error": None,
         "paper_only": True,
         "equity": applied.get("equity"),
+        "decision_source": source,
     }
 
 
@@ -364,14 +490,7 @@ def _approve_live(
         }
 
     if result.get("skipped"):
-        conn.execute(
-            """
-            UPDATE approval_queue SET resolve_reason = ?
-            WHERE id = ?
-            """,
-            ("live_skipped", approval_id),
-        )
-        conn.commit()
+        set_approval_resolve_reason(conn, approval_id, "live_skipped")
 
     return {
         "ok": True,

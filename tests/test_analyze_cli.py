@@ -64,9 +64,7 @@ def test_analyze_persists_analysis_output(tmp_path: Path, capsys):
     db = tmp_path / "a.db"
     _seed_trend(db)
 
-    code = run(
-        ["--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)]
-    )
+    code = run(["--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     analysis_id = payload["analyses"][0]["analysis_id"]

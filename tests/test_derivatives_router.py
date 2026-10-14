@@ -80,9 +80,7 @@ def test_router_uses_coinglass_with_key(monkeypatch: pytest.MonkeyPatch) -> None
             }
         ]
 
-    monkeypatch.setattr(
-        "jarvise_ingest.providers.coinglass.fetch_derivatives", fake_cg
-    )
+    monkeypatch.setattr("jarvise_ingest.providers.coinglass.fetch_derivatives", fake_cg)
     rows, provider = derivatives.fetch_derivatives("BTCUSDT", "1h", limit=5)
     assert provider == derivatives.PROVIDER_COINGLASS
     assert rows[0]["liquidations_24h_usd"] == 9.0

@@ -8,7 +8,13 @@ import sys
 import time
 from pathlib import Path
 
-from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
+from jarvise_analyze.engine import (
+    CONFIDENCE_THRESHOLD,
+    analyze_mtf,
+    analyze_snapshot,
+    htf_timeframe,
+    mtf_enabled,
+)
 from jarvise_ingest.db import (
     ensure_paper_account,
     get_paper_account,
@@ -22,7 +28,12 @@ from jarvise_ingest.db import (
     upsert_analysis_output,
 )
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
-from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_ingest.universe import (
+    PAPER_CORE,
+    PAPER_EQUITY,
+    PAPER_LIQUID,
+    seed_named_universe,
+)
 from jarvise_paper.approval import (
     approve_approval,
     enqueue_approval,
@@ -31,6 +42,8 @@ from jarvise_paper.approval import (
 )
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
+from jarvise_paper.risk_monitor import run_risk_monitor
+from jarvise_paper.stops import backfill_stops
 from jarvise_risk import apply_safety_to_analysis, evaluate_from_db, read_kill_switch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -57,8 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jarvise paper",
         description=(
-            "Paper auto-trade: simulated fills from analyze + closed candles. "
-            "No exchange order placement."
+            "Paper auto-trade: simulated fills from analyze + closed candles. No exchange order placement."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -75,7 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Analyze (unless skipped); default enqueues for approve",
     )
     run_p.add_argument("--symbol", action="append", dest="symbols")
-    run_p.add_argument("--universe", help=f"Universe id (seeded: {PAPER_CORE})")
+    run_p.add_argument(
+        "--universe",
+        help=f"Universe id (seeded: {PAPER_CORE}, {PAPER_LIQUID}, {PAPER_EQUITY})",
+    )
     run_p.add_argument(
         "--timeframe",
         default="4h",
@@ -137,6 +152,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Upsert snapshot into performance_risk_metrics",
     )
+
+    bf = sub.add_parser("backfill-stops", help="Attach stops to open paper positions")
+    bf.add_argument("--db", type=Path, default=DEFAULT_DB)
+    bf.add_argument("--dry-run", action="store_true")
+    bf.add_argument("--apply", action="store_true")
+    bf.add_argument("--json", action="store_true", dest="as_json")
+
+    rm = sub.add_parser("risk-monitor", help="MTM, stop exits, daily halt")
+    rm.add_argument("--db", type=Path, default=DEFAULT_DB)
+    rm.add_argument("--json", action="store_true", dest="as_json")
     return p
 
 
@@ -154,8 +179,7 @@ def _resolve_symbols(conn, args) -> list[str]:
     symbols = _parse_symbols(getattr(args, "symbols", None))
     universe = getattr(args, "universe", None)
     if universe:
-        if universe == PAPER_CORE:
-            seed_paper_core(conn)
+        seed_named_universe(conn, universe)
         as_of_ms = int(time.time() * 1000)
         from_universe = universe_as_of(conn, universe, as_of_ms)
         seen: set[str] = set()
@@ -245,9 +269,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     errors.append(f"{sym} {args.timeframe}: no analysis_output")
                     continue
             else:
-                analysis = analyze_snapshot(
-                    candle, confidence_threshold=args.confidence_threshold
-                )
+                if mtf_enabled() and args.timeframe != htf_timeframe():
+                    htf_candle = load_latest_candle(conn, sym, htf_timeframe())
+                    analysis = analyze_mtf(
+                        candle,
+                        htf_candle,
+                        confidence_threshold=args.confidence_threshold,
+                    )
+                else:
+                    analysis = analyze_snapshot(candle, confidence_threshold=args.confidence_threshold)
                 safety = evaluate_from_db(conn, sym)
                 analysis = apply_safety_to_analysis(analysis, safety)
                 if not args.dry_run:
@@ -277,13 +307,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                         "analysis": summary,
                     }
                 else:
-                    queued = enqueue_approval(
-                        conn, analysis=analysis, timeframe=args.timeframe
-                    )
+                    queued = enqueue_approval(conn, analysis=analysis, timeframe=args.timeframe)
                     if queued.get("error") or queued.get("skipped"):
-                        errors.append(
-                            f"{sym}: {queued.get('error') or 'risk cap blocked enqueue'}"
-                        )
+                        errors.append(f"{sym}: {queued.get('error') or 'risk cap blocked enqueue'}")
                         if not args.as_json:
                             print(
                                 f"Error: {sym} enqueue blocked: {queued.get('error')}",
@@ -291,8 +317,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                             )
                 results.append({"queued": queued, "analysis": summary})
                 if not args.as_json and not (
-                    isinstance(queued, dict)
-                    and (queued.get("error") or queued.get("skipped"))
+                    isinstance(queued, dict) and (queued.get("error") or queued.get("skipped"))
                 ):
                     print(f"{sym}: {analysis.get('action')} queued for approval")
     finally:
@@ -381,9 +406,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
 def cmd_reject(args: argparse.Namespace) -> int:
     conn = open_db(args.db)
     try:
-        result = reject_approval(
-            conn, args.approval_id, reason=args.reason
-        )
+        result = reject_approval(conn, args.approval_id, reason=args.reason)
     finally:
         conn.close()
     code = 0 if result.get("ok") else 2
@@ -435,11 +458,41 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             f"sharpe={report.get('sharpe_ratio')} sortino={report.get('sortino_ratio')}"
         )
         if not report.get("ratios_ready"):
-            print(
-                f"(Sharpe/Sortino need ≥{report.get('need_trades_for_ratios')} closed trades)"
-            )
+            print(f"(Sharpe/Sortino need ≥{report.get('need_trades_for_ratios')} closed trades)")
         if report.get("persisted"):
             print("persisted performance_risk_metrics snapshot")
+    return 0
+
+
+def cmd_backfill_stops(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.apply:
+        print("Error: pass --dry-run or --apply", file=sys.stderr)
+        return 2
+    conn = open_db(args.db)
+    try:
+        result = backfill_stops(conn, dry_run=not args.apply)
+    finally:
+        conn.close()
+    if args.as_json:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        print(
+            f"dry_run={result.get('dry_run')} would_update={result.get('would_update')} "
+            f"updated={result.get('updated')}"
+        )
+    return 0
+
+
+def cmd_risk_monitor(args: argparse.Namespace) -> int:
+    conn = open_db(args.db)
+    try:
+        result = run_risk_monitor(conn)
+    finally:
+        conn.close()
+    if args.as_json:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        print(f"halted={result.get('halted')} stops={result.get('stops')}")
     return 0
 
 
@@ -460,6 +513,10 @@ def run(argv: list[str] | None = None) -> int:
         return cmd_expire(args)
     if args.cmd == "metrics":
         return cmd_metrics(args)
+    if args.cmd == "backfill-stops":
+        return cmd_backfill_stops(args)
+    if args.cmd == "risk-monitor":
+        return cmd_risk_monitor(args)
     return 2
 
 

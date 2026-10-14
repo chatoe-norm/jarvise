@@ -16,19 +16,33 @@ from jarvise_ingest.db import (
     insert_paper_order,
     latest_order_book,
     list_paper_positions,
+    load_newest_close,
     set_paper_account_value,
     upsert_paper_position,
     upsert_performance_risk_metrics,
 )
+from jarvise_paper.schemas import parse_signal
 
 # Binance spot taker (no BNB discount) — owner-protective paper EV default.
 FEE_BPS = 10.0
+# Liquid US ETF retail-ish default when symbol is equity (override via env).
+EQUITY_FEE_BPS = 2.0
 SLIP_BPS = 5.0
 STRATEGY_ID = "paper"
 
 
-def load_paper_fee_bps() -> float:
-    """Paper fee in bps. Env ``JARVISE_PAPER_FEE_BPS`` overrides; clamped to >= 0."""
+def load_paper_fee_bps(*, symbol: str | None = None) -> float:
+    """Paper fee in bps. Equity symbols use ``JARVISE_PAPER_EQUITY_FEE_BPS`` (default 2)."""
+    from jarvise_ingest.providers.stooq_ohlcv import is_equity_symbol
+
+    if symbol and is_equity_symbol(symbol):
+        raw = os.environ.get("JARVISE_PAPER_EQUITY_FEE_BPS")
+        if raw is None or str(raw).strip() == "":
+            return float(EQUITY_FEE_BPS)
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return float(EQUITY_FEE_BPS)
     raw = os.environ.get("JARVISE_PAPER_FEE_BPS")
     if raw is None or str(raw).strip() == "":
         return float(FEE_BPS)
@@ -36,6 +50,24 @@ def load_paper_fee_bps() -> float:
         return max(0.0, float(raw))
     except ValueError:
         return float(FEE_BPS)
+
+
+def estimate_impact_bps(notional: float, side_depth_1pct_usd: float | None) -> float:
+    """Linear impact: walking the full ±1% depth costs ~100 bps."""
+    depth = float(side_depth_1pct_usd or 0.0)
+    if depth <= 0:
+        return 0.0
+    return 100.0 * abs(float(notional)) / depth
+
+
+def max_impact_bps() -> float:
+    raw = os.environ.get("JARVISE_MAX_IMPACT_BPS")
+    if raw is None or str(raw).strip() == "":
+        return 50.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 50.0
 
 
 def fill_price(
@@ -103,6 +135,11 @@ def apply_signal(
     fee_bps: float | None = None,
     slip_bps: float = SLIP_BPS,
     now_ms: int | None = None,
+    approval_id: str | None = None,
+    decision_source: str | None = None,
+    marks: dict[str, float] | None = None,
+    in_transaction: bool = False,
+    exit_reason: str | None = None,
 ) -> dict[str, Any]:
     """Apply one analysis action to the paper ledger.
 
@@ -111,28 +148,32 @@ def apply_signal(
     - same side already open: no-op hold
 
     Fee defaults to Binance-spot-taker-equivalent 10 bps (``JARVISE_PAPER_FEE_BPS``).
+    Optional ``approval_id`` / ``decision_source`` stamp fills for T2.1 attribution.
     """
     ensure_paper_account(conn)
+    parsed = parse_signal(analysis)
+    analysis = {**analysis, **parsed.model_dump()}
     account = get_paper_account(conn)
     symbol = str(analysis["symbol"]).upper()
     action = str(analysis.get("action") or "flat").lower()
     size_pct = float(analysis.get("size_pct_equity") or 0.0)
+    invalidation = analysis.get("invalidation_price")
     analysis_id = analysis.get("analysis_id")
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
     pos = get_paper_position(conn, symbol)
     fills: list[dict[str, Any]] = []
     cash = float(account["cash"])
     realized_delta = 0.0
-    use_fee_bps = load_paper_fee_bps() if fee_bps is None else max(0.0, float(fee_bps))
+    use_fee_bps = load_paper_fee_bps(symbol=symbol) if fee_bps is None else max(0.0, float(fee_bps))
+    stamp_approval = str(approval_id) if approval_id else None
+    stamp_source = str(decision_source) if decision_source else None
 
-    book = latest_order_book(conn, symbol)
+    book = latest_order_book(conn, symbol, as_of_ms=ts)
     spread = None if book is None else book.get("bid_ask_spread")
     use_slip = effective_slip_bps(slip_bps=slip_bps, bid_ask_spread=spread)
 
     # Working copy of positions for dry-run
-    working: dict[str, dict] = {
-        str(p["symbol"]).upper(): dict(p) for p in list_paper_positions(conn)
-    }
+    working: dict[str, dict] = {str(p["symbol"]).upper(): dict(p) for p in list_paper_positions(conn)}
 
     def _record_fill(side: str, qty: float, price: float, reason: str) -> None:
         nonlocal cash
@@ -155,6 +196,8 @@ def apply_signal(
             "slip_bps": use_slip,
             "analysis_id": analysis_id,
             "reason": reason,
+            "approval_id": stamp_approval,
+            "decision_source": stamp_source,
         }
         fills.append(order)
         if not dry_run:
@@ -165,28 +208,35 @@ def apply_signal(
         want = None if action == "flat" else action
         if want != pos_side:
             close_side = "sell" if pos_side == "long" else "buy"
-            px = fill_price(
-                mid_price, side=close_side, slip_bps=slip_bps, bid_ask_spread=spread
-            )
+            px = fill_price(mid_price, side=close_side, slip_bps=slip_bps, bid_ask_spread=spread)
             qty = float(pos["qty"])
             entry = float(pos["entry_price"])
             if pos_side == "long":
                 realized_delta += (px - entry) * qty
             else:
                 realized_delta += (entry - px) * qty
-            _record_fill(close_side, qty, px, f"close_{pos_side}")
+            _record_fill(close_side, qty, px, exit_reason or f"close_{pos_side}")
             working.pop(symbol, None)
             if not dry_run:
                 delete_paper_position(conn, symbol)
             pos = None
 
     if action in {"long", "short"} and size_pct > 0 and pos is None:
+        if invalidation is None:
+            raise ValueError("missing_invalidation")
+        inv_f = float(invalidation)
+        if inv_f <= 0:
+            raise ValueError("missing_invalidation")
         equity_now = mark_equity(cash, list(working.values()), {symbol: mid_price})
         target_notional = max(0.0, equity_now) * (size_pct / 100.0)
         open_side = "buy" if action == "long" else "sell"
-        px = fill_price(
-            mid_price, side=open_side, slip_bps=slip_bps, bid_ask_spread=spread
-        )
+        depth_key = "ask_depth_1pct_usd" if open_side == "buy" else "bid_depth_1pct_usd"
+        depth = None if book is None else book.get(depth_key)
+        impact = estimate_impact_bps(target_notional, depth)
+        if impact > max_impact_bps():
+            raise ValueError(f"impact_bps={impact:.1f}>{max_impact_bps():.1f}")
+        use_slip = max(use_slip, impact)
+        px = fill_price(mid_price, side=open_side, slip_bps=use_slip, bid_ask_spread=spread)
         if px > 0 and target_notional > 0:
             qty = target_notional / px
             _record_fill(open_side, qty, px, f"open_{action}")
@@ -198,27 +248,35 @@ def apply_signal(
                 "entry_ts": ts,
                 "unrealized_pnl": 0.0,
                 "realized_pnl": 0.0,
+                "stop_price": inv_f,
+                "stop_source": "analysis",
+                "approval_id": stamp_approval,
             }
             working[symbol] = new_pos
             if not dry_run:
                 upsert_paper_position(conn, new_pos)
 
-    marks = {symbol: mid_price}
+    marks_out: dict[str, float] = dict(marks or {})
+    marks_out[symbol] = mid_price
     for sym, p in working.items():
-        if sym not in marks:
-            marks[sym] = float(p["entry_price"])
+        if sym not in marks_out:
+            stored = load_newest_close(conn, sym)
+            marks_out[sym] = float(stored if stored is not None else p["entry_price"])
         entry = float(p["entry_price"])
         qty = float(p["qty"])
-        mark = marks[sym]
+        mark = marks_out[sym]
         if str(p["side"]) == "long":
             unreal = (mark - entry) * qty
         else:
             unreal = (entry - mark) * qty
         p["unrealized_pnl"] = round(unreal, 8)
+        p.setdefault("stop_price", p.get("stop_price"))
+        p.setdefault("stop_source", p.get("stop_source"))
+        p.setdefault("approval_id", p.get("approval_id"))
         if not dry_run:
             upsert_paper_position(conn, p)
 
-    equity_out = mark_equity(cash, list(working.values()), marks)
+    equity_out = mark_equity(cash, list(working.values()), marks_out)
     if not dry_run:
         set_paper_account_value(conn, "cash", round(cash, 8))
         set_paper_account_value(conn, "equity", round(equity_out, 8))
@@ -236,7 +294,8 @@ def apply_signal(
                 "confidence_score": analysis.get("confidence_score"),
             },
         )
-        conn.commit()
+        if not in_transaction:
+            conn.commit()
 
     return {
         "symbol": symbol,
