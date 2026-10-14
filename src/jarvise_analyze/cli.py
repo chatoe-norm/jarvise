@@ -16,7 +16,7 @@ from jarvise_analyze.engine import (
     htf_timeframe,
     mtf_enabled,
 )
-from jarvise_analyze.replay import replay_range
+from jarvise_analyze.replay import replay_is_oos, replay_range
 from jarvise_ingest.db import (
     load_latest_candle,
     open_db,
@@ -58,6 +58,32 @@ def _is_default_live_db(path: Path) -> bool:
         return path.resolve() == DEFAULT_DB.resolve()
     except OSError:
         return False
+
+
+def _print_metrics(metrics: dict) -> None:
+    if not metrics:
+        return
+    print(
+        f"metrics closed={metrics.get('closed_trades')} "
+        f"EV={metrics.get('expected_value_ev')} "
+        f"win_rate={metrics.get('win_rate')}"
+    )
+
+
+def _print_split_window(label: str, window: dict) -> None:
+    counts = window.get("action_counts") or {}
+    print(
+        f"{label} bars={window['bars']} "
+        f"long={counts.get('long', 0)} short={counts.get('short', 0)} "
+        f"flat={counts.get('flat', 0)} fills={window['fills']}"
+    )
+    metrics = window.get("metrics") or {}
+    if metrics:
+        print(
+            f"{label} metrics closed={metrics.get('closed_trades')} "
+            f"EV={metrics.get('expected_value_ev')} "
+            f"win_rate={metrics.get('win_rate')}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,6 +137,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--until",
         help="Replay end ISO-8601 (default: now; requires --replay)",
+    )
+    p.add_argument(
+        "--oos-since",
+        help=(
+            "Out-of-sample start ISO-8601. Requires --replay and must sit "
+            "strictly after --since and strictly before --until. "
+            "Scores the same frozen strategy on both windows."
+        ),
     )
     p.add_argument(
         "--apply-paper",
@@ -184,6 +218,12 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.oos_since and not args.replay:
+        print(
+            "Error: --oos-since requires --replay.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
     if args.apply_paper and _is_default_live_db(args.db):
         print(
             "Error: --apply-paper refuses the default live ledger DB. "
@@ -216,31 +256,70 @@ def run(argv: list[str] | None = None) -> int:
                 return 2
             since_ms = int(since.timestamp() * 1000)
             until_ms = int(until.timestamp() * 1000)
-            report = replay_range(
-                conn,
-                symbols=symbols,
-                timeframe=args.timeframe,
-                since_ms=since_ms,
-                until_ms=until_ms,
-                confidence_threshold=args.confidence_threshold,
-                apply_paper=args.apply_paper,
-                dry_run=args.dry_run,
-                paper_policy=args.paper_policy,
-            )
+            if args.oos_since:
+                oos_since = _parse_instant(args.oos_since)
+                if not (since < oos_since < until):
+                    print(
+                        "Error: --oos-since must be strictly after --since and strictly before --until.\n  "
+                        + REPLAY_EXAMPLE,
+                        file=sys.stderr,
+                    )
+                    return 2
+                report = replay_is_oos(
+                    conn,
+                    symbols=symbols,
+                    timeframe=args.timeframe,
+                    since_ms=since_ms,
+                    oos_since_ms=int(oos_since.timestamp() * 1000),
+                    until_ms=until_ms,
+                    confidence_threshold=args.confidence_threshold,
+                    apply_paper=args.apply_paper,
+                    dry_run=args.dry_run,
+                    paper_policy=args.paper_policy,
+                )
+                if args.apply_paper and args.paper_policy == "rules":
+                    report["note"] += (
+                        " Paper fills on an isolated db (rules policy: hold/defer/flat); "
+                        "no Claude; no exchange orders."
+                    )
+                elif args.apply_paper:
+                    report["note"] += " Paper fills on an isolated db; no exchange orders."
+                else:
+                    report["note"] += " Analysis only; no order placement."
+            else:
+                report = replay_range(
+                    conn,
+                    symbols=symbols,
+                    timeframe=args.timeframe,
+                    since_ms=since_ms,
+                    until_ms=until_ms,
+                    confidence_threshold=args.confidence_threshold,
+                    apply_paper=args.apply_paper,
+                    dry_run=args.dry_run,
+                    paper_policy=args.paper_policy,
+                )
+                if args.apply_paper and args.paper_policy == "rules":
+                    report["note"] = (
+                        "replay + paper fills (isolated db, rules policy: hold/defer/flat); "
+                        "no Claude; no exchange orders"
+                    )
+                elif args.apply_paper:
+                    report["note"] = "replay + paper fills (isolated db); no exchange orders"
+                else:
+                    report["note"] = "replay analysis only; no order placement"
             report["db"] = str(args.db.resolve())
             report["universe"] = args.universe
             report["duration_s"] = round(time.perf_counter() - started, 3)
-            if args.apply_paper and args.paper_policy == "rules":
-                report["note"] = (
-                    "replay + paper fills (isolated db, rules policy: hold/defer/flat); "
-                    "no Claude; no exchange orders"
-                )
-            elif args.apply_paper:
-                report["note"] = "replay + paper fills (isolated db); no exchange orders"
-            else:
-                report["note"] = "replay analysis only; no order placement"
             if args.as_json:
                 print(json.dumps(report, separators=(",", ":")))
+            elif args.oos_since:
+                for err in (report["in_sample"].get("errors") or []) + (
+                    report["out_of_sample"].get("errors") or []
+                ):
+                    print(f"Error: {err}", file=sys.stderr)
+                _print_split_window("in_sample", report["in_sample"])
+                _print_split_window("out_of_sample", report["out_of_sample"])
+                print(report["note"])
             else:
                 print(
                     f"replay bars={report['bars']} analyses={report['analyses']} "
@@ -248,13 +327,7 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 for err in report.get("errors") or []:
                     print(f"Error: {err}", file=sys.stderr)
-                metrics = report.get("metrics") or {}
-                if metrics:
-                    print(
-                        f"metrics closed={metrics.get('closed_trades')} "
-                        f"EV={metrics.get('expected_value_ev')} "
-                        f"win_rate={metrics.get('win_rate')}"
-                    )
+                _print_metrics(report.get("metrics") or {})
             return 0 if report.get("ok") else 1
 
         analyses: list[dict] = []
