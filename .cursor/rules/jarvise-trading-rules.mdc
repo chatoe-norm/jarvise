@@ -1,0 +1,35 @@
+---
+description: Jarvise trading guardrails for signals, risk, and paper execution
+alwaysApply: true
+---
+
+# Jarvise trading rules
+
+Capital preservation comes before trade frequency. These rules point at the Python modules that already run. They do not add a strategy.
+
+## Signal
+
+- Stay `FLAT` when confidence is below `0.55` (`CONFIDENCE_THRESHOLD` in `src/jarvise_analyze/engine.py`).
+- Doctrine-free auto-approve stays at `0.70` (`NO_DOCTRINE_MIN_CONF` / `DOCTRINE_FREE_APPROVE`).
+- Read closed candles from SQLite. Fear & Greed and altseason are Home context and never enqueue, size, or raise confidence.
+- Thin books, wide spreads, stale books, and unsafe derivatives or macro force `FLAT` through `jarvise_risk.market_safety`.
+- Leave `JARVISE_ANALYZE_MTF` off. Leave floors `0.55` / `0.70` and `same_side_hold` unchanged.
+
+## Risk
+
+- Risk at the stop stays at or below 1% of equity (`max_risk_per_trade_pct`, ceiling `HARD_MAX_RISK_PER_TRADE_PCT`).
+- Stops stay at least `1.5 × ATR` (`ATR_STOP_MULT`).
+- Correlation is the notional bucket cap (`symbol_bucket`, `max_correlated_bucket_pct`). Do not add a ban on holding BTC and ETH together.
+- Keep the current universe. Do not add fiat pairs or cross pairs such as `ETH/BTC`.
+
+## Execution
+
+- Paper fills go through `jarvise_paper`. Live stays off until `live_trading_enabled()` is true and the owner checklist is done.
+- Quote pairs are USDT on liquid venues the ingest stack already uses.
+- Do not add Prisma, Next.js Server Actions, a TradingView webhook order path, a required 1:3 take-profit, Coinbase, Alpaca, IBKR, Glassnode, or CryptoQuant.
+
+## Before editing trading code
+
+Present a technical plan (schema, files, signatures, UI, tests) and wait for approval. Research notes in `docs/research/` stay out of Qdrant `jarvise_doctrine` and out of the paper ledger.
+
+Use skills `jarvise-signal`, `jarvise-risk`, and `jarvise-execution` when working in those layers.
