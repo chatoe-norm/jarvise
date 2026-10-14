@@ -30,12 +30,7 @@ from jarvise_ingest.providers.derivatives import fetch_derivatives, select_provi
 from jarvise_ingest.providers.stooq_ohlcv import fetch_stooq_ohlcv, is_equity_symbol
 from jarvise_ingest.series import find_gaps, recompute_indicators
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
-from jarvise_ingest.universe import (
-    PAPER_CORE,
-    PAPER_EQUITY,
-    seed_paper_core,
-    seed_paper_equity,
-)
+from jarvise_ingest.universe import PAPER_EQUITY, seed_named_universe
 from jarvise_risk import evaluate_from_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -84,7 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--universe",
         help=(
-            f"Resolve symbols from a point-in-time universe (seeded: {PAPER_CORE}); may combine with --symbol"
+            "Resolve symbols from a point-in-time universe "
+            "(seeded: paper_core, paper_liquid, paper_equity); may combine with --symbol"
         ),
     )
     p.add_argument(
@@ -190,10 +186,7 @@ def run(argv: list[str] | None = None) -> int:
     if universe_id:
         resolve_conn = open_db(args.db)
         try:
-            if universe_id == PAPER_CORE:
-                seed_paper_core(resolve_conn)
-            elif universe_id == PAPER_EQUITY:
-                seed_paper_equity(resolve_conn)
+            seed_named_universe(resolve_conn, universe_id)
             as_of_ms = int((until or datetime.now(UTC)).timestamp() * 1000)
             from_universe = universe_as_of(resolve_conn, universe_id, as_of_ms)
         finally:

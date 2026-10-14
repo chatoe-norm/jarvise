@@ -3,7 +3,7 @@ import { UsdBars } from "@/components/Charts";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type ExchangePayload } from "@/lib/api";
-import { formatNum, relativeAge } from "@/lib/utils";
+import { formatNum, formatQty, relativeAge } from "@/lib/utils";
 
 function UsdCell({
   usd,
@@ -109,9 +109,9 @@ export function ExchangePage() {
                     {(data.balances || []).map((b) => (
                       <tr key={b.asset} className="border-b border-[var(--color-border)]/60">
                         <td className="py-2 pr-3 font-medium">{b.asset}</td>
-                        <td className="py-2 pr-3 tabular-nums">{b.free}</td>
-                        <td className="py-2 pr-3 tabular-nums">{b.locked}</td>
-                        <td className="py-2 pr-3 tabular-nums">{b.total}</td>
+                        <td className="py-2 pr-3 tabular-nums">{formatQty(b.free)}</td>
+                        <td className="py-2 pr-3 tabular-nums">{formatQty(b.locked)}</td>
+                        <td className="py-2 pr-3 tabular-nums">{formatQty(b.total)}</td>
                         <td className="py-2">
                           <UsdCell usd={b.usd} pricing={b.pricing} />
                         </td>

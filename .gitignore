@@ -57,6 +57,7 @@ data/analytics/sources/fetch/
 data/analytics/sources/firecrawl/
 data/analytics/sources/openclaw/*
 !data/analytics/sources/openclaw/.gitkeep
+data/analytics/candle-graph/
 
 # Local sync salvage
 .local-wip/

@@ -132,9 +132,35 @@ def test_live_journey_mock_transport_blocks_real_host(tmp_path: Path, monkeypatc
     conn = open_db(db)
     ensure_paper_account(conn)
 
+    stop_posts: list[httpx.URL] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host not in {"api.binance.com"}:
             raise AssertionError(f"unexpected host {request.url.host}")
+        if request.method == "GET" and request.url.path == "/api/v3/exchangeInfo":
+            return httpx.Response(
+                200,
+                json={
+                    "symbols": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "baseAsset": "BTC",
+                            "filters": [
+                                {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                                {"filterType": "LOT_SIZE", "stepSize": "0.00001", "minQty": "0.00001"},
+                                {"filterType": "NOTIONAL", "minNotional": "0.05"},
+                            ],
+                        }
+                    ]
+                },
+            )
+        if request.method == "GET" and request.url.path == "/api/v3/account":
+            return httpx.Response(
+                200, json={"balances": [{"asset": "BTC", "free": "0.000999", "locked": "0"}]}
+            )
+        if request.method == "POST" and request.url.params.get("type") == "STOP_LOSS_LIMIT":
+            stop_posts.append(request.url)
+            return httpx.Response(200, json={"orderId": 43, "status": "NEW", "executedQty": "0"})
         if request.method == "GET" and "apiRestrictions" in request.url.path:
             return httpx.Response(
                 200,
@@ -186,5 +212,8 @@ def test_live_journey_mock_transport_blocks_real_host(tmp_path: Path, monkeypatc
     )
     assert filled["ok"] is True
     assert filled["live_order"]["status"] == "filled"
+    assert filled["stop_order"]["status"] == "submitted"
+    assert len(stop_posts) == 1
+    assert stop_posts[0].params["quantity"] == "0.00099"
     conn.close()
     client.close()

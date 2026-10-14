@@ -7,7 +7,12 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "jarvise-openclaw"
-SKILLS = ("jarvise-paper-research", "jarvise-doctrine-rag", "jarvise-binance-intel")
+SKILLS = (
+    "jarvise-paper-research",
+    "jarvise-doctrine-rag",
+    "jarvise-binance-intel",
+    "jarvise-news-ingest",
+)
 INTEL_HOSTS = {"web3.binance.com", "www.binance.com", "developers.binance.com", "github.com"}
 
 
@@ -54,6 +59,37 @@ def test_cursor_binance_intel_points_at_canonical_skill() -> None:
     text = (ROOT / ".cursor" / "skills" / "jarvise-binance-intel" / "SKILL.md").read_text(encoding="utf-8")
     assert re.match(r"^---\nname: jarvise-binance-intel\n", text)
     assert "plugins/jarvise-openclaw/skills/jarvise-binance-intel/SKILL.md" in text
+
+
+def test_news_ingest_skill_stays_out_of_doctrine_and_orders() -> None:
+    text = (PLUGIN / "skills" / "jarvise-news-ingest" / "SKILL.md").read_text(encoding="utf-8")
+    assert "/home/node/.openclaw/exports/" in text
+    assert "jarvise_doctrine" in text
+    assert "do not place orders" in text.lower()
+    watch = (ROOT / "config" / "openclaw" / "ingest" / "WATCHLIST.md").read_text(encoding="utf-8")
+    for name in (
+        "NVIDIA",
+        "Samsung Electronics",
+        "Federal Reserve",
+        "Mark Zuckerberg",
+        "Donald Trump",
+        "Kenn Bosak",
+        "Satoshi Nakamoto",
+    ):
+        assert name in watch
+    workflow = json.loads(
+        (ROOT / "infra" / "n8n" / "workflows" / "jarvise-news-ingest.json").read_text(encoding="utf-8")
+    )
+    assert workflow["active"] is False
+    raw = json.dumps(workflow)
+    hook = next(node for node in workflow["nodes"] if node["name"] == "POST OpenClaw ingest hook")
+    body = json.loads(hook["parameters"]["jsonBody"])
+    assert hook["parameters"]["url"] == "http://openclaw:18789/hooks/agent"
+    assert body["agentId"] == "ingest"
+    assert body["deliver"] is False
+    assert "0 7,19 * * *" in raw
+    assert "__OPENCLAW_HOOK_TOKEN__" in raw
+    assert "jarvise.db" not in raw
 
 
 def test_openclaw_example_loads_jarvise_skills() -> None:

@@ -1,11 +1,14 @@
 """jarvise_trade — gated live spot order placement (separate from read-only exchange)."""
 
 from jarvise_trade.flags import live_trading_enabled
+from jarvise_trade.flatten import flatten_live_positions, live_risk_tick
 from jarvise_trade.reconcile import reconcile_live_orders
 from jarvise_trade.submit import live_preflight, submit_live_for_approval
 
 __all__ = [
+    "flatten_live_positions",
     "live_preflight",
+    "live_risk_tick",
     "live_trading_enabled",
     "reconcile_live_orders",
     "submit_live_for_approval",

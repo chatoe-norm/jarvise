@@ -121,7 +121,7 @@ def backfill_stops(conn: Any, *, dry_run: bool) -> dict[str, Any]:
         sym = str(order["symbol"]).upper()
         if reason.startswith("open_"):
             latest_open[sym] = order
-        elif reason.startswith("close_"):
+        elif reason.startswith("close_") or reason == "stop_hit":
             latest_open.pop(sym, None)
     for pos in list_paper_positions(conn):
         if pos.get("stop_price") is not None:

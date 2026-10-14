@@ -42,7 +42,7 @@ from jarvise_risk import (
 from jarvise_trade import live_trading_enabled
 
 PROMPT_VERSION = "2026-10-04.1"
-DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
+DEFAULT_MODEL = "anthropic/claude-sonnet-5.5"
 DECISIONS = frozenset({"approve", "reject", "defer"})
 REASON_MAX = 280
 UNPARSEABLE = "auto:claude:unparseable"
