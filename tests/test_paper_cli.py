@@ -61,8 +61,8 @@ def _seed_long_analysis(db: Path, *, symbol: str = "BTCUSDT", timeframe: str = "
             "regime_state": "trend_up",
             "confidence_score": 0.9,
             "action": "long",
-            "invalidation_price": None,
-            "size_pct_equity": 10.0,
+            "invalidation_price": float(candle["close"]) * 0.985,
+            "size_pct_equity": 1.5,
             "thesis": "cli test",
         },
     )
@@ -101,9 +101,7 @@ def test_paper_run_and_status(tmp_path: Path, capsys, monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     db = tmp_path / "a.db"
     _seed(db)
-    code = run(
-        ["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)]
-    )
+    code = run(["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -139,9 +137,7 @@ def test_paper_run_kill_switch(tmp_path: Path, capsys, monkeypatch):
         "kill_switch_engaged",
         lambda: True,
     )
-    code = run(
-        ["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)]
-    )
+    code = run(["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--json", "--db", str(db)])
     assert code == 3
     payload = json.loads(capsys.readouterr().out)
     assert payload["skipped"] is True

@@ -1,0 +1,34 @@
+---
+description: Owner shortcuts fdpy (ship) and wdpy (wait for CI/deploy queue)
+alwaysApply: true
+---
+
+# Owner ship vocabulary: `fdpy` / `wdpy`
+
+When the owner types these exact tokens, treat them as explicit process commands.
+
+## `fdpy` — ship step by step
+
+Means: **commit → open/update PR → merge to `main` → wait VPS deploy**.
+
+1. Commit relevant work on the feature branch (never secrets/`.env`/tmp; push via SSH host `github.com-chatoe-norm`; `gh` as `chatoe-norm`).
+2. Open or update the PR if needed.
+3. **Internal wait:** PR CI must be green before merge. If checks are running, wait — do not merge red.
+4. Merge into `main` with `gh pr merge --merge` (match history style “Merge pull request #N”).
+5. Watch `CI` on `main`, then `Deploy` (self-hosted runner `jarvise` → `/opt/jarvise/infra/deploy/vps-deploy.sh`). Do not kick a second full bake unless Deploy fails and the runbook says so. Prefer web+jobs-only only if a full bake hangs.
+6. Report PR URL + Deploy run result.
+
+`fdpy` authorizes merge + deploy wait. It does **not** by itself mean: enable live, raise analyzer floors, change `same_side_hold`, start P5, SSH-edit `/opt/jarvise/.env`, or merge unrelated open PRs.
+
+## `wdpy` — wait only
+
+Means: **wait for the in-flight queue** (PR checks, `CI` on `main`, `Deploy`) until it finishes. Do **not** start another `fdpy` (second commit/merge) until that queue is idle. After wait, report status; do not merge unless the user also said `fdpy`.
+
+## Hard stops (not overridden by `fdpy`)
+
+- Live trading flag / withdraw / transfer
+- Eterna MCP or Binance execution MCP for live
+- Analyzer floors 0.55/0.70 and `same_side_hold`
+- P5 unattended live
+- Merging unrelated PRs (e.g. live kill-switch flatten) unless that PR is the `fdpy` target
+- Committing secrets

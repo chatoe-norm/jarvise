@@ -1,7 +1,10 @@
 // web/src/components/RecommendationCard.tsx
 import type { ReactNode } from "react";
+import { CandleChart } from "@/components/CandleChart";
+import { ConfidenceLadder } from "@/components/ConfidenceLadder";
 import { Badge } from "@/components/ui/badge";
-import type { RecommendationPayload } from "@/lib/api";
+import type { OhlcvPayload, RecommendationPayload } from "@/lib/api";
+import { ownerReasonCopy } from "@/lib/copy";
 import { formatNum } from "@/lib/utils";
 
 const REC_LABEL: Record<
@@ -43,8 +46,17 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function RecommendationCard({ data }: { data: RecommendationPayload }) {
+export function RecommendationCard({
+  data,
+  ohlcv,
+}: {
+  data: RecommendationPayload;
+  ohlcv?: OhlcvPayload | null;
+}) {
   const rec = REC_LABEL[data.recommendation];
+  const tfLabel = ohlcv
+    ? `${ohlcv.symbol} ${ohlcv.timeframe}`
+    : `${data.symbol} ${data.timeframe}`;
   return (
     <div className="space-y-4 rounded-md border border-[var(--color-border)] bg-[#121922] p-4 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -57,9 +69,23 @@ export function RecommendationCard({ data }: { data: RecommendationPayload }) {
 
       {data.recommendation_source === "claude" && data.claude ? (
         <Section title={`Claude (${data.claude.model}) ตัดสิน: ${data.claude.decision}`}>
-          <p>{data.claude.reason || "—"}</p>
+          <p>{ownerReasonCopy(data.claude.reason)}</p>
         </Section>
       ) : null}
+
+      {data.confidence_breakdown ? (
+        <Section title="ทำไมได้คะแนนนี้">
+          <ConfidenceLadder breakdown={data.confidence_breakdown} />
+        </Section>
+      ) : null}
+
+      <Section title="ราคา (แท่งปิด)">
+        <CandleChart
+          bars={ohlcv?.bars ?? []}
+          invalidation={ohlcv?.invalidation_price ?? data.risk.invalidation_price}
+          label={tfLabel}
+        />
+      </Section>
 
       <Section title="เกิดอะไรขึ้น">
         <List items={data.what_happened} />
@@ -79,12 +105,12 @@ export function RecommendationCard({ data }: { data: RecommendationPayload }) {
         </dl>
       </Section>
 
-      <Section title="หลักการ (doctrine)">
+      <Section title="กฎการเทรด">
         {data.doctrine.length ? (
           <List items={data.doctrine} />
         ) : (
           <p className="text-[var(--color-muted)]">
-            ยังไม่มีข้อความ doctrine ที่ตรงกับสัญญาณนี้
+            ไม่พบกฎการเทรดที่ตรงสัญญาณ
           </p>
         )}
       </Section>

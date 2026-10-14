@@ -14,9 +14,17 @@ from jarvise_ingest.db import (
     list_paper_positions,
     upsert_performance_risk_metrics,
 )
+from jarvise_paper.feedback import (
+    WINDOW_30D_MS,
+    auto_ev_gate_status,
+    metrics_by_decision_source,
+    sync_decision_outcomes,
+)
+from jarvise_risk.caps import utc_day_bounds_ms
 
 PAPER_STRATEGY_ID = "paper"
 MIN_TRADES_FOR_RATIOS = 30
+AUTO_SAMPLE_MIN = 8
 
 
 def _is_open(reason: str | None) -> bool:
@@ -24,7 +32,10 @@ def _is_open(reason: str | None) -> bool:
 
 
 def _is_close(reason: str | None) -> bool:
-    return bool(reason) and str(reason).startswith("close_")
+    text = str(reason or "")
+    # stop_hit is a real round-trip exit. Leaving it out made EV ignore the losses
+    # that actually moved account equity.
+    return text.startswith("close_") or text == "stop_hit"
 
 
 def _position_side_from_open(reason: str) -> str:
@@ -44,7 +55,7 @@ def _trade_pnl(open_o: dict, close_o: dict, *, side: str) -> float:
 
 
 def reconstruct_closed_trades(orders: list[dict]) -> tuple[list[dict], int, int]:
-    """FIFO-pair open_* with close_* per symbol.
+    """FIFO-pair open_* with close_* or stop_hit per symbol.
 
     Returns (trades, unmatched_orders, open_legs_remaining).
     """
@@ -80,6 +91,7 @@ def reconstruct_closed_trades(orders: list[dict]) -> tuple[list[dict], int, int]
                     "qty": float(open_o["qty"]),
                     "entry_price": float(open_o["price"]),
                     "exit_price": float(order["price"]),
+                    "exit_reason": str(order.get("reason") or ""),
                     "pnl_usd": round(pnl, 8),
                 }
             )
@@ -88,6 +100,16 @@ def reconstruct_closed_trades(orders: list[dict]) -> tuple[list[dict], int, int]
 
     open_remaining = sum(len(v) for v in stacks.values())
     return trades, unmatched, open_remaining
+
+
+def paper_utc_day_realized_pnl(orders: list[dict], *, now_ms: int) -> float:
+    """Sum closed round-trip PnL whose close_ts falls in the UTC calendar day of now_ms."""
+    start, end = utc_day_bounds_ms(now_ms)
+    trades, _unmatched, _open = reconstruct_closed_trades(orders)
+    return round(
+        sum(float(t["pnl_usd"]) for t in trades if start <= int(t["close_ts"]) < end),
+        8,
+    )
 
 
 def _max_drawdown_pct(pnls: list[float], *, start: float) -> float | None:
@@ -131,9 +153,53 @@ def _sharpe_sortino(returns: list[float]) -> tuple[float | None, float | None]:
     )
 
 
+def loss_lesson(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Owner summary of closed trades. Does not change floors or the analyzer."""
+    losses = [t for t in trades if float(t["pnl_usd"]) < 0]
+    by_exit = {
+        "stop_hit": {"n": 0, "pnl_usd": 0.0},
+        "flat": {"n": 0, "pnl_usd": 0.0},
+    }
+    for trade in losses:
+        reason = str(trade.get("exit_reason") or "")
+        key = "stop_hit" if reason == "stop_hit" else "flat"
+        by_exit[key]["n"] += 1
+        by_exit[key]["pnl_usd"] += float(trade["pnl_usd"])
+    for bucket in by_exit.values():
+        bucket["pnl_usd"] = round(bucket["pnl_usd"], 8)
+
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for trade in trades:
+        row = by_symbol.setdefault(str(trade["symbol"]), {"n": 0, "pnl_usd": 0.0})
+        row["n"] += 1
+        row["pnl_usd"] += float(trade["pnl_usd"])
+    for row in by_symbol.values():
+        row["pnl_usd"] = round(row["pnl_usd"], 8)
+
+    auto_pnls = [
+        float(trade["pnl_usd"])
+        for trade in trades
+        if str(trade.get("decision_source") or "").startswith("auto_")
+    ]
+    auto_closed = len(auto_pnls)
+    auto_ev = round(statistics.mean(auto_pnls), 8) if auto_pnls else None
+    return {
+        "closed_trades": len(trades),
+        "wins": sum(1 for trade in trades if float(trade["pnl_usd"]) > 0),
+        "losses": len(losses),
+        "by_exit": by_exit,
+        "by_symbol": by_symbol,
+        "auto_closed": auto_closed,
+        "auto_ev": auto_ev,
+        "floors_unchanged": auto_closed < AUTO_SAMPLE_MIN or (auto_ev is not None and auto_ev < 0),
+    }
+
+
 def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
     orders = list_paper_orders_asc(conn)
     trades, unmatched, open_from_orders = reconstruct_closed_trades(orders)
+    orders_by_id = {str(o["order_id"]): o for o in orders}
+    sync_decision_outcomes(conn, trades, orders_by_id)
     positions = list_paper_positions(conn)
     open_count = max(len(positions), open_from_orders)
 
@@ -156,6 +222,15 @@ def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, 
     equity = float(account.get("equity") or STARTING_PAPER_EQUITY)
     daily_pnl = round(equity - STARTING_PAPER_EQUITY, 8)
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    by_source = metrics_by_decision_source(conn)
+    by_source_30d = metrics_by_decision_source(conn, since_ms=ts - WINDOW_30D_MS)
+    gate = auto_ev_gate_status(conn, now_ms=ts)
+
+    # Enrich reconstructed trades with attribution from open fills.
+    for trade in trades:
+        open_o = orders_by_id.get(str(trade["open_order_id"])) or {}
+        trade["approval_id"] = open_o.get("approval_id")
+        trade["decision_source"] = open_o.get("decision_source") or "unknown"
 
     return {
         "ok": True,
@@ -181,6 +256,10 @@ def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, 
         "starting_equity": STARTING_PAPER_EQUITY,
         "equity": equity,
         "trades": trades,
+        "by_decision_source": by_source,
+        "by_decision_source_30d": by_source_30d,
+        "auto_ev_gate": gate,
+        "loss_lesson": loss_lesson(trades),
     }
 
 

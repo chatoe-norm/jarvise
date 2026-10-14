@@ -10,8 +10,11 @@ append a new version; they never overwrite the prior one.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,13 @@ CREATE TABLE IF NOT EXISTS market_technicals (
     adx_14 REAL,
     ema_20 REAL,
     ema_200 REAL,
+    sma_20 REAL,
+    macd_line REAL,
+    macd_signal REAL,
+    macd_hist REAL,
+    bb_mid REAL,
+    bb_upper REAL,
+    bb_lower REAL,
     PRIMARY KEY (symbol, timestamp, timeframe)
 );
 
@@ -125,7 +135,9 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     fee_bps REAL,
     slip_bps REAL NOT NULL,
     analysis_id TEXT,
-    reason TEXT
+    reason TEXT,
+    approval_id TEXT,
+    decision_source TEXT
 );
 
 CREATE TABLE IF NOT EXISTS paper_positions (
@@ -135,7 +147,10 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     entry_price REAL NOT NULL,
     entry_ts INTEGER NOT NULL,
     unrealized_pnl REAL NOT NULL DEFAULT 0,
-    realized_pnl REAL NOT NULL DEFAULT 0
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    stop_price REAL,
+    stop_source TEXT,
+    approval_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS approval_queue (
@@ -149,6 +164,7 @@ CREATE TABLE IF NOT EXISTS approval_queue (
     regime_state TEXT,
     confidence_score REAL,
     size_pct_equity REAL,
+    invalidation_price REAL,
     status TEXT NOT NULL,
     resolved_at_ms INTEGER,
     resolve_reason TEXT,
@@ -160,6 +176,13 @@ CREATE INDEX IF NOT EXISTS idx_approval_queue_symbol_tf_status
     ON approval_queue (symbol, timeframe, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_queue_pending_symbol_tf
     ON approval_queue (symbol, timeframe) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
+    ts INTEGER PRIMARY KEY,
+    equity REAL NOT NULL,
+    cash REAL NOT NULL,
+    source TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS live_orders (
     id TEXT NOT NULL PRIMARY KEY,
@@ -214,6 +237,45 @@ CREATE TABLE IF NOT EXISTS approval_llm_reviews (
 );
 CREATE INDEX IF NOT EXISTS idx_approval_llm_reviews_approval
     ON approval_llm_reviews (approval_id, created_at_ms);
+
+-- Closed-trade outcomes attributed to the approving decision (T2.1 feedback).
+CREATE TABLE IF NOT EXISTS paper_decision_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    approval_id TEXT,
+    open_order_id TEXT NOT NULL,
+    close_order_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    pnl_usd REAL NOT NULL,
+    r_multiple REAL,
+    hold_ms INTEGER,
+    decision_source TEXT NOT NULL,
+    prompt_version TEXT,
+    closed_at_ms INTEGER NOT NULL,
+    UNIQUE(open_order_id, close_order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_decision_outcomes_source_closed
+    ON paper_decision_outcomes (decision_source, closed_at_ms);
+
+-- Durable auto-decide run summaries (Redis last-run alone is not enough).
+CREATE TABLE IF NOT EXISTS paper_auto_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms INTEGER NOT NULL,
+    model TEXT,
+    prompt_version TEXT,
+    ok INTEGER NOT NULL,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    reason TEXT,
+    processed INTEGER,
+    approved_n INTEGER,
+    rejected_n INTEGER,
+    deferred_n INTEGER,
+    apply_failed_n INTEGER,
+    duration_s REAL,
+    payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at
+    ON paper_auto_runs (at_ms DESC);
 """
 
 _DERIV_METRIC_KEYS = (
@@ -302,9 +364,7 @@ def _migrate_analysis_timeframe(conn: sqlite3.Connection) -> None:
     cols = _table_columns(conn, "analysis_output")
     if not cols or "timeframe" in cols:
         return
-    conn.execute(
-        "ALTER TABLE analysis_output ADD COLUMN timeframe TEXT NOT NULL DEFAULT ''"
-    )
+    conn.execute("ALTER TABLE analysis_output ADD COLUMN timeframe TEXT NOT NULL DEFAULT ''")
 
 
 def _migrate_macro_global_mcap(conn: sqlite3.Connection) -> None:
@@ -312,9 +372,7 @@ def _migrate_macro_global_mcap(conn: sqlite3.Connection) -> None:
     cols = _table_columns(conn, "macro_onchain_sentiment")
     if not cols or "global_market_cap_usd" in cols:
         return
-    conn.execute(
-        "ALTER TABLE macro_onchain_sentiment ADD COLUMN global_market_cap_usd REAL"
-    )
+    conn.execute("ALTER TABLE macro_onchain_sentiment ADD COLUMN global_market_cap_usd REAL")
 
 
 def _migrate_paper_orders_fee_bps(conn: sqlite3.Connection) -> None:
@@ -343,9 +401,7 @@ def _migrate_live_orders_reconcile(conn: sqlite3.Connection) -> None:
     for name, typ in _LIVE_ORDER_RECONCILE_COLUMNS:
         if name not in cols:
             conn.execute(f"ALTER TABLE live_orders ADD COLUMN {name} {typ}")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_live_orders_client ON live_orders (client_order_id)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_live_orders_client ON live_orders (client_order_id)")
 
 
 def _migrate_exchange_balances(conn: sqlite3.Connection) -> None:
@@ -369,6 +425,100 @@ def _migrate_exchange_balances(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_decision_feedback(conn: sqlite3.Connection) -> None:
+    """Stamp paper fills with approval attribution + durable outcome/auto-run tables."""
+    cols = _table_columns(conn, "paper_orders")
+    if cols:
+        if "approval_id" not in cols:
+            conn.execute("ALTER TABLE paper_orders ADD COLUMN approval_id TEXT")
+        if "decision_source" not in cols:
+            conn.execute("ALTER TABLE paper_orders ADD COLUMN decision_source TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_approval ON paper_orders (approval_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_decision_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            approval_id TEXT,
+            open_order_id TEXT NOT NULL,
+            close_order_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            pnl_usd REAL NOT NULL,
+            r_multiple REAL,
+            hold_ms INTEGER,
+            decision_source TEXT NOT NULL,
+            prompt_version TEXT,
+            closed_at_ms INTEGER NOT NULL,
+            UNIQUE(open_order_id, close_order_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paper_decision_outcomes_source_closed "
+        "ON paper_decision_outcomes (decision_source, closed_at_ms)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_auto_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at_ms INTEGER NOT NULL,
+            model TEXT,
+            prompt_version TEXT,
+            ok INTEGER NOT NULL,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            reason TEXT,
+            processed INTEGER,
+            approved_n INTEGER,
+            rejected_n INTEGER,
+            deferred_n INTEGER,
+            apply_failed_n INTEGER,
+            duration_s REAL,
+            payload_json TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at ON paper_auto_runs (at_ms DESC)")
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, name: str, typ: str) -> None:
+    cols = _table_columns(conn, table)
+    if not cols or name in cols:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+
+
+def _migrate_stop_and_marks(conn: sqlite3.Connection) -> None:
+    """Stops on approvals/positions + paper equity snapshots (additive)."""
+    _add_column_if_missing(conn, "approval_queue", "invalidation_price", "REAL")
+    _add_column_if_missing(conn, "paper_positions", "stop_price", "REAL")
+    _add_column_if_missing(conn, "paper_positions", "stop_source", "TEXT")
+    _add_column_if_missing(conn, "paper_positions", "approval_id", "TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
+            ts INTEGER PRIMARY KEY,
+            equity REAL NOT NULL,
+            cash REAL NOT NULL,
+            source TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _migrate_indicator_context(conn: sqlite3.Connection) -> None:
+    """MACD / Bollinger / SMA context columns (analyzer does not consume them)."""
+    for name in (
+        "sma_20",
+        "macd_line",
+        "macd_signal",
+        "macd_hist",
+        "bb_mid",
+        "bb_upper",
+        "bb_lower",
+    ):
+        _add_column_if_missing(conn, "market_technicals", name, "REAL")
+
+
 # Ordered, numbered migrations. PRAGMA user_version records the last applied step so a
 # multi-step evolution runs exactly once per database. ``repair=True`` marks cheap,
 # idempotent additive steps (column sniff + ALTER ADD) that also re-run on every open so
@@ -380,6 +530,9 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (4, "paper_orders_fee_bps", _migrate_paper_orders_fee_bps, True),
     (5, "live_orders_reconcile", _migrate_live_orders_reconcile, True),
     (6, "exchange_balances", _migrate_exchange_balances, True),
+    (7, "decision_feedback", _migrate_decision_feedback, True),
+    (8, "stop_and_marks", _migrate_stop_and_marks, True),
+    (9, "indicator_context", _migrate_indicator_context, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -410,6 +563,26 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """BEGIN IMMEDIATE → commit, or rollback on any error."""
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+
+
+def _commit(conn: sqlite3.Connection, *, commit: bool) -> None:
+    if commit:
+        conn.commit()
+
+
 def upsert_market_technicals(conn: sqlite3.Connection, rows: list[dict]) -> int:
     """Write OHLCV only.
 
@@ -436,9 +609,7 @@ def upsert_market_technicals(conn: sqlite3.Connection, rows: list[dict]) -> int:
     return len(rows)
 
 
-def load_candle_series(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
-) -> list[sqlite3.Row]:
+def load_candle_series(conn: sqlite3.Connection, symbol: str, timeframe: str) -> list[sqlite3.Row]:
     cur = conn.execute(
         "SELECT timestamp, high, low, close FROM market_technicals "
         "WHERE symbol=? AND timeframe=? ORDER BY timestamp",
@@ -450,15 +621,39 @@ def load_candle_series(
 def write_indicators(conn: sqlite3.Connection, rows: list[dict]) -> int:
     if not rows:
         return 0
+    keys = (
+        "symbol",
+        "timeframe",
+        "timestamp",
+        "atr_14",
+        "rsi_14",
+        "ema_20",
+        "ema_200",
+        "sma_20",
+        "macd_line",
+        "macd_signal",
+        "macd_hist",
+        "bb_mid",
+        "bb_upper",
+        "bb_lower",
+    )
+    filled = [{key: row.get(key) for key in keys} for row in rows]
     sql = """
     UPDATE market_technicals SET
         atr_14=:atr_14,
         rsi_14=:rsi_14,
         ema_20=:ema_20,
-        ema_200=:ema_200
+        ema_200=:ema_200,
+        sma_20=:sma_20,
+        macd_line=:macd_line,
+        macd_signal=:macd_signal,
+        macd_hist=:macd_hist,
+        bb_mid=:bb_mid,
+        bb_upper=:bb_upper,
+        bb_lower=:bb_lower
     WHERE symbol=:symbol AND timeframe=:timeframe AND timestamp=:timestamp
     """
-    conn.executemany(sql, rows)
+    conn.executemany(sql, filled)
     conn.commit()
     return len(rows)
 
@@ -507,9 +702,7 @@ def append_derivatives(
     """
     written = 0
     for row in rows:
-        previous = conn.execute(
-            latest_sql, (row["symbol"], row["timestamp"])
-        ).fetchone()
+        previous = conn.execute(latest_sql, (row["symbol"], row["timestamp"])).fetchone()
         if previous is not None and _metrics_equal(previous, row):
             continue
         payload = {
@@ -527,9 +720,7 @@ def append_derivatives(
     return written
 
 
-def as_of_derivatives(
-    conn: sqlite3.Connection, symbol: str, as_of_ms: int
-) -> list[dict]:
+def as_of_derivatives(conn: sqlite3.Connection, symbol: str, as_of_ms: int) -> list[dict]:
     """Latest version of each event-time row that was known by `as_of_ms`."""
     sql = """
     SELECT d.symbol, d.timestamp, d.ingested_at,
@@ -586,8 +777,7 @@ def count_indicator_ready(
     if column not in _INDICATOR_COLUMNS:
         raise ValueError(f"unknown indicator column: {column}")
     cur = conn.execute(
-        f"SELECT COUNT(*) FROM market_technicals "
-        f"WHERE symbol=? AND timeframe=? AND {column} IS NOT NULL",
+        f"SELECT COUNT(*) FROM market_technicals WHERE symbol=? AND timeframe=? AND {column} IS NOT NULL",
         (symbol.upper(), timeframe),
     )
     return int(cur.fetchone()[0])
@@ -628,18 +818,31 @@ def upsert_order_book(conn: sqlite3.Connection, row: dict) -> int:
     return 1
 
 
-def latest_order_book(conn: sqlite3.Connection, symbol: str) -> dict | None:
-    cur = conn.execute(
-        """
-        SELECT symbol, timestamp, bid_ask_spread, bid_depth_1pct_usd, ask_depth_1pct_usd,
-               largest_buy_wall_price, largest_sell_wall_price, spoof_wall_detected
-        FROM order_book_microstructure
-        WHERE symbol=?
-        ORDER BY timestamp DESC
-        LIMIT 1
-        """,
-        (symbol.upper(),),
-    )
+def latest_order_book(conn: sqlite3.Connection, symbol: str, *, as_of_ms: int | None = None) -> dict | None:
+    if as_of_ms is None:
+        cur = conn.execute(
+            """
+            SELECT symbol, timestamp, bid_ask_spread, bid_depth_1pct_usd, ask_depth_1pct_usd,
+                   largest_buy_wall_price, largest_sell_wall_price, spoof_wall_detected
+            FROM order_book_microstructure
+            WHERE symbol=?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT symbol, timestamp, bid_ask_spread, bid_depth_1pct_usd, ask_depth_1pct_usd,
+                   largest_buy_wall_price, largest_sell_wall_price, spoof_wall_detected
+            FROM order_book_microstructure
+            WHERE symbol=? AND timestamp <= ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            (symbol.upper(), int(as_of_ms)),
+        )
     row = cur.fetchone()
     return dict(row) if row is not None else None
 
@@ -657,13 +860,23 @@ def upsert_macro_sentiment(conn: sqlite3.Connection, row: dict) -> int:
         :global_market_cap_usd
     )
     ON CONFLICT(timestamp) DO UPDATE SET
-        fear_greed_index=excluded.fear_greed_index,
-        altcoin_season_index=excluded.altcoin_season_index,
-        btc_dominance_pct=excluded.btc_dominance_pct,
-        exchange_netflow_btc=excluded.exchange_netflow_btc,
-        exchange_reserve_btc=excluded.exchange_reserve_btc,
-        etf_net_flow_usd=excluded.etf_net_flow_usd,
-        global_market_cap_usd=excluded.global_market_cap_usd
+        fear_greed_index=COALESCE(excluded.fear_greed_index, macro_onchain_sentiment.fear_greed_index),
+        altcoin_season_index=COALESCE(
+            excluded.altcoin_season_index, macro_onchain_sentiment.altcoin_season_index
+        ),
+        btc_dominance_pct=COALESCE(
+            excluded.btc_dominance_pct, macro_onchain_sentiment.btc_dominance_pct
+        ),
+        exchange_netflow_btc=COALESCE(
+            excluded.exchange_netflow_btc, macro_onchain_sentiment.exchange_netflow_btc
+        ),
+        exchange_reserve_btc=COALESCE(
+            excluded.exchange_reserve_btc, macro_onchain_sentiment.exchange_reserve_btc
+        ),
+        etf_net_flow_usd=COALESCE(excluded.etf_net_flow_usd, macro_onchain_sentiment.etf_net_flow_usd),
+        global_market_cap_usd=COALESCE(
+            excluded.global_market_cap_usd, macro_onchain_sentiment.global_market_cap_usd
+        )
     """
     conn.execute(
         sql,
@@ -711,9 +924,40 @@ def latest_derivatives_as_of(
     return rows[-1] if rows else None
 
 
-def load_latest_candle(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
-) -> dict | None:
+def load_newest_close(conn: sqlite3.Connection, symbol: str) -> float | None:
+    cur = conn.execute(
+        """
+        SELECT close FROM market_technicals
+        WHERE symbol=? AND close IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol.upper(),),
+    )
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return float(row[0])
+
+
+def range_since_entry(
+    conn: sqlite3.Connection, symbol: str, *, entry_ts: int
+) -> tuple[float | None, float | None]:
+    cur = conn.execute(
+        """
+        SELECT MIN(low), MAX(high) FROM market_technicals
+        WHERE symbol=? AND timestamp >= ?
+        """,
+        (symbol.upper(), int(entry_ts)),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None, None
+    lo, hi = row[0], row[1]
+    return (None if lo is None else float(lo), None if hi is None else float(hi))
+
+
+def load_latest_candle(conn: sqlite3.Connection, symbol: str, timeframe: str) -> dict | None:
     cur = conn.execute(
         """
         SELECT symbol, timestamp, timeframe, open, high, low, close, volume,
@@ -727,6 +971,51 @@ def load_latest_candle(
     )
     row = cur.fetchone()
     return dict(row) if row is not None else None
+
+
+def load_candle_at(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    timestamp: int,
+) -> dict | None:
+    """Single closed candle at exact timestamp (for confidence explainability)."""
+    cur = conn.execute(
+        """
+        SELECT symbol, timestamp, timeframe, open, high, low, close, volume,
+               atr_14, rsi_14, ema_20, ema_200
+        FROM market_technicals
+        WHERE symbol=? AND timeframe=? AND timestamp=?
+        LIMIT 1
+        """,
+        (symbol.upper(), timeframe, int(timestamp)),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def load_recent_ohlcv(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    limit: int = 48,
+) -> list[dict]:
+    """Newest closed OHLC bars, oldest first. Cap 120. SQLite only (no live fetch)."""
+    cap = max(1, min(int(limit), 120))
+    cur = conn.execute(
+        """
+        SELECT timestamp, open, high, low, close
+        FROM market_technicals
+        WHERE symbol=? AND timeframe=?
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (symbol.upper(), timeframe, cap),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    rows.reverse()
+    return rows
 
 
 def load_candles_in_range(
@@ -849,12 +1138,166 @@ def list_analysis_output(
     return [dict(row) for row in cur.fetchall()]
 
 
+_SQLITE_IN_CHUNK = 400
+
+
+def _parse_order_id_json(raw: object) -> list[str]:
+    if raw is None or raw == "":
+        return []
+    parsed: object = raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if item is not None and str(item) != ""]
+
+
+def _chunked(values: list[str], size: int = _SQLITE_IN_CHUNK) -> Iterator[list[str]]:
+    for i in range(0, len(values), size):
+        yield values[i : i + size]
+
+
+def list_analysis_outcomes(
+    conn: sqlite3.Connection,
+    analysis_ids: list[str],
+) -> dict[str, dict]:
+    """Latest approval + fill counts keyed by analysis_id (empty ids omitted)."""
+    ids = [str(item) for item in analysis_ids if item]
+    if not ids:
+        return {}
+    unique = list(dict.fromkeys(ids))
+    latest: dict[str, dict] = {}
+    for chunk in _chunked(unique):
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"""
+            SELECT id, analysis_id, status, resolve_reason, resolved_at_ms,
+                   paper_order_ids_json, created_at_ms
+            FROM approval_queue
+            WHERE analysis_id IN ({placeholders})
+            ORDER BY COALESCE(resolved_at_ms, created_at_ms) DESC, created_at_ms DESC
+            """,
+            chunk,
+        )
+        for row in cur.fetchall():
+            aid = str(row["analysis_id"] or "")
+            if not aid or aid in latest:
+                continue
+            latest[aid] = dict(row)
+
+    orders_by_aid: dict[str, list[dict]] = {aid: [] for aid in unique}
+    orders_by_oid: dict[str, dict] = {}
+    for chunk in _chunked(unique):
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"""
+            SELECT order_id, analysis_id, reason, approval_id
+            FROM paper_orders
+            WHERE analysis_id IN ({placeholders})
+            """,
+            chunk,
+        )
+        for row in cur.fetchall():
+            rec = dict(row)
+            aid = str(rec.get("analysis_id") or "")
+            oid = str(rec.get("order_id") or "")
+            if aid:
+                orders_by_aid.setdefault(aid, []).append(rec)
+            if oid:
+                orders_by_oid[oid] = rec
+
+    extra_oids: list[str] = []
+    for queued_row in latest.values():
+        extra_oids.extend(_parse_order_id_json(queued_row.get("paper_order_ids_json")))
+    missing = [oid for oid in dict.fromkeys(extra_oids) if oid and oid not in orders_by_oid]
+    for chunk in _chunked(missing):
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"""
+            SELECT order_id, analysis_id, reason, approval_id
+            FROM paper_orders
+            WHERE order_id IN ({placeholders})
+            """,
+            chunk,
+        )
+        for row in cur.fetchall():
+            rec = dict(row)
+            oid = str(rec.get("order_id") or "")
+            if oid:
+                orders_by_oid[oid] = rec
+
+    out: dict[str, dict] = {}
+    for aid in unique:
+        approval_row: dict | None = latest.get(aid)
+        json_ids = _parse_order_id_json(approval_row.get("paper_order_ids_json") if approval_row else None)
+        if json_ids:
+            fills = len(json_ids)
+            fill_reasons = [
+                str(orders_by_oid[oid].get("reason") or "")
+                for oid in json_ids
+                if oid in orders_by_oid and orders_by_oid[oid].get("reason")
+            ]
+        else:
+            by_aid = orders_by_aid.get(aid) or []
+            fills = len(by_aid)
+            fill_reasons = [str(row.get("reason") or "") for row in by_aid if row.get("reason")]
+        out[aid] = {
+            "approval_id": approval_row.get("id") if approval_row else None,
+            "approval_status": approval_row.get("status") if approval_row else None,
+            "resolve_reason": approval_row.get("resolve_reason") if approval_row else None,
+            "resolved_at_ms": approval_row.get("resolved_at_ms") if approval_row else None,
+            "paper_order_ids_json": approval_row.get("paper_order_ids_json") if approval_row else None,
+            "fills": fills,
+            "fill_reasons": fill_reasons,
+        }
+    return out
+
+
+def iter_analysis_outcome_facts(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+) -> list[dict]:
+    """Action + latest approval/fill facts for every matching analysis_output row."""
+    where, params = _analysis_output_where(symbol=symbol, timeframe=timeframe)
+    cur = conn.execute(
+        f"SELECT analysis_id, action FROM analysis_output {where}",
+        params,
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    outcomes = list_analysis_outcomes(conn, [str(row["analysis_id"]) for row in rows])
+    facts: list[dict] = []
+    for row in rows:
+        aid = str(row.get("analysis_id") or "")
+        o = outcomes.get(aid) or {}
+        approval = None
+        if o.get("approval_id"):
+            approval = {
+                "id": o.get("approval_id"),
+                "status": o.get("approval_status"),
+                "resolve_reason": o.get("resolve_reason"),
+                "resolved_at_ms": o.get("resolved_at_ms"),
+            }
+        facts.append(
+            {
+                "analysis_id": aid,
+                "action": row.get("action"),
+                "approval": approval,
+                "fills": int(o.get("fills") or 0),
+                "fill_reasons": list(o.get("fill_reasons") or []),
+            }
+        )
+    return facts
+
+
 STARTING_PAPER_EQUITY = 10_000.0
 
 
-def reset_paper_ledger(
-    conn: sqlite3.Connection, *, starting_equity: float = STARTING_PAPER_EQUITY
-) -> None:
+def reset_paper_ledger(conn: sqlite3.Connection, *, starting_equity: float = STARTING_PAPER_EQUITY) -> None:
     """Wipe paper fills/positions and reset cash/equity (for isolated backtests)."""
     conn.execute("DELETE FROM paper_orders")
     conn.execute("DELETE FROM paper_positions")
@@ -878,9 +1321,7 @@ def ensure_paper_account(
     conn: sqlite3.Connection, *, starting_equity: float = STARTING_PAPER_EQUITY
 ) -> dict[str, float]:
     """Ensure paper_account keys exist; return cash/equity/starting_equity."""
-    row = conn.execute(
-        "SELECT value FROM paper_account WHERE key='starting_equity'"
-    ).fetchone()
+    row = conn.execute("SELECT value FROM paper_account WHERE key='starting_equity'").fetchone()
     if row is None:
         conn.executemany(
             "INSERT INTO paper_account (key, value) VALUES (?, ?)",
@@ -917,14 +1358,18 @@ def set_paper_account_value(conn: sqlite3.Connection, key: str, value: float) ->
 def insert_paper_order(conn: sqlite3.Connection, row: dict) -> None:
     payload = dict(row)
     payload.setdefault("fee_bps", None)
+    payload.setdefault("approval_id", None)
+    payload.setdefault("decision_source", None)
     conn.execute(
         """
         INSERT INTO paper_orders (
             order_id, ts, symbol, timeframe, side, qty, price,
-            fee_usd, fee_bps, slip_bps, analysis_id, reason
+            fee_usd, fee_bps, slip_bps, analysis_id, reason,
+            approval_id, decision_source
         ) VALUES (
             :order_id, :ts, :symbol, :timeframe, :side, :qty, :price,
-            :fee_usd, :fee_bps, :slip_bps, :analysis_id, :reason
+            :fee_usd, :fee_bps, :slip_bps, :analysis_id, :reason,
+            :approval_id, :decision_source
         )
         """,
         payload,
@@ -932,12 +1377,18 @@ def insert_paper_order(conn: sqlite3.Connection, row: dict) -> None:
 
 
 def upsert_paper_position(conn: sqlite3.Connection, row: dict) -> None:
+    payload = dict(row)
+    payload.setdefault("stop_price", None)
+    payload.setdefault("stop_source", None)
+    payload.setdefault("approval_id", None)
     conn.execute(
         """
         INSERT INTO paper_positions (
-            symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl
+            symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl,
+            stop_price, stop_source, approval_id
         ) VALUES (
-            :symbol, :side, :qty, :entry_price, :entry_ts, :unrealized_pnl, :realized_pnl
+            :symbol, :side, :qty, :entry_price, :entry_ts, :unrealized_pnl, :realized_pnl,
+            :stop_price, :stop_source, :approval_id
         )
         ON CONFLICT(symbol) DO UPDATE SET
             side=excluded.side,
@@ -945,9 +1396,12 @@ def upsert_paper_position(conn: sqlite3.Connection, row: dict) -> None:
             entry_price=excluded.entry_price,
             entry_ts=excluded.entry_ts,
             unrealized_pnl=excluded.unrealized_pnl,
-            realized_pnl=excluded.realized_pnl
+            realized_pnl=excluded.realized_pnl,
+            stop_price=excluded.stop_price,
+            stop_source=excluded.stop_source,
+            approval_id=excluded.approval_id
         """,
-        row,
+        payload,
     )
 
 
@@ -958,7 +1412,8 @@ def delete_paper_position(conn: sqlite3.Connection, symbol: str) -> None:
 def get_paper_position(conn: sqlite3.Connection, symbol: str) -> dict | None:
     cur = conn.execute(
         """
-        SELECT symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl
+        SELECT symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl,
+               stop_price, stop_source, approval_id
         FROM paper_positions WHERE symbol=?
         """,
         (symbol.upper(),),
@@ -970,7 +1425,8 @@ def get_paper_position(conn: sqlite3.Connection, symbol: str) -> dict | None:
 def list_paper_positions(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl
+        SELECT symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl,
+               stop_price, stop_source, approval_id
         FROM paper_positions
         ORDER BY symbol
         """
@@ -983,7 +1439,8 @@ def list_paper_orders(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict
     cur = conn.execute(
         """
         SELECT order_id, ts, symbol, timeframe, side, qty, price,
-               fee_usd, fee_bps, slip_bps, analysis_id, reason
+               fee_usd, fee_bps, slip_bps, analysis_id, reason,
+               approval_id, decision_source
         FROM paper_orders
         ORDER BY ts DESC
         LIMIT ?
@@ -998,7 +1455,8 @@ def list_paper_orders_asc(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.execute(
         """
         SELECT order_id, ts, symbol, timeframe, side, qty, price,
-               fee_usd, fee_bps, slip_bps, analysis_id, reason
+               fee_usd, fee_bps, slip_bps, analysis_id, reason,
+               approval_id, decision_source
         FROM paper_orders
         ORDER BY ts ASC, order_id ASC
         """
@@ -1006,9 +1464,107 @@ def list_paper_orders_asc(conn: sqlite3.Connection) -> list[dict]:
     return [dict(row) for row in cur.fetchall()]
 
 
-def load_latest_analysis(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
-) -> dict | None:
+def upsert_paper_decision_outcome(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_decision_outcomes (
+            approval_id, open_order_id, close_order_id, symbol, side,
+            pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+        ) VALUES (
+            :approval_id, :open_order_id, :close_order_id, :symbol, :side,
+            :pnl_usd, :r_multiple, :hold_ms, :decision_source, :prompt_version, :closed_at_ms
+        )
+        ON CONFLICT(open_order_id, close_order_id) DO UPDATE SET
+            approval_id=excluded.approval_id,
+            symbol=excluded.symbol,
+            side=excluded.side,
+            pnl_usd=excluded.pnl_usd,
+            r_multiple=excluded.r_multiple,
+            hold_ms=excluded.hold_ms,
+            decision_source=excluded.decision_source,
+            prompt_version=excluded.prompt_version,
+            closed_at_ms=excluded.closed_at_ms
+        """,
+        {
+            "approval_id": row.get("approval_id"),
+            "open_order_id": str(row["open_order_id"]),
+            "close_order_id": str(row["close_order_id"]),
+            "symbol": str(row["symbol"]).upper(),
+            "side": str(row["side"]),
+            "pnl_usd": float(row["pnl_usd"]),
+            "r_multiple": row.get("r_multiple"),
+            "hold_ms": row.get("hold_ms"),
+            "decision_source": str(row.get("decision_source") or "unknown"),
+            "prompt_version": row.get("prompt_version"),
+            "closed_at_ms": int(row["closed_at_ms"]),
+        },
+    )
+
+
+def insert_paper_auto_run(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_auto_runs (
+            at_ms, model, prompt_version, ok, skipped, reason, processed,
+            approved_n, rejected_n, deferred_n, apply_failed_n, duration_s, payload_json
+        ) VALUES (
+            :at_ms, :model, :prompt_version, :ok, :skipped, :reason, :processed,
+            :approved_n, :rejected_n, :deferred_n, :apply_failed_n, :duration_s, :payload_json
+        )
+        """,
+        {
+            "at_ms": int(row["at_ms"]),
+            "model": row.get("model"),
+            "prompt_version": row.get("prompt_version"),
+            "ok": 1 if row.get("ok") else 0,
+            "skipped": 1 if row.get("skipped") else 0,
+            "reason": row.get("reason"),
+            "processed": row.get("processed"),
+            "approved_n": row.get("approved_n"),
+            "rejected_n": row.get("rejected_n"),
+            "deferred_n": row.get("deferred_n"),
+            "apply_failed_n": row.get("apply_failed_n"),
+            "duration_s": row.get("duration_s"),
+            "payload_json": row.get("payload_json"),
+        },
+    )
+    conn.commit()
+
+
+def list_paper_decision_outcomes(
+    conn: sqlite3.Connection,
+    *,
+    since_ms: int | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    lim = max(1, min(int(limit), 5_000))
+    if since_ms is None:
+        cur = conn.execute(
+            """
+            SELECT id, approval_id, open_order_id, close_order_id, symbol, side,
+                   pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+            FROM paper_decision_outcomes
+            ORDER BY closed_at_ms DESC
+            LIMIT ?
+            """,
+            (lim,),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT id, approval_id, open_order_id, close_order_id, symbol, side,
+                   pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+            FROM paper_decision_outcomes
+            WHERE closed_at_ms >= ?
+            ORDER BY closed_at_ms DESC
+            LIMIT ?
+            """,
+            (int(since_ms), lim),
+        )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def load_latest_analysis(conn: sqlite3.Connection, symbol: str, timeframe: str) -> dict | None:
     cur = conn.execute(
         """
         SELECT analysis_id, timestamp, symbol, timeframe, regime_state,
@@ -1058,8 +1614,7 @@ def record_membership(
 ) -> int:
     """Insert one membership interval; return 1 if new, 0 if already present."""
     existing = conn.execute(
-        "SELECT 1 FROM universe_membership "
-        "WHERE universe_id=? AND symbol=? AND listed_at=?",
+        "SELECT 1 FROM universe_membership WHERE universe_id=? AND symbol=? AND listed_at=?",
         (universe_id, symbol.upper(), listed_at),
     ).fetchone()
     if existing is not None:
@@ -1076,9 +1631,7 @@ def record_membership(
     return 1
 
 
-def universe_as_of(
-    conn: sqlite3.Connection, universe_id: str, as_of_ms: int
-) -> list[str]:
+def universe_as_of(conn: sqlite3.Connection, universe_id: str, as_of_ms: int) -> list[str]:
     """Symbols eligible in `universe_id` at knowledge/event cutoff `as_of_ms`."""
     cur = conn.execute(
         """
@@ -1095,7 +1648,7 @@ def universe_as_of(
 
 _APPROVAL_COLUMNS = """
     id, created_at_ms, expires_at_ms, symbol, timeframe, analysis_id,
-    action, regime_state, confidence_score, size_pct_equity, status,
+    action, regime_state, confidence_score, size_pct_equity, invalidation_price, status,
     resolved_at_ms, resolve_reason, paper_order_ids_json
 """
 
@@ -1167,17 +1720,18 @@ def upsert_pending_approval(conn: sqlite3.Connection, row: dict) -> dict:
         "regime_state": row.get("regime_state"),
         "confidence_score": row.get("confidence_score"),
         "size_pct_equity": row.get("size_pct_equity"),
+        "invalidation_price": row.get("invalidation_price"),
     }
     try:
         conn.execute(
             """
             INSERT INTO approval_queue (
                 id, created_at_ms, expires_at_ms, symbol, timeframe, analysis_id,
-                action, regime_state, confidence_score, size_pct_equity, status,
+                action, regime_state, confidence_score, size_pct_equity, invalidation_price, status,
                 resolved_at_ms, resolve_reason, paper_order_ids_json
             ) VALUES (
                 :id, :created_at_ms, :expires_at_ms, :symbol, :timeframe, :analysis_id,
-                :action, :regime_state, :confidence_score, :size_pct_equity, 'pending',
+                :action, :regime_state, :confidence_score, :size_pct_equity, :invalidation_price, 'pending',
                 NULL, NULL, NULL
             )
             ON CONFLICT(id) DO UPDATE SET
@@ -1188,6 +1742,7 @@ def upsert_pending_approval(conn: sqlite3.Connection, row: dict) -> dict:
                 regime_state=excluded.regime_state,
                 confidence_score=excluded.confidence_score,
                 size_pct_equity=excluded.size_pct_equity,
+                invalidation_price=excluded.invalidation_price,
                 status='pending',
                 resolved_at_ms=NULL,
                 resolve_reason=NULL,
@@ -1219,6 +1774,7 @@ def upsert_pending_approval(conn: sqlite3.Connection, row: dict) -> dict:
                 regime_state=:regime_state,
                 confidence_score=:confidence_score,
                 size_pct_equity=:size_pct_equity,
+                invalidation_price=:invalidation_price,
                 status='pending',
                 resolved_at_ms=NULL,
                 resolve_reason=NULL,
@@ -1238,6 +1794,7 @@ def claim_approval_for_fill(
     now_ms: int,
     resolve_reason: str = "paper_fill",
     expected_analysis_id: str | None = None,
+    commit: bool = True,
 ) -> dict | None:
     """Atomically claim a pending, unexpired row before paper or live fill."""
     ts = int(now_ms)
@@ -1254,7 +1811,7 @@ def claim_approval_for_fill(
         sql += " AND analysis_id = ?"
         params.append(expected_analysis_id)
     cur = conn.execute(sql, params)
-    conn.commit()
+    _commit(conn, commit=commit)
     if cur.rowcount == 0:
         return None
     row = get_approval(conn, approval_id)
@@ -1265,6 +1822,8 @@ def set_approval_paper_order_ids(
     conn: sqlite3.Connection,
     approval_id: str,
     paper_order_ids_json: str | None,
+    *,
+    commit: bool = True,
 ) -> dict | None:
     conn.execute(
         """
@@ -1273,7 +1832,7 @@ def set_approval_paper_order_ids(
         """,
         (paper_order_ids_json, approval_id),
     )
-    conn.commit()
+    _commit(conn, commit=commit)
     row = get_approval(conn, approval_id)
     return dict(row) if row is not None else None
 
@@ -1300,6 +1859,78 @@ def mark_approval_failed(
     return dict(row) if row is not None else None
 
 
+def set_position_stop(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    stop_price: float,
+    stop_source: str,
+    commit: bool = True,
+) -> None:
+    conn.execute(
+        """
+        UPDATE paper_positions SET stop_price = ?, stop_source = ?
+        WHERE symbol = ?
+        """,
+        (float(stop_price), stop_source, symbol.upper()),
+    )
+    _commit(conn, commit=commit)
+
+
+def insert_equity_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    ts: int,
+    equity: float,
+    cash: float,
+    source: str,
+    commit: bool = True,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_equity_snapshots (ts, equity, cash, source)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(ts) DO UPDATE SET
+            equity=excluded.equity,
+            cash=excluded.cash,
+            source=excluded.source
+        """,
+        (int(ts), float(equity), float(cash), source),
+    )
+    _commit(conn, commit=commit)
+
+
+def day_open_equity(conn: sqlite3.Connection, day_start_ms: int) -> float | None:
+    cur = conn.execute(
+        """
+        SELECT equity FROM paper_equity_snapshots
+        WHERE ts >= ?
+        ORDER BY ts ASC
+        LIMIT 1
+        """,
+        (int(day_start_ms),),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return float(row[0])
+
+
+def cancel_pending_approvals(conn: sqlite3.Connection, *, reason: str, ts: int, commit: bool = True) -> int:
+    cur = conn.execute(
+        """
+        UPDATE approval_queue SET
+            status = 'rejected',
+            resolve_reason = ?,
+            resolved_at_ms = ?
+        WHERE status = 'pending'
+        """,
+        (reason, int(ts)),
+    )
+    _commit(conn, commit=commit)
+    return int(cur.rowcount)
+
+
 def resolve_approval(
     conn: sqlite3.Connection,
     approval_id: str,
@@ -1309,11 +1940,7 @@ def resolve_approval(
     paper_order_ids_json: str | None = None,
     resolved_at_ms: int | None = None,
 ) -> dict | None:
-    resolved = (
-        int(resolved_at_ms)
-        if resolved_at_ms is not None
-        else int(time.time() * 1000)
-    )
+    resolved = int(resolved_at_ms) if resolved_at_ms is not None else int(time.time() * 1000)
     cur = conn.execute(
         """
         UPDATE approval_queue SET
@@ -1346,9 +1973,7 @@ def expire_pending_approvals(conn: sqlite3.Connection, *, now_ms: int) -> int:
     return int(cur.rowcount)
 
 
-def list_expired_pending_approvals(
-    conn: sqlite3.Connection, *, now_ms: int
-) -> list[dict]:
+def list_expired_pending_approvals(conn: sqlite3.Connection, *, now_ms: int) -> list[dict]:
     cur = conn.execute(
         f"""
         SELECT {_APPROVAL_COLUMNS}
@@ -1367,6 +1992,7 @@ def set_approval_resolve_reason(
     reason: str,
     *,
     resolved_at_ms: int | None = None,
+    commit: bool = True,
 ) -> dict | None:
     """Overwrite resolve_reason only. With resolved_at_ms, only when the row was resolved at exactly that instant (same run)."""
     if resolved_at_ms is not None:
@@ -1374,7 +2000,7 @@ def set_approval_resolve_reason(
             "UPDATE approval_queue SET resolve_reason = ? WHERE id = ? AND resolved_at_ms = ?",
             (reason, approval_id, int(resolved_at_ms)),
         )
-        conn.commit()
+        _commit(conn, commit=commit)
         if cur.rowcount == 0:
             return None
         return get_approval(conn, approval_id)
@@ -1382,7 +2008,7 @@ def set_approval_resolve_reason(
         "UPDATE approval_queue SET resolve_reason = ? WHERE id = ?",
         (reason, approval_id),
     )
-    conn.commit()
+    _commit(conn, commit=commit)
     return get_approval(conn, approval_id)
 
 
@@ -1531,6 +2157,84 @@ def list_live_orders_open(conn: sqlite3.Connection, *, limit: int = 200) -> list
     return [dict(row) for row in cur.fetchall()]
 
 
+def live_spot_inventory(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    exclude_id: str | None = None,
+) -> tuple[float, float]:
+    """Net filled base qty and average entry from live fills (BUY minus SELL)."""
+    if exclude_id:
+        rows = conn.execute(
+            """
+            SELECT side, executed_qty, cummulative_quote_qty
+            FROM live_orders
+            WHERE symbol = ?
+              AND id != ?
+              AND executed_qty IS NOT NULL
+              AND executed_qty > 0
+            ORDER BY created_at_ms ASC
+            """,
+            (symbol.upper(), exclude_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT side, executed_qty, cummulative_quote_qty
+            FROM live_orders
+            WHERE symbol = ?
+              AND executed_qty IS NOT NULL
+              AND executed_qty > 0
+            ORDER BY created_at_ms ASC
+            """,
+            (symbol.upper(),),
+        ).fetchall()
+    qty = 0.0
+    cost = 0.0
+    for row in rows:
+        filled = float(row["executed_qty"] or 0)
+        quote = float(row["cummulative_quote_qty"] or 0)
+        if str(row["side"]).upper() == "BUY":
+            qty += filled
+            cost += quote
+            continue
+        if qty <= 0:
+            continue
+        avg = cost / qty
+        sold = min(filled, qty)
+        cost -= avg * sold
+        qty -= sold
+    avg_entry = (cost / qty) if qty > 0 else 0.0
+    return qty, avg_entry
+
+
+def list_live_symbols(conn: sqlite3.Connection) -> list[str]:
+    """Symbols with at least one live fill (candidates for non-zero inventory)."""
+    cur = conn.execute(
+        """
+        SELECT DISTINCT symbol FROM live_orders
+        WHERE executed_qty IS NOT NULL AND executed_qty > 0
+        ORDER BY symbol
+        """
+    )
+    return [str(row[0]) for row in cur.fetchall()]
+
+
+def get_latest_live_buy(conn: sqlite3.Connection, symbol: str) -> dict | None:
+    """Most recent filled (or partially filled) live BUY for a symbol."""
+    cur = conn.execute(
+        f"""
+        SELECT {_LIVE_ORDER_COLUMNS} FROM live_orders
+        WHERE symbol = ? AND side = 'BUY' AND executed_qty IS NOT NULL AND executed_qty > 0
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT 1
+        """,
+        (symbol.upper(),),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
 def update_live_order_fill(
     conn: sqlite3.Connection,
     order_id: str,
@@ -1544,6 +2248,7 @@ def update_live_order_fill(
     venue_response_json: str | None,
     reconciled_at_ms: int,
     error: str | None = None,
+    realized_pnl_usd: float | None = None,
 ) -> dict | None:
     """Write reconciled fill state for one live order."""
     conn.execute(
@@ -1552,7 +2257,8 @@ def update_live_order_fill(
         SET status = ?, venue_status = ?, executed_qty = ?, cummulative_quote_qty = ?,
             fills_count = ?, venue_order_id = COALESCE(?, venue_order_id),
             venue_response_json = COALESCE(?, venue_response_json),
-            reconciled_at_ms = ?, error = COALESCE(?, error)
+            reconciled_at_ms = ?, error = COALESCE(?, error),
+            realized_pnl_usd = COALESCE(?, realized_pnl_usd)
         WHERE id = ?
         """,
         (
@@ -1565,6 +2271,7 @@ def update_live_order_fill(
             venue_response_json,
             int(reconciled_at_ms),
             error,
+            realized_pnl_usd,
             order_id,
         ),
     )
@@ -1572,9 +2279,7 @@ def update_live_order_fill(
     return get_live_order(conn, order_id)
 
 
-def sum_live_realized_pnl_utc_day(
-    conn: sqlite3.Connection, *, day_start_ms: int, day_end_ms: int
-) -> float:
+def sum_live_realized_pnl_utc_day(conn: sqlite3.Connection, *, day_start_ms: int, day_end_ms: int) -> float:
     """Sum realized_pnl_usd for live_orders created in [day_start_ms, day_end_ms)."""
     cur = conn.execute(
         """

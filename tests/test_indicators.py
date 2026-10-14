@@ -55,5 +55,38 @@ def test_indicator_series_keys_match_the_stored_columns():
 
     series = indicator_series(highs, lows, closes)
 
-    assert set(series) == {"atr_14", "rsi_14", "ema_20", "ema_200"}
+    assert set(series) == {
+        "atr_14",
+        "rsi_14",
+        "ema_20",
+        "ema_200",
+        "sma_20",
+        "macd_line",
+        "macd_signal",
+        "macd_hist",
+        "bb_mid",
+        "bb_upper",
+        "bb_lower",
+    }
     assert all(len(values) == 30 for values in series.values())
+
+
+def test_indicators_match_frozen_reference() -> None:
+    import json
+    from pathlib import Path
+
+    from jarvise_ingest.indicators import atr, bollinger, ema, macd, rsi
+
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "indicators_reference.json").read_text())
+    closes = fixture["closes"]
+    highs = [c + 1.0 for c in closes]
+    lows = [c - 1.0 for c in closes]
+    assert abs(ema(closes, 20)[19] - fixture["ema_20_at_19"]) < 1e-9
+    assert abs(rsi(closes, 14)[14] - fixture["rsi_14_at_14"]) < 1e-9
+    assert abs(atr(highs, lows, closes, 14)[13] - fixture["atr_14_at_13"]) < 1e-9
+    line, sig, hist = macd(closes)
+    assert abs(line[25] - fixture["macd_line_at_25"]) < 1e-9
+    mid, up, lo = bollinger(closes)
+    assert abs(mid[19] - fixture["bb_mid_at_19"]) < 1e-9
+    assert abs(up[19] - fixture["bb_upper_at_19"]) < 1e-9
+    assert abs(lo[19] - fixture["bb_lower_at_19"]) < 1e-9

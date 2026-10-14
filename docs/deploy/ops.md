@@ -63,7 +63,7 @@ cd /opt/jarvise && bash infra/backup/backup.sh --no-offbox   # SQLite + Qdrant +
 Pin OpenClaw in the VPS `.env` (do not leave `:latest`):
 
 ```bash
-OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.5
+OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.8
 ```
 
 Then pull and recreate:
@@ -83,7 +83,7 @@ If a bump misbehaves, restore the previous image tags in `docker-compose.yml` / 
 | Redis | `redis:7-alpine` |
 | Qdrant | `qdrant/qdrant:v1.13.4` |
 | n8n | `n8nio/n8n:2.39.10` |
-| OpenClaw | `ghcr.io/openclaw/openclaw:2026.9.5` (match `.env` / compose pin; never leave `:latest`) |
+| OpenClaw | `ghcr.io/openclaw/openclaw:2026.9.8` (match `.env` / compose pin; never leave `:latest`; previous `2026.9.5`) |
 | Python base | `python:3.12-slim-bookworm` |
 
 ## Kill switch

@@ -1,11 +1,13 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
--- Runtime owner: src/jarvise_ingest/db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 6).
+-- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 9).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
 -- Notebook: Jarvise : Crypto Trader (14e11c63-e2ee-4b49-898f-b0cc4c61cb4e)
+
+
 -- Timestamps: INTEGER Unix milliseconds (UTC)
 CREATE TABLE IF NOT EXISTS market_technicals (
     symbol TEXT NOT NULL,
@@ -22,6 +24,13 @@ CREATE TABLE IF NOT EXISTS market_technicals (
     adx_14 REAL,
     ema_20 REAL,
     ema_200 REAL,
+    sma_20 REAL,
+    macd_line REAL,
+    macd_signal REAL,
+    macd_hist REAL,
+    bb_mid REAL,
+    bb_upper REAL,
+    bb_lower REAL,
     PRIMARY KEY (symbol, timestamp, timeframe)
 );
 
@@ -115,7 +124,9 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     fee_bps REAL,
     slip_bps REAL NOT NULL,
     analysis_id TEXT,
-    reason TEXT
+    reason TEXT,
+    approval_id TEXT,
+    decision_source TEXT
 );
 
 CREATE TABLE IF NOT EXISTS paper_positions (
@@ -125,7 +136,10 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     entry_price REAL NOT NULL,
     entry_ts INTEGER NOT NULL,
     unrealized_pnl REAL NOT NULL DEFAULT 0,
-    realized_pnl REAL NOT NULL DEFAULT 0
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    stop_price REAL,
+    stop_source TEXT,
+    approval_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS approval_queue (
@@ -139,6 +153,7 @@ CREATE TABLE IF NOT EXISTS approval_queue (
     regime_state TEXT,
     confidence_score REAL,
     size_pct_equity REAL,
+    invalidation_price REAL,
     status TEXT NOT NULL,
     resolved_at_ms INTEGER,
     resolve_reason TEXT,
@@ -150,6 +165,13 @@ CREATE INDEX IF NOT EXISTS idx_approval_queue_symbol_tf_status
     ON approval_queue (symbol, timeframe, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_queue_pending_symbol_tf
     ON approval_queue (symbol, timeframe) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
+    ts INTEGER PRIMARY KEY,
+    equity REAL NOT NULL,
+    cash REAL NOT NULL,
+    source TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS live_orders (
     id TEXT NOT NULL PRIMARY KEY,
@@ -204,3 +226,42 @@ CREATE TABLE IF NOT EXISTS approval_llm_reviews (
 );
 CREATE INDEX IF NOT EXISTS idx_approval_llm_reviews_approval
     ON approval_llm_reviews (approval_id, created_at_ms);
+
+-- Closed-trade outcomes attributed to the approving decision (T2.1 feedback).
+CREATE TABLE IF NOT EXISTS paper_decision_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    approval_id TEXT,
+    open_order_id TEXT NOT NULL,
+    close_order_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    pnl_usd REAL NOT NULL,
+    r_multiple REAL,
+    hold_ms INTEGER,
+    decision_source TEXT NOT NULL,
+    prompt_version TEXT,
+    closed_at_ms INTEGER NOT NULL,
+    UNIQUE(open_order_id, close_order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_decision_outcomes_source_closed
+    ON paper_decision_outcomes (decision_source, closed_at_ms);
+
+-- Durable auto-decide run summaries (Redis last-run alone is not enough).
+CREATE TABLE IF NOT EXISTS paper_auto_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms INTEGER NOT NULL,
+    model TEXT,
+    prompt_version TEXT,
+    ok INTEGER NOT NULL,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    reason TEXT,
+    processed INTEGER,
+    approved_n INTEGER,
+    rejected_n INTEGER,
+    deferred_n INTEGER,
+    apply_failed_n INTEGER,
+    duration_s REAL,
+    payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at
+    ON paper_auto_runs (at_ms DESC);
