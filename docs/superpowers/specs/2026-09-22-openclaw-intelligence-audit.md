@@ -8,7 +8,7 @@
 
 | Piece | Path / surface | Role |
 |-------|----------------|------|
-| OpenClaw container | `docker-compose.yml` service `openclaw` | Image `ghcr.io/openclaw/openclaw:2026.9.5`, port `18789`, Tailscale-only in prod |
+| OpenClaw container | `docker-compose.yml` service `openclaw` | Image `ghcr.io/openclaw/openclaw:2026.9.8`, port `18789`, Tailscale-only in prod |
 | Seed config | `config/openclaw/openclaw.json.example` → `data/openclaw/openclaw.json` via `infra/docker/seed-openclaw-config.sh` | OpenRouter model `openrouter/openrouter/auto`, paper-only env vars, `plugins.load.paths` |
 | Native plugin | `plugins/jarvise-openclaw/` | Skills via `skills.load.extraDirs` (not empty-extension `plugins.load`) |
 | Drop-folder sync | `jarvise rag sync-openclaw` / `jarvise rag refresh` | Exports → `sources/openclaw/` → `kind=openclaw` |
