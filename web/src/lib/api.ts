@@ -1,3 +1,5 @@
+import { dashboardSchema, paperSchema, statusSchema } from "@/lib/schemas";
+
 export type IngestHealthStatus = {
   ok: boolean;
   timeframe: string;
@@ -29,6 +31,15 @@ export type PaperAutoStatus = {
   duration_s?: number;
   at_ms?: number;
   telegram_sent?: boolean;
+  auto_ev_gate?: {
+    enabled?: boolean;
+    blocked?: boolean;
+    min_ev?: number | null;
+    min_n?: number;
+    n?: number;
+    ev?: number | null;
+    reason?: string | null;
+  };
 };
 
 export type StatusPayload = {
@@ -43,6 +54,11 @@ export type StatusPayload = {
   paper_auto?: PaperAutoStatus | null;
   risk_caps: Record<string, unknown>;
   qdrant: Record<string, unknown>;
+  fear_greed_index?: number | null;
+  altcoin_season_index?: number | null;
+  sentiment_note?: string | null;
+  risk_monitor?: unknown;
+  auth_warning?: string | null;
 };
 
 export type ApprovalRow = {
@@ -56,6 +72,58 @@ export type ApprovalRow = {
   regime_state?: string;
   thesis?: string;
   status?: string;
+};
+
+export type OhlcvBar = {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+};
+
+export type OhlcvPayload = {
+  ok: boolean;
+  approval_id: string;
+  symbol: string;
+  timeframe: string;
+  bars: OhlcvBar[];
+  invalidation_price: number | null;
+  action: string;
+};
+
+export type ConfidenceStep = {
+  label: string;
+  delta: number;
+};
+
+export type ConfidenceBreakdown = {
+  regime: string;
+  side: string;
+  base: number;
+  steps: ConfidenceStep[];
+  total: number;
+  gates: {
+    flat_below: number;
+    doctrine_free_approve: number;
+  };
+  insufficient: boolean;
+};
+
+export type AnalysisExplainPayload = {
+  ok: boolean;
+  analysis_id: string;
+  symbol: string;
+  timeframe: string;
+  timestamp: number;
+  candle: {
+    close: number | null;
+    ema_20: number | null;
+    ema_200: number | null;
+    rsi_14: number | null;
+    atr_14: number | null;
+  } | null;
+  breakdown: ConfidenceBreakdown;
 };
 
 export type RecommendationPayload = {
@@ -87,6 +155,8 @@ export type RecommendationPayload = {
     model: string;
     at_ms: number;
   } | null;
+  confidence_breakdown?: ConfidenceBreakdown;
+  gates?: { flat: number; approve: number };
 };
 
 export type PaperPayload = {
@@ -97,6 +167,34 @@ export type PaperPayload = {
   positions: Array<Record<string, unknown>>;
   orders: Array<Record<string, unknown>>;
   error?: string;
+};
+
+export type SourceMetrics = {
+  closed_trades?: number;
+  wins?: number;
+  losses?: number;
+  scratches?: number;
+  expected_value_ev?: number | null;
+  win_rate?: number | null;
+};
+
+export type LossExitBucket = {
+  n: number;
+  pnl_usd: number;
+};
+
+export type LossLesson = {
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  by_exit: {
+    stop_hit: LossExitBucket;
+    flat: LossExitBucket;
+  };
+  by_symbol: Record<string, LossExitBucket>;
+  auto_closed: number;
+  auto_ev: number | null;
+  floors_unchanged: boolean;
 };
 
 export type MetricsPayload = {
@@ -113,7 +211,44 @@ export type MetricsPayload = {
   ratios_ready?: boolean;
   need_trades_for_ratios?: number;
   unmatched_orders?: number;
+  by_decision_source?: Record<string, SourceMetrics>;
+  by_decision_source_30d?: Record<string, SourceMetrics>;
+  auto_ev_gate?: {
+    enabled?: boolean;
+    blocked?: boolean;
+    min_ev?: number | null;
+    min_n?: number;
+    n?: number;
+    ev?: number | null;
+    reason?: string | null;
+  };
+  loss_lesson?: LossLesson;
   error?: string;
+};
+
+export type AnalysisOutcomeKind =
+  | "filled"
+  | "hold"
+  | "rejected"
+  | "timed_out"
+  | "failed"
+  | "pending"
+  | "not_queued";
+
+export type AnalysisOutcome = {
+  kind: AnalysisOutcomeKind;
+  approval_id: string | null;
+  approval_status: string | null;
+  resolve_reason: string | null;
+  resolved_at_ms: number | null;
+  fills: number;
+  fill_reasons: string[];
+};
+
+export type AnalysisSummary = {
+  by_kind?: Partial<Record<AnalysisOutcomeKind, number>>;
+  by_action?: Record<string, number>;
+  total?: number;
 };
 
 export type AnalysisPayload = {
@@ -122,6 +257,7 @@ export type AnalysisPayload = {
   total?: number;
   limit?: number;
   offset?: number;
+  summary?: AnalysisSummary;
   error?: string;
 };
 
@@ -136,8 +272,11 @@ export type ExchangePayload = {
     locked: string;
     total: string;
     usd: number | null;
+    pricing?: string | null;
   }>;
   total_usd?: number | null;
+  priced_count?: number;
+  unpriced_count?: number;
   error?: string;
 };
 
@@ -153,6 +292,7 @@ export type DashboardPayload = {
 async function request<T>(
   path: string,
   init?: RequestInit,
+  schema?: { parse: (data: unknown) => unknown },
 ): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
@@ -167,15 +307,19 @@ async function request<T>(
   }
   const ct = resp.headers.get("content-type") || "";
   if (ct.includes("application/json")) {
-    return (await resp.json()) as T;
+    const data: unknown = await resp.json();
+    if (schema) {
+      return schema.parse(data) as T;
+    }
+    return data as T;
   }
   return {} as T;
 }
 
 export const api = {
-  dashboard: () => request<DashboardPayload>("/api/dashboard"),
-  status: () => request<StatusPayload>("/api/status"),
-  paper: () => request<PaperPayload>("/api/paper"),
+  dashboard: () => request<DashboardPayload>("/api/dashboard", undefined, dashboardSchema),
+  status: () => request<StatusPayload>("/api/status", undefined, statusSchema),
+  paper: () => request<PaperPayload>("/api/paper", undefined, paperSchema),
   metrics: () => request<MetricsPayload>("/api/paper/metrics"),
   analysis: (
     symbol = "",
@@ -190,6 +334,10 @@ export const api = {
     const qs = q.toString();
     return request<AnalysisPayload>(`/api/analysis${qs ? `?${qs}` : ""}`);
   },
+  analysisExplain: (analysisId: string) =>
+    request<AnalysisExplainPayload>(
+      `/api/analysis/${encodeURIComponent(analysisId)}/explain`,
+    ),
   approvals: (status = "pending") =>
     request<{ ok: boolean; rows: ApprovalRow[] }>(
       `/api/approvals?status=${encodeURIComponent(status)}`,
@@ -198,6 +346,8 @@ export const api = {
     request<RecommendationPayload>(
       `/api/approvals/${encodeURIComponent(id)}/recommendation`,
     ),
+  ohlcv: (id: string) =>
+    request<OhlcvPayload>(`/api/approvals/${encodeURIComponent(id)}/ohlcv`),
   exchange: () => request<ExchangePayload>("/api/exchange"),
   approve: (id: string) =>
     request<{ ok: boolean }>("/approvals/approve", {
