@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useState, type FormEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,8 +9,10 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/ui/pagination";
-import { api } from "@/lib/api";
-import { formatNum } from "@/lib/utils";
+import { ConfidenceLadder } from "@/components/ConfidenceLadder";
+import { api, type AnalysisExplainPayload, type AnalysisSummary } from "@/lib/api";
+import { outcomeCopy, parseAnalysisOutcome } from "@/lib/copy";
+import { formatDecisionStamp, formatNum, formatThesisDisplay } from "@/lib/utils";
 
 const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
 
@@ -19,10 +21,15 @@ export function DecisionsPage() {
   const [timeframe, setTimeframe] = useState("");
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([]);
   const [total, setTotal] = useState(0);
+  const [summary, setSummary] = useState<AnalysisSummary | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(10);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [explains, setExplains] = useState<Record<string, AnalysisExplainPayload>>({});
+  const [explainError, setExplainError] = useState<Record<string, string>>({});
+  const [explainLoading, setExplainLoading] = useState<Record<string, boolean>>({});
 
   const load = useCallback(
     async (
@@ -42,6 +49,7 @@ export function DecisionsPage() {
         if (!data.ok) setError(data.error || "Failed");
         setRows(data.rows || []);
         setTotal(Number(data.total ?? data.rows?.length ?? 0));
+        setSummary(data.summary ?? null);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -78,12 +86,43 @@ export function DecisionsPage() {
     void load(symbol, timeframe, clamped, pageSize);
   }
 
+  async function toggleExplain(analysisId: string) {
+    const next = !expanded[analysisId];
+    setExpanded((prev) => ({ ...prev, [analysisId]: next }));
+    if (!next || explains[analysisId] || explainLoading[analysisId]) return;
+    setExplainLoading((prev) => ({ ...prev, [analysisId]: true }));
+    setExplainError((prev) => {
+      const cleared = { ...prev };
+      delete cleared[analysisId];
+      return cleared;
+    });
+    try {
+      const payload = await api.analysisExplain(analysisId);
+      setExplains((prev) => ({ ...prev, [analysisId]: payload }));
+    } catch (err) {
+      setExplainError((prev) => ({
+        ...prev,
+        [analysisId]: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setExplainLoading((prev) => ({ ...prev, [analysisId]: false }));
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">Decisions</h1>
         <p className="text-sm text-[var(--color-muted)]">
           Latest analysis output — regime, action, and thesis.
+        </p>
+        <p className="mt-1 text-xs text-[var(--color-muted)]">
+          0.55 = FLAT gate · 0.70 = auto-approve without trading rules · click Conf to
+          see the ladder
+        </p>
+        <p className="mt-1 text-xs text-[var(--color-muted)]">
+          Outcome = ผลจากคิวอนุมัติ; ถือไม้เดิม = มี position ฝั่งเดียวกันอยู่แล้ว
+          ระบบไม่เพิ่มไม้
         </p>
       </div>
 
@@ -131,6 +170,7 @@ export function DecisionsPage() {
       <Card>
         <CardHeader>
           <CardTitle>Analysis</CardTitle>
+          {summary ? <OutcomeSummaryChips summary={summary} /> : null}
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -148,46 +188,105 @@ export function DecisionsPage() {
                 <table className="w-full text-left text-sm">
                   <thead className="text-[var(--color-muted)]">
                     <tr className="border-b border-[var(--color-border)]">
+                      <th className="py-2 pr-2">No</th>
+                      <th className="py-2 pr-2">Date</th>
+                      <th className="py-2 pr-2">Time</th>
                       <th className="py-2 pr-2">Symbol</th>
                       <th className="py-2 pr-2">TF</th>
                       <th className="py-2 pr-2">Regime</th>
                       <th className="py-2 pr-2">Action</th>
+                      <th className="py-2 pr-2">Outcome</th>
                       <th className="py-2 pr-2">Conf</th>
                       <th className="py-2 pr-2">Size%</th>
                       <th className="py-2">Thesis</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((r, i) => (
-                      <tr
-                        key={i}
-                        className="border-b border-[var(--color-border)]/60 align-top"
-                      >
-                        <td className="py-2 pr-2 font-medium">
-                          {String(r.symbol ?? "")}
-                        </td>
-                        <td className="py-2 pr-2">{String(r.timeframe ?? "")}</td>
-                        <td className="py-2 pr-2">
-                          <Badge variant="muted">
-                            {String(r.regime_state ?? "—")}
-                          </Badge>
-                        </td>
-                        <td className="py-2 pr-2">
-                          <Badge variant="outline">
-                            {String(r.action ?? "—")}
-                          </Badge>
-                        </td>
-                        <td className="py-2 pr-2 tabular-nums">
-                          {formatNum(r.confidence_score)}
-                        </td>
-                        <td className="py-2 pr-2 tabular-nums">
-                          {formatNum(r.size_pct_equity)}
-                        </td>
-                        <td className="py-2 max-w-md text-[var(--color-muted)]">
-                          {String(r.thesis ?? "")}
-                        </td>
-                      </tr>
-                    ))}
+                    {rows.map((r, i) => {
+                      const stamp = formatDecisionStamp(r.timestamp);
+                      const analysisId =
+                        r.analysis_id != null && r.analysis_id !== ""
+                          ? String(r.analysis_id)
+                          : "";
+                      const rowKey = analysisId || String(i);
+                      const isOpen = Boolean(analysisId && expanded[analysisId]);
+                      return (
+                        <Fragment key={rowKey}>
+                          <tr className="border-b border-[var(--color-border)]/60 align-top">
+                            <td className="py-2 pr-2 tabular-nums text-[var(--color-muted)]">
+                              {from + i}
+                            </td>
+                            <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
+                              {stamp.date}
+                            </td>
+                            <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
+                              {stamp.time}
+                            </td>
+                            <td className="py-2 pr-2 font-medium">
+                              {String(r.symbol ?? "")}
+                            </td>
+                            <td className="py-2 pr-2">{String(r.timeframe ?? "")}</td>
+                            <td className="py-2 pr-2">
+                              <Badge variant="muted">
+                                {String(r.regime_state ?? "—")}
+                              </Badge>
+                            </td>
+                            <td className="py-2 pr-2">
+                              <Badge variant="outline">
+                                {String(r.action ?? "—")}
+                              </Badge>
+                            </td>
+                            <td className="py-2 pr-2">
+                              <OutcomeCell row={r} />
+                            </td>
+                            <td className="py-2 pr-2 tabular-nums">
+                              {analysisId ? (
+                                <button
+                                  type="button"
+                                  className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-accent)]"
+                                  onClick={() => void toggleExplain(analysisId)}
+                                  aria-expanded={isOpen}
+                                >
+                                  {formatNum(r.confidence_score)}
+                                  {isOpen ? " ▾" : " ▸"}
+                                </button>
+                              ) : (
+                                formatNum(r.confidence_score)
+                              )}
+                            </td>
+                            <td className="py-2 pr-2 tabular-nums">
+                              {formatNum(r.size_pct_equity)}
+                            </td>
+                            <td className="py-2 max-w-md text-[var(--color-muted)]">
+                              {formatThesisDisplay(r.thesis)}
+                            </td>
+                          </tr>
+                          {isOpen ? (
+                            <tr className="border-b border-[var(--color-border)]/60 bg-[#121922]/60">
+                              <td colSpan={11} className="px-3 py-3">
+                                {explainLoading[analysisId] ? (
+                                  <p className="text-xs text-[var(--color-muted)]">
+                                    Loading confidence ladder…
+                                  </p>
+                                ) : null}
+                                {explainError[analysisId] ? (
+                                  <p className="text-xs text-[var(--color-danger)]">
+                                    {explainError[analysisId]}
+                                  </p>
+                                ) : null}
+                                {explains[analysisId] ? (
+                                  <div className="max-w-lg">
+                                    <ConfidenceLadder
+                                      breakdown={explains[analysisId].breakdown}
+                                    />
+                                  </div>
+                                ) : null}
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -238,6 +337,45 @@ export function DecisionsPage() {
           ) : null}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function OutcomeCell({ row }: { row: Record<string, unknown> }) {
+  const outcome = parseAnalysisOutcome(row.outcome);
+  const copy = outcomeCopy(outcome, String(row.action ?? ""));
+  const title = outcome?.resolve_reason || undefined;
+  return (
+    <div className="min-w-[9rem]" title={title}>
+      <Badge variant={copy.variant}>{copy.label}</Badge>
+      {copy.detail ? (
+        <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">{copy.detail}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function OutcomeSummaryChips({ summary }: { summary: AnalysisSummary }) {
+  const byKind = summary.by_kind || {};
+  const chips: Array<{ label: string; value: number }> = [
+    { label: "ทั้งหมด", value: Number(summary.total ?? 0) },
+    { label: "เปิด/ปิดไม้จริง", value: Number(byKind.filled ?? 0) },
+    { label: "ถือไม้เดิม", value: Number(byKind.hold ?? 0) },
+    { label: "ปฏิเสธ", value: Number(byKind.rejected ?? 0) },
+    { label: "หมดเวลา", value: Number(byKind.timed_out ?? 0) },
+    { label: "ไม่เข้าคิว", value: Number(byKind.not_queued ?? 0) },
+  ];
+  const pending = Number(byKind.pending ?? 0);
+  const failed = Number(byKind.failed ?? 0);
+  if (pending > 0) chips.push({ label: "รออนุมัติ", value: pending });
+  if (failed > 0) chips.push({ label: "ล้มเหลว", value: failed });
+  return (
+    <div className="flex flex-wrap gap-1.5 pt-1">
+      {chips.map((chip) => (
+        <Badge key={chip.label} variant="muted">
+          {chip.label} {chip.value}
+        </Badge>
+      ))}
     </div>
   );
 }

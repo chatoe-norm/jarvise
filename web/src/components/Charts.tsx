@@ -104,13 +104,15 @@ export function WinLossChart({
 
 export function UsdBars({
   rows,
+  emptyMessage = "No priced balances.",
 }: {
   rows: Array<{ asset: string; usd: number }>;
+  emptyMessage?: string;
 }) {
   if (rows.length === 0) {
     return (
       <div className="flex h-40 items-center justify-center text-sm text-[var(--color-muted)]">
-        No priced balances.
+        {emptyMessage}
       </div>
     );
   }

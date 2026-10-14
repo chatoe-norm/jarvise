@@ -154,6 +154,7 @@ services:
       - COINGECKO_API_KEY=${COINGECKO_API_KEY:-}
       - COINGECKO_DEMO_API_KEY=${COINGECKO_DEMO_API_KEY:-}
       - COINGECKO_PRO_API_KEY=${COINGECKO_PRO_API_KEY:-}
+      - COINGECKO_ENVIRONMENT=${COINGECKO_ENVIRONMENT:-}
       - BINANCE_API_KEY=${BINANCE_API_KEY:-}
       - BINANCE_API_SECRET=${BINANCE_API_SECRET:-}
       - BINANCE_API_PRIVATE_KEY_PATH=${BINANCE_API_PRIVATE_KEY_PATH:-}
@@ -162,18 +163,27 @@ services:
       - JARVISE_LIVE_TRADING=${JARVISE_LIVE_TRADING:-false}
       - JARVISE_ROOT=/app
       - JARVISE_PAPER_UNIVERSE=${JARVISE_PAPER_UNIVERSE:-paper_core}
+      - JARVISE_INGEST_SYMBOLS=${JARVISE_INGEST_SYMBOLS:-BTCUSDT,ETHUSDT}
       - JARVISE_PAPER_TIMEFRAME=${JARVISE_PAPER_TIMEFRAME:-4h}
       - JARVISE_APPROVAL_TIMEOUT_MIN=${JARVISE_APPROVAL_TIMEOUT_MIN:-60}
       - JARVISE_INGEST_HEALTH_MAX_AGE_MIN=${JARVISE_INGEST_HEALTH_MAX_AGE_MIN:-60}
       - JARVISE_PAPER_AUTO_DECIDE=${JARVISE_PAPER_AUTO_DECIDE:-false}
-      - JARVISE_AUTO_DECIDE_MODEL=${JARVISE_AUTO_DECIDE_MODEL:-anthropic/claude-sonnet-4.5}
+      - JARVISE_AUTO_DECIDE_MODEL=${JARVISE_AUTO_DECIDE_MODEL:-anthropic/claude-sonnet-5.5}
       - JARVISE_AUTO_DECIDE_MIN_CONF=${JARVISE_AUTO_DECIDE_MIN_CONF:-0.55}
       - JARVISE_AUTO_DECIDE_MAX_PER_RUN=${JARVISE_AUTO_DECIDE_MAX_PER_RUN:-4}
       - JARVISE_AUTO_DECIDE_TIMEOUT_S=${JARVISE_AUTO_DECIDE_TIMEOUT_S:-30}
+      - JARVISE_AUTO_DECIDE_MIN_EV=${JARVISE_AUTO_DECIDE_MIN_EV:-}
+      - JARVISE_AUTO_DECIDE_MIN_EV_N=${JARVISE_AUTO_DECIDE_MIN_EV_N:-10}
+      - JARVISE_ANALYZE_MTF=${JARVISE_ANALYZE_MTF:-true}
+      - JARVISE_ANALYZE_HTF=${JARVISE_ANALYZE_HTF:-1d}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - JARVISE_MAX_NOTIONAL_PER_ORDER=${JARVISE_MAX_NOTIONAL_PER_ORDER:-2000}
       - JARVISE_MAX_DAILY_LOSS_USD=${JARVISE_MAX_DAILY_LOSS_USD:-100}
       - JARVISE_DRAWDOWN_LOCK_PCT=${JARVISE_DRAWDOWN_LOCK_PCT:-5}
+      - JARVISE_MAX_OPEN_POSITIONS=${JARVISE_MAX_OPEN_POSITIONS:-2}
+      - JARVISE_MAX_GROSS_NOTIONAL_PCT=${JARVISE_MAX_GROSS_NOTIONAL_PCT:-10}
+      - JARVISE_MAX_SYMBOL_NOTIONAL_PCT=${JARVISE_MAX_SYMBOL_NOTIONAL_PCT:-6}
+      - JARVISE_MAX_CORRELATED_BUCKET_PCT=${JARVISE_MAX_CORRELATED_BUCKET_PCT:-10}
       - NLM_PROFILE=${NLM_PROFILE:-chatoe}
       - NOTEBOOKLM_MCP_CLI_PATH=/home/jarvise/.nlm
       - HF_HOME=/app/data/.cache/hf
@@ -206,23 +216,32 @@ services:
       start_period: 40s
 
   openclaw:
-    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.5}
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.8}
     restart: unless-stopped
     networks: [jarvise_net]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 1g
-    cpus: 1.0
+    # Control UI OOMs on the default V8 heap at 1g (gateway RSS passes ~800MiB while
+    # sessions load, then the page stays on "gateway not reachable"). 3g / 2.0 / 2048
+    # leaves headroom for chief+3, longer sessions, and future Control UI features on
+    # the 16 GB co-tenant host (LearningYard).
+    mem_limit: 3g
+    cpus: 2.0
     pids_limit: 256
+    # The gateway holds an owner lease in its state dir; a SIGKILL after the default 10s leaves it
+    # stale and the next start loops "lease still active" for minutes. Give it time to drain.
+    stop_grace_period: 90s
     ports:
       - "127.0.0.1:${OPENCLAW_PORT:-18789}:18789"
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENCLAW_PAPER_ONLY=true
       - JARVISE_PAPER_ONLY=true
       - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379/0
       - OPENCLAW_GATEWAY_BIND=lan
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
+      - NODE_OPTIONS=--max-old-space-size=2048
     volumes:
       - ./data/openclaw:/home/node/.openclaw
       - ./config/openclaw:/config:ro
@@ -272,6 +291,12 @@ services:
       - JARVISE_MAX_NOTIONAL_PER_ORDER=${JARVISE_MAX_NOTIONAL_PER_ORDER:-2000}
       - JARVISE_MAX_DAILY_LOSS_USD=${JARVISE_MAX_DAILY_LOSS_USD:-100}
       - JARVISE_DRAWDOWN_LOCK_PCT=${JARVISE_DRAWDOWN_LOCK_PCT:-5}
+      - JARVISE_MAX_OPEN_POSITIONS=${JARVISE_MAX_OPEN_POSITIONS:-2}
+      - JARVISE_MAX_GROSS_NOTIONAL_PCT=${JARVISE_MAX_GROSS_NOTIONAL_PCT:-10}
+      - JARVISE_MAX_SYMBOL_NOTIONAL_PCT=${JARVISE_MAX_SYMBOL_NOTIONAL_PCT:-6}
+      - JARVISE_MAX_CORRELATED_BUCKET_PCT=${JARVISE_MAX_CORRELATED_BUCKET_PCT:-10}
+      - JARVISE_ANALYZE_MTF=${JARVISE_ANALYZE_MTF:-true}
+      - JARVISE_ANALYZE_HTF=${JARVISE_ANALYZE_HTF:-1d}
       - WEB_BASIC_AUTH_USER=${WEB_BASIC_AUTH_USER:-}
       - WEB_BASIC_AUTH_PASSWORD=${WEB_BASIC_AUTH_PASSWORD:-}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-jarvise_doctrine}
@@ -301,6 +326,53 @@ services:
       retries: 10
       start_period: 20s
 
+  # Lean observability (T2.4). Opt-in: docker compose --profile obs up -d
+  # Bind 127.0.0.1 / Tailscale only — never public IPv4. Keep mem limits for T4Trip.
+  prometheus:
+    profiles: [obs]
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    networks: [jarvise_net]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - jarvise_prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    depends_on:
+      - web
+      - jobs
+
+  grafana:
+    profiles: [obs]
+    image: grafana/grafana:11.3.1
+    restart: unless-stopped
+    networks: [jarvise_net]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-jarvise}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-change-me}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://127.0.0.1:3000}
+    volumes:
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - jarvise_grafana:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 networks:
   jarvise_net:
     driver: bridge
@@ -309,3 +381,5 @@ volumes:
   jarvise_redis:
   jarvise_qdrant:
   jarvise_n8n:
+  jarvise_prometheus:
+  jarvise_grafana:
