@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
+from jarvise.charts import export_candle_graphs
 from jarvise.rag import doctrine_snippets, publish_redis_status
 from jarvise_ingest.db import count_indicator_ready, count_market, list_approvals, open_db
 from jarvise_ingest.health import ingest_health
@@ -267,6 +268,15 @@ def _finish_cli_payload(job: str, proc: Any, key: str) -> tuple[int, dict[str, A
     return proc.returncode, payload
 
 
+def _export_ingest_charts(symbols: str, timeframes: list[str]) -> dict[str, Any]:
+    """Draw stored candles after ingest. A write failure does not change the ingest exit code."""
+    names = [part.strip().upper() for part in symbols.split(",") if part.strip()]
+    try:
+        return export_candle_graphs(_analytics_db_path(), names, timeframes)
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
+
+
 def run_ingest() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
@@ -315,6 +325,7 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
             for key in ("db", "market_technicals", "errors", "duration_s"):
                 if key in by_tf["1h"]:
                     payload[key] = by_tf["1h"][key]
+        payload["candle_graphs"] = _export_ingest_charts(symbols, timeframes)
         _publish_best_effort("jarvise:ingest:last", payload)
         return exit_code, payload
 
