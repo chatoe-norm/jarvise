@@ -197,6 +197,44 @@ def notify_kill_switch(
         return False
 
 
+def format_live_flatten_message(result: dict[str, Any]) -> str:
+    lines = [f"Jarvise LIVE FLATTEN (kill-switch: {result.get('reason') or 'engaged'})"]
+    for symbol in result.get("unprotected") or []:
+        lines.append(
+            f"!! UNPROTECTED {symbol}: sell failed and the stop could not be re-placed. "
+            "Close it on Binance now."
+        )
+    for sold in result.get("sold") or []:
+        lines.append(f"- SOLD {sold.get('symbol')} qty={sold.get('qty')} ({sold.get('status')})")
+    cancelled = result.get("cancelled") or []
+    if cancelled:
+        lines.append(f"- stops cancelled: {len(cancelled)}")
+    for stop in result.get("stop_replaced") or []:
+        lines.append(f"- stop re-placed {stop.get('symbol')} ({stop.get('status')})")
+    for dust in result.get("dust") or []:
+        lines.append(f"- DUST {dust.get('symbol')}: {dust.get('reason')}")
+    for err in (result.get("errors") or [])[:DIGEST_CAP]:
+        lines.append(f"! {err}")
+    lines.append("Ledger: Ops (:8080/ops). Clear the kill-switch only after a written review.")
+    return "\n".join(lines)
+
+
+def notify_live_flatten(
+    result: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Alert when a live flatten cancelled, sold, flagged dust, or errored. Soft-fail."""
+    acted = any(result.get(key) for key in ("cancelled", "sold", "dust", "errors", "unprotected"))
+    if not acted or not notify_configured():
+        return False
+    try:
+        return send_telegram_message(format_live_flatten_message(result), client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify live flatten soft-fail: %s", type(exc).__name__)
+        return False
+
+
 def format_job_failure_message(job: str, error: str) -> str:
     return (
         f"Jarvise job FAILED: {job}\n"

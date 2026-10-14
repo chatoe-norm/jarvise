@@ -57,6 +57,7 @@ export type StatusPayload = {
   fear_greed_index?: number | null;
   altcoin_season_index?: number | null;
   sentiment_note?: string | null;
+  risk_monitor?: unknown;
   auth_warning?: string | null;
 };
 
@@ -177,6 +178,25 @@ export type SourceMetrics = {
   win_rate?: number | null;
 };
 
+export type LossExitBucket = {
+  n: number;
+  pnl_usd: number;
+};
+
+export type LossLesson = {
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  by_exit: {
+    stop_hit: LossExitBucket;
+    flat: LossExitBucket;
+  };
+  by_symbol: Record<string, LossExitBucket>;
+  auto_closed: number;
+  auto_ev: number | null;
+  floors_unchanged: boolean;
+};
+
 export type MetricsPayload = {
   ok?: boolean;
   closed_trades?: number;
@@ -202,7 +222,33 @@ export type MetricsPayload = {
     ev?: number | null;
     reason?: string | null;
   };
+  loss_lesson?: LossLesson;
   error?: string;
+};
+
+export type AnalysisOutcomeKind =
+  | "filled"
+  | "hold"
+  | "rejected"
+  | "timed_out"
+  | "failed"
+  | "pending"
+  | "not_queued";
+
+export type AnalysisOutcome = {
+  kind: AnalysisOutcomeKind;
+  approval_id: string | null;
+  approval_status: string | null;
+  resolve_reason: string | null;
+  resolved_at_ms: number | null;
+  fills: number;
+  fill_reasons: string[];
+};
+
+export type AnalysisSummary = {
+  by_kind?: Partial<Record<AnalysisOutcomeKind, number>>;
+  by_action?: Record<string, number>;
+  total?: number;
 };
 
 export type AnalysisPayload = {
@@ -211,6 +257,7 @@ export type AnalysisPayload = {
   total?: number;
   limit?: number;
   offset?: number;
+  summary?: AnalysisSummary;
   error?: string;
 };
 

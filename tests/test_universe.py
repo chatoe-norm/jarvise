@@ -79,7 +79,19 @@ def test_seed_paper_core_lists_btc_and_eth_from_2021(tmp_path: Path):
     conn.close()
 
 
-def test_universe_as_of_unknown_universe_is_empty(tmp_path: Path):
+def test_seed_paper_liquid_lists_btc_eth_sol_bnb(tmp_path: Path):
+    from jarvise_ingest.universe import PAPER_LIQUID, seed_named_universe, seed_paper_liquid
+
+    conn = open_db(tmp_path / "t.db")
+    assert seed_paper_liquid(conn) >= 4
+    assert seed_named_universe(conn, PAPER_LIQUID) == 0
+    symbols = universe_as_of(conn, PAPER_LIQUID, as_of_ms=1_700_000_000_000)
+    assert set(symbols) == {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+    assert universe_as_of(conn, PAPER_CORE, as_of_ms=1_700_000_000_000) == []
+    conn.close()
+
+
+def test_universe_as_of_unknown_universe_is_empty(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "t.db")
     assert universe_as_of(conn, "nope", as_of_ms=1_700_000_000_000) == []
     conn.close()

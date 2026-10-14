@@ -9,9 +9,25 @@ export function formatNum(value: unknown, digits = 2): string {
   if (value === null || value === undefined || value === "") return "—";
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return String(value);
+  if (n === 0) return "0";
   return n.toLocaleString(undefined, {
     maximumFractionDigits: digits,
     minimumFractionDigits: 0,
+  });
+}
+
+/** Crypto size / qty — enough fraction digits so BTC ~0.0013 is not "0". */
+export function formatQty(value: unknown, digits = 8): string {
+  return formatNum(value, digits);
+}
+
+/** Thesis column only: expand scientific EMA/RSI dumps; do not rewrite SQLite. */
+export function formatThesisDisplay(thesis: unknown): string {
+  if (thesis == null || thesis === "") return "";
+  return String(thesis).replace(/(-?\d+(?:\.\d+)?)e([+-]?\d+)/gi, (raw, mant, exp) => {
+    const n = Number(`${mant}e${exp}`);
+    if (!Number.isFinite(n)) return raw;
+    return formatNum(n, Math.abs(n) >= 1000 ? 2 : 4);
   });
 }
 

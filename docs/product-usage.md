@@ -103,6 +103,14 @@ Historical replay (stored candles only):
 cp data/analytics/jarvise.db /tmp/jarvise-bt.db
 .venv/bin/jarvise analyze --replay --since 2024-01-01 --until 2024-06-01 \
   --universe paper_core --timeframe 4h --db /tmp/jarvise-bt.db --apply-paper --json
+
+# closer to paper auto-decide code gates (same-side hold, opposite defer; no Claude)
+.venv/bin/jarvise analyze --replay --since 2024-01-01 --universe paper_core --timeframe 4h \
+  --db /tmp/jarvise-bt.db --apply-paper --paper-policy rules --json
+
+# same frozen strategy on two chronological windows (ledger resets between them)
+.venv/bin/jarvise analyze --replay --since 2024-01-01 --oos-since 2025-07-01 --until 2026-01-01 \
+  --universe paper_core --timeframe 4h --db /tmp/jarvise-bt.db --apply-paper --paper-policy rules --json
 ```
 
 On Windows use `.venv\Scripts\jarvise` instead of `.venv/bin/jarvise`. Set `JARVISE_APPROVAL_TIMEOUT_MIN` in `.env` (see `.env.example`).
@@ -111,11 +119,14 @@ On Windows use `.venv\Scripts\jarvise` instead of `.venv/bin/jarvise`. Set `JARV
 
 Deploy per [hostinger-vps.md](deploy/hostinger-vps.md): stack at `/opt/jarvise`, Tailscale only.
 
+**Local vs VPS SQLite (not the same book):** `data/analytics/jarvise.db` is gitignored. A laptop Dashboard (`:8080` / Vite `:5173` / another local port) reads a local file that is often missing, so `ensure_paper_account` seeds **$10,000**. The 24/7 book is `/opt/jarvise/data/analytics/jarvise.db` on a compose bind-mount. Deploy updates code only (`git checkout -f`); it does **not** call `reset_paper_ledger` and does **not** `compose down -v`. Replay `--apply-paper` may wipe an **isolated copy** only. To inspect the same numbers locally, copy that VPS file read-only — do not expect `git pull` to reset or sync the ledger.
+
 **Automatic** (n8n → jobs service in [`src/jarvise/jobs.py`](../src/jarvise/jobs.py)):
 
-- Every ~15 minutes: `POST /jobs/ingest` → refresh market data
+- Every ~15 minutes: `POST /jobs/ingest` → refresh market data (includes Alternative.me Fear & Greed as context)
+- Every ~15 minutes: `POST /jobs/risk-monitor` → paper MTM + stop FLAT + daily halt (runs even if kill-switch is on). With live **off** it places no live orders. With live **on** it also reconciles live orders, engages the kill-switch on the live daily-loss cap, and while the kill-switch is engaged cancels Jarvise's own stops and MARKET-sells live spot positions (owner shortcut: `jarvise trade flatten [--dry-run]`; see [`docs/ops/live-enable-checklist.md`](ops/live-enable-checklist.md)).
 - Every ~6 hours: `POST /jobs/rag-refresh` → refresh doctrine RAG (indexes owner protocol extracts + OpenClaw only; generic Notebook scrapes stay on disk for NotebookLM but are not embedded)
-- Every ~4 hours: `POST /jobs/paper-run` → enqueue paper candidates (`paper_core` @ `4h` by default; **no** `--auto-fill`), then `POST /jobs/paper-auto-decide` → no-op unless `JARVISE_PAPER_AUTO_DECIDE=true`
+- Every ~4 hours: `POST /jobs/paper-run` → enqueue paper candidates (`paper_core` @ `4h` by default; **no** `--auto-fill`), then `POST /jobs/paper-auto-decide` → no-op unless `JARVISE_PAPER_AUTO_DECIDE=true`. Opt-in four-spot static list: `JARVISE_PAPER_UNIVERSE=paper_liquid` **and** `JARVISE_INGEST_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT` (then 4h `--since` backfill SOL/BNB). Default jobs stay BTC+ETH. Analyzer floors and `same_side_hold` unchanged; `JARVISE_MAX_OPEN_POSITIONS` still defaults to 2.
 - Every ~1 hour: `POST /jobs/paper-expire` → mark timed-out approvals (timeout → **hold** if open paper position is already the same side; otherwise timeout → FLAT)
 - Every ~1 hour: `POST /jobs/ingest-health` → Telegram alert when `ema_200` warm-up is missing, candles are stale, or the series has gaps (alert only; fix with the one-shot backfill shown in the message)
 - Every ~1 hour (only after live is enabled): `POST /jobs/live-reconcile` → read-only `GET /api/v3/order` by `jrv-<approval id>` for open `live_orders`; persists fill state; places nothing. Also `jarvise trade reconcile --json`.
@@ -140,6 +151,8 @@ Optional Telegram alerts when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set 
 **Wait-time ops (C):** n8n `Jarvise ingest health` (hourly) + pending digest + Telegram (`TELEGRAM_*`) keep candles/EMA200 visible. VPS compose `--profile obs` is up (Grafana/Prometheus Tailscale `:3000`/`:9090`). Do **not** flip `JARVISE_LIVE_TRADING`, `JARVISE_AUTO_DECIDE_MIN_EV`, or restore `JARVISE_ANALYZE_MTF=true` until ~10 closed `auto_*` trades.
 
 **Stocks / ETF paper (T2.6):** universe `paper_equity` (SPY, QQQ) ingests via Stooq CSV (`jarvise ingest --universe paper_equity --timeframe 1d --skip-book --skip-derivatives`). Skips Binance book/deriv; market-safety auto-skips those streams for equity symbols. Paper fee `JARVISE_PAPER_EQUITY_FEE_BPS` (default 2). Weekend holes on 1d are not reported as gaps. No broker live.
+
+**Crypto pairlist opt-in (`paper_liquid`):** Freqtrade StaticPairList idea only — BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT. See [`docs/research/2026-10-05-freqtrade-pairlist-for-jarvise.md`](research/2026-10-05-freqtrade-pairlist-for-jarvise.md). Does not replace `paper_core`. Skip VolumePairList / forcebuy / ccxt.
 
 **Paper fees:** simulated fills use **10 bps** by default (Binance spot taker, no BNB discount) plus slip `max(5 bps, half bid-ask spread)` when book data exists. Override fee with `JARVISE_PAPER_FEE_BPS`. Each fill stores `fee_bps` on `paper_orders`.
 
