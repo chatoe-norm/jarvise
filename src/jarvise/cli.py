@@ -11,6 +11,7 @@ import typer
 
 from jarvise import __version__
 from jarvise import config as store
+from jarvise.charts import analytics_db_path, export_candle_graphs
 from jarvise_exchange.cli import exchange_app
 from jarvise_ingest.db_cli import db_app
 from jarvise_trade.cli import trade_app
@@ -27,6 +28,7 @@ ROOT_EPILOG = """Examples:
   jarvise trade reconcile --dry-run --json
   jarvise db status --json
   jarvise db prune --older-than 180d --dry-run --json
+  jarvise charts export --symbol BTCUSDT --timeframe 4h --output json
 """
 
 STATUS_EPILOG = """Examples:
@@ -96,6 +98,16 @@ app.add_typer(exchange_app, name="exchange")
 app.add_typer(trade_app, name="trade")
 app.add_typer(db_app, name="db")
 
+charts_app = typer.Typer(
+    name="charts",
+    help="Draw SVG snapshots from stored candles (not a price feed).",
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    pretty_exceptions_show_locals=False,
+)
+app.add_typer(charts_app, name="charts")
+
 
 class OutputFormat(str, Enum):
     text = "text"
@@ -146,6 +158,23 @@ def require_initialized(root: Path) -> None:
         f"jarvise init --path {root} --yes",
         "jarvise init --yes",
     )
+
+
+@charts_app.command("export")
+def charts_export(
+    symbol: Annotated[str, typer.Option("--symbol", help="Comma-separated symbols.")] = "BTCUSDT,ETHUSDT",
+    timeframe: Annotated[str, typer.Option("--timeframe", help="Comma-separated timeframes.")] = "1h,4h,1d",
+    output: OutputOpt = OutputFormat.text,
+) -> None:
+    """Write candle SVGs from the analytics database. Does not fetch prices."""
+    result = export_candle_graphs(
+        analytics_db_path(),
+        [part.strip() for part in symbol.split(",") if part.strip()],
+        [part.strip() for part in timeframe.split(",") if part.strip()],
+    )
+    emit(result, output)
+    if not result.get("ok"):
+        raise typer.Exit(code=2)
 
 
 @app.command(epilog=STATUS_EPILOG)
