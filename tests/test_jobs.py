@@ -61,6 +61,10 @@ def test_ingest_also_fetches_paper_timeframe(monkeypatch) -> None:
 
     monkeypatch.setattr("jarvise.jobs.subprocess.run", fake_run)
     monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "jarvise.jobs.export_candle_graphs",
+        lambda *a, **k: {"ok": True, "written": [], "skipped": []},
+    )
     code, body = run_ingest()
     assert code == 0
     assert body["ok"] is True
@@ -112,6 +116,10 @@ def test_ingest_backfills_short_htf_only(monkeypatch) -> None:
     monkeypatch.setattr("jarvise.jobs.subprocess.run", fake_run)
     monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
     monkeypatch.setattr("jarvise.jobs.htf_symbol_stats", stats)
+    monkeypatch.setattr(
+        "jarvise.jobs.export_candle_graphs",
+        lambda *a, **k: {"ok": True, "written": [], "skipped": []},
+    )
     code, _body = run_ingest()
     assert code == 0
     by_tf = {cmd[cmd.index("--timeframe") + 1]: cmd for cmd in captured}
@@ -119,6 +127,37 @@ def test_ingest_backfills_short_htf_only(monkeypatch) -> None:
     assert "--limit" in by_tf["4h"] and "--since" not in by_tf["4h"]
     assert by_tf["1d"][by_tf["1d"].index("--since") + 1] == HTF_BACKFILL_SINCE
     assert "--limit" not in by_tf["1d"]
+
+
+def test_ingest_chart_export_failure_keeps_exit_code(monkeypatch) -> None:
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: False)
+    monkeypatch.delenv("JARVISE_PAPER_TIMEFRAME", raising=False)
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{"ok": true}'
+        stderr = ""
+
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return FakeProc()
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("jarvise.jobs.subprocess.run", fake_run)
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *a, **k: None)
+    monkeypatch.setattr("jarvise.jobs.htf_symbol_stats", lambda *_a, **_k: [(2111, 1451)])
+    monkeypatch.setattr("jarvise.jobs.export_candle_graphs", boom)
+    code, body = run_ingest()
+    assert code == 0
+    assert body["ok"] is True
+    assert body["candle_graphs"]["ok"] is False
+    assert body["candle_graphs"]["error"] == "OSError"
+    assert len(captured) == 3
+    assert all(cmd[1:3] == ["-m", "jarvise"] and "ingest" in cmd for cmd in captured)
 
 
 def test_jobs_healthz() -> None:
