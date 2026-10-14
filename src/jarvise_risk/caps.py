@@ -40,6 +40,19 @@ def _fenv(name: str, default: float) -> float:
 DEFAULT_MAX_NOTIONAL = 2000.0
 DEFAULT_MAX_DAILY_LOSS = 100.0
 DEFAULT_DRAWDOWN_LOCK_PCT = 5.0
+DEFAULT_MAX_OPEN_POSITIONS = 2
+DEFAULT_MAX_GROSS_NOTIONAL_PCT = 10.0
+DEFAULT_MAX_SYMBOL_NOTIONAL_PCT = 6.0
+DEFAULT_MAX_CORRELATED_BUCKET_PCT = 10.0
+HARD_MAX_RISK_PER_TRADE_PCT = 1.0
+
+# Correlated exposure buckets (T2.2). Symbols may appear in at most one bucket.
+CRYPTO_MAJORS = frozenset({"BTCUSDT", "ETHUSDT"})
+US_EQUITY = frozenset({"SPY", "QQQ"})
+BUCKETS: dict[str, frozenset[str]] = {
+    "crypto_majors": CRYPTO_MAJORS,
+    "us_equity": US_EQUITY,
+}
 
 
 @dataclass(frozen=True)
@@ -47,25 +60,66 @@ class RiskCaps:
     max_notional_per_order: float
     max_daily_loss_usd: float
     drawdown_lock_pct: float
+    max_open_positions: int = DEFAULT_MAX_OPEN_POSITIONS
+    max_gross_notional_pct: float = DEFAULT_MAX_GROSS_NOTIONAL_PCT
+    max_symbol_notional_pct: float = DEFAULT_MAX_SYMBOL_NOTIONAL_PCT
+    max_correlated_bucket_pct: float = DEFAULT_MAX_CORRELATED_BUCKET_PCT
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[str, float | int]:
         return {
             "max_notional_per_order": self.max_notional_per_order,
             "max_daily_loss_usd": self.max_daily_loss_usd,
             "drawdown_lock_pct": self.drawdown_lock_pct,
+            "max_open_positions": self.max_open_positions,
+            "max_gross_notional_pct": self.max_gross_notional_pct,
+            "max_symbol_notional_pct": self.max_symbol_notional_pct,
+            "max_correlated_bucket_pct": self.max_correlated_bucket_pct,
         }
 
 
 def load_risk_caps() -> RiskCaps:
     return RiskCaps(
-        max_notional_per_order=_fenv(
-            "JARVISE_MAX_NOTIONAL_PER_ORDER", DEFAULT_MAX_NOTIONAL
-        ),
+        max_notional_per_order=_fenv("JARVISE_MAX_NOTIONAL_PER_ORDER", DEFAULT_MAX_NOTIONAL),
         max_daily_loss_usd=_fenv("JARVISE_MAX_DAILY_LOSS_USD", DEFAULT_MAX_DAILY_LOSS),
-        drawdown_lock_pct=_fenv(
-            "JARVISE_DRAWDOWN_LOCK_PCT", DEFAULT_DRAWDOWN_LOCK_PCT
+        drawdown_lock_pct=_fenv("JARVISE_DRAWDOWN_LOCK_PCT", DEFAULT_DRAWDOWN_LOCK_PCT),
+        max_open_positions=max(
+            0, int(_fenv("JARVISE_MAX_OPEN_POSITIONS", float(DEFAULT_MAX_OPEN_POSITIONS)))
+        ),
+        max_gross_notional_pct=_fenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", DEFAULT_MAX_GROSS_NOTIONAL_PCT),
+        max_symbol_notional_pct=_fenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", DEFAULT_MAX_SYMBOL_NOTIONAL_PCT),
+        max_correlated_bucket_pct=_fenv(
+            "JARVISE_MAX_CORRELATED_BUCKET_PCT", DEFAULT_MAX_CORRELATED_BUCKET_PCT
         ),
     )
+
+
+def utc_day_bounds_ms(now_ms: int) -> tuple[int, int]:
+    """UTC calendar day [start, end) in unix milliseconds."""
+    day_ms = 86_400_000
+    start = (int(now_ms) // day_ms) * day_ms
+    return start, start + day_ms
+
+
+def max_risk_per_trade_pct() -> float:
+    """Owner may tighten below 1%; never raise the doctrine ceiling."""
+    raw = _fenv("JARVISE_MAX_RISK_PER_TRADE_PCT", HARD_MAX_RISK_PER_TRADE_PCT)
+    return min(HARD_MAX_RISK_PER_TRADE_PCT, max(0.0, float(raw)))
+
+
+def risk_at_stop_pct(
+    *,
+    size_pct_equity: float,
+    entry: float,
+    stop: float,
+    round_trip_cost_bps: float = 0.0,
+) -> float:
+    """Share of equity lost if the stop fills (size × stop distance + round-trip costs)."""
+    entry_f = float(entry)
+    if entry_f == 0:
+        return 0.0
+    dist = abs(entry_f - float(stop)) / abs(entry_f)
+    cost = max(0.0, float(round_trip_cost_bps)) / 10_000.0
+    return max(0.0, float(size_pct_equity)) * (dist + cost)
 
 
 def estimated_notional(
@@ -76,6 +130,18 @@ def estimated_notional(
     return max(0.0, float(equity)) * (max(0.0, float(size_pct_equity)) / 100.0)
 
 
+def position_notional(pos: dict[str, Any]) -> float:
+    return abs(float(pos.get("qty") or 0.0) * float(pos.get("entry_price") or 0.0))
+
+
+def symbol_bucket(symbol: str) -> str | None:
+    sym = str(symbol).upper()
+    for name, members in BUCKETS.items():
+        if sym in members:
+            return name
+    return None
+
+
 def check_caps(
     caps: RiskCaps,
     *,
@@ -83,28 +149,100 @@ def check_caps(
     starting_equity: float,
     size_pct_equity: float | None = None,
     action: str | None = None,
+    utc_day_realized_pnl_usd: float = 0.0,
+    utc_day_mtm_pnl_usd: float | None = None,
+    entry_price: float | None = None,
+    stop_price: float | None = None,
+    round_trip_cost_bps: float = 0.0,
 ) -> str | None:
-    """Return breach reason or None if OK."""
+    """Return account/order breach reason or None if OK (engage kill-switch on breach).
+
+    ``max_daily_loss_usd`` is UTC-calendar realized PnL (same window as live submit),
+    not lifetime distance from starting equity. Drawdown lock stays vs starting equity.
+    """
     start = float(starting_equity) if starting_equity else 0.0
     eq = float(equity)
     if start > 0:
         dd_pct = max(0.0, (start - eq) / start * 100.0)
         if dd_pct >= caps.drawdown_lock_pct:
-            return (
-                f"drawdown_lock: {dd_pct:.2f}% >= {caps.drawdown_lock_pct:.2f}%"
-            )
-        loss = start - eq
-        if loss >= caps.max_daily_loss_usd:
-            return (
-                f"max_daily_loss: loss ${loss:.2f} >= ${caps.max_daily_loss_usd:.2f}"
-            )
+            return f"drawdown_lock: {dd_pct:.2f}% >= {caps.drawdown_lock_pct:.2f}%"
+    day_pnl = float(utc_day_realized_pnl_usd)
+    if day_pnl <= -caps.max_daily_loss_usd:
+        return f"max_daily_loss: utc_day_pnl ${day_pnl:.2f} <= -${caps.max_daily_loss_usd:.2f}"
+    if utc_day_mtm_pnl_usd is not None and float(utc_day_mtm_pnl_usd) <= -caps.max_daily_loss_usd:
+        return (
+            f"max_daily_loss: utc_day_mtm_pnl ${float(utc_day_mtm_pnl_usd):.2f} "
+            f"<= -${caps.max_daily_loss_usd:.2f}"
+        )
 
     act = (action or "").lower()
     if act in {"long", "short"} and size_pct_equity is not None:
         notional = estimated_notional(equity=eq, size_pct_equity=float(size_pct_equity))
         if notional > caps.max_notional_per_order:
+            return f"max_notional: ${notional:.2f} > ${caps.max_notional_per_order:.2f}"
+        if stop_price is None:
+            return "missing_invalidation"
+        if entry_price is not None and float(entry_price) > 0:
+            risk = risk_at_stop_pct(
+                size_pct_equity=float(size_pct_equity),
+                entry=float(entry_price),
+                stop=float(stop_price),
+                round_trip_cost_bps=round_trip_cost_bps,
+            )
+            ceiling = max_risk_per_trade_pct()
+            if risk > ceiling:
+                return f"risk_at_stop: {risk:.2f}% > {ceiling:.2f}%"
+    return None
+
+
+def check_portfolio_caps(
+    caps: RiskCaps,
+    *,
+    equity: float,
+    positions: list[dict[str, Any]],
+    symbol: str,
+    action: str | None,
+    size_pct_equity: float | None = None,
+) -> str | None:
+    """Multi-symbol book limits. Soft breach — block without engaging kill-switch."""
+    act = (action or "").lower()
+    if act not in {"long", "short"} or size_pct_equity is None:
+        return None
+    eq = max(0.0, float(equity))
+    if eq <= 0:
+        return "portfolio: equity <= 0"
+    sym = str(symbol).upper()
+    cand_notional = estimated_notional(equity=eq, size_pct_equity=float(size_pct_equity))
+    by_sym = {str(p["symbol"]).upper(): p for p in positions}
+    existing = by_sym.get(sym)
+    # Same-side hold does not change book exposure.
+    if existing is not None and str(existing.get("side") or "").lower() == act:
+        return None
+
+    projected: dict[str, float] = {s: position_notional(p) for s, p in by_sym.items() if s != sym}
+    projected[sym] = cand_notional
+
+    if len(projected) > caps.max_open_positions:
+        return f"max_open_positions: {len(projected)} > {caps.max_open_positions}"
+
+    gross = sum(projected.values())
+    gross_pct = (gross / eq) * 100.0
+    if gross_pct > caps.max_gross_notional_pct:
+        return f"max_gross_notional_pct: {gross_pct:.2f}% > {caps.max_gross_notional_pct:.2f}%"
+
+    sym_pct = (cand_notional / eq) * 100.0
+    if sym_pct > caps.max_symbol_notional_pct:
+        return f"max_symbol_notional_pct: {sym_pct:.2f}% > {caps.max_symbol_notional_pct:.2f}%"
+
+    bucket = symbol_bucket(sym)
+    if bucket is not None:
+        members = BUCKETS[bucket]
+        bucket_notional = sum(n for s, n in projected.items() if s in members)
+        bucket_pct = (bucket_notional / eq) * 100.0
+        if bucket_pct > caps.max_correlated_bucket_pct:
             return (
-                f"max_notional: ${notional:.2f} > ${caps.max_notional_per_order:.2f}"
+                f"max_correlated_bucket_pct[{bucket}]: "
+                f"{bucket_pct:.2f}% > {caps.max_correlated_bucket_pct:.2f}%"
             )
     return None
 

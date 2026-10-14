@@ -1,17 +1,27 @@
 """jarvise_risk — venue-agnostic capital caps (paper enforcement first)."""
 
 from jarvise_risk.caps import (
+    BUCKETS,
+    CRYPTO_MAJORS,
+    HARD_MAX_RISK_PER_TRADE_PCT,
     KILL_SWITCH_KEY,
     KILL_SWITCH_REASON_KEY,
+    US_EQUITY,
     KillSwitchUnavailable,
     RiskCaps,
     check_caps,
+    check_portfolio_caps,
     engage_kill_switch,
     engage_kill_switch_strict,
     estimated_notional,
     kill_switch_state,
     load_risk_caps,
+    max_risk_per_trade_pct,
+    position_notional,
     read_kill_switch,
+    risk_at_stop_pct,
+    symbol_bucket,
+    utc_day_bounds_ms,
 )
 from jarvise_risk.market_safety import (
     MarketSafetyConfig,
@@ -24,14 +34,19 @@ from jarvise_risk.market_safety import (
 )
 
 __all__ = [
+    "BUCKETS",
+    "CRYPTO_MAJORS",
     "KILL_SWITCH_KEY",
     "KILL_SWITCH_REASON_KEY",
+    "HARD_MAX_RISK_PER_TRADE_PCT",
     "KillSwitchUnavailable",
     "MarketSafetyConfig",
     "MarketSafetyResult",
     "RiskCaps",
+    "US_EQUITY",
     "apply_safety_to_analysis",
     "check_caps",
+    "check_portfolio_caps",
     "engage_kill_switch",
     "engage_kill_switch_strict",
     "estimated_notional",
@@ -40,6 +55,11 @@ __all__ = [
     "kill_switch_state",
     "load_market_safety_config",
     "load_risk_caps",
+    "max_risk_per_trade_pct",
     "maybe_engage_kill_switch",
+    "position_notional",
     "read_kill_switch",
+    "risk_at_stop_pct",
+    "symbol_bucket",
+    "utc_day_bounds_ms",
 ]

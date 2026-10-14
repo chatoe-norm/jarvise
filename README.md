@@ -1,6 +1,6 @@
 # jarvise
 
-Paper analytics for an intelligent crypto trader. **No order placement** in this phase.
+Paper analytics for an intelligent crypto trader. Live submit exists but stays gated off (`JARVISE_LIVE_TRADING=false`) until the owner enables trade keys.
 
 Repository: https://github.com/chatoe-norm/jarvise
 
@@ -11,26 +11,55 @@ How to run the shipped product day-to-day (CLI, VPS schedules, agent/MCP): [docs
 One Typer entrypoint: `jarvise` (`status` / `init` / `config` / `ingest` / `analyze`). Paper ingest and analyze are delegated from that CLI; `jarvise-ingest` / `jarvise-analyze` remain compatibility aliases.
 
 ```powershell
-# Python 3.11+ (repo uses 3.12 locally)
-python -m venv .venv
+# Python 3.12 required (3.11+ ok; prefer 3.12)
+py -3.12 -m venv .venv
 .venv\Scripts\pip install -e ".[dev]"
 
-.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --limit 50 --skip-derivatives --json
+.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 4h --limit 50 --skip-derivatives --json
 .venv\Scripts\jarvise analyze --symbol BTCUSDT --timeframe 4h --json
 ```
 
-On macOS/Linux, use `.venv/bin/pip` and `.venv/bin/jarvise` instead.
+On macOS/Linux: `python3.12 -m venv .venv`, then use `.venv/bin/pip` and `.venv/bin/jarvise`.
 
 With CoinGlass:
 
 ```powershell
 $env:COINGLASS_API_KEY="..."
-.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 1h --json
+.venv\Scripts\jarvise ingest --symbol BTCUSDT --timeframe 4h --json
 ```
 
 SQLite DB: `data/analytics/jarvise.db` (gitignored). Doctrine extract: `data/analytics/`.
 
 On Windows, prefer `.venv\Scripts\jarvise` over bash `bin/jarvise status` — the bash shim and Typer CLI use separate state files.
+
+## Command Dashboard (local)
+
+Owner UI is the Vite/React SPA under [`web/`](web/README.md), served by FastAPI `jarvise_web` on `:8080` (Home / Paper / Decisions / Exchange / Ops). Day-to-day paths: [docs/product-usage.md](docs/product-usage.md).
+
+```bash
+.venv/bin/pip install -e ".[web]"
+.venv/bin/python -m uvicorn jarvise_web.app:app --port 8080
+# optional hot UI: cd web && npm install && npm run dev   # :5173 → proxies API
+```
+
+## Validate and format
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+make hooks     # install pre-commit + pre-push hooks once
+make format    # Ruff lint fixes, then Ruff formatting
+make check     # format check + ruff + mypy + full pytest coverage gate
+
+# Scoped Python loop (keeps lint/type checks, skips the repo-wide coverage gate)
+./scripts/check.sh tests/test_db_upsert.py -q
+
+# Frontend validation
+cd web && npm ci && npm run build
+```
+
+`scripts/check.sh` automatically uses the active virtual environment or the repo-local `.venv`; shell activation is not required.
+
+Windows (no bash): `.venv\Scripts\ruff format --check src tests scripts`, then `.venv\Scripts\ruff check src tests scripts`, `.venv\Scripts\mypy`, and `.venv\Scripts\python -m pytest --cov=src --cov-report=term --cov-fail-under=70`.
 
 ## Background MCP plane (Phase 2)
 
@@ -120,6 +149,14 @@ Exit codes: `0` finished, `1` startup or missing config, `2` the agent ran and f
 - Ingest HTTP is **GET-only** market data
 - OpenClaw MCP: research/signal context only until manual-approval phase
 - OpenClaw paper notes: `data/openclaw/exports` → `jarvise rag sync-openclaw` → Qdrant `kind=openclaw` (plugin: `plugins/jarvise-openclaw`)
+
+## License
+
+Jarvise is licensed under the [MIT License](LICENSE).
+
+## Financial risk disclaimer
+
+Jarvise is software for research, analytics, and controlled trading workflows. It is not financial, investment, tax, or legal advice. Trading can result in substantial loss; users are responsible for validating the software, protecting credentials, and deciding whether any paper or live action is appropriate. Live trading remains off by default.
 
 ## Specs
 

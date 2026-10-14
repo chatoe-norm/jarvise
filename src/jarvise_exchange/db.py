@@ -66,9 +66,7 @@ def insert_snapshot(
     return len(rows)
 
 
-def latest_snapshot(
-    conn: sqlite3.Connection, venue: str
-) -> tuple[int, list[SpotBalance]] | None:
+def latest_snapshot(conn: sqlite3.Connection, venue: str) -> tuple[int, list[SpotBalance]] | None:
     row = conn.execute(
         "SELECT MAX(fetched_at_ms) AS ts FROM exchange_balances WHERE venue=?",
         (venue,),

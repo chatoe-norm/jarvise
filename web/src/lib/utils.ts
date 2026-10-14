@@ -9,9 +9,25 @@ export function formatNum(value: unknown, digits = 2): string {
   if (value === null || value === undefined || value === "") return "—";
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return String(value);
+  if (n === 0) return "0";
   return n.toLocaleString(undefined, {
     maximumFractionDigits: digits,
     minimumFractionDigits: 0,
+  });
+}
+
+/** Crypto size / qty — enough fraction digits so BTC ~0.0013 is not "0". */
+export function formatQty(value: unknown, digits = 8): string {
+  return formatNum(value, digits);
+}
+
+/** Thesis column only: expand scientific EMA/RSI dumps; do not rewrite SQLite. */
+export function formatThesisDisplay(thesis: unknown): string {
+  if (thesis == null || thesis === "") return "";
+  return String(thesis).replace(/(-?\d+(?:\.\d+)?)e([+-]?\d+)/gi, (raw, mant, exp) => {
+    const n = Number(`${mant}e${exp}`);
+    if (!Number.isFinite(n)) return raw;
+    return formatNum(n, Math.abs(n) >= 1000 ? 2 : 4);
   });
 }
 
@@ -35,4 +51,35 @@ export function expiresIn(expiresAtMs: number | null | undefined): string {
   const min = Math.floor(left / 60_000);
   if (min < 60) return `${min}m left`;
   return `${Math.floor(min / 60)}h ${min % 60}m left`;
+}
+
+const BANGKOK = "Asia/Bangkok";
+
+const decisionDateFmt = new Intl.DateTimeFormat("en-CA", {
+  timeZone: BANGKOK,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const decisionTimeFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: BANGKOK,
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+/** Format analysis timestamp (epoch ms) as Bangkok date + time. */
+export function formatDecisionStamp(
+  ms: unknown,
+): { date: string; time: string } {
+  const n = typeof ms === "number" ? ms : Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return { date: "—", time: "—" };
+  const d = new Date(n);
+  if (Number.isNaN(d.getTime())) return { date: "—", time: "—" };
+  return {
+    date: decisionDateFmt.format(d),
+    time: decisionTimeFmt.format(d),
+  };
 }

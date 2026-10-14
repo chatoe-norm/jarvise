@@ -14,9 +14,7 @@ from jarvise_ingest.indicators import indicator_series
 from jarvise_ingest.timeframes import INTERVAL_MS
 
 
-def recompute_indicators(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
-) -> int:
+def recompute_indicators(conn: sqlite3.Connection, symbol: str, timeframe: str) -> int:
     """Rewrite indicator columns for every stored candle; return rows touched."""
     candles = load_candle_series(conn, symbol, timeframe)
     if not candles:
@@ -36,6 +34,7 @@ def recompute_indicators(
         closes.append(float(candle["close"]))
 
     computed = indicator_series(highs, lows, closes)
+    macd_line, macd_signal, macd_hist = computed["macd_line"], computed["macd_signal"], computed["macd_hist"]
     updates = [
         {
             "symbol": symbol,
@@ -45,6 +44,13 @@ def recompute_indicators(
             "rsi_14": computed["rsi_14"][i],
             "ema_20": computed["ema_20"][i],
             "ema_200": computed["ema_200"][i],
+            "sma_20": computed["sma_20"][i],
+            "macd_line": macd_line[i],
+            "macd_signal": macd_signal[i],
+            "macd_hist": macd_hist[i],
+            "bb_mid": computed["bb_mid"][i],
+            "bb_upper": computed["bb_upper"][i],
+            "bb_lower": computed["bb_lower"][i],
         }
         for i, candle in enumerate(candles)
     ]
@@ -52,21 +58,28 @@ def recompute_indicators(
 
 
 def find_gaps(
-    conn: sqlite3.Connection, symbol: str, timeframe: str
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    asset_class: str | None = None,
 ) -> list[tuple[int, int, int]]:
     """Missing stretches as (last before, first after, candles absent).
 
     Indicators are computed across the stored series as if it were continuous, so
     a hole silently shifts every value after it. Gaps are reported rather than
     rejected: a venue outage is a data problem, but for stocks and ETFs a weekend
-    is not.
+    is not (1d equity: ignore holes of ≤3 calendar days).
     """
     step = INTERVAL_MS[timeframe]
     candles = load_candle_series(conn, symbol, timeframe)
     gaps: list[tuple[int, int, int]] = []
+    equity_daily = (asset_class or "").lower() == "equity" and timeframe == "1d"
     for previous, following in zip(candles, candles[1:], strict=False):
         distance = following["timestamp"] - previous["timestamp"]
         if distance > step:
             missing = distance // step - 1
+            if equity_daily and missing <= 3:
+                continue
             gaps.append((previous["timestamp"], following["timestamp"], int(missing)))
     return gaps

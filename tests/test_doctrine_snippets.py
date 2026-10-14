@@ -40,9 +40,7 @@ def test_hits_mapped_and_truncated() -> None:
         ),
     ]
     client = _FakeClient(points)
-    hits = doctrine_snippets(
-        "trend_up long", limit=2, client=client, encoder=lambda _t: [0.1, 0.2]
-    )
+    hits = doctrine_snippets("trend_up long", limit=2, client=client, encoder=lambda _t: [0.1, 0.2])
     # Oversample: min(40, max(2*10, 20)) == 20
     assert client.calls == [("jarvise_doctrine", 20)]
     assert len(hits) == 2
@@ -53,6 +51,13 @@ def test_hits_mapped_and_truncated() -> None:
 def test_preferred_markers() -> None:
     assert is_preferred_doctrine_payload(
         {"kind": "doctrine", "source": "jarvise-doctrine.txt", "path": "sources/jarvise-doctrine.txt"}
+    )
+    assert is_preferred_doctrine_payload(
+        {
+            "kind": "doctrine",
+            "source": "jarvise-doctrine-pullback-entry.txt",
+            "path": "sources/jarvise-doctrine-pullback-entry.txt",
+        }
     )
     assert is_preferred_doctrine_payload(
         {

@@ -13,6 +13,7 @@ APPROVAL = {
     "action": "long",
     "regime_state": "trend_up",
     "confidence_score": 0.75,
+    "invalidation_price": 97.0,
     "size_pct_equity": 1.125,
     "expires_at_ms": 9_999_999_999_999,
     "status": "pending",
@@ -46,12 +47,10 @@ def test_confidence_labels() -> None:
 
 def test_doctrine_query_uses_regime_and_action() -> None:
     assert doctrine_query(APPROVAL) == (
-        "jarvise doctrine trend_up long entry risk stop "
-        "capital preservation kill-switch FLAT"
+        "jarvise doctrine trend_up long entry pullback EMA20 risk stop capital preservation kill-switch FLAT"
     )
     assert doctrine_query({}) == (
-        "jarvise doctrine range flat entry risk stop "
-        "capital preservation kill-switch FLAT"
+        "jarvise doctrine range flat entry pullback EMA20 risk stop capital preservation kill-switch FLAT"
     )
 
 
@@ -83,6 +82,9 @@ def test_card_approve_with_risk_math() -> None:
     assert card["doctrine"] == ["structure first, oscillators as context"]
     assert any("ยังไม่ถือตำแหน่งเดียวกันซ้ำ" in line for line in card["checklist"])
     assert card["claude"] is None
+    assert card["confidence_breakdown"]["total"] == 0.75
+    assert card["gates"] == {"flat": 0.55, "approve": 0.70}
+    assert not any("auto-decide จะ defer" in line for line in card["what_happened"])
 
 
 def test_card_omits_est_loss_without_invalidation() -> None:
@@ -99,6 +101,47 @@ def test_card_omits_est_loss_without_invalidation() -> None:
     assert "est_loss_usd" not in card["risk"]
     assert card["risk"]["invalidation_price"] is None
     assert card["doctrine"] == []
+    # conf 0.75 >= 0.70 → no doctrine-gate defer note even when doctrine empty
+    assert not any("auto-decide จะ defer" in line for line in card["what_happened"])
+
+
+def test_card_gate_note_when_conf_below_approve_and_no_doctrine() -> None:
+    mid = {**APPROVAL, "confidence_score": 0.65, "size_pct_equity": 0.975}
+    pullback = {
+        **CANDLE,
+        "close": 2687.0,
+        "ema_20": 2700.0,
+        "ema_200": 2560.0,
+        "rsi_14": 49.0,
+        "atr_14": 40.0,
+    }
+    card = build_recommendation(
+        approval=mid,
+        candle=pullback,
+        analysis=ANALYSIS,
+        account=ACCOUNT,
+        position=None,
+        safety=SAFETY_OK,
+        doctrine=[],
+        claude=None,
+        signal_candle=pullback,
+    )
+    assert card["recommendation"] == "approve_with_caution"
+    assert card["confidence_breakdown"]["total"] == 0.65
+    assert any("auto-decide จะ defer" in line for line in card["what_happened"])
+    # With doctrine present, note should not appear
+    with_doc = build_recommendation(
+        approval=mid,
+        candle=pullback,
+        analysis=ANALYSIS,
+        account=ACCOUNT,
+        position=None,
+        safety=SAFETY_OK,
+        doctrine=["structure first"],
+        claude=None,
+        signal_candle=pullback,
+    )
+    assert not any("auto-decide จะ defer" in line for line in with_doc["what_happened"])
 
 
 def test_card_flat_explains_reject_and_missing_ema200() -> None:

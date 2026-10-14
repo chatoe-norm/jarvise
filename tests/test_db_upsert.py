@@ -5,6 +5,7 @@ from jarvise_ingest.db import (
     count_analysis_output,
     count_market,
     list_analysis_output,
+    load_recent_ohlcv,
     open_db,
     upsert_analysis_output,
     upsert_market_technicals,
@@ -156,4 +157,36 @@ def test_migrate_adds_timeframe_to_legacy_analysis(tmp_path: Path):
     conn = open_db(db)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(analysis_output)")}
     assert "timeframe" in cols
+    conn.close()
+
+
+def test_load_recent_ohlcv_limit_and_oldest_first(tmp_path: Path):
+    db = tmp_path / "ohlcv.db"
+    conn = open_db(db)
+    rows = []
+    for i in range(60):
+        ts = 1_700_000_000_000 + i * 14_400_000
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": ts,
+                "timeframe": "4h",
+                "open": float(i),
+                "high": float(i + 1),
+                "low": float(i) - 0.5,
+                "close": float(i) + 0.2,
+                "volume": 1.0,
+            }
+        )
+    upsert_market_technicals(conn, rows)
+    got = load_recent_ohlcv(conn, "btcusdt", "4h", limit=48)
+    assert len(got) == 48
+    stamps = [int(r["timestamp"]) for r in got]
+    assert stamps == sorted(stamps)
+    assert stamps[-1] == 1_700_000_000_000 + 59 * 14_400_000
+    assert stamps[0] == 1_700_000_000_000 + 12 * 14_400_000
+    capped = load_recent_ohlcv(conn, "BTCUSDT", "4h", limit=500)
+    assert len(capped) == 60
+    empty = load_recent_ohlcv(conn, "BTCUSDT", "1h", limit=48)
+    assert empty == []
     conn.close()

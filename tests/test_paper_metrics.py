@@ -7,6 +7,7 @@ from jarvise_paper.engine import apply_signal
 from jarvise_paper.metrics import (
     MIN_TRADES_FOR_RATIOS,
     compute_paper_metrics,
+    loss_lesson,
     persist_metrics_snapshot,
     reconstruct_closed_trades,
 )
@@ -19,6 +20,7 @@ def _long_flat(conn, *, sym: str, open_mid: float, close_mid: float, t0: int, si
             "analysis_id": f"o{t0}",
             "symbol": sym,
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": size,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -33,6 +35,7 @@ def _long_flat(conn, *, sym: str, open_mid: float, close_mid: float, t0: int, si
             "analysis_id": f"c{t0}",
             "symbol": sym,
             "action": "flat",
+            "invalidation_price": 97.0,
             "size_pct_equity": 0.0,
             "regime_state": "range",
             "confidence_score": 0.4,
@@ -124,6 +127,60 @@ def test_scratch_excluded_from_win_rate() -> None:
     assert 10.0 in pnls
 
 
+def test_stop_hit_counts_as_closed_round_trip() -> None:
+    orders = [
+        {
+            "order_id": "o1",
+            "ts": 1,
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "qty": 0.01,
+            "price": 100.0,
+            "fee_usd": 0.1,
+            "reason": "open_long",
+        },
+        {
+            "order_id": "s1",
+            "ts": 2,
+            "symbol": "BTCUSDT",
+            "side": "sell",
+            "qty": 0.01,
+            "price": 90.0,
+            "fee_usd": 0.1,
+            "reason": "stop_hit",
+        },
+        {
+            "order_id": "o2",
+            "ts": 3,
+            "symbol": "ETHUSDT",
+            "side": "sell",
+            "qty": 1.0,
+            "price": 50.0,
+            "fee_usd": 0.05,
+            "reason": "open_short",
+        },
+        {
+            "order_id": "s2",
+            "ts": 4,
+            "symbol": "ETHUSDT",
+            "side": "buy",
+            "qty": 1.0,
+            "price": 55.0,
+            "fee_usd": 0.05,
+            "reason": "stop_hit",
+        },
+    ]
+    trades, unmatched, open_rem = reconstruct_closed_trades(orders)
+    assert unmatched == 0
+    assert open_rem == 0
+    assert len(trades) == 2
+    by_symbol = {t["symbol"]: t for t in trades}
+    assert by_symbol["BTCUSDT"]["side"] == "long"
+    assert by_symbol["BTCUSDT"]["pnl_usd"] < 0
+    assert by_symbol["ETHUSDT"]["side"] == "short"
+    assert by_symbol["ETHUSDT"]["pnl_usd"] < 0
+
+
 def test_orphan_close_counted_unmatched() -> None:
     orders = [
         {
@@ -178,3 +235,86 @@ def test_persist_snapshot(tmp_path: Path) -> None:
     assert row is not None
     assert row[0] is not None
     conn.close()
+
+
+def _leg(
+    order_id: str,
+    ts: int,
+    symbol: str,
+    reason: str,
+    price: float,
+    *,
+    source: str | None = None,
+) -> dict:
+    row = {
+        "order_id": order_id,
+        "ts": ts,
+        "symbol": symbol,
+        "side": "buy" if reason.startswith("open_") else "sell",
+        "qty": 1.0,
+        "price": price,
+        "fee_usd": 0.0,
+        "reason": reason,
+    }
+    if source is not None:
+        row["decision_source"] = source
+    return row
+
+
+def test_loss_lesson_exit_mix_symbol_and_floors() -> None:
+    orders = [
+        _leg("o1", 1, "BTCUSDT", "open_long", 100.0, source="auto_claude"),
+        _leg("c1", 2, "BTCUSDT", "stop_hit", 90.0),
+        _leg("o2", 3, "ETHUSDT", "open_long", 50.0, source="auto_claude"),
+        _leg("c2", 4, "ETHUSDT", "close_long", 40.0),
+        _leg("o3", 5, "BTCUSDT", "open_long", 100.0, source="auto_rule"),
+        _leg("c3", 6, "BTCUSDT", "close_long", 110.0),
+    ]
+    trades, unmatched, open_rem = reconstruct_closed_trades(orders)
+    assert unmatched == 0 and open_rem == 0
+    assert [t["exit_reason"] for t in trades] == ["stop_hit", "close_long", "close_long"]
+    for trade, source in zip(trades, ("auto_claude", "auto_claude", "auto_rule"), strict=True):
+        trade["decision_source"] = source
+    lesson = loss_lesson(trades)
+    assert lesson["closed_trades"] == 3
+    assert lesson["wins"] == 1
+    assert lesson["losses"] == 2
+    assert lesson["by_exit"]["stop_hit"] == {"n": 1, "pnl_usd": -10.0}
+    assert lesson["by_exit"]["flat"] == {"n": 1, "pnl_usd": -10.0}
+    assert lesson["by_symbol"]["ETHUSDT"] == {"n": 1, "pnl_usd": -10.0}
+    assert lesson["by_symbol"]["BTCUSDT"]["n"] == 2
+    assert lesson["by_symbol"]["BTCUSDT"]["pnl_usd"] == 0.0
+    assert lesson["auto_closed"] == 3
+    assert lesson["auto_ev"] is not None and lesson["auto_ev"] < 0
+    assert lesson["floors_unchanged"] is True
+
+    losing_at_gate = [
+        {
+            "symbol": "BTCUSDT",
+            "pnl_usd": -1.0,
+            "exit_reason": "stop_hit",
+            "decision_source": "auto_claude",
+        }
+        for _ in range(8)
+    ]
+    held = loss_lesson(losing_at_gate)
+    assert held["auto_closed"] == 8
+    assert held["auto_ev"] is not None and held["auto_ev"] < 0
+    assert held["floors_unchanged"] is True
+
+    positive = [
+        {
+            "symbol": "BTCUSDT",
+            "pnl_usd": 1.0,
+            "exit_reason": "close_long",
+            "decision_source": "auto_claude",
+        }
+        for _ in range(8)
+    ]
+    cleared = loss_lesson(positive)
+    assert cleared["auto_closed"] == 8
+    assert cleared["auto_ev"] == 1.0
+    assert cleared["floors_unchanged"] is False
+    short = positive[:7]
+    assert loss_lesson(short)["floors_unchanged"] is True
+    assert loss_lesson([])["floors_unchanged"] is True

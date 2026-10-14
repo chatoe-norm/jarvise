@@ -37,10 +37,7 @@ class _Exchange:
     """Serves a fixed universe of klines the way Binance pages them."""
 
     def __init__(self, first_open_ms: int, count: int, step_ms: int = STEP):
-        self.rows = [
-            _kline(first_open_ms + i * step_ms, step_ms, 100.0 + i)
-            for i in range(count)
-        ]
+        self.rows = [_kline(first_open_ms + i * step_ms, step_ms, 100.0 + i) for i in range(count)]
         self.requests: list[dict] = []
 
     def client(self) -> httpx.Client:
@@ -64,9 +61,7 @@ def test_range_fetch_pages_until_the_history_is_exhausted():
     first = _past(2500)
     exchange = _Exchange(first, 2500)
 
-    candles = fetch_klines_range(
-        "BTCUSDT", "1h", first, client=exchange.client(), page_limit=1000
-    )
+    candles = fetch_klines_range("BTCUSDT", "1h", first, client=exchange.client(), page_limit=1000)
 
     assert len(candles) == 2500
     assert len(exchange.requests) == 3
@@ -78,9 +73,7 @@ def test_range_fetch_advances_start_time_between_pages():
     first = _past(1500)
     exchange = _Exchange(first, 1500)
 
-    fetch_klines_range(
-        "BTCUSDT", "1h", first, client=exchange.client(), page_limit=1000
-    )
+    fetch_klines_range("BTCUSDT", "1h", first, client=exchange.client(), page_limit=1000)
 
     starts = [int(r["startTime"]) for r in exchange.requests]
     assert starts == [first, first + 1000 * STEP]
@@ -90,9 +83,7 @@ def test_range_fetch_returns_no_duplicate_timestamps():
     first = _past(2500)
     exchange = _Exchange(first, 2500)
 
-    candles = fetch_klines_range(
-        "BTCUSDT", "1h", first, client=exchange.client(), page_limit=1000
-    )
+    candles = fetch_klines_range("BTCUSDT", "1h", first, client=exchange.client(), page_limit=1000)
 
     stamps = [c["timestamp"] for c in candles]
     assert len(set(stamps)) == len(stamps)
@@ -116,9 +107,7 @@ def test_range_fetch_still_drops_the_unclosed_candle():
     first = now_ms - 3 * STEP
     exchange = _Exchange(first, 4)  # the 4th candle closes in the future
 
-    candles = fetch_klines_range(
-        "BTCUSDT", "1h", first, client=exchange.client(), page_limit=1000
-    )
+    candles = fetch_klines_range("BTCUSDT", "1h", first, client=exchange.client(), page_limit=1000)
 
     assert len(candles) == 3
 

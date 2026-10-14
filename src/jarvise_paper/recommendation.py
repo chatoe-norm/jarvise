@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from jarvise_analyze.engine import ATR_STOP_MULT
+from jarvise_analyze.explain import confidence_breakdown
 
 APPROVE_CONF = 0.70
 CAUTION_CONF = 0.55
@@ -44,8 +45,8 @@ def doctrine_query(row: Mapping[str, Any]) -> str:
     regime = row.get("regime_state") or "range"
     action = row.get("action") or "flat"
     return (
-        f"jarvise doctrine {regime} {action} entry risk stop "
-        "capital preservation kill-switch FLAT"
+        f"jarvise doctrine {regime} {action} entry pullback EMA20 "
+        "risk stop capital preservation kill-switch FLAT"
     )
 
 
@@ -60,10 +61,7 @@ def _f(value: Any) -> float | None:
 
 def _headline(rec: str, action: str, conf: float) -> str:
     if action == "flat":
-        return (
-            "แนะนำ: REJECT — สัญญาณ flat "
-            "(approve ไม่เปิดตำแหน่งใหม่; ถ้ามีตำแหน่งเปิดอยู่จะถูกปิด)"
-        )
+        return "แนะนำ: REJECT — สัญญาณ flat (approve ไม่เปิดตำแหน่งใหม่; ถ้ามีตำแหน่งเปิดอยู่จะถูกปิด)"
     if rec == "approve":
         return f"แนะนำ: APPROVE (ความมั่นใจ {conf:.2f})"
     if rec == "approve_with_caution":
@@ -76,9 +74,7 @@ def _what_happened(candle: Mapping[str, Any] | None, safety: Mapping[str, Any] |
     c = candle or {}
     close, ema20, ema200 = _f(c.get("close")), _f(c.get("ema_20")), _f(c.get("ema_200"))
     if close is None or ema20 is None or ema200 is None:
-        lines.append(
-            "ตัวชี้วัดระยะยาว (EMA200) ยังไม่พร้อม — ระบบจะไม่เสนอเทรดจนกว่าข้อมูลครบ"
-        )
+        lines.append("ตัวชี้วัดระยะยาว (EMA200) ยังไม่พร้อม — ระบบจะไม่เสนอเทรดจนกว่าข้อมูลครบ")
     elif close > ema20 > ema200:
         lines.append("ราคาอยู่เหนือเส้นค่าเฉลี่ยทั้งระยะสั้นและระยะยาว = แนวโน้มขาขึ้น")
     elif close < ema20 < ema200:
@@ -134,9 +130,7 @@ def _risk(
     return risk
 
 
-def _checklist(
-    approval: Mapping[str, Any], position: Mapping[str, Any] | None
-) -> list[str]:
+def _checklist(approval: Mapping[str, Any], position: Mapping[str, Any] | None) -> list[str]:
     symbol = str(approval.get("symbol") or "")
     timeframe = str(approval.get("timeframe") or "")
     lines = [f"มีข่าวใหญ่ใน {timeframe} ข้างหน้าหรือไม่ (ระบบไม่เห็นข่าว)"]
@@ -161,10 +155,19 @@ def build_recommendation(
     safety: Mapping[str, Any] | None,
     doctrine: list[str],
     claude: Mapping[str, Any] | None,
+    signal_candle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     action = str(approval.get("action") or "flat").lower()
     conf = float(approval.get("confidence_score") or 0.0)
     rec = template_recommendation(action, conf)
+    explain_src = signal_candle if signal_candle is not None else candle
+    breakdown = confidence_breakdown(explain_src or {})
+    what = _what_happened(candle, safety)
+    if conf < APPROVE_CONF and not doctrine:
+        what.append(
+            f"ความมั่นใจ {conf:.2f} < {APPROVE_CONF:.2f} และไม่พบกฎการเทรดตรงสัญญาณ "
+            "→ auto-decide จะ defer ให้เจ้าของตัดสินใจเอง"
+        )
     return {
         "ok": True,
         "approval_id": approval.get("id"),
@@ -176,11 +179,13 @@ def build_recommendation(
         "recommendation_source": "claude" if claude else "template",
         "confidence_label": confidence_label(conf),
         "headline": _headline(rec, action, conf),
-        "what_happened": _what_happened(candle, safety),
+        "what_happened": what,
         "risk": _risk(approval, candle, analysis, account),
         "doctrine": list(doctrine),
         "checklist": _checklist(approval, position),
         "thesis": (analysis or {}).get("thesis"),
         "claude": dict(claude) if claude else None,
+        "confidence_breakdown": breakdown,
+        "gates": {"flat": CAUTION_CONF, "approve": APPROVE_CONF},
         "paper_only": True,
     }

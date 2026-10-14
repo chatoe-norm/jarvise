@@ -81,13 +81,10 @@ def fetch_klines(
     if not raw:
         raise RuntimeError(f"binance returned empty klines for {symbol}")
     now_ms = int(time.time() * 1000)
-    candles = [
-        _to_candle(symbol, interval, row) for row in raw if _is_closed(row, now_ms)
-    ]
+    candles = [_to_candle(symbol, interval, row) for row in raw if _is_closed(row, now_ms)]
     if not candles:
         raise RuntimeError(
-            f"binance returned no closed candles for {symbol}; "
-            f"the current {interval} candle is still open"
+            f"binance returned no closed candles for {symbol}; the current {interval} candle is still open"
         )
     return candles
 
@@ -125,8 +122,7 @@ def fetch_klines_range(
         while True:
             if pages >= max_pages:
                 raise RuntimeError(
-                    f"too many pages fetching {symbol} {interval}; "
-                    f"narrow the window or raise max_pages"
+                    f"too many pages fetching {symbol} {interval}; narrow the window or raise max_pages"
                 )
             rows = _request_page(http, symbol, interval, page_limit, cursor)
             pages += 1
@@ -150,8 +146,5 @@ def fetch_klines_range(
             http.close()
 
     if not candles:
-        raise RuntimeError(
-            f"binance returned no closed candles for {symbol} {interval} "
-            f"from {start_ms}"
-        )
+        raise RuntimeError(f"binance returned no closed candles for {symbol} {interval} from {start_ms}")
     return candles
