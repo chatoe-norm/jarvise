@@ -24,6 +24,7 @@ from jarvise_risk.caps import utc_day_bounds_ms
 
 PAPER_STRATEGY_ID = "paper"
 MIN_TRADES_FOR_RATIOS = 30
+AUTO_SAMPLE_MIN = 8
 
 
 def _is_open(reason: str | None) -> bool:
@@ -90,6 +91,7 @@ def reconstruct_closed_trades(orders: list[dict]) -> tuple[list[dict], int, int]
                     "qty": float(open_o["qty"]),
                     "entry_price": float(open_o["price"]),
                     "exit_price": float(order["price"]),
+                    "exit_reason": str(order.get("reason") or ""),
                     "pnl_usd": round(pnl, 8),
                 }
             )
@@ -149,6 +151,48 @@ def _sharpe_sortino(returns: list[float]) -> tuple[float | None, float | None]:
         round(sharpe, 6) if sharpe is not None else None,
         round(sortino, 6) if sortino is not None else None,
     )
+
+
+def loss_lesson(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Owner summary of closed trades. Does not change floors or the analyzer."""
+    losses = [t for t in trades if float(t["pnl_usd"]) < 0]
+    by_exit = {
+        "stop_hit": {"n": 0, "pnl_usd": 0.0},
+        "flat": {"n": 0, "pnl_usd": 0.0},
+    }
+    for trade in losses:
+        reason = str(trade.get("exit_reason") or "")
+        key = "stop_hit" if reason == "stop_hit" else "flat"
+        by_exit[key]["n"] += 1
+        by_exit[key]["pnl_usd"] += float(trade["pnl_usd"])
+    for bucket in by_exit.values():
+        bucket["pnl_usd"] = round(bucket["pnl_usd"], 8)
+
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for trade in trades:
+        row = by_symbol.setdefault(str(trade["symbol"]), {"n": 0, "pnl_usd": 0.0})
+        row["n"] += 1
+        row["pnl_usd"] += float(trade["pnl_usd"])
+    for row in by_symbol.values():
+        row["pnl_usd"] = round(row["pnl_usd"], 8)
+
+    auto_pnls = [
+        float(trade["pnl_usd"])
+        for trade in trades
+        if str(trade.get("decision_source") or "").startswith("auto_")
+    ]
+    auto_closed = len(auto_pnls)
+    auto_ev = round(statistics.mean(auto_pnls), 8) if auto_pnls else None
+    return {
+        "closed_trades": len(trades),
+        "wins": sum(1 for trade in trades if float(trade["pnl_usd"]) > 0),
+        "losses": len(losses),
+        "by_exit": by_exit,
+        "by_symbol": by_symbol,
+        "auto_closed": auto_closed,
+        "auto_ev": auto_ev,
+        "floors_unchanged": auto_closed < AUTO_SAMPLE_MIN or (auto_ev is not None and auto_ev < 0),
+    }
 
 
 def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
@@ -215,6 +259,7 @@ def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, 
         "by_decision_source": by_source,
         "by_decision_source_30d": by_source_30d,
         "auto_ev_gate": gate,
+        "loss_lesson": loss_lesson(trades),
     }
 
 

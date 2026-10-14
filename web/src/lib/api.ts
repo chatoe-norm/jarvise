@@ -178,6 +178,25 @@ export type SourceMetrics = {
   win_rate?: number | null;
 };
 
+export type LossExitBucket = {
+  n: number;
+  pnl_usd: number;
+};
+
+export type LossLesson = {
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  by_exit: {
+    stop_hit: LossExitBucket;
+    flat: LossExitBucket;
+  };
+  by_symbol: Record<string, LossExitBucket>;
+  auto_closed: number;
+  auto_ev: number | null;
+  floors_unchanged: boolean;
+};
+
 export type MetricsPayload = {
   ok?: boolean;
   closed_trades?: number;
@@ -203,6 +222,7 @@ export type MetricsPayload = {
     ev?: number | null;
     reason?: string | null;
   };
+  loss_lesson?: LossLesson;
   error?: string;
 };
 
