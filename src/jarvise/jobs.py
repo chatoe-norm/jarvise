@@ -16,9 +16,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
+from jarvise.charts import export_candle_graphs
 from jarvise.rag import doctrine_snippets, publish_redis_status
-from jarvise_ingest.db import list_approvals, open_db
+from jarvise_ingest.db import count_indicator_ready, count_market, list_approvals, open_db
 from jarvise_ingest.health import ingest_health
+from jarvise_ingest.indicators import warm_from
 from jarvise_notify import (
     notify_auto_decide,
     notify_ingest_health,
@@ -88,6 +90,76 @@ def _publish_best_effort(key: str, payload: dict[str, Any]) -> None:
 
 def job_timeout_s(job: str) -> float:
     return _fenv(f"JARVISE_JOB_TIMEOUT_{job.upper()}_S", JOB_TIMEOUTS_S.get(job, 600.0))
+
+
+# Same start as the stored 4h series. Daily EMA200 stays NULL until this history exists.
+HTF_BACKFILL_SINCE = "2021-01-01"
+
+
+def ema200_warmup_bars() -> int:
+    """First bar index where EMA200 is published (seed influence below the floor)."""
+    return warm_from(199, 2 / 201)
+
+
+def htf_needs_history_backfill(stats: list[tuple[int, int]], *, warmup_bars: int) -> bool:
+    """True when any symbol is still short of the EMA200 warm-up.
+
+    ``stats`` entries are ``(row_count, ema200_ready_count)``. An empty list means
+    the series has not been stored yet.
+    """
+    if not stats:
+        return True
+    return any(ready < 1 and rows < warmup_bars for rows, ready in stats)
+
+
+def ingest_timeframe_args(*, symbols: str, timeframe: str, backfill: bool) -> list[str]:
+    """CLI args for one ingest timeframe. Only a short HTF series uses ``--since``."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "jarvise",
+        "ingest",
+        "--symbol",
+        symbols,
+        "--timeframe",
+        timeframe,
+    ]
+    if backfill:
+        cmd.extend(["--since", HTF_BACKFILL_SINCE])
+    else:
+        cmd.extend(["--limit", "200"])
+    cmd.append("--json")
+    return cmd
+
+
+def _analytics_db_path() -> Path:
+    raw = (os.environ.get("JARVISE_DB") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parents[2] / "data" / "analytics" / "jarvise.db"
+
+
+def htf_symbol_stats(symbols: str, timeframe: str) -> list[tuple[int, int]]:
+    """``(rows, ema200_ready)`` per symbol. Missing database counts as no stored bars."""
+    path = _analytics_db_path()
+    if not path.is_file():
+        return []
+    conn = open_db(path)
+    try:
+        stats: list[tuple[int, int]] = []
+        for raw in symbols.split(","):
+            sym = raw.strip().upper()
+            if not sym:
+                continue
+            stats.append(
+                (
+                    count_market(conn, sym, timeframe),
+                    count_indicator_ready(conn, sym, timeframe, column="ema_200"),
+                )
+            )
+        return stats
+    finally:
+        conn.close()
 
 
 class _TimedOut:
@@ -196,6 +268,15 @@ def _finish_cli_payload(job: str, proc: Any, key: str) -> tuple[int, dict[str, A
     return proc.returncode, payload
 
 
+def _export_ingest_charts(symbols: str, timeframes: list[str]) -> dict[str, Any]:
+    """Draw stored candles after ingest. A write failure does not change the ingest exit code."""
+    names = [part.strip().upper() for part in symbols.split(",") if part.strip()]
+    try:
+        return export_candle_graphs(_analytics_db_path(), names, timeframes)
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
+
+
 def run_ingest() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
@@ -217,20 +298,13 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
         by_tf: dict[str, Any] = {}
         exit_code = 0
         timed_out = False
+        warmup = ema200_warmup_bars()
         for tf in timeframes:
-            cmd = [
-                sys.executable,
-                "-m",
-                "jarvise",
-                "ingest",
-                "--symbol",
-                symbols,
-                "--timeframe",
-                tf,
-                "--limit",
-                "200",
-                "--json",
-            ]
+            backfill = tf == htf and htf_needs_history_backfill(
+                htf_symbol_stats(symbols, tf),
+                warmup_bars=warmup,
+            )
+            cmd = ingest_timeframe_args(symbols=symbols, timeframe=tf, backfill=backfill)
             proc = _run_cmd("ingest", cmd)
             by_tf[tf] = _parse_stdout(proc)
             if proc.returncode != 0:
@@ -251,6 +325,7 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
             for key in ("db", "market_technicals", "errors", "duration_s"):
                 if key in by_tf["1h"]:
                     payload[key] = by_tf["1h"][key]
+        payload["candle_graphs"] = _export_ingest_charts(symbols, timeframes)
         _publish_best_effort("jarvise:ingest:last", payload)
         return exit_code, payload
 
