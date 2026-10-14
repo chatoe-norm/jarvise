@@ -210,6 +210,12 @@ export type MetricsPayload = {
   sortino_ratio?: number | null;
   ratios_ready?: boolean;
   need_trades_for_ratios?: number;
+  starting_equity?: number;
+  trades?: Array<{
+    close_ts?: number;
+    pnl_usd?: number;
+    symbol?: string;
+  }>;
   unmatched_orders?: number;
   by_decision_source?: Record<string, SourceMetrics>;
   by_decision_source_30d?: Record<string, SourceMetrics>;

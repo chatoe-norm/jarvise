@@ -1,41 +1,46 @@
+export const STARTING_EQUITY = 10_000;
+
+export type ClosedTrade = {
+  close_ts?: unknown;
+  pnl_usd?: unknown;
+};
+
 export function buildEquityPoints(
-  orders: Array<Record<string, unknown>>,
-  currentEquity: unknown,
+  trades: ClosedTrade[],
+  startingEquity: unknown = STARTING_EQUITY,
 ): Array<{ t: string; equity: number }> {
-  const sorted = [...orders].sort((a, b) => {
-    const ta = Number(a.ts ?? a.timestamp ?? 0);
-    const tb = Number(b.ts ?? b.timestamp ?? 0);
-    return ta - tb;
-  });
-  if (sorted.length === 0) {
-    const eq = Number(currentEquity);
-    if (Number.isFinite(eq)) {
-      return [{ t: "now", equity: eq }];
-    }
-    return [];
-  }
+  const start = Number(startingEquity);
+  const base = Number.isFinite(start) ? start : STARTING_EQUITY;
+  const rows = trades
+    .map((trade) => ({
+      ts: Number(trade.close_ts ?? 0),
+      pnl: Number(trade.pnl_usd ?? 0),
+    }))
+    .filter((row) => Number.isFinite(row.ts) && row.ts > 0 && Number.isFinite(row.pnl))
+    .sort((a, b) => a.ts - b.ts);
 
-  let running = Number(currentEquity);
-  if (!Number.isFinite(running)) running = 10_000;
-  // Walk backwards from current equity using rough notional of fills.
-  const backwards: number[] = new Array(sorted.length);
-  for (let i = sorted.length - 1; i >= 0; i -= 1) {
-    backwards[i] = running;
-    const qty = Number(sorted[i].qty ?? 0);
-    const price = Number(sorted[i].price ?? 0);
-    const side = String(sorted[i].side || "").toLowerCase();
-    const notional = qty * price;
-    if (Number.isFinite(notional) && notional > 0) {
-      // Approximate: buys reduce cash path, sells add — equity wobble for viz only.
-      running += side.includes("sell") || side === "flat" ? -notional * 0.01 : notional * 0.01;
-    }
+  let equity = base;
+  const points = [{ t: "start", equity: round2(equity) }];
+  for (const row of rows) {
+    equity += row.pnl;
+    points.push({
+      t: new Date(row.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+      equity: round2(equity),
+    });
   }
+  return points;
+}
 
-  return sorted.map((o, i) => {
-    const ts = Number(o.ts ?? o.timestamp ?? 0);
-    const label = Number.isFinite(ts) && ts > 0
-      ? new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" })
-      : `#${i + 1}`;
-    return { t: label, equity: Number(backwards[i].toFixed(2)) };
-  });
+export function equityDomain(points: Array<{ equity: number }>): [number, number] {
+  const values = points.map((point) => point.equity).filter((value) => Number.isFinite(value));
+  if (values.length === 0) return [STARTING_EQUITY - 10, STARTING_EQUITY + 10];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min;
+  const pad = span > 0 ? span * 0.2 : 10;
+  return [round2(min - pad), round2(max + pad)];
+}
+
+function round2(value: number): number {
+  return Number(value.toFixed(2));
 }

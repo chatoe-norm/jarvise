@@ -66,7 +66,7 @@ export function PaperPage() {
     }
   }
 
-  const points = buildEquityPoints(paper?.orders || [], paper?.equity);
+  const points = buildEquityPoints(metrics?.trades || [], metrics?.starting_equity);
   const positions = paper?.positions || [];
 
   return (
@@ -102,7 +102,7 @@ export function PaperPage() {
         <Card>
           <CardHeader>
             <CardTitle>Equity curve</CardTitle>
-            <CardDescription>Derived from fill history (visual estimate)</CardDescription>
+            <CardDescription>Closed round-trips from starting equity</CardDescription>
           </CardHeader>
           <CardContent>
             <EquityChart points={points} />
@@ -110,7 +110,7 @@ export function PaperPage() {
         </Card>
         <Card>
           <CardHeader>
-            <CardTitle>Expectancy mix</CardTitle>
+            <CardTitle>Win / loss count</CardTitle>
             <CardDescription>
               MDD {formatNum(metrics?.max_drawdown_pct)}%
               {metrics?.ratios_ready

@@ -10,6 +10,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { equityDomain } from "@/lib/equity";
 
 const tooltipStyle = {
   background: "#121820",
@@ -30,6 +31,7 @@ export function EquityChart({
       </div>
     );
   }
+  const [yMin, yMax] = equityDomain(points);
   return (
     <div className="h-48 w-full">
       <ResponsiveContainer width="100%" height="100%">
@@ -42,7 +44,11 @@ export function EquityChart({
           </defs>
           <CartesianGrid stroke="#1e2a38" strokeDasharray="3 3" />
           <XAxis dataKey="t" tick={{ fill: "#8b9aab", fontSize: 11 }} />
-          <YAxis tick={{ fill: "#8b9aab", fontSize: 11 }} width={56} />
+          <YAxis
+            domain={[yMin, yMax]}
+            tick={{ fill: "#8b9aab", fontSize: 11 }}
+            width={64}
+          />
           <Tooltip contentStyle={tooltipStyle} />
           <Area
             type="monotone"

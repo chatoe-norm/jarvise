@@ -20,6 +20,11 @@ test("paper page shows the live loss lesson", async ({ page }) => {
       wins: 1,
       losses: 2,
       expected_value_ev: -3.33,
+      starting_equity: 10000,
+      trades: [
+        { close_ts: Date.UTC(2026, 9, 10), pnl_usd: -10, symbol: "ETHUSDT" },
+        { close_ts: Date.UTC(2026, 9, 12), pnl_usd: -10, symbol: "BTCUSDT" },
+      ],
       loss_lesson: {
         closed_trades: 3,
         wins: 1,
@@ -54,6 +59,9 @@ test("paper page shows the live loss lesson", async ({ page }) => {
 
   await page.goto("/");
   await page.getByRole("link", { name: "Paper" }).click();
+  await expect(page.getByText("Win / loss count")).toBeVisible();
+  await expect(page.getByText("Expectancy mix")).toHaveCount(0);
+  await expect(page.getByText("2500")).toHaveCount(0);
   await expect(page.getByText("บทเรียนจากไม้ที่ปิดแล้ว")).toBeVisible();
   await expect(page.getByText("ปิดแล้ว 3 ไม้ ชนะ 1 ไม้ EV ติดลบ")).toBeVisible();
   await expect(page.getByText(/จุดตัด 1 ไม้/)).toBeVisible();
