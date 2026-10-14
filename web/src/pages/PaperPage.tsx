@@ -3,10 +3,35 @@ import { EquityChart, WinLossChart } from "@/components/Charts";
 import { KpiStrip } from "@/components/KpiStrip";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { api, type MetricsPayload, type PaperPayload } from "@/lib/api";
+import { api, type LossLesson, type MetricsPayload, type PaperPayload } from "@/lib/api";
 import { buildEquityPoints } from "@/lib/equity";
 import { decisionSourceLabel } from "@/lib/copy";
 import { formatNum, formatQty } from "@/lib/utils";
+
+function evSign(ev: number | null | undefined): string {
+  if (ev == null) return "ยังไม่มี EV";
+  if (ev < 0) return "EV ติดลบ";
+  if (ev > 0) return "EV เป็นบวก";
+  return "EV เท่ากับศูนย์";
+}
+
+function worstSymbol(lesson: LossLesson): string {
+  const rows = Object.entries(lesson.by_symbol);
+  if (rows.length === 0) return "ยังไม่มีสัญลักษณ์ที่ปิดไม้";
+  const [symbol, row] = rows.reduce((worst, next) =>
+    next[1].pnl_usd < worst[1].pnl_usd ? next : worst,
+  );
+  return `${symbol} กินผลขาดทุนมากสุด ${formatNum(row.pnl_usd)} ดอลลาร์ จาก ${row.n} ไม้`;
+}
+
+function floorLine(lesson: LossLesson): string {
+  const ev =
+    lesson.auto_ev == null ? "ยังไม่มี" : lesson.auto_ev < 0 ? "ติดลบ" : "ไม่ติดลบ";
+  if (lesson.floors_unchanged) {
+    return `auto_* ปิดแล้ว ${lesson.auto_closed} ไม้ จากเกณฑ์ประมาณ 8 และ EV ของ auto_* ${ev} พื้นความมั่นใจ 0.55/0.70 จึงยังอยู่`;
+  }
+  return `auto_* ปิดแล้ว ${lesson.auto_closed} ไม้ และ EV ของ auto_* ${ev} หน้านี้ยังไม่สั่งให้เปลี่ยนสูตร`;
+}
 
 export function PaperPage() {
   const [paper, setPaper] = useState<PaperPayload | null>(null);
@@ -173,6 +198,33 @@ export function PaperPage() {
           })()}
         </CardContent>
       </Card>
+
+      {metrics?.loss_lesson ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>บทเรียนจากไม้ที่ปิดแล้ว</CardTitle>
+            <CardDescription>ตัวเลขจากสมุด paper ปัจจุบัน อัปเดตเมื่อมีไม้ปิดเพิ่ม</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            <p>
+              ปิดแล้ว {metrics.loss_lesson.closed_trades} ไม้ ชนะ {metrics.loss_lesson.wins} ไม้{" "}
+              {evSign(metrics.expected_value_ev)}
+            </p>
+            <p>
+              ไม้ที่แพ้ปิดที่จุดตัด {metrics.loss_lesson.by_exit.stop_hit.n} ไม้ รวม{" "}
+              {formatNum(metrics.loss_lesson.by_exit.stop_hit.pnl_usd)} ดอลลาร์ และปิดตาม FLAT{" "}
+              {metrics.loss_lesson.by_exit.flat.n} ไม้ รวม{" "}
+              {formatNum(metrics.loss_lesson.by_exit.flat.pnl_usd)} ดอลลาร์
+            </p>
+            <p>{worstSymbol(metrics.loss_lesson)}</p>
+            <p>{floorLine(metrics.loss_lesson)}</p>
+            <p className="text-[var(--color-muted)]">
+              รีเพลย์ 2026-10-14 ของกฎชุดเดิมติดลบทั้งช่วงในตัวอย่างและนอกตัวอย่าง
+              หน้านี้ไม่ใช่เหตุให้เปลี่ยนสูตร
+            </p>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>

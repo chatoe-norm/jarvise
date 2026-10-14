@@ -17,6 +17,10 @@ from jarvise_paper.metrics import compute_paper_metrics
 
 PaperPolicy = Literal["naive", "rules"]
 PAPER_POLICIES: tuple[str, ...] = ("naive", "rules")
+FROZEN_STRATEGY_NOTE = (
+    "Frozen strategy. In-sample and out-of-sample are separate holdouts. "
+    "Do not keep the window with the better EV. Do not suggest a confidence floor."
+)
 
 
 def replay_range(
@@ -48,6 +52,7 @@ def replay_range(
     errors: list[str] = []
     by_symbol: dict[str, int] = {}
     policy_counts = {"hold": 0, "defer": 0, "fill_bars": 0, "flat_exit": 0, "skip": 0}
+    action_counts = {"long": 0, "short": 0, "flat": 0}
 
     for sym in symbols:
         candles = load_candles_in_range(conn, sym, timeframe, since_ms=since_ms, until_ms=until_ms)
@@ -59,6 +64,9 @@ def replay_range(
             bars += 1
             by_symbol[sym] += 1
             result = analyze_snapshot(candle, confidence_threshold=confidence_threshold)
+            action = str(result.get("action") or "").lower()
+            if action in action_counts:
+                action_counts[action] += 1
             if not dry_run:
                 upsert_analysis_output(conn, result)
             analyses.append(result)
@@ -102,11 +110,74 @@ def replay_range(
         "by_symbol": by_symbol,
         "errors": errors,
         "metrics": metrics,
+        "action_counts": action_counts,
         "sample": analyses[:3],
     }
     if apply_paper and paper_policy == "rules":
         out["policy_counts"] = policy_counts
     return out
+
+
+def replay_is_oos(
+    conn: Any,
+    *,
+    symbols: list[str],
+    timeframe: str,
+    since_ms: int,
+    oos_since_ms: int,
+    until_ms: int,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+    apply_paper: bool = False,
+    dry_run: bool = False,
+    paper_policy: PaperPolicy = "naive",
+) -> dict[str, Any]:
+    """Score one frozen strategy on two chronological windows.
+
+    In-sample is ``since <= timestamp < oos_since``. Out-of-sample is
+    ``oos_since <= timestamp <= until``. Each ``--apply-paper`` pass resets the
+    ledger, so an in-sample position cannot close in the out-of-sample window.
+    Indicators stay the values already stored on the candles.
+    """
+    if not (int(since_ms) < int(oos_since_ms) < int(until_ms)):
+        raise ValueError("oos_since must be strictly after since and strictly before until")
+    in_sample = replay_range(
+        conn,
+        symbols=symbols,
+        timeframe=timeframe,
+        since_ms=int(since_ms),
+        until_ms=int(oos_since_ms) - 1,
+        confidence_threshold=confidence_threshold,
+        apply_paper=apply_paper,
+        dry_run=dry_run,
+        paper_policy=paper_policy,
+    )
+    out_of_sample = replay_range(
+        conn,
+        symbols=symbols,
+        timeframe=timeframe,
+        since_ms=int(oos_since_ms),
+        until_ms=int(until_ms),
+        confidence_threshold=confidence_threshold,
+        apply_paper=apply_paper,
+        dry_run=dry_run,
+        paper_policy=paper_policy,
+    )
+    return {
+        "ok": bool(in_sample.get("ok")) and bool(out_of_sample.get("ok")),
+        "paper_only": True,
+        "replay": True,
+        "split": "in_sample_out_of_sample",
+        "dry_run": dry_run,
+        "apply_paper": apply_paper,
+        "paper_policy": paper_policy,
+        "timeframe": timeframe,
+        "since_ms": int(since_ms),
+        "oos_since_ms": int(oos_since_ms),
+        "until_ms": int(until_ms),
+        "in_sample": in_sample,
+        "out_of_sample": out_of_sample,
+        "note": FROZEN_STRATEGY_NOTE,
+    }
 
 
 def _rules_disposition(conn: Any, result: dict[str, Any]) -> str:
