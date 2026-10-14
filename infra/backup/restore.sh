@@ -30,6 +30,12 @@ done
 [[ -d "$FROM" ]] || { echo "--from DIR required and must exist" >&2; exit 2; }
 log() { printf '[restore %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
+compose_volume() {
+  docker volume ls -q \
+    --filter "label=com.docker.compose.project=jarvise" \
+    --filter "label=com.docker.compose.volume=$1" | head -n 1
+}
+
 log "verifying checksums in $FROM"
 ( cd "$FROM" && sha256sum -c SHA256SUMS )
 if [[ -f "$FROM/jarvise.db.gz" ]]; then
@@ -63,17 +69,21 @@ if [[ "$DO_SQLITE" -eq 1 ]]; then
 fi
 
 if [[ "$DO_QDRANT" -eq 1 ]]; then
-  log "restoring qdrant volume"
+  QV="$(compose_volume jarvise_qdrant)"
+  [[ -n "$QV" ]] || { echo "qdrant compose volume not found; run compose up once first" >&2; exit 1; }
+  log "restoring qdrant volume ($QV)"
   "${COMPOSE[@]}" stop qdrant >/dev/null
-  docker run --rm -v jarvise_qdrant:/qdrant/storage -v "$FROM":/backup:ro alpine \
+  docker run --rm -v "$QV":/qdrant/storage -v "$FROM":/backup:ro alpine \
     sh -c 'rm -rf /qdrant/storage/* && tar xzf /backup/qdrant.tgz -C /qdrant/storage'
   "${COMPOSE[@]}" start qdrant >/dev/null
 fi
 
 if [[ "$DO_REDIS" -eq 1 ]]; then
-  log "restoring redis volume (kill-switch state returns with it)"
+  RV="$(compose_volume jarvise_redis)"
+  [[ -n "$RV" ]] || { echo "redis compose volume not found; run compose up once first" >&2; exit 1; }
+  log "restoring redis volume ($RV) (kill-switch state returns with it)"
   "${COMPOSE[@]}" stop redis >/dev/null
-  docker run --rm -v jarvise_redis:/data -v "$FROM":/backup:ro alpine \
+  docker run --rm -v "$RV":/data -v "$FROM":/backup:ro alpine \
     sh -c 'rm -rf /data/* && tar xzf /backup/redis.tgz -C /data'
   "${COMPOSE[@]}" start redis >/dev/null
 fi

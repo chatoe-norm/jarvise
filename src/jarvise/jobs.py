@@ -16,18 +16,22 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
+from jarvise.charts import export_candle_graphs
 from jarvise.rag import doctrine_snippets, publish_redis_status
-from jarvise_ingest.db import list_approvals, open_db
+from jarvise_ingest.db import count_indicator_ready, count_market, list_approvals, open_db
 from jarvise_ingest.health import ingest_health
+from jarvise_ingest.indicators import warm_from
 from jarvise_notify import (
     notify_auto_decide,
     notify_ingest_health,
     notify_job_failure,
     notify_pending_digest,
 )
+from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
+from jarvise_paper.risk_monitor import run_risk_monitor as paper_risk_monitor
 from jarvise_risk import kill_switch_state
-from jarvise_trade import reconcile_live_orders
+from jarvise_trade import live_risk_tick, live_trading_enabled, reconcile_live_orders
 
 # Subprocess wall-clock limits (seconds). A hung CLI must never wedge n8n or the health probe.
 JOB_TIMEOUTS_S: dict[str, float] = {
@@ -86,6 +90,76 @@ def _publish_best_effort(key: str, payload: dict[str, Any]) -> None:
 
 def job_timeout_s(job: str) -> float:
     return _fenv(f"JARVISE_JOB_TIMEOUT_{job.upper()}_S", JOB_TIMEOUTS_S.get(job, 600.0))
+
+
+# Same start as the stored 4h series. Daily EMA200 stays NULL until this history exists.
+HTF_BACKFILL_SINCE = "2021-01-01"
+
+
+def ema200_warmup_bars() -> int:
+    """First bar index where EMA200 is published (seed influence below the floor)."""
+    return warm_from(199, 2 / 201)
+
+
+def htf_needs_history_backfill(stats: list[tuple[int, int]], *, warmup_bars: int) -> bool:
+    """True when any symbol is still short of the EMA200 warm-up.
+
+    ``stats`` entries are ``(row_count, ema200_ready_count)``. An empty list means
+    the series has not been stored yet.
+    """
+    if not stats:
+        return True
+    return any(ready < 1 and rows < warmup_bars for rows, ready in stats)
+
+
+def ingest_timeframe_args(*, symbols: str, timeframe: str, backfill: bool) -> list[str]:
+    """CLI args for one ingest timeframe. Only a short HTF series uses ``--since``."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "jarvise",
+        "ingest",
+        "--symbol",
+        symbols,
+        "--timeframe",
+        timeframe,
+    ]
+    if backfill:
+        cmd.extend(["--since", HTF_BACKFILL_SINCE])
+    else:
+        cmd.extend(["--limit", "200"])
+    cmd.append("--json")
+    return cmd
+
+
+def _analytics_db_path() -> Path:
+    raw = (os.environ.get("JARVISE_DB") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parents[2] / "data" / "analytics" / "jarvise.db"
+
+
+def htf_symbol_stats(symbols: str, timeframe: str) -> list[tuple[int, int]]:
+    """``(rows, ema200_ready)`` per symbol. Missing database counts as no stored bars."""
+    path = _analytics_db_path()
+    if not path.is_file():
+        return []
+    conn = open_db(path)
+    try:
+        stats: list[tuple[int, int]] = []
+        for raw in symbols.split(","):
+            sym = raw.strip().upper()
+            if not sym:
+                continue
+            stats.append(
+                (
+                    count_market(conn, sym, timeframe),
+                    count_indicator_ready(conn, sym, timeframe, column="ema_200"),
+                )
+            )
+        return stats
+    finally:
+        conn.close()
 
 
 class _TimedOut:
@@ -190,41 +264,47 @@ def _finish_cli_payload(job: str, proc: Any, key: str) -> tuple[int, dict[str, A
     if proc.returncode == TIMEOUT_EXIT_CODE:
         payload["ok"] = False
         payload["error"] = f"timeout after {job_timeout_s(job):.0f}s"
-    publish_redis_status(key, payload)
+    _publish_best_effort(key, payload)
     return proc.returncode, payload
+
+
+def _export_ingest_charts(symbols: str, timeframes: list[str]) -> dict[str, Any]:
+    """Draw stored candles after ingest. A write failure does not change the ingest exit code."""
+    names = [part.strip().upper() for part in symbols.split(",") if part.strip()]
+    try:
+        return export_candle_graphs(_analytics_db_path(), names, timeframes)
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
 
 
 def run_ingest() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
-        publish_redis_status("jarvise:ingest:last", payload)
+        _publish_best_effort("jarvise:ingest:last", payload)
         return 3, payload
     with single_flight("ingest") as acquired:
         if not acquired:
             return 3, _running("ingest")
         symbols = os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")
         paper_tf = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+        # 1h microstructure + paper TF + 1d HTF for analyzer MTF confirm (T2.3).
         timeframes = ["1h"]
-        if paper_tf != "1h":
+        if paper_tf not in timeframes:
             timeframes.append(paper_tf)
+        htf = (os.environ.get("JARVISE_ANALYZE_HTF") or "1d").strip() or "1d"
+        if htf not in timeframes:
+            timeframes.append(htf)
 
         by_tf: dict[str, Any] = {}
         exit_code = 0
         timed_out = False
+        warmup = ema200_warmup_bars()
         for tf in timeframes:
-            cmd = [
-                sys.executable,
-                "-m",
-                "jarvise",
-                "ingest",
-                "--symbol",
-                symbols,
-                "--timeframe",
-                tf,
-                "--limit",
-                "200",
-                "--json",
-            ]
+            backfill = tf == htf and htf_needs_history_backfill(
+                htf_symbol_stats(symbols, tf),
+                warmup_bars=warmup,
+            )
+            cmd = ingest_timeframe_args(symbols=symbols, timeframe=tf, backfill=backfill)
             proc = _run_cmd("ingest", cmd)
             by_tf[tf] = _parse_stdout(proc)
             if proc.returncode != 0:
@@ -245,14 +325,15 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
             for key in ("db", "market_technicals", "errors", "duration_s"):
                 if key in by_tf["1h"]:
                     payload[key] = by_tf["1h"][key]
-        publish_redis_status("jarvise:ingest:last", payload)
+        payload["candle_graphs"] = _export_ingest_charts(symbols, timeframes)
+        _publish_best_effort("jarvise:ingest:last", payload)
         return exit_code, payload
 
 
 def run_rag_refresh() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
-        publish_redis_status("jarvise:rag:last", payload)
+        _publish_best_effort("jarvise:rag:last", payload)
         return 3, payload
     with single_flight("rag") as acquired:
         if not acquired:
@@ -266,7 +347,7 @@ def run_rag_refresh() -> tuple[int, dict[str, Any]]:
 def run_paper_run() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
-        publish_redis_status("jarvise:paper:last", payload)
+        _publish_best_effort("jarvise:paper:last", payload)
         return 3, payload
     with single_flight("paper_run") as acquired:
         if not acquired:
@@ -292,7 +373,7 @@ def run_paper_run() -> tuple[int, dict[str, Any]]:
 def run_paper_expire() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
-        publish_redis_status("jarvise:paper:expire:last", payload)
+        _publish_best_effort("jarvise:paper:expire:last", payload)
         return 3, payload
     with single_flight("paper_expire") as acquired:
         if not acquired:
@@ -317,7 +398,7 @@ def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
                 "count": 0,
                 "paper_only": True,
             }
-            publish_redis_status("jarvise:paper:digest:last", payload)
+            _publish_best_effort("jarvise:paper:digest:last", payload)
             return 0, payload
         conn = open_db(path)
         try:
@@ -326,7 +407,7 @@ def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
             conn.close()
         result = notify_pending_digest(rows)
         payload = {**result, "paper_only": True}
-        publish_redis_status("jarvise:paper:digest:last", payload)
+        _publish_best_effort("jarvise:paper:digest:last", payload)
         return 0, payload
 
 
@@ -336,8 +417,7 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
     path = Path(raw)
     timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
     symbols = [
-        s for s in (os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")).split(",")
-        if s.strip()
+        s for s in (os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")).split(",") if s.strip()
     ]
     max_age = _fenv("JARVISE_INGEST_HEALTH_MAX_AGE_MIN", 60.0)
     if not path.exists():
@@ -356,7 +436,7 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
         finally:
             conn.close()
     payload["telegram_sent"] = notify_ingest_health(payload)
-    publish_redis_status("jarvise:ingest:health", payload)
+    _publish_best_effort("jarvise:ingest:health", payload)
     return 0, payload
 
 
@@ -370,7 +450,13 @@ def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
     now = int(time.time() * 1000)
     with single_flight("paper_auto_decide") as acquired:
         if not acquired:
-            return 3, {"ok": False, "skipped": True, "reason": "auto_decide_running", "paper_only": True, "at_ms": now}
+            return 3, {
+                "ok": False,
+                "skipped": True,
+                "reason": "auto_decide_running",
+                "paper_only": True,
+                "at_ms": now,
+            }
         unreadable = False
         try:
             engaged = kill_switch_engaged()
@@ -384,7 +470,13 @@ def run_paper_auto_decide() -> tuple[int, dict[str, Any]]:
         raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
         path = Path(raw)
         if not path.exists():
-            payload = {"ok": False, "skipped": True, "reason": "no_database", "paper_only": True, "at_ms": now}
+            payload = {
+                "ok": False,
+                "skipped": True,
+                "reason": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
             _publish_best_effort(key, payload)
             return 1, payload
         conn = open_db(path)
@@ -412,7 +504,14 @@ def run_live_reconcile() -> tuple[int, dict[str, Any]]:
         raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
         path = Path(raw)
         if not path.exists():
-            payload = {"ok": True, "skipped": True, "reason": "no_database", "open": 0, "read_only": True, "at_ms": now}
+            payload = {
+                "ok": True,
+                "skipped": True,
+                "reason": "no_database",
+                "open": 0,
+                "read_only": True,
+                "at_ms": now,
+            }
             _publish_best_effort(key, payload)
             return 0, payload
         conn = open_db(path)
@@ -420,6 +519,58 @@ def run_live_reconcile() -> tuple[int, dict[str, Any]]:
             payload = reconcile_live_orders(conn, now_ms=now)
         except Exception as exc:  # noqa: BLE001
             payload = {"ok": False, "read_only": True, "error": f"{type(exc).__name__}: {exc}", "at_ms": now}
+        finally:
+            conn.close()
+        _publish_best_effort(key, payload)
+        return (0 if payload.get("ok") else 1), payload
+
+
+def run_risk_monitor() -> tuple[int, dict[str, Any]]:
+    """MTM + stop exits + daily halt. Runs even when kill-switch is engaged (stops reduce risk).
+
+    With live trading on, also reconciles live orders, halts on the live day-loss cap, and
+    flattens live spot positions while the kill-switch is engaged — even if the paper pass failed.
+    """
+    key = "jarvise:risk_monitor:last"
+    now = int(time.time() * 1000)
+    with single_flight("risk_monitor") as acquired:
+        if not acquired:
+            return 3, _running("risk_monitor")
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        if not path.exists():
+            payload = {
+                "ok": False,
+                "skipped": True,
+                "reason": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
+            _publish_best_effort(key, payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            try:
+                payload = paper_risk_monitor(conn, now_ms=now)
+            except Exception as exc:  # noqa: BLE001
+                payload = {
+                    "ok": False,
+                    "paper_only": True,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "at_ms": now,
+                }
+            if live_trading_enabled():
+                try:
+                    live = live_risk_tick(conn, now_ms=now)
+                except Exception as exc:  # noqa: BLE001
+                    live = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                    notify_job_failure("risk_monitor (live flatten)", str(live["error"]))
+                payload = {
+                    **payload,
+                    "ok": bool(payload.get("ok")) and bool(live.get("ok")),
+                    "paper_only": False,
+                    "live": live,
+                }
         finally:
             conn.close()
         _publish_best_effort(key, payload)
@@ -450,6 +601,7 @@ def _parse_stdout(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 ROUTES = {
     ("GET", "/healthz"): "health",
+    ("GET", "/metrics"): "metrics",
     ("GET", "/doctrine"): "doctrine",
     ("POST", "/jobs/ingest"): "ingest",
     ("POST", "/jobs/rag-refresh"): "rag",
@@ -459,6 +611,7 @@ ROUTES = {
     ("POST", "/jobs/ingest-health"): "ingest_health",
     ("POST", "/jobs/paper-auto-decide"): "paper_auto_decide",
     ("POST", "/jobs/live-reconcile"): "live_reconcile",
+    ("POST", "/jobs/risk-monitor"): "risk_monitor",
 }
 
 
@@ -476,7 +629,11 @@ class JobHandler(BaseHTTPRequestHandler):
         token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
         if not token:
             return True
-        return self.headers.get("X-Jarvise-Token") == token
+        got = self.headers.get("X-Jarvise-Token") or ""
+        try:
+            return secrets.compare_digest(got, token)
+        except (TypeError, ValueError):
+            return False
 
     def _dispatch(self) -> None:
         if not self._authorized():
@@ -487,6 +644,12 @@ class JobHandler(BaseHTTPRequestHandler):
         if action == "health":
             self._send(200, {"ok": True, "paper_only": True})
             return
+        if action == "metrics":
+            ks = kill_switch_state(strict=False)
+            set_gauge("jarvise_kill_switch", 1.0 if ks.get("engaged") else 0.0)
+            metrics_body = render_prometheus()
+            self._send_text(200, metrics_body)
+            return
         if action == "doctrine":
             params = parse_qs(self.path.partition("?")[2])
             query = (params.get("q") or [""])[0]
@@ -496,44 +659,41 @@ class JobHandler(BaseHTTPRequestHandler):
                 limit = 3
             self._send(200, run_doctrine_search(query, limit))
             return
-        if action == "ingest":
-            code, body = run_ingest()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
+        runners = {
+            "ingest": run_ingest,
+            "rag": run_rag_refresh,
+            "paper_run": run_paper_run,
+            "paper_expire": run_paper_expire,
+            "paper_pending_digest": run_paper_pending_digest,
+            "ingest_health": run_ingest_health,
+            "paper_auto_decide": run_paper_auto_decide,
+            "live_reconcile": run_live_reconcile,
+            "risk_monitor": run_risk_monitor,
+        }
+        runner = runners.get(action or "")
+        if runner is None or action is None:
+            self._send(404, {"ok": False, "error": "not found"})
             return
-        if action == "rag":
-            code, body = run_rag_refresh()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        if action == "paper_run":
-            code, body = run_paper_run()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        if action == "paper_expire":
-            code, body = run_paper_expire()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        if action == "paper_pending_digest":
-            code, body = run_paper_pending_digest()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
+        started = time.monotonic()
+        code, payload = runner()
+        observe_job(action, ok=(code == 0), duration_s=time.monotonic() - started)
         if action == "ingest_health":
-            code, body = run_ingest_health()
-            self._send(200 if code == 0 else 500, body)
-            return
-        if action == "paper_auto_decide":
-            code, body = run_paper_auto_decide()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        if action == "live_reconcile":
-            code, body = run_live_reconcile()
-            self._send(200 if code == 0 else 409 if code == 3 else 500, body)
-            return
-        self._send(404, {"ok": False, "error": "not found"})
+            self._send(200 if code == 0 else 500, payload)
+        else:
+            self._send(200 if code == 0 else 409 if code == 3 else 500, payload)
 
     def _send(self, status: int, body: dict[str, Any]) -> None:
         raw = json.dumps(body).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _send_text(self, status: int, body: str) -> None:
+        raw = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
