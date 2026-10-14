@@ -1,12 +1,13 @@
 {
   "id": "jarvise",
   "name": "Jarvise",
-  "description": "Paper-only Jarvise research/signals, doctrine RAG, and read-only Binance public intel. No order placement.",
+  "description": "Paper-only Jarvise research/signals, doctrine RAG, read-only Binance public intel, and news digests. No order placement.",
   "version": "0.2.0",
   "skills": [
     "./skills/jarvise-paper-research",
     "./skills/jarvise-doctrine-rag",
-    "./skills/jarvise-binance-intel"
+    "./skills/jarvise-binance-intel",
+    "./skills/jarvise-news-ingest"
   ],
   "configSchema": {
     "type": "object",

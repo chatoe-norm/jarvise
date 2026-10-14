@@ -1,6 +1,6 @@
 # Disaster recovery — Jarvise VPS
 
-**Scope:** `/opt/jarvise` on Hostinger KVM `srv1269762` (Tailscale `100.93.110.48`). Co-tenant T4Trip (`/opt/t4trip*`) is out of scope and must never be touched by these scripts.
+**Scope:** `/opt/jarvise` on Hostinger KVM `srv1811101` (Tailscale `100.89.171.36`, public `76.13.218.48`). Co-tenant LearningYard is out of scope and must never be touched by these scripts. Former host `srv1269762` (T4Trip) is also out of scope.
 
 ## Objectives
 

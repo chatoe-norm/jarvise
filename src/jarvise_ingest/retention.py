@@ -19,6 +19,7 @@ PROTECTED_TABLES = (
     "universe_membership",
     "performance_risk_metrics",
     "macro_onchain_sentiment",
+    "paper_equity_snapshots",
 )
 
 

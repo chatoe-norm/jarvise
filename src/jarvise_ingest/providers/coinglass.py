@@ -85,9 +85,7 @@ def fetch_derivatives(
     params = {"symbol": coin, "interval": cg_interval, "limit": limit}
 
     oi_raw = _get("/api/futures/openInterest/ohlc-history", params, key, client=client)
-    fr_raw = _get(
-        "/api/futures/fundingRate/oi-weight-ohlc-history", params, key, client=client
-    )
+    fr_raw = _get("/api/futures/fundingRate/oi-weight-ohlc-history", params, key, client=client)
     liq_raw = _get(
         "/api/futures/liquidation/aggregated-history",
         {"symbol": coin, "interval": cg_interval, "limit": limit},
@@ -144,9 +142,7 @@ def fetch_derivatives(
             or item.get("volUsd")
             or item.get("c")
         )
-        short = item.get("aggregated_short_liquidation_usd") or item.get(
-            "shortLiquidationUsd"
-        )
+        short = item.get("aggregated_short_liquidation_usd") or item.get("shortLiquidationUsd")
         total = None
         if liq is not None:
             total = float(liq)

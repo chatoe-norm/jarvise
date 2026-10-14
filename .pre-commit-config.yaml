@@ -1,0 +1,21 @@
+minimum_pre_commit_version: "4.0.0"
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^(src|tests|scripts)/.*\.py$
+      - id: ruff-format
+        files: ^(src|tests|scripts)/.*\.py$
+
+  - repo: local
+    hooks:
+      - id: jarvise-check
+        name: jarvise full validation
+        entry: ./scripts/check.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

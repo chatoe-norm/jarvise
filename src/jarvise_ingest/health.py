@@ -17,8 +17,7 @@ from jarvise_ingest.series import find_gaps
 from jarvise_ingest.timeframes import INTERVAL_MS
 
 BACKFILL_HINT = (
-    "jarvise ingest --symbol {symbols} --timeframe {timeframe} "
-    "--since 2021-01-01 --skip-derivatives --json"
+    "jarvise ingest --symbol {symbols} --timeframe {timeframe} --since 2021-01-01 --skip-derivatives --json"
 )
 
 

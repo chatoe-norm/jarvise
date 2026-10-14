@@ -9,8 +9,14 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
-from jarvise_analyze.replay import replay_range
+from jarvise_analyze.engine import (
+    CONFIDENCE_THRESHOLD,
+    analyze_mtf,
+    analyze_snapshot,
+    htf_timeframe,
+    mtf_enabled,
+)
+from jarvise_analyze.replay import replay_is_oos, replay_range
 from jarvise_ingest.db import (
     load_latest_candle,
     open_db,
@@ -18,7 +24,7 @@ from jarvise_ingest.db import (
     upsert_analysis_output,
 )
 from jarvise_ingest.timeframes import ALLOWED_INTERVALS
-from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_ingest.universe import PAPER_CORE, PAPER_LIQUID, seed_named_universe
 from jarvise_risk import apply_safety_to_analysis, evaluate_from_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +60,32 @@ def _is_default_live_db(path: Path) -> bool:
         return False
 
 
+def _print_metrics(metrics: dict) -> None:
+    if not metrics:
+        return
+    print(
+        f"metrics closed={metrics.get('closed_trades')} "
+        f"EV={metrics.get('expected_value_ev')} "
+        f"win_rate={metrics.get('win_rate')}"
+    )
+
+
+def _print_split_window(label: str, window: dict) -> None:
+    counts = window.get("action_counts") or {}
+    print(
+        f"{label} bars={window['bars']} "
+        f"long={counts.get('long', 0)} short={counts.get('short', 0)} "
+        f"flat={counts.get('flat', 0)} fills={window['fills']}"
+    )
+    metrics = window.get("metrics") or {}
+    if metrics:
+        print(
+            f"{label} metrics closed={metrics.get('closed_trades')} "
+            f"EV={metrics.get('expected_value_ev')} "
+            f"win_rate={metrics.get('win_rate')}"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jarvise analyze",
@@ -76,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--universe",
-        help=f"Analyze eligible symbols from a universe (seeded: {PAPER_CORE})",
+        help=f"Analyze eligible symbols from a universe (seeded: {PAPER_CORE}, {PAPER_LIQUID})",
     )
     p.add_argument(
         "--timeframe",
@@ -107,11 +139,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replay end ISO-8601 (default: now; requires --replay)",
     )
     p.add_argument(
+        "--oos-since",
+        help=(
+            "Out-of-sample start ISO-8601. Requires --replay and must sit "
+            "strictly after --since and strictly before --until. "
+            "Scores the same frozen strategy on both windows."
+        ),
+    )
+    p.add_argument(
         "--apply-paper",
         action="store_true",
+        help=("With --replay: apply_signal each bar into isolated --db (refuses default live ledger path)"),
+    )
+    p.add_argument(
+        "--paper-policy",
+        choices=["naive", "rules"],
+        default="naive",
         help=(
-            "With --replay: apply_signal each bar into isolated --db "
-            "(refuses default live ledger path)"
+            "With --apply-paper: naive = fill every bar (engine may flip). "
+            "rules = same-side hold, opposite defer, FLAT closes (no Claude)"
         ),
     )
     return p
@@ -120,8 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_symbols(conn, args) -> list[str] | int:
     symbols = _parse_symbols(args.symbols)
     if args.universe:
-        if args.universe == PAPER_CORE:
-            seed_paper_core(conn)
+        seed_named_universe(conn, args.universe)
         as_of_ms = int(time.time() * 1000)
         from_universe = universe_as_of(conn, args.universe, as_of_ms)
         seen: set[str] = set()
@@ -173,10 +218,22 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.oos_since and not args.replay:
+        print(
+            "Error: --oos-since requires --replay.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
     if args.apply_paper and _is_default_live_db(args.db):
         print(
             "Error: --apply-paper refuses the default live ledger DB. "
             f"Copy the DB and pass --db <isolated path>.\n  {REPLAY_EXAMPLE}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.paper_policy == "rules" and not args.apply_paper:
+        print(
+            "Error: --paper-policy rules requires --apply-paper.\n  " + REPLAY_EXAMPLE,
             file=sys.stderr,
         )
         return 2
@@ -190,11 +247,7 @@ def run(argv: list[str] | None = None) -> int:
 
         if args.replay:
             since = _parse_instant(args.since)
-            until = (
-                _parse_instant(args.until)
-                if args.until
-                else datetime.now(UTC)
-            )
+            until = _parse_instant(args.until) if args.until else datetime.now(UTC)
             if since >= until:
                 print(
                     "Error: --since must be before --until.\n  " + REPLAY_EXAMPLE,
@@ -203,26 +256,70 @@ def run(argv: list[str] | None = None) -> int:
                 return 2
             since_ms = int(since.timestamp() * 1000)
             until_ms = int(until.timestamp() * 1000)
-            report = replay_range(
-                conn,
-                symbols=symbols,
-                timeframe=args.timeframe,
-                since_ms=since_ms,
-                until_ms=until_ms,
-                confidence_threshold=args.confidence_threshold,
-                apply_paper=args.apply_paper,
-                dry_run=args.dry_run,
-            )
+            if args.oos_since:
+                oos_since = _parse_instant(args.oos_since)
+                if not (since < oos_since < until):
+                    print(
+                        "Error: --oos-since must be strictly after --since and strictly before --until.\n  "
+                        + REPLAY_EXAMPLE,
+                        file=sys.stderr,
+                    )
+                    return 2
+                report = replay_is_oos(
+                    conn,
+                    symbols=symbols,
+                    timeframe=args.timeframe,
+                    since_ms=since_ms,
+                    oos_since_ms=int(oos_since.timestamp() * 1000),
+                    until_ms=until_ms,
+                    confidence_threshold=args.confidence_threshold,
+                    apply_paper=args.apply_paper,
+                    dry_run=args.dry_run,
+                    paper_policy=args.paper_policy,
+                )
+                if args.apply_paper and args.paper_policy == "rules":
+                    report["note"] += (
+                        " Paper fills on an isolated db (rules policy: hold/defer/flat); "
+                        "no Claude; no exchange orders."
+                    )
+                elif args.apply_paper:
+                    report["note"] += " Paper fills on an isolated db; no exchange orders."
+                else:
+                    report["note"] += " Analysis only; no order placement."
+            else:
+                report = replay_range(
+                    conn,
+                    symbols=symbols,
+                    timeframe=args.timeframe,
+                    since_ms=since_ms,
+                    until_ms=until_ms,
+                    confidence_threshold=args.confidence_threshold,
+                    apply_paper=args.apply_paper,
+                    dry_run=args.dry_run,
+                    paper_policy=args.paper_policy,
+                )
+                if args.apply_paper and args.paper_policy == "rules":
+                    report["note"] = (
+                        "replay + paper fills (isolated db, rules policy: hold/defer/flat); "
+                        "no Claude; no exchange orders"
+                    )
+                elif args.apply_paper:
+                    report["note"] = "replay + paper fills (isolated db); no exchange orders"
+                else:
+                    report["note"] = "replay analysis only; no order placement"
             report["db"] = str(args.db.resolve())
             report["universe"] = args.universe
             report["duration_s"] = round(time.perf_counter() - started, 3)
-            report["note"] = (
-                "replay + paper fills (isolated db); no exchange orders"
-                if args.apply_paper
-                else "replay analysis only; no order placement"
-            )
             if args.as_json:
                 print(json.dumps(report, separators=(",", ":")))
+            elif args.oos_since:
+                for err in (report["in_sample"].get("errors") or []) + (
+                    report["out_of_sample"].get("errors") or []
+                ):
+                    print(f"Error: {err}", file=sys.stderr)
+                _print_split_window("in_sample", report["in_sample"])
+                _print_split_window("out_of_sample", report["out_of_sample"])
+                print(report["note"])
             else:
                 print(
                     f"replay bars={report['bars']} analyses={report['analyses']} "
@@ -230,13 +327,7 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 for err in report.get("errors") or []:
                     print(f"Error: {err}", file=sys.stderr)
-                metrics = report.get("metrics") or {}
-                if metrics:
-                    print(
-                        f"metrics closed={metrics.get('closed_trades')} "
-                        f"EV={metrics.get('expected_value_ev')} "
-                        f"win_rate={metrics.get('win_rate')}"
-                    )
+                _print_metrics(report.get("metrics") or {})
             return 0 if report.get("ok") else 1
 
         analyses: list[dict] = []
@@ -246,9 +337,15 @@ def run(argv: list[str] | None = None) -> int:
             if candle is None:
                 errors.append(f"{sym} {args.timeframe}: no stored candles")
                 continue
-            result = analyze_snapshot(
-                candle, confidence_threshold=args.confidence_threshold
-            )
+            if mtf_enabled() and args.timeframe != htf_timeframe():
+                htf_candle = load_latest_candle(conn, sym, htf_timeframe())
+                result = analyze_mtf(
+                    candle,
+                    htf_candle,
+                    confidence_threshold=args.confidence_threshold,
+                )
+            else:
+                result = analyze_snapshot(candle, confidence_threshold=args.confidence_threshold)
             safety = evaluate_from_db(conn, sym)
             result = apply_safety_to_analysis(result, safety)
             if not args.dry_run:

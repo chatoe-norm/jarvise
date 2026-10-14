@@ -14,7 +14,7 @@ Drawdown halt / kill-switch: stop trading for the session/day if equity drops a 
 
 Deployment ladder: paper (simulated fills) -> manual approval (human sign-off) -> autonomy. Unlock live only with kill-switch, spend/asset caps, and confidence threshold. Current Jarvise stack is paper analytics / research only: no order placement.
 
-Charts: read structure first (trend vs range, swing highs/lows, support/resistance, volume confirmation). Oscillators (RSI/MACD/BB) are context, not standalone signals. Forecast as 2–3 scenarios with invalidation, never a single fake-precise price. Below confidence threshold -> FLAT.
+Charts: read structure first (trend vs range, swing highs/lows, support/resistance, volume confirmation). Oscillators (RSI/MACD/BB) are context, not standalone signals. Forecast as 2–3 scenarios with invalidation, never a single fake-precise price. Below confidence threshold -> FLAT. Shallow trend_up pullbacks (close slightly below EMA20, RSI 45–70) are a written caution entry — see jarvise-doctrine-pullback-entry.txt.
 
 Venue: trade worldwide — not locked to Binance or Binance TH. Any venue/account is fine if Jarvise stays efficient, stable, and secure. Binance spot is the current first adapter for OHLCV / read-only balances / gated live. Respect venue listing and local rules where they apply. Fees, spread, and book depth are real costs. BTC books are thicker; ETH is thinner with more wicks/spoof walls — wider structural stops and print validation.
 
