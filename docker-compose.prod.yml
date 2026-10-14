@@ -28,3 +28,11 @@ services:
   web:
     ports: !override
       - "${TAILSCALE_IP:?Set TAILSCALE_IP to the VPS Tailscale IPv4}:${WEB_PORT:-8080}:8080"
+
+  prometheus:
+    ports: !override
+      - "${TAILSCALE_IP:?Set TAILSCALE_IP to the VPS Tailscale IPv4}:9090:9090"
+
+  grafana:
+    ports: !override
+      - "${TAILSCALE_IP:?Set TAILSCALE_IP to the VPS Tailscale IPv4}:3000:3000"

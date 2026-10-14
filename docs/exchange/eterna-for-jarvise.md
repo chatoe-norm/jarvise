@@ -99,18 +99,22 @@ Same rule as TradingView MCP and CoinGecko AI: agents may use Eterna tools for r
 
 Eterna defaults to linear perpetuals. Jarvise's `market_safety` fails closed on stale or unsafe **derivatives** data (funding, OI, liquidations) as context for **spot** paper decisions. Perp execution would need a separate risk model (leverage, liquidation price, funding drag) that Jarvise does not have — do not reuse spot risk caps for perps.
 
-## Future venue adapter (candidate only)
+## Venue adapter status (T2.5)
 
-Jarvise is venue-agnostic; Binance is the first adapter. Eterna could become a second adapter **only** through the existing contract, never through ad-hoc MCP calls:
+| Piece | Status |
+|-------|--------|
+| Registry | `jarvise_exchange.registry.resolve_venue_client("binance"|"eterna")`; env `JARVISE_EXCHANGE_VENUE` (default `binance`) |
+| CLI | `jarvise exchange venues`; `jarvise exchange sync-balances --venue eterna` |
+| `EternaSpotClient` | **Stub** — loads `ETERNA_SPOT_FIXTURE` JSON offline; otherwise raises `EternaReadApiBlocked` |
+| Blocker | No documented **GET-only** spot-balance REST suitable for `VenueClient`. MCP `execute_code` is **forbidden** (scope includes trading + withdraw). |
+| Next unblock | When Eterna publishes a signed read-only HTTP account API (no withdraw), implement real HTTP in `eterna_spot.py` behind the same client; keep fixture for tests. |
 
 | Step | Requirement |
 |------|-------------|
-| 1. Read-only balances | Implement `VenueClient.list_spot_balances()` in `src/jarvise_exchange/` over a GET-only path (evaluate the [API catalog](https://ai.eterna.exchange/.well-known/api-catalog) before an MCP client). Soft-fail on the Exchange page like Binance. |
-| 2. Paper evaluation | Spot symbols only; slippage model from Eterna order book; compare EV after fees vs Binance using the same ledger. |
+| 1. Read-only balances | In progress (fixture/blocker). Prefer GET-only REST from the [API catalog](https://ai.eterna.exchange/.well-known/api-catalog); never MCP. |
+| 2. Paper evaluation | Spot symbols only; slippage from Eterna book; compare EV vs Binance. |
 | 3. Manual approval | Owner Approve on the Command Dashboard; still no orders. |
-| 4. Live (gated) | Only after the live-enable checklist, size-capped spot, `JARVISE_LIVE_TRADING=true`, kill-switch and risk caps enforced in `jarvise_trade`. No perps, no leverage, no funding methods. |
-
-Nothing in this table is scheduled; it records the only acceptable path.
+| 4. Live (gated) | Only after the live-enable checklist + `jarvise_trade` path. No perps / leverage / funding methods. |
 
 ## Hard rules
 

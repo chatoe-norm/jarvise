@@ -6,6 +6,13 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _default_live_equity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live sizing must not fall back to paper equity; tests that need fail-closed
+    can ``delenv("JARVISE_LIVE_EQUITY_USD")``."""
+    monkeypatch.setenv("JARVISE_LIVE_EQUITY_USD", "10000")
+
+
+@pytest.fixture(autouse=True)
 def _disable_market_safety_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Existing paper/approval tests seed OHLCV only; gate is covered in
     test_market_safety.py with explicit MarketSafetyConfig."""

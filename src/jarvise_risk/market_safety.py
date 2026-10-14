@@ -74,17 +74,12 @@ def load_market_safety_config(
 ) -> MarketSafetyConfig:
     return MarketSafetyConfig(
         enabled=_benv("JARVISE_MARKET_SAFETY", True),
-        max_spread_bps=_fenv(
-            "JARVISE_MARKET_SAFETY_MAX_SPREAD_BPS", DEFAULT_MAX_SPREAD_BPS
-        ),
-        min_depth_usd=_fenv(
-            "JARVISE_MARKET_SAFETY_MIN_DEPTH_USD", DEFAULT_MIN_DEPTH_USD
-        ),
+        max_spread_bps=_fenv("JARVISE_MARKET_SAFETY_MAX_SPREAD_BPS", DEFAULT_MAX_SPREAD_BPS),
+        min_depth_usd=_fenv("JARVISE_MARKET_SAFETY_MIN_DEPTH_USD", DEFAULT_MIN_DEPTH_USD),
         max_age_min=_fenv("JARVISE_MARKET_SAFETY_MAX_AGE_MIN", DEFAULT_MAX_AGE_MIN),
         require_book=not skip_book,
         require_derivatives=not skip_derivatives,
-        require_macro=not skip_macro
-        and _benv("JARVISE_MARKET_SAFETY_REQUIRE_MACRO", False),
+        require_macro=not skip_macro and _benv("JARVISE_MARKET_SAFETY_REQUIRE_MACRO", False),
     )
 
 
@@ -122,6 +117,7 @@ def evaluate_market_safety(
     config: MarketSafetyConfig | None = None,
     now_ms: int | None = None,
     provider_errors: list[str] | None = None,
+    intended_side: str | None = None,
 ) -> MarketSafetyResult:
     """Return gate outcome. Does not engage kill-switch (caller may)."""
     cfg = config or load_market_safety_config()
@@ -156,19 +152,25 @@ def evaluate_market_safety(
             else:
                 spread_bps = float(spread) * 10_000.0
                 if spread_bps > cfg.max_spread_bps:
-                    reasons.append(
-                        f"spread_bps={spread_bps:.1f}>{cfg.max_spread_bps:.1f}"
-                    )
+                    reasons.append(f"spread_bps={spread_bps:.1f}>{cfg.max_spread_bps:.1f}")
             bid_d = book.get("bid_depth_1pct_usd")
             ask_d = book.get("ask_depth_1pct_usd")
             if bid_d is None or ask_d is None:
                 reasons.append("book_depth_null")
                 critical = True
-            elif float(bid_d) < cfg.min_depth_usd and float(ask_d) < cfg.min_depth_usd:
-                reasons.append(
-                    f"illiquid_depth bid={bid_d} ask={ask_d} floor={cfg.min_depth_usd}"
-                )
-                critical = True
+            else:
+                side = (intended_side or "").lower()
+                if side in {"buy", "long"}:
+                    if float(ask_d) < cfg.min_depth_usd:
+                        reasons.append(f"illiquid_depth ask={ask_d} floor={cfg.min_depth_usd}")
+                        critical = True
+                elif side in {"sell", "short"}:
+                    if float(bid_d) < cfg.min_depth_usd:
+                        reasons.append(f"illiquid_depth bid={bid_d} floor={cfg.min_depth_usd}")
+                        critical = True
+                elif float(bid_d) < cfg.min_depth_usd and float(ask_d) < cfg.min_depth_usd:
+                    reasons.append(f"illiquid_depth bid={bid_d} ask={ask_d} floor={cfg.min_depth_usd}")
+                    critical = True
 
     if cfg.require_derivatives:
         if derivatives is None:
@@ -176,17 +178,11 @@ def evaluate_market_safety(
             critical = True
         else:
             # Event time or ingested_at — prefer ingested_at when present.
-            ts = int(
-                derivatives.get("ingested_at")
-                or derivatives.get("timestamp")
-                or 0
-            )
+            ts = int(derivatives.get("ingested_at") or derivatives.get("timestamp") or 0)
             if now - ts > max_age_ms:
                 reasons.append(f"derivatives_stale_ms={now - ts}")
                 critical = True
-            if derivatives.get("funding_rate") is None and derivatives.get(
-                "liquidations_24h_usd"
-            ) is None:
+            if derivatives.get("funding_rate") is None and derivatives.get("liquidations_24h_usd") is None:
                 reasons.append("derivatives_metrics_null")
                 critical = True
 
@@ -254,6 +250,7 @@ def evaluate_from_db(
     now_ms: int | None = None,
     provider_errors: list[str] | None = None,
     engage_ks: bool = False,
+    intended_side: str | None = None,
 ) -> MarketSafetyResult:
     """Load latest snapshots from SQLite and evaluate."""
     from jarvise_ingest.db import (
@@ -261,6 +258,12 @@ def evaluate_from_db(
         latest_macro_sentiment,
         latest_order_book,
     )
+    from jarvise_ingest.providers.stooq_ohlcv import is_equity_symbol
+
+    # US equity / ETF paper path has no Binance book or crypto derivatives.
+    if is_equity_symbol(symbol):
+        skip_book = True
+        skip_derivatives = True
 
     cfg = load_market_safety_config(
         skip_book=skip_book,
@@ -268,9 +271,7 @@ def evaluate_from_db(
         skip_macro=skip_macro,
     )
     book = None if skip_book else latest_order_book(conn, symbol)
-    deriv = None if skip_derivatives else latest_derivatives_as_of(
-        conn, symbol, as_of_ms=now_ms
-    )
+    deriv = None if skip_derivatives else latest_derivatives_as_of(conn, symbol, as_of_ms=now_ms)
     macro = None if skip_macro else latest_macro_sentiment(conn)
     result = evaluate_market_safety(
         book=book,
@@ -279,6 +280,7 @@ def evaluate_from_db(
         config=cfg,
         now_ms=now_ms,
         provider_errors=provider_errors,
+        intended_side=intended_side,
     )
     if engage_ks:
         return maybe_engage_kill_switch(result)

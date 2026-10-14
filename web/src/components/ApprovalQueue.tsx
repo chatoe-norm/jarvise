@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type ApprovalRow, type RecommendationPayload } from "@/lib/api";
+import { api, type ApprovalRow, type OhlcvPayload, type RecommendationPayload } from "@/lib/api";
 import { RecommendationCard } from "@/components/RecommendationCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,6 +39,7 @@ export function ApprovalQueue({
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [cards, setCards] = useState<Record<string, RecommendationPayload>>({});
+  const [ohlcv, setOhlcv] = useState<Record<string, OhlcvPayload>>({});
   const [cardError, setCardError] = useState<Record<string, string>>({});
 
   async function act(id: string, kind: "approve" | "reject") {
@@ -65,8 +66,12 @@ export function ApprovalQueue({
       return cleared;
     });
     try {
-      const card = await api.recommendation(id);
+      const [card, series] = await Promise.all([
+        api.recommendation(id),
+        api.ohlcv(id).catch(() => null),
+      ]);
       setCards((prev) => ({ ...prev, [id]: card }));
+      if (series) setOhlcv((prev) => ({ ...prev, [id]: series }));
     } catch (err) {
       setCardError((prev) => ({
         ...prev,
@@ -152,7 +157,7 @@ export function ApprovalQueue({
                       <tr key={r.id + ":card"} className="border-b border-[var(--color-border)]/60">
                         <td colSpan={7} className="pb-4 pt-1">
                           {card ? (
-                            <RecommendationCard data={card} />
+                            <RecommendationCard data={card} ohlcv={ohlcv[r.id]} />
                           ) : cardError[r.id] ? (
                             <p className="text-sm text-[var(--color-danger)]">
                               โหลดคำแนะนำไม่สำเร็จ: {cardError[r.id]}

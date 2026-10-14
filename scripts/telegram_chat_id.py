@@ -109,7 +109,9 @@ def main() -> int:
     args = parser.parse_args()
 
     dotenv = _load_dotenv(args.env)
-    token = (args.token or os.environ.get("TELEGRAM_BOT_TOKEN") or dotenv.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    token = (
+        args.token or os.environ.get("TELEGRAM_BOT_TOKEN") or dotenv.get("TELEGRAM_BOT_TOKEN") or ""
+    ).strip()
     if not token:
         print("Missing TELEGRAM_BOT_TOKEN (.env / env / --token)", file=sys.stderr)
         return 2
