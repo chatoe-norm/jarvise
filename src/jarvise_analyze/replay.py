@@ -140,16 +140,28 @@ def replay_is_oos(
     """
     if not (int(since_ms) < int(oos_since_ms) < int(until_ms)):
         raise ValueError("oos_since must be strictly after since and strictly before until")
-    common = {
-        "symbols": symbols,
-        "timeframe": timeframe,
-        "confidence_threshold": confidence_threshold,
-        "apply_paper": apply_paper,
-        "dry_run": dry_run,
-        "paper_policy": paper_policy,
-    }
-    in_sample = replay_range(conn, since_ms=int(since_ms), until_ms=int(oos_since_ms) - 1, **common)
-    out_of_sample = replay_range(conn, since_ms=int(oos_since_ms), until_ms=int(until_ms), **common)
+    in_sample = replay_range(
+        conn,
+        symbols=symbols,
+        timeframe=timeframe,
+        since_ms=int(since_ms),
+        until_ms=int(oos_since_ms) - 1,
+        confidence_threshold=confidence_threshold,
+        apply_paper=apply_paper,
+        dry_run=dry_run,
+        paper_policy=paper_policy,
+    )
+    out_of_sample = replay_range(
+        conn,
+        symbols=symbols,
+        timeframe=timeframe,
+        since_ms=int(oos_since_ms),
+        until_ms=int(until_ms),
+        confidence_threshold=confidence_threshold,
+        apply_paper=apply_paper,
+        dry_run=dry_run,
+        paper_policy=paper_policy,
+    )
     return {
         "ok": bool(in_sample.get("ok")) and bool(out_of_sample.get("ok")),
         "paper_only": True,
