@@ -1,12 +1,10 @@
 import { Link } from "react-router-dom";
 import { ApprovalQueue } from "@/components/ApprovalQueue";
-import { EquityChart, WinLossChart } from "@/components/Charts";
 import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { DashboardPayload, PaperAutoStatus, StatusPayload } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
-import { buildEquityPoints } from "@/lib/equity";
 import { relativeAge } from "@/lib/utils";
 
 type AutoEntry = {
@@ -160,10 +158,6 @@ export function HomePage({
   }
   if (!data) return null;
 
-  const equityPoints = buildEquityPoints(
-    data.metrics.trades || [],
-    data.metrics.starting_equity,
-  );
   const m = data.metrics;
   const queueEmpty = (data.approvals || []).length === 0;
 
@@ -202,29 +196,6 @@ export function HomePage({
       />
 
       <MarketContextCard status={data.status} />
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Equity trajectory</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <EquityChart points={equityPoints} />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>Win / loss mix</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <WinLossChart
-              wins={Number(m.wins || 0)}
-              losses={Number(m.losses || 0)}
-              scratches={Number(m.scratches || 0)}
-            />
-          </CardContent>
-        </Card>
-      </div>
     </div>
   );
 }
