@@ -160,7 +160,10 @@ export function HomePage({
   }
   if (!data) return null;
 
-  const equityPoints = buildEquityPoints(data.paper.orders || [], data.paper.equity);
+  const equityPoints = buildEquityPoints(
+    data.metrics.trades || [],
+    data.metrics.starting_equity,
+  );
   const m = data.metrics;
   const queueEmpty = (data.approvals || []).length === 0;
 
