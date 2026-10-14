@@ -41,7 +41,7 @@ OpenClaw on the Jarvise VPS is an agent Control UI (paper-only team). It does **
 
 **Pros:** Mature OMS/backtest/multi-venue/risk primitives; clearer “brain vs engine” split in theory; closer to industry bot stacks for heavy live/multi-venue later.
 
-**Cons:** Large rewrite (paper ledger, approval, market_safety, kill-switch, jobs/n8n, Dashboard); fights current `AGENTS.md` ban on Nautilus as execution dependency; heavy PyO3/Rust footprint on a shared 4 vCPU / 16 GB host; does not fix today’s bottleneck (closed `auto_*` n=0); OpenClaw is not a Nautilus runtime (extra process); loses the audited simplicity of httpx + SQLite.
+**Cons:** Large rewrite (paper ledger, approval, market_safety, kill-switch, jobs/n8n, Dashboard); fights current `AGENTS.md` ban on Nautilus as execution dependency; heavy PyO3/Rust footprint on a shared 4 vCPU / 16 GB host; does not fix today’s bottleneck (the closed `auto_*` sample exists and is negative, so option B is still not justified); OpenClaw is not a Nautilus runtime (extra process); loses the audited simplicity of httpx + SQLite.
 
 ### C — Jarvise core, overlay ideas only
 
@@ -55,7 +55,7 @@ OpenClaw on the Jarvise VPS is an agent Control UI (paper-only team). It does **
 
 **Choose C now.** Do not pursue B until all of the following are true:
 
-1. Closed paper `auto_*` sample is honest (~10+) and EV is readable.
+1. The closed paper `auto_*` sample has reached the Paper gate of about 8 trades and EV is readable. A losing sample does not loosen floors `0.55`/`0.70`, `same_side_hold`, or live.
 2. Optional P4-C live smoke via [`docs/ops/live-enable-checklist.md`](../ops/live-enable-checklist.md) (flag stays false until the owner enables it).
 3. A concrete gap that C cannot reasonably close (e.g. real multi-venue execution) justifies a **separate** B spec.
 
