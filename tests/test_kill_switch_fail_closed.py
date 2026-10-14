@@ -74,9 +74,7 @@ def test_engage_sets_keys_and_alerts_once_per_transition(monkeypatch) -> None:
     fake = _FakeRedis()
     monkeypatch.setattr(caps, "_redis_client", lambda url: fake)
     alerts: list[tuple] = []
-    monkeypatch.setattr(
-        caps, "notify_kill_switch", lambda reason, **kw: alerts.append((reason, kw)) or True
-    )
+    monkeypatch.setattr(caps, "notify_kill_switch", lambda reason, **kw: alerts.append((reason, kw)) or True)
     assert engage_kill_switch(reason="max_daily_loss") is True
     assert fake.store["jarvise:kill_switch"] == "1"
     assert fake.store["jarvise:kill_switch:reason"] == "max_daily_loss"
@@ -88,9 +86,7 @@ def test_engage_sets_keys_and_alerts_once_per_transition(monkeypatch) -> None:
 
 def test_engage_failure_returns_false_and_alerts(monkeypatch) -> None:
     alerts: list[tuple] = []
-    monkeypatch.setattr(
-        caps, "notify_kill_switch", lambda reason, **kw: alerts.append((reason, kw)) or True
-    )
+    monkeypatch.setattr(caps, "notify_kill_switch", lambda reason, **kw: alerts.append((reason, kw)) or True)
     monkeypatch.delenv("REDIS_URL", raising=False)
     assert engage_kill_switch(reason="breach") is False
     assert alerts[-1] == ("breach", {"engaged": False, "error": "REDIS_URL unset"})
@@ -119,10 +115,17 @@ def test_jobs_fail_closed_without_redis(monkeypatch) -> None:
 def test_jobs_fail_closed_on_connection_error(monkeypatch) -> None:
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setattr(caps, "_redis_client", lambda url: _FakeRedis(fail=True))
-    monkeypatch.setattr(jobs, "publish_redis_status", lambda *a, **k: None)
+
+    def publish_boom(*a, **k):
+        raise ConnectionError("redis down")
+
+    # Redis is down for status publishing too: the job must still return a clean 409 payload.
+    monkeypatch.setattr(jobs, "publish_redis_status", publish_boom)
     assert jobs.kill_switch_engaged() is True
     code, body = jobs.run_paper_expire()
     assert code == 3 and "unreadable" in body["reason"]
+    code, body = jobs.run_paper_run()
+    assert code == 3 and body["skipped"] is True
 
 
 def test_kill_switch_message_formats() -> None:

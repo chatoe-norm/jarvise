@@ -33,6 +33,25 @@ def test_universe_dry_run_resolves_paper_core(tmp_path: Path, capsys):
     assert set(payload["market_technicals"]) == {"BTCUSDT", "ETHUSDT"}
 
 
+def test_universe_dry_run_resolves_paper_liquid(tmp_path: Path, capsys):
+    db = tmp_path / "u.db"
+    code = run(
+        [
+            "--universe",
+            "paper_liquid",
+            "--skip-derivatives",
+            "--dry-run",
+            "--json",
+            "--db",
+            str(db),
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["universe"] == "paper_liquid"
+    assert set(payload["market_technicals"]) == {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+
+
 def test_until_without_since_exit_2():
     assert run([*BACKFILL_BASE, "--until", "2026-01-01"]) == 2
 
@@ -47,9 +66,7 @@ def test_since_after_until_exit_2():
 
 def test_dry_run_reports_the_backfill_window(tmp_path: Path, capsys):
     db = tmp_path / "missing" / "jarvise.db"
-    code = run(
-        [*BACKFILL_BASE, "--since", "2026-01-01", "--dry-run", "--json", "--db", str(db)]
-    )
+    code = run([*BACKFILL_BASE, "--since", "2026-01-01", "--dry-run", "--json", "--db", str(db)])
 
     assert code == 0
     planned = json.loads(capsys.readouterr().out)["market_technicals"]["BTCUSDT"]

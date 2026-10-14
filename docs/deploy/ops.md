@@ -32,7 +32,7 @@ Then `systemctl restart docker`.
 
 ## Backups
 
-Volumes: `jarvise_redis`, `jarvise_qdrant`, `jarvise_n8n`, plus bind mounts `data/analytics/`, `data/openclaw/`.
+Volumes (compose project `jarvise` prefixes them on disk): `jarvise_jarvise_redis`, `jarvise_jarvise_qdrant`, `jarvise_jarvise_n8n`, plus bind mounts `data/analytics/`, `data/openclaw/`. The scripts resolve the real names by label — never pass `jarvise_qdrant` to `docker run -v` by hand; that creates an empty look-alike volume (two such leftovers from 2026-09-22 exist: `jarvise_qdrant`, `jarvise_redis`; safe to `docker volume rm` after confirming they are empty).
 
 Scripted (preferred): [`infra/backup/backup.sh`](../../infra/backup/backup.sh) nightly via root cron → `/opt/jarvise/backups/YYYY-MM-DD/` (SQLite online `.backup` + integrity check, Qdrant/Redis volume tars, checksums, 14-day retention, optional `rsync` to `JARVISE_BACKUP_DEST`). Restore and verify with [`infra/backup/restore.sh`](../../infra/backup/restore.sh). Full procedure, RPO/RTO, and the post-restore smoke list: [disaster-recovery.md](../ops/disaster-recovery.md).
 
@@ -57,18 +57,13 @@ sudo /opt/jarvise/infra/deploy/vps-deploy.sh
 Before the first pull that bumps **Qdrant** (e.g. `v1.13.x` → `v1.19.x`) or **Redis** patch pins, take a volume backup (see [Backups](#backups)). Also snapshot Redis:
 
 ```bash
-BACKUP_DIR=~/jarvise-backups/$(date +%F)
-mkdir -p "$BACKUP_DIR"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop redis
-docker run --rm -v jarvise_redis:/data -v "$BACKUP_DIR":/backup alpine \
-  tar czf /backup/redis.tgz -C /data .
-docker compose -f docker-compose.yml -f docker-compose.prod.yml start redis
+cd /opt/jarvise && bash infra/backup/backup.sh --no-offbox   # SQLite + Qdrant + Redis + OpenClaw state, checksummed
 ```
 
 Pin OpenClaw in the VPS `.env` (do not leave `:latest`):
 
 ```bash
-OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.5
+OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.8
 ```
 
 Then pull and recreate:
@@ -88,7 +83,7 @@ If a bump misbehaves, restore the previous image tags in `docker-compose.yml` / 
 | Redis | `redis:7-alpine` |
 | Qdrant | `qdrant/qdrant:v1.13.4` |
 | n8n | `n8nio/n8n:2.39.10` |
-| OpenClaw | `ghcr.io/openclaw/openclaw:2026.9.5` (match `.env` / compose pin; never leave `:latest`) |
+| OpenClaw | `ghcr.io/openclaw/openclaw:2026.9.8` (match `.env` / compose pin; never leave `:latest`; previous `2026.9.5`) |
 | Python base | `python:3.12-slim-bookworm` |
 
 ## Kill switch

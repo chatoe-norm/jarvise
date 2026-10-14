@@ -12,10 +12,11 @@ from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
+from jarvise_analyze.explain import confidence_breakdown
 from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_exchange.value import value_spot_balances
@@ -25,20 +26,26 @@ from jarvise_ingest.db import (
     get_analysis_output,
     get_approval,
     get_latest_llm_review,
-    get_paper_account,
     get_paper_position,
+    iter_analysis_outcome_facts,
+    latest_macro_sentiment,
+    list_analysis_outcomes,
     list_analysis_output,
     list_approvals,
-    list_paper_orders,
-    list_paper_positions,
+    load_candle_at,
     load_latest_candle,
+    load_recent_ohlcv,
     open_db,
 )
+from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
+from jarvise_paper.ledger import load_paper_ledger
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
 from jarvise_risk import evaluate_from_db, load_risk_caps
 from jarvise_trade import live_trading_enabled
+from jarvise_web.outcomes import derive_outcome, empty_outcome_summary, summarize_outcomes
+from jarvise_web.schemas import ApprovalsResponse, DashboardResponse
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +64,7 @@ PAPER_KEY = "jarvise:paper:last"
 PAPER_EXPIRE_KEY = "jarvise:paper:expire:last"
 PAPER_AUTO_KEY = "jarvise:paper_auto:last"
 INGEST_HEALTH_KEY = "jarvise:ingest:health"
+RISK_MONITOR_KEY = "jarvise:risk_monitor:last"
 JOBS_URL = os.environ.get("JARVISE_JOBS_URL", "http://jobs:8090")
 DEFAULT_DB = Path("data/analytics/jarvise.db")
 
@@ -95,6 +103,16 @@ def _redis():
         socket_connect_timeout=3.0,
         socket_timeout=3.0,
     )
+
+
+def live_auth_gap() -> str | None:
+    if not live_trading_enabled():
+        return None
+    user = os.environ.get("WEB_BASIC_AUTH_USER") or ""
+    password = os.environ.get("WEB_BASIC_AUTH_PASSWORD") or ""
+    if not user or not password:
+        return "live_trading requires WEB_BASIC_AUTH_USER and WEB_BASIC_AUTH_PASSWORD"
+    return None
 
 
 def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
@@ -204,16 +222,35 @@ def qdrant_info() -> dict[str, Any]:
         return {"exists": False, "error": str(exc)}
 
 
+def _outcome_from_lookup(row: dict[str, Any], lookup: dict[str, dict]) -> dict[str, Any]:
+    o = lookup.get(str(row.get("analysis_id") or "")) or {}
+    approval = None
+    if o.get("approval_id"):
+        approval = {
+            "id": o.get("approval_id"),
+            "status": o.get("approval_status"),
+            "resolve_reason": o.get("resolve_reason"),
+            "resolved_at_ms": o.get("resolved_at_ms"),
+        }
+    return derive_outcome(
+        row.get("action"),
+        approval,
+        o.get("fills") or 0,
+        list(o.get("fill_reasons") or []),
+    )
+
+
 def load_analysis_rows(
     *,
     symbol: str | None = None,
     timeframe: str | None = None,
     limit: int = 10,
     offset: int = 0,
-) -> tuple[list[dict[str, Any]], int, str | None]:
+) -> tuple[list[dict[str, Any]], int, str | None, dict[str, Any]]:
     path = db_path()
+    empty = empty_outcome_summary()
     if not path.exists():
-        return [], 0, f"Database not found: {path}"
+        return [], 0, f"Database not found: {path}", empty
     try:
         conn = open_db(path)
         try:
@@ -229,31 +266,27 @@ def load_analysis_rows(
                 limit=limit,
                 offset=offset,
             )
+            lookup = list_analysis_outcomes(
+                conn,
+                [str(row.get("analysis_id") or "") for row in rows],
+            )
+            for row in rows:
+                row["outcome"] = _outcome_from_lookup(row, lookup)
+            facts = iter_analysis_outcome_facts(
+                conn,
+                symbol=symbol or None,
+                timeframe=timeframe or None,
+            )
+            summary = summarize_outcomes(facts)
         finally:
             conn.close()
-        return rows, total, None
+        return rows, total, None, summary
     except Exception as exc:  # noqa: BLE001
-        return [], 0, str(exc)
+        return [], 0, str(exc), empty
 
 
-def load_paper_ledger() -> tuple[dict[str, Any], str | None]:
-    path = db_path()
-    if not path.exists():
-        return {"account": None, "positions": [], "orders": []}, f"Database not found: {path}"
-    try:
-        conn = open_db(path)
-        try:
-            ensure_paper_account(conn)
-            payload = {
-                "account": get_paper_account(conn),
-                "positions": list_paper_positions(conn),
-                "orders": list_paper_orders(conn, limit=20),
-            }
-        finally:
-            conn.close()
-        return payload, None
-    except Exception as exc:  # noqa: BLE001
-        return {"account": None, "positions": [], "orders": []}, str(exc)
+def load_paper_snapshot() -> tuple[dict[str, Any], str | None]:
+    return load_paper_ledger(db_path())
 
 
 def kill_switch_state() -> dict[str, Any]:
@@ -279,9 +312,18 @@ def kill_switch_engaged() -> bool:
 def status_payload() -> dict[str, Any]:
     live = live_trading_enabled()
     ks = kill_switch_state()
+    macro = None
+    path = db_path()
+    if path.exists():
+        conn = open_db(path)
+        try:
+            macro = latest_macro_sentiment(conn)
+        finally:
+            conn.close()
     return {
         "paper_only": PAPER_ONLY and not live,
         "live_trading": live,
+        "auth_warning": live_auth_gap(),
         "kill_switch": bool(ks["engaged"]),
         "kill_switch_state": ks,
         "ingest": redis_get_json(INGEST_KEY),
@@ -290,8 +332,12 @@ def status_payload() -> dict[str, Any]:
         "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
         "paper_auto": redis_get_json(PAPER_AUTO_KEY),
         "ingest_health": redis_get_json(INGEST_HEALTH_KEY),
+        "risk_monitor": redis_get_json(RISK_MONITOR_KEY),
         "risk_caps": load_risk_caps().as_dict(),
         "qdrant": qdrant_info(),
+        "fear_greed_index": None if not macro else macro.get("fear_greed_index"),
+        "altcoin_season_index": None if not macro else macro.get("altcoin_season_index"),
+        "sentiment_note": (None if macro and macro.get("fear_greed_index") is not None else "ไม่มีข้อมูล"),
     }
 
 
@@ -340,10 +386,12 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         if row is None:
             return None
         symbol = str(row["symbol"])
-        candle = load_latest_candle(conn, symbol, str(row["timeframe"]))
-        analysis = (
-            get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
-        )
+        timeframe = str(row["timeframe"])
+        candle = load_latest_candle(conn, symbol, timeframe)
+        analysis = get_analysis_output(conn, str(row["analysis_id"])) if row.get("analysis_id") else None
+        signal_candle = None
+        if analysis is not None and analysis.get("timestamp") is not None:
+            signal_candle = load_candle_at(conn, symbol, timeframe, int(analysis["timestamp"]))
         account = ensure_paper_account(conn)
         position = get_paper_position(conn, symbol)
         safety = evaluate_from_db(conn, symbol).as_dict()
@@ -371,7 +419,48 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         safety=safety,
         doctrine=fetch_doctrine(doctrine_query(row)),
         claude=claude,
+        signal_candle=signal_candle,
     )
+
+
+def load_analysis_explain(analysis_id: str) -> dict[str, Any] | None:
+    """Confidence ladder for one analysis_output row (SPA Decisions expand)."""
+    path = db_path()
+    if not path.exists():
+        return None
+    conn = open_db(path)
+    try:
+        analysis = get_analysis_output(conn, analysis_id)
+        if analysis is None:
+            return None
+        symbol = str(analysis["symbol"])
+        timeframe = str(analysis["timeframe"])
+        ts = int(analysis["timestamp"])
+        candle = load_candle_at(conn, symbol, timeframe, ts)
+    finally:
+        conn.close()
+    if candle is None:
+        breakdown = confidence_breakdown({})
+    else:
+        breakdown = confidence_breakdown(candle)
+    candle_out: dict[str, Any] | None = None
+    if candle is not None:
+        candle_out = {
+            "close": candle.get("close"),
+            "ema_20": candle.get("ema_20"),
+            "ema_200": candle.get("ema_200"),
+            "rsi_14": candle.get("rsi_14"),
+            "atr_14": candle.get("atr_14"),
+        }
+    return {
+        "ok": True,
+        "analysis_id": analysis_id,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "timestamp": ts,
+        "candle": candle_out,
+        "breakdown": breakdown,
+    }
 
 
 def exchange_payload() -> dict[str, Any]:
@@ -392,6 +481,8 @@ def exchange_payload() -> dict[str, Any]:
         return {"ok": True, "available": False, "error": result.error or "sync failed"}
     balances_out: list[dict[str, Any]] = []
     total_usd: float | None = None
+    priced_count = 0
+    unpriced_count = 0
     if result.balances:
         try:
             valued = value_spot_balances(result.balances)
@@ -399,6 +490,7 @@ def exchange_payload() -> dict[str, Any]:
             logger.warning("exchange value soft-fail: %s", type(exc).__name__)
             valued = None
         if valued is None:
+            unpriced_count = len(result.balances)
             for b in result.balances:
                 balances_out.append(
                     {
@@ -407,10 +499,13 @@ def exchange_payload() -> dict[str, Any]:
                         "locked": str(b.locked),
                         "total": str(b.total),
                         "usd": None,
+                        "pricing": None,
                     }
                 )
         else:
             total_usd = float(valued.total_usd)
+            priced_count = int(valued.priced_count)
+            unpriced_count = int(valued.unpriced_count)
             for row in valued.rows:
                 b = row.balance
                 balances_out.append(
@@ -420,6 +515,7 @@ def exchange_payload() -> dict[str, Any]:
                         "locked": str(b.locked),
                         "total": str(b.total),
                         "usd": float(row.usd) if row.usd is not None else None,
+                        "pricing": row.pricing,
                     }
                 )
     return {
@@ -429,6 +525,8 @@ def exchange_payload() -> dict[str, Any]:
         "fetched_at_ms": result.fetched_at_ms,
         "balances": balances_out,
         "total_usd": total_usd,
+        "priced_count": priced_count,
+        "unpriced_count": unpriced_count,
     }
 
 
@@ -440,6 +538,26 @@ def healthz() -> dict[str, Any]:
         "ok": True,
         "paper_only": PAPER_ONLY and not live,
     }
+
+
+@app.get("/metrics")
+def metrics() -> PlainTextResponse:
+    """Prometheus scrape endpoint (unauthenticated; bind Tailscale/private only)."""
+    ks = kill_switch_state()
+    set_gauge("jarvise_kill_switch", 1.0 if ks.get("engaged") else 0.0)
+    pending = 0
+    try:
+        conn = open_db(db_path())
+        try:
+            pending = len(list_approvals(conn, status="pending", limit=500))
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pending = -1
+    set_gauge("jarvise_paper_queue_pending", float(pending))
+    set_gauge("jarvise_live_trading", 1.0 if live_trading_enabled() else 0.0)
+    body = render_prometheus()
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/api/status")
@@ -457,9 +575,7 @@ def api_analysis(
 ) -> dict[str, Any]:
     sym = symbol.strip().upper() or None
     tf = timeframe.strip() or None
-    rows, total, err = load_analysis_rows(
-        symbol=sym, timeframe=tf, limit=limit, offset=offset
-    )
+    rows, total, err, summary = load_analysis_rows(symbol=sym, timeframe=tf, limit=limit, offset=offset)
     payload: dict[str, Any] = {
         "paper_only": PAPER_ONLY,
         "db": str(db_path()),
@@ -467,6 +583,7 @@ def api_analysis(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "summary": summary,
     }
     if err:
         payload["ok"] = False
@@ -476,9 +593,17 @@ def api_analysis(
     return payload
 
 
+@app.get("/api/analysis/{analysis_id}/explain")
+def api_analysis_explain(analysis_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+    payload = load_analysis_explain(analysis_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="analysis not found")
+    return payload
+
+
 @app.get("/api/paper")
 def api_paper(_: None = Depends(require_auth)) -> dict[str, Any]:
-    ledger, err = load_paper_ledger()
+    ledger, err = load_paper_snapshot()
     payload: dict[str, Any] = {
         "paper_only": PAPER_ONLY,
         "db": str(db_path()),
@@ -501,7 +626,7 @@ def api_paper_metrics(_: None = Depends(require_auth)) -> dict[str, Any]:
     return load_metrics()
 
 
-@app.get("/api/approvals")
+@app.get("/api/approvals", response_model=ApprovalsResponse)
 def api_approvals(
     _: None = Depends(require_auth),
     status_filter: str = Query("pending", alias="status"),
@@ -519,13 +644,56 @@ def api_approvals(
 
 
 @app.get("/api/approvals/{approval_id}/recommendation")
-def api_approval_recommendation(
-    approval_id: str, _: None = Depends(require_auth)
-) -> dict[str, Any]:
+def api_approval_recommendation(approval_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
     card = load_recommendation(approval_id)
     if card is None:
         raise HTTPException(status_code=404, detail="approval not found")
     return card
+
+
+@app.get("/api/approvals/{approval_id}/ohlcv")
+def api_approval_ohlcv(
+    approval_id: str,
+    _: None = Depends(require_auth),
+    limit: int = Query(48, ge=1, le=120),
+) -> dict[str, Any]:
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="approval not found")
+    conn = open_db(path)
+    try:
+        row = get_approval(conn, approval_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="approval not found")
+        symbol = str(row["symbol"])
+        timeframe = str(row["timeframe"])
+        action = str(row.get("action") or "flat")
+        raw = load_recent_ohlcv(conn, symbol, timeframe, limit=limit)
+        analysis_id = row.get("analysis_id")
+        analysis = get_analysis_output(conn, str(analysis_id)) if analysis_id else None
+        inv = (analysis or {}).get("invalidation_price")
+        invalidation = float(inv) if inv is not None else None
+    finally:
+        conn.close()
+    bars = [
+        {
+            "t": int(b["timestamp"]),
+            "o": float(b["open"]),
+            "h": float(b["high"]),
+            "l": float(b["low"]),
+            "c": float(b["close"]),
+        }
+        for b in raw
+    ]
+    return {
+        "ok": True,
+        "approval_id": approval_id,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "bars": bars,
+        "invalidation_price": invalidation,
+        "action": action,
+    }
 
 
 @app.get("/api/exchange")
@@ -533,7 +701,7 @@ def api_exchange(_: None = Depends(require_auth)) -> dict[str, Any]:
     return exchange_payload()
 
 
-@app.get("/api/dashboard")
+@app.get("/api/dashboard", response_model=DashboardResponse)
 def api_dashboard(_: None = Depends(require_auth)) -> dict[str, Any]:
     path = db_path()
     approvals: list[dict[str, Any]] = []
@@ -560,6 +728,11 @@ async def set_kill_switch(
     state: str = Form(...),
     _: None = Depends(require_auth),
 ) -> Any:
+    gap = live_auth_gap()
+    if gap:
+        if wants_json(request):
+            return JSONResponse({"ok": False, "error": gap}, status_code=403)
+        raise HTTPException(status_code=403, detail=gap)
     value = "1" if state.lower() in {"on", "1", "true", "engage"} else "0"
     try:
         _redis().set(KILL_SWITCH_KEY, value)
@@ -576,6 +749,12 @@ async def approvals_approve(
     id: str = Form(...),
     _: None = Depends(require_auth),
 ) -> Any:
+    gap = live_auth_gap()
+    if gap:
+        detail = {"ok": False, "error": gap, "id": id}
+        if wants_json(request):
+            return JSONResponse(detail, status_code=403)
+        raise HTTPException(status_code=403, detail=gap)
     ks = kill_switch_state()
     if not ks["known"]:
         # Fail closed: an unreadable switch must never let an approve through.

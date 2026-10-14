@@ -37,7 +37,13 @@ SAFE_PERMS = {
 
 
 def _approval(aid: str = "abc123def456") -> dict:
-    return {"id": aid, "symbol": "BTCUSDT", "action": "long", "size_pct_equity": 5.0}
+    return {
+        "id": aid,
+        "symbol": "BTCUSDT",
+        "action": "long",
+        "size_pct_equity": 5.0,
+        "invalidation_price": 97.0,
+    }
 
 
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,8 +62,9 @@ def test_client_order_id_is_deterministic_and_bounded() -> None:
         client_order_id_for_approval("!!!")
 
 
-def test_allowlist_has_get_and_post_order_only() -> None:
-    assert ALLOWED_TRADE_CALLS == frozenset({("POST", ORDER_PATH), ("GET", ORDER_PATH)})
+def test_allowlist_order_calls_are_post_get_delete_only() -> None:
+    order_calls = {call for call in ALLOWED_TRADE_CALLS if call[1] == ORDER_PATH}
+    assert order_calls == {("POST", ORDER_PATH), ("GET", ORDER_PATH), ("DELETE", ORDER_PATH)}
 
 
 def test_place_order_sends_client_order_id_and_full_resp() -> None:
@@ -88,7 +95,10 @@ def test_query_order_returns_none_on_not_found() -> None:
     resp.json.return_value = {"code": -2013, "msg": "Order does not exist."}
     client = MagicMock(spec=httpx.Client)
     client.get.return_value = resp
-    assert query_order(auth, symbol="BTCUSDT", orig_client_order_id="jrv-x", client=client, timestamp_ms=1) is None
+    assert (
+        query_order(auth, symbol="BTCUSDT", orig_client_order_id="jrv-x", client=client, timestamp_ms=1)
+        is None
+    )
     url = client.get.call_args.args[0]
     assert ORDER_PATH in url and "origClientOrderId=jrv-x" in url
     assert client.post.call_count == 0
@@ -120,12 +130,19 @@ def test_duplicate_submit_returns_existing_without_post(tmp_path: Path, monkeypa
     conn = open_db(tmp_path / "l.db")
     ensure_paper_account(conn)
     approval = _approval()
-    with patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS), patch(
-        "jarvise_trade.submit.query_order", return_value=None
-    ), patch(
-        "jarvise_trade.submit.place_spot_market_order",
-        return_value={"orderId": 1, "status": "FILLED", "executedQty": "0.005", "cummulativeQuoteQty": "500"},
-    ) as place:
+    with (
+        patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS),
+        patch("jarvise_trade.submit.query_order", return_value=None),
+        patch(
+            "jarvise_trade.submit.place_spot_market_order",
+            return_value={
+                "orderId": 1,
+                "status": "FILLED",
+                "executedQty": "0.005",
+                "cummulativeQuoteQty": "500",
+            },
+        ) as place,
+    ):
         first = submit_live_for_approval(conn, approval=approval, now_ms=1_000)
         second = submit_live_for_approval(conn, approval=approval, now_ms=2_000)
     assert first["ok"] and first["live_order"]["status"] == "filled"
@@ -138,10 +155,18 @@ def test_venue_already_has_order_skips_post(tmp_path: Path, monkeypatch) -> None
     _env(monkeypatch)
     conn = open_db(tmp_path / "l.db")
     ensure_paper_account(conn)
-    prior = {"orderId": 55, "clientOrderId": "jrv-abc123def456", "status": "FILLED", "executedQty": "0.004", "cummulativeQuoteQty": "400"}
-    with patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS), patch(
-        "jarvise_trade.submit.query_order", return_value=prior
-    ), patch("jarvise_trade.submit.place_spot_market_order") as place:
+    prior = {
+        "orderId": 55,
+        "clientOrderId": "jrv-abc123def456",
+        "status": "FILLED",
+        "executedQty": "0.004",
+        "cummulativeQuoteQty": "400",
+    }
+    with (
+        patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS),
+        patch("jarvise_trade.submit.query_order", return_value=prior),
+        patch("jarvise_trade.submit.place_spot_market_order") as place,
+    ):
         result = submit_live_for_approval(conn, approval=_approval(), now_ms=1_000)
     assert result["ok"] and result.get("duplicate") is True
     assert result["live_order"]["status"] == "filled"
@@ -154,22 +179,32 @@ def test_timeout_then_recovery_does_not_double_order(tmp_path: Path, monkeypatch
     _env(monkeypatch)
     conn = open_db(tmp_path / "l.db")
     ensure_paper_account(conn)
-    recovered = {"orderId": 77, "clientOrderId": "jrv-abc123def456", "status": "FILLED", "executedQty": "0.005", "cummulativeQuoteQty": "500"}
+    recovered = {
+        "orderId": 77,
+        "clientOrderId": "jrv-abc123def456",
+        "status": "FILLED",
+        "executedQty": "0.005",
+        "cummulativeQuoteQty": "500",
+    }
     queries = [None, recovered]  # pre-submit: absent; post-timeout: present
-    with patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS), patch(
-        "jarvise_trade.submit.query_order", side_effect=lambda *a, **k: queries.pop(0)
-    ), patch(
-        "jarvise_trade.submit.place_spot_market_order", side_effect=httpx.ReadTimeout("timeout")
-    ) as place:
+    with (
+        patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS),
+        patch("jarvise_trade.submit.query_order", side_effect=lambda *a, **k: queries.pop(0)),
+        patch(
+            "jarvise_trade.submit.place_spot_market_order", side_effect=httpx.ReadTimeout("timeout")
+        ) as place,
+    ):
         result = submit_live_for_approval(conn, approval=_approval(), now_ms=1_000)
     assert place.call_count == 1
     assert result["ok"] is True and result.get("recovered") is True
     assert result["live_order"]["status"] == "filled"
     assert result["live_order"]["venue_order_id"] == "77"
     # A retry now short-circuits on our own ledger.
-    with patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS), patch(
-        "jarvise_trade.submit.place_spot_market_order"
-    ) as place2, patch("jarvise_trade.submit.query_order") as q2:
+    with (
+        patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS),
+        patch("jarvise_trade.submit.place_spot_market_order") as place2,
+        patch("jarvise_trade.submit.query_order") as q2,
+    ):
         again = submit_live_for_approval(conn, approval=_approval(), now_ms=3_000)
     assert again.get("duplicate") is True and place2.call_count == 0 and q2.call_count == 0
 
@@ -178,9 +213,11 @@ def test_timeout_without_venue_order_records_error(tmp_path: Path, monkeypatch) 
     _env(monkeypatch)
     conn = open_db(tmp_path / "l.db")
     ensure_paper_account(conn)
-    with patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS), patch(
-        "jarvise_trade.submit.query_order", return_value=None
-    ), patch("jarvise_trade.submit.place_spot_market_order", side_effect=httpx.ReadTimeout("timeout")):
+    with (
+        patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS),
+        patch("jarvise_trade.submit.query_order", return_value=None),
+        patch("jarvise_trade.submit.place_spot_market_order", side_effect=httpx.ReadTimeout("timeout")),
+    ):
         result = submit_live_for_approval(conn, approval=_approval(), now_ms=1_000)
     assert result["ok"] is False
     assert result["live_order"]["status"] == "error"
@@ -191,9 +228,11 @@ def test_pre_submit_query_failure_blocks_post(tmp_path: Path, monkeypatch) -> No
     _env(monkeypatch)
     conn = open_db(tmp_path / "l.db")
     ensure_paper_account(conn)
-    with patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS), patch(
-        "jarvise_trade.submit.query_order", side_effect=httpx.ConnectError("down")
-    ), patch("jarvise_trade.submit.place_spot_market_order") as place:
+    with (
+        patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS),
+        patch("jarvise_trade.submit.query_order", side_effect=httpx.ConnectError("down")),
+        patch("jarvise_trade.submit.place_spot_market_order") as place,
+    ):
         result = submit_live_for_approval(conn, approval=_approval(), now_ms=1_000)
     assert result["ok"] is False and "pre-submit" in result["error"]
     assert place.call_count == 0
@@ -203,19 +242,36 @@ def test_partial_fill_persisted_and_reconciled(tmp_path: Path, monkeypatch) -> N
     _env(monkeypatch)
     conn = open_db(tmp_path / "l.db")
     ensure_paper_account(conn)
-    partial = {"orderId": 5, "clientOrderId": "jrv-abc123def456", "status": "PARTIALLY_FILLED", "executedQty": "0.002", "cummulativeQuoteQty": "200", "fills": [{}]}
-    with patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS), patch(
-        "jarvise_trade.submit.query_order", return_value=None
-    ), patch("jarvise_trade.submit.place_spot_market_order", return_value=partial):
+    partial = {
+        "orderId": 5,
+        "clientOrderId": "jrv-abc123def456",
+        "status": "PARTIALLY_FILLED",
+        "executedQty": "0.002",
+        "cummulativeQuoteQty": "200",
+        "fills": [{}],
+    }
+    with (
+        patch("jarvise_trade.submit.fetch_api_restrictions", return_value=SAFE_PERMS),
+        patch("jarvise_trade.submit.query_order", return_value=None),
+        patch("jarvise_trade.submit.place_spot_market_order", return_value=partial),
+    ):
         result = submit_live_for_approval(conn, approval=_approval(), now_ms=1_000)
     live = result["live_order"]
     assert live["status"] == "partially_filled" and live["executed_qty"] == 0.002
-    assert [r["id"] for r in list_live_orders_open(conn)] == [live["id"]]
+    open_ids = [r["id"] for r in list_live_orders_open(conn)]
+    assert live["id"] in open_ids
 
-    filled = {**partial, "status": "FILLED", "executedQty": "0.005", "cummulativeQuoteQty": "500", "fills": [{}, {}, {}]}
+    filled = {
+        **partial,
+        "status": "FILLED",
+        "executedQty": "0.005",
+        "cummulativeQuoteQty": "500",
+        "fills": [{}, {}, {}],
+    }
     with patch("jarvise_trade.reconcile.query_order", return_value=filled):
         rec = reconcile_live_orders(conn, now_ms=5_000)
-    assert rec["ok"] and rec["updated"] == [{"id": live["id"], "from": "partially_filled", "to": "filled"}]
+    assert rec["ok"]
+    assert {"id": live["id"], "from": "partially_filled", "to": "filled"} in rec["updated"]
     row = get_live_order_by_client_id(conn, "jrv-abc123def456")
     assert row["status"] == "filled" and row["executed_qty"] == 0.005 and row["fills_count"] == 3
     assert row["reconciled_at_ms"] == 5_000

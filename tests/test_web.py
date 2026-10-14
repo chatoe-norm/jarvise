@@ -8,6 +8,7 @@ from jarvise_ingest.db import (
     ensure_paper_account,
     open_db,
     upsert_analysis_output,
+    upsert_macro_sentiment,
     upsert_market_technicals,
     upsert_pending_approval,
 )
@@ -77,9 +78,7 @@ def _stub_control_deps(monkeypatch) -> None:
     monkeypatch.setattr("jarvise_web.app.qdrant_info", fake_qdrant)
 
 
-def test_kill_switch_unreadable_blocks_approve_and_reports_unknown(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_kill_switch_unreadable_blocks_approve_and_reports_unknown(monkeypatch, tmp_path: Path) -> None:
     """Redis down must never read as 'kill-switch off'."""
     monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
     monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
@@ -105,6 +104,7 @@ def test_kill_switch_unreadable_blocks_approve_and_reports_unknown(
             "action": "long",
             "regime_state": "trend_up",
             "confidence_score": 0.7,
+            "invalidation_price": 97.0,
             "size_pct_equity": 1.0,
         },
     )
@@ -117,9 +117,7 @@ def test_kill_switch_unreadable_blocks_approve_and_reports_unknown(
     assert status["kill_switch"] is True
     assert status["kill_switch_state"]["known"] is False
 
-    resp = client.post(
-        "/approvals/approve", data={"id": "ks1"}, headers={"accept": "application/json"}
-    )
+    resp = client.post("/approvals/approve", data={"id": "ks1"}, headers={"accept": "application/json"})
     assert resp.status_code == 503
     body = resp.json()
     assert body["ok"] is False and "unreadable" in body["error"]
@@ -237,6 +235,137 @@ def test_api_analysis_pagination(monkeypatch, tmp_path: Path) -> None:
     default = client.get("/api/analysis")
     assert default.json()["limit"] == 10
     assert len(default.json()["rows"]) == 10
+    assert default.json()["rows"][0]["outcome"]["kind"] == "not_queued"
+    assert default.json()["summary"]["by_kind"]["not_queued"] == 25
+
+
+def test_api_analysis_outcomes(monkeypatch, tmp_path: Path) -> None:
+    from jarvise_ingest.db import insert_paper_order, resolve_approval
+
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    rows = [
+        ("filled-a", "BTCUSDT", "long", 4),
+        ("hold-a", "BTCUSDT", "long", 3),
+        ("rej-a", "ETHUSDT", "long", 2),
+        ("flat-a", "ETHUSDT", "flat", 1),
+    ]
+    for aid, symbol, action, ts_off in rows:
+        upsert_analysis_output(
+            conn,
+            {
+                "analysis_id": aid,
+                "timestamp": 1_700_000_000_000 + ts_off,
+                "symbol": symbol,
+                "timeframe": "4h",
+                "regime_state": "trend_up" if action == "long" else "range",
+                "confidence_score": 0.75 if action == "long" else 0.1,
+                "action": action,
+                "invalidation_price": 90.0,
+                "size_pct_equity": 1.0 if action == "long" else 0.0,
+                "thesis": aid,
+            },
+        )
+    filled = upsert_pending_approval(
+        conn,
+        {
+            "id": "ap-filled",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 9_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": "filled-a",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.75,
+            "size_pct_equity": 1.0,
+            "status": "pending",
+        },
+    )
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "ord-fill",
+            "ts": 1_100,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "side": "buy",
+            "qty": 0.01,
+            "price": 100.0,
+            "fee_usd": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "filled-a",
+            "reason": "open_long",
+            "approval_id": filled["id"],
+            "decision_source": "auto_claude",
+        },
+    )
+    conn.commit()
+    resolve_approval(
+        conn,
+        filled["id"],
+        status="approved",
+        resolve_reason="auto:claude:approve",
+        paper_order_ids_json='["ord-fill"]',
+        resolved_at_ms=1_200,
+    )
+    hold = upsert_pending_approval(
+        conn,
+        {
+            "id": "ap-hold",
+            "created_at_ms": 2_000,
+            "expires_at_ms": 9_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "1h",
+            "analysis_id": "hold-a",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.75,
+            "size_pct_equity": 1.0,
+            "status": "pending",
+        },
+    )
+    resolve_approval(
+        conn,
+        hold["id"],
+        status="approved",
+        resolve_reason="auto:rule:same_side_hold",
+        resolved_at_ms=2_100,
+    )
+    rejected = upsert_pending_approval(
+        conn,
+        {
+            "id": "ap-rej",
+            "created_at_ms": 3_000,
+            "expires_at_ms": 9_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "analysis_id": "rej-a",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.65,
+            "size_pct_equity": 1.0,
+            "status": "pending",
+        },
+    )
+    resolve_approval(conn, rejected["id"], status="rejected", resolve_reason="ui", resolved_at_ms=3_100)
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    payload = client.get("/api/analysis", params={"limit": 10}).json()
+    assert payload["ok"] is True
+    by_id = {row["analysis_id"]: row["outcome"]["kind"] for row in payload["rows"]}
+    assert by_id["filled-a"] == "filled"
+    assert by_id["hold-a"] == "hold"
+    assert by_id["rej-a"] == "rejected"
+    assert by_id["flat-a"] == "not_queued"
+    assert payload["summary"]["by_kind"]["filled"] == 1
+    assert payload["summary"]["by_kind"]["hold"] == 1
+    assert payload["summary"]["by_kind"]["rejected"] == 1
+    assert payload["summary"]["by_kind"]["not_queued"] == 1
+    assert payload["summary"]["total"] == 4
 
 
 def test_parse_status_payload_json_and_legacy_text() -> None:
@@ -270,6 +399,9 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
     data = resp.json()
     assert "paper" in data
     assert "paper_expire" in data
+    assert "risk_monitor" in data
+    assert "fear_greed_index" in data
+    assert "altcoin_season_index" in data
     assert "risk_caps" in data
     assert "max_notional_per_order" in data["risk_caps"]
     assert data["kill_switch"] is False
@@ -279,6 +411,33 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
         "reason": None,
         "error": None,
     }
+
+
+def test_api_status_fear_greed_from_macro(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    upsert_macro_sentiment(
+        conn,
+        {
+            "timestamp": 1_700_000_000_000,
+            "fear_greed_index": 65,
+            "altcoin_season_index": None,
+            "btc_dominance_pct": 58.5,
+            "exchange_netflow_btc": None,
+            "exchange_reserve_btc": None,
+            "etf_net_flow_usd": None,
+            "global_market_cap_usd": 1.0,
+        },
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    data = client.get("/api/status").json()
+    assert data["fear_greed_index"] == 65
+    assert data["altcoin_season_index"] is None
+    assert data["sentiment_note"] is None
 
 
 def test_api_dashboard_bundle(monkeypatch, tmp_path: Path) -> None:
@@ -298,6 +457,7 @@ def test_api_dashboard_bundle(monkeypatch, tmp_path: Path) -> None:
             "action": "long",
             "regime_state": "trend_up",
             "confidence_score": 0.7,
+            "invalidation_price": 97.0,
             "size_pct_equity": 5.0,
             "status": "pending",
         },
@@ -327,6 +487,7 @@ def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
             "analysis_id": "p1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 5.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -359,6 +520,7 @@ def test_api_paper_metrics_and_persist_json(monkeypatch, tmp_path: Path) -> None
             "analysis_id": "m1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 5.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
@@ -373,6 +535,7 @@ def test_api_paper_metrics_and_persist_json(monkeypatch, tmp_path: Path) -> None
             "analysis_id": "m2",
             "symbol": "BTCUSDT",
             "action": "flat",
+            "invalidation_price": 97.0,
             "size_pct_equity": 0.0,
             "regime_state": "range",
             "confidence_score": 0.4,
@@ -421,6 +584,7 @@ def test_api_approvals_pending(monkeypatch, tmp_path: Path) -> None:
             "action": "long",
             "regime_state": "trend_up",
             "confidence_score": 0.7,
+            "invalidation_price": 97.0,
             "size_pct_equity": 5.0,
             "status": "pending",
         },
@@ -468,6 +632,7 @@ def test_post_approve_json_and_redirect(monkeypatch, tmp_path: Path) -> None:
             "action": "long",
             "regime_state": "trend_up",
             "confidence_score": 0.7,
+            "invalidation_price": 97.0,
             "size_pct_equity": 5.0,
             "status": "pending",
         },
@@ -483,3 +648,191 @@ def test_post_approve_json_and_redirect(monkeypatch, tmp_path: Path) -> None:
     )
     assert resp.status_code == 303
     assert resp.headers.get("location") == "/"
+
+
+def test_api_ohlcv_404_unknown_id(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/approvals/missing/ohlcv")
+    assert resp.status_code == 404
+
+
+def test_api_ohlcv_empty_bars_when_no_technicals(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    upsert_pending_approval(
+        conn,
+        {
+            "id": "ohlcv-empty",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 3_600_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "analysis_id": None,
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+            "invalidation_price": 97.0,
+            "size_pct_equity": 1.0,
+        },
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/approvals/ohlcv-empty/ohlcv")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["symbol"] == "ETHUSDT"
+    assert body["timeframe"] == "4h"
+    assert body["bars"] == []
+    assert body["invalidation_price"] is None
+    assert body["action"] == "long"
+
+
+def test_api_ohlcv_seeded_closed_bars_in_order(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    candles = []
+    for i in range(50):
+        ts = 1_700_000_000_000 + i * 14_400_000
+        candles.append(
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": ts,
+                "timeframe": "4h",
+                "open": 100.0 + i,
+                "high": 101.0 + i,
+                "low": 99.0 + i,
+                "close": 100.5 + i,
+                "volume": 1.0,
+            }
+        )
+    upsert_market_technicals(conn, candles)
+    upsert_analysis_output(
+        conn,
+        {
+            "analysis_id": "an-ohlcv",
+            "timestamp": 1_700_000_000_000 + 49 * 14_400_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "regime_state": "trend_up",
+            "confidence_score": 0.75,
+            "action": "long",
+            "invalidation_price": 90.5,
+            "size_pct_equity": 1.0,
+            "thesis": "seed",
+        },
+    )
+    upsert_pending_approval(
+        conn,
+        {
+            "id": "ohlcv-full",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 3_600_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": "an-ohlcv",
+            "action": "long",
+            "regime_state": "trend_up",
+            "confidence_score": 0.75,
+            "invalidation_price": 97.0,
+            "size_pct_equity": 1.0,
+        },
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/approvals/ohlcv-full/ohlcv")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "BTCUSDT"
+    assert body["timeframe"] == "4h"
+    assert len(body["bars"]) == 48
+    stamps = [b["t"] for b in body["bars"]]
+    assert stamps == sorted(stamps)
+    assert stamps[-1] == 1_700_000_000_000 + 49 * 14_400_000
+    last = body["bars"][-1]
+    assert last["o"] == 149.0 and last["c"] == 149.5
+    assert body["invalidation_price"] == 90.5
+    assert body["action"] == "long"
+
+
+def test_api_analysis_explain_404(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/analysis/missing-id/explain")
+    assert resp.status_code == 404
+
+
+def test_api_analysis_explain_ladder(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ts = 1_700_000_000_000
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "ETHUSDT",
+                "timestamp": ts,
+                "timeframe": "4h",
+                "open": 2680.0,
+                "high": 2700.0,
+                "low": 2670.0,
+                "close": 2687.0,
+                "volume": 1.0,
+            }
+        ],
+    )
+    conn.execute(
+        """
+        UPDATE market_technicals
+        SET atr_14=?, rsi_14=?, ema_20=?, ema_200=?
+        WHERE symbol=? AND timeframe=? AND timestamp=?
+        """,
+        (40.0, 49.0, 2700.0, 2560.0, "ETHUSDT", "4h", ts),
+    )
+    upsert_analysis_output(
+        conn,
+        {
+            "analysis_id": "an-explain",
+            "timestamp": ts,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "regime_state": "trend_up",
+            "confidence_score": 0.65,
+            "action": "long",
+            "invalidation_price": 2600.0,
+            "size_pct_equity": 0.975,
+            "thesis": "Trend up pullback",
+        },
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.get("/api/analysis/an-explain/explain")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["analysis_id"] == "an-explain"
+    assert body["symbol"] == "ETHUSDT"
+    assert body["candle"]["close"] == 2687.0
+    assert body["breakdown"]["total"] == 0.65
+    assert body["breakdown"]["regime"] == "trend_up"
+    assert body["breakdown"]["gates"]["flat_below"] == 0.55
+    assert body["breakdown"]["gates"]["doctrine_free_approve"] == 0.70
+    assert any(s["delta"] == -0.1 for s in body["breakdown"]["steps"])

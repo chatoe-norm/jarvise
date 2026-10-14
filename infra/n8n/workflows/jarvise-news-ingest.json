@@ -1,0 +1,74 @@
+{
+  "id": "jrvsNewsIngest0719",
+  "name": "Jarvise news ingest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7,19 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-news-ingest",
+      "name": "07:00 and 19:00 ICT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "notes": "Container timezone is Asia/Bangkok. Admission only; the OpenClaw turn keeps running after HTTP returns."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://openclaw:18789/hooks/agent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer __OPENCLAW_HOOK_TOKEN__"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"message\":\"Run one news digest now. Follow AGENTS.md and WATCHLIST.md in this workspace. Write /home/node/.openclaw/workspace-ingest/digests/YYYY-MM-DD-HH.md. At most 8 items on chips, AI labs, the named people, geopolitics, or the Federal Reserve. Each item needs a primary URL and a time. Paper context for BTC/ETH only. End with: Not a trade signal. Do not write /home/node/.openclaw/exports/. Do not place orders. Do not change trading rules.\",\"name\":\"n8n news-ingest\",\"agentId\":\"ingest\",\"sessionMode\":\"isolated\",\"deliver\":false,\"timeoutSeconds\":600}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "http-openclaw-ingest",
+      "name": "POST OpenClaw ingest hook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 0],
+      "notes": "Wakes OpenClaw agent ingest. deliver false. The seed script replaces __OPENCLAW_HOOK_TOKEN__ at import time. Do not commit a real token."
+    }
+  ],
+  "connections": {
+    "07:00 and 19:00 ICT": {
+      "main": [[{ "node": "POST OpenClaw ingest hook", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Bangkok"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "infra/docker/seed-openclaw-ingest-agent.sh renders the hook token, then n8n import:workflow and publish:workflow. Do not import the live-reconcile workflow."
+    }
+  },
+  "pinData": {},
+  "active": false
+}

@@ -5,7 +5,7 @@ description: Queries the Jarvise Gemini Notebook (crypto trading knowledge base)
 
 # Jarvise Notebook
 
-Trading knowledge lives in Gemini Notebook **Jarvise : Crypto Trader**. Read [`config/notebook.json`](../../../config/notebook.json) for id, alias, and profile. Query it before analyzing markets or recommending trades. Local extracts: `data/analytics/sources/jarvise-doctrine.txt`, `jarvise-analyzer-stack.txt`, `binance-api-intro-jarvise.txt`, `binance-skills-hub-jarvise.txt`, `shadcn-ui-installation-jarvise.txt`, `api-map.json` (synced 2026-09-22; Binance digests 2026-09-23; shadcn digest 2026-09-29). Agent maps: [`docs/exchange/binance-for-jarvise.md`](../../../docs/exchange/binance-for-jarvise.md), [`docs/ux-ui/shadcn-for-jarvise.md`](../../../docs/ux-ui/shadcn-for-jarvise.md).
+Trading knowledge lives in Gemini Notebook **Jarvise : Crypto Trader**. Read [`config/notebook.json`](../../../config/notebook.json) for id, alias, and profile. Query it before analyzing markets or recommending trades. Local extracts: `data/analytics/sources/jarvise-doctrine.txt`, `jarvise-doctrine-pullback-entry.txt`, `jarvise-analyzer-stack.txt`, `binance-api-intro-jarvise.txt`, `binance-skills-hub-jarvise.txt`, `shadcn-ui-installation-jarvise.txt`, `api-map.json` (synced 2026-09-22; Binance digests 2026-09-23; shadcn digest 2026-09-29; pullback note 2026-10-04). Agent maps: [`docs/exchange/binance-for-jarvise.md`](../../../docs/exchange/binance-for-jarvise.md), [`docs/ux-ui/shadcn-for-jarvise.md`](../../../docs/ux-ui/shadcn-for-jarvise.md).
 
 ## Notebook
 
@@ -34,6 +34,18 @@ Do not use the `default` profile (`normstudiox@gmail.com`) for this notebook —
 2. `notebook_query` with the notebook id. Ask for principles, risk rules, venue constraints, and anything matching the current symbol/setup.
 3. Combine notebook context with local SQLite price-graph (OHLCV after ingest/backfill) **and** optional research overlays (e.g. TradingView MCP screener/MTF). Notebook is doctrine, not a price feed. Do **not** treat TV MCP output as the sole driver of paper fills or live orders.
 4. If query fails with auth errors, re-auth (above) and retry once.
+
+## Skill map
+
+The trading-system context note [`docs/research/jarvise-trading-system-context.md`](../../../docs/research/jarvise-trading-system-context.md) is a research overlay. Its three domains already exist in Python:
+
+| Domain | Code |
+| --- | --- |
+| Signal | `src/jarvise_analyze` and `src/jarvise_paper/auto_decide.py` |
+| Risk | `src/jarvise_risk` and `src/jarvise_paper/stops.py` |
+| Execution | `src/jarvise_paper` (paper fills) and `src/jarvise_trade` (gated live path) |
+
+Do not rebuild that note as Prisma, Next.js Server Actions, or a TradingView webhook. Do not add a required 1:3 take-profit, raise risk above the 1% ceiling, boost confidence from Fear & Greed, or turn on `JARVISE_ANALYZE_MTF` from that file. Do not index the note into `jarvise_doctrine`.
 
 ## Hard guardrails (from doctrine)
 

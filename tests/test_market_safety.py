@@ -52,9 +52,7 @@ def test_fetch_order_book_snapshot_parses(monkeypatch: pytest.MonkeyPatch) -> No
             "asks": [["100.1", "4"], ["102.0", "1"]],
         }
 
-    monkeypatch.setattr(
-        "jarvise_ingest.providers.binance_book._get", fake_get
-    )
+    monkeypatch.setattr("jarvise_ingest.providers.binance_book._get", fake_get)
     row = fetch_order_book_snapshot("BTCUSDT", now_ms=1_700_000_000_000)
     assert row["symbol"] == "BTCUSDT"
     assert abs(row["bid_ask_spread"] - (0.2 / 100.1)) < 1e-9
@@ -68,6 +66,7 @@ def test_fetch_global_macro_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COINGECKO_DEMO_API_KEY", raising=False)
     monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
     monkeypatch.delenv("CoinGecko_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_ENVIRONMENT", raising=False)
 
     class Resp:
         status_code = 200
@@ -96,6 +95,7 @@ def test_fetch_global_macro_parses(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_resolve_coingecko_demo_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_ENVIRONMENT", raising=False)
     monkeypatch.setenv("COINGECKO_API_KEY", "CG-test-demo")
     url, headers = resolve_coingecko_global_request()
     assert url == "https://api.coingecko.com/api/v3/global"
@@ -106,6 +106,7 @@ def test_resolve_coingecko_legacy_key_name(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
     monkeypatch.delenv("COINGECKO_DEMO_API_KEY", raising=False)
     monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_ENVIRONMENT", raising=False)
     monkeypatch.setenv("CoinGecko_API_KEY", "CG-legacy")
     url, headers = resolve_coingecko_global_request()
     assert url.endswith("/api/v3/global")
@@ -121,8 +122,59 @@ def test_resolve_coingecko_pro_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "x-cg-demo-api-key" not in headers
 
 
+def test_resolve_coingecko_environment_pro_uses_generic_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
+    monkeypatch.setenv("COINGECKO_API_KEY", "CG-actually-pro")
+    monkeypatch.setenv("COINGECKO_ENVIRONMENT", "pro")
+    url, headers = resolve_coingecko_global_request()
+    assert url == "https://pro-api.coingecko.com/api/v3/global"
+    assert headers["x-cg-pro-api-key"] == "CG-actually-pro"
+    assert "x-cg-demo-api-key" not in headers
+
+
+def test_fetch_global_macro_retries_pro_host_on_public_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("COINGECKO_API_KEY", "CG-pro-on-public")
+
+    class Resp400:
+        status_code = 400
+        text = "invalid api key"
+
+        def json(self) -> dict:
+            return {}
+
+    class Resp200:
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict:
+            return {
+                "data": {
+                    "market_cap_percentage": {"btc": 51.0},
+                    "total_market_cap": {"usd": 3e12},
+                }
+            }
+
+    client = MagicMock()
+    client.get.side_effect = [Resp400(), Resp200()]
+    row = fetch_global_macro(client=client, now_ms=2)
+    assert row["btc_dominance_pct"] == 51.0
+    assert client.get.call_count == 2
+    first_url = client.get.call_args_list[0].args[0]
+    second_url = client.get.call_args_list[1].args[0]
+    assert first_url == "https://api.coingecko.com/api/v3/global"
+    assert second_url == "https://pro-api.coingecko.com/api/v3/global"
+    assert client.get.call_args_list[1].kwargs["headers"]["x-cg-pro-api-key"] == "CG-pro-on-public"
+
+
 def test_fetch_global_macro_sends_demo_header(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COINGECKO_PRO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_ENVIRONMENT", raising=False)
     monkeypatch.setenv("COINGECKO_API_KEY", "CG-demo")
 
     class Resp:
@@ -250,18 +302,14 @@ def test_gate_provider_error_critical_and_ks(
         called.append(reason)
         return True
 
-    monkeypatch.setattr(
-        "jarvise_risk.market_safety.engage_kill_switch", fake_ks
-    )
+    monkeypatch.setattr("jarvise_risk.market_safety.engage_kill_switch", fake_ks)
     cfg = MarketSafetyConfig(
         enabled=True,
         require_book=True,
         require_derivatives=False,
         require_macro=False,
     )
-    result = evaluate_market_safety(
-        config=cfg, provider_errors=["book:boom"]
-    )
+    result = evaluate_market_safety(config=cfg, provider_errors=["book:boom"])
     assert result.critical
     result = maybe_engage_kill_switch(result)
     assert result.kill_switch_engaged
@@ -341,9 +389,7 @@ def test_apply_safety_forces_flat() -> None:
         "thesis": "Trend up",
         "invalidation_price": 90.0,
     }
-    safety = MarketSafetyResult(
-        ok=False, force_flat=True, critical=False, reasons=["spread_bps=80"]
-    )
+    safety = MarketSafetyResult(ok=False, force_flat=True, critical=False, reasons=["spread_bps=80"])
     out = apply_safety_to_analysis(analysis, safety)
     assert out["action"] == "flat"
     assert out["size_pct_equity"] == 0.0
@@ -382,6 +428,7 @@ def test_apply_signal_uses_book_spread(tmp_path: Path) -> None:
             "analysis_id": "a1",
             "symbol": "BTCUSDT",
             "action": "long",
+            "invalidation_price": 97.0,
             "size_pct_equity": 10.0,
             "regime_state": "trend_up",
             "confidence_score": 0.7,
