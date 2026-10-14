@@ -331,6 +331,8 @@ Repo convention: **spec → plan → TDD implementation → review → PR to `ma
 
 **Do not skip the ladder:** paper EV → optional gated live → stabilize P4-C → **then** a separate P5 plan.
 
+**Base trading strategy (2026-10-07):** keep **Jarvise as the core** (option **C**). Frameworks (NautilusTrader, Freqtrade, Hummingbot, ccxt, MetaTrader5-Docker) stay **research overlays only** — do not adopt as the OMS/execution base and do not add them to compose. Revisit a separate “B” (Nautilus-as-base) spec only after closed `auto_*` EV + gated live smoke, and only if C cannot close a concrete multi-venue/OMS gap. Map: [`docs/research/2026-10-07-mt5-docker-and-base-strategy.md`](docs/research/2026-10-07-mt5-docker-and-base-strategy.md).
+
 ### MVP checklist (complete; live flip still owner-gated)
 
 - [x] **1–7.** P4-B → paper 24/7 → expectancy → replay → risk caps → P4-C design → P4-C implementation (gated). Evidence in §3 / §6.
