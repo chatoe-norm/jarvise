@@ -288,6 +288,20 @@ def test_loss_lesson_exit_mix_symbol_and_floors() -> None:
     assert lesson["auto_ev"] is not None and lesson["auto_ev"] < 0
     assert lesson["floors_unchanged"] is True
 
+    losing_at_gate = [
+        {
+            "symbol": "BTCUSDT",
+            "pnl_usd": -1.0,
+            "exit_reason": "stop_hit",
+            "decision_source": "auto_claude",
+        }
+        for _ in range(8)
+    ]
+    held = loss_lesson(losing_at_gate)
+    assert held["auto_closed"] == 8
+    assert held["auto_ev"] is not None and held["auto_ev"] < 0
+    assert held["floors_unchanged"] is True
+
     positive = [
         {
             "symbol": "BTCUSDT",
@@ -295,10 +309,12 @@ def test_loss_lesson_exit_mix_symbol_and_floors() -> None:
             "exit_reason": "close_long",
             "decision_source": "auto_claude",
         }
-        for _ in range(10)
+        for _ in range(8)
     ]
     cleared = loss_lesson(positive)
-    assert cleared["auto_closed"] == 10
+    assert cleared["auto_closed"] == 8
     assert cleared["auto_ev"] == 1.0
     assert cleared["floors_unchanged"] is False
+    short = positive[:7]
+    assert loss_lesson(short)["floors_unchanged"] is True
     assert loss_lesson([])["floors_unchanged"] is True

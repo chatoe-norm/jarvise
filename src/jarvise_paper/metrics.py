@@ -24,7 +24,7 @@ from jarvise_risk.caps import utc_day_bounds_ms
 
 PAPER_STRATEGY_ID = "paper"
 MIN_TRADES_FOR_RATIOS = 30
-AUTO_SAMPLE_MIN = 10
+AUTO_SAMPLE_MIN = 8
 
 
 def _is_open(reason: str | None) -> bool:

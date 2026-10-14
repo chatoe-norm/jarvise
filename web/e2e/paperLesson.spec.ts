@@ -59,6 +59,7 @@ test("paper page shows the live loss lesson", async ({ page }) => {
   await expect(page.getByText(/จุดตัด 1 ไม้/)).toBeVisible();
   await expect(page.getByText(/ปิดตาม FLAT 1 ไม้/)).toBeVisible();
   await expect(page.getByText(/ETHUSDT กินผลขาดทุนมากสุด/)).toBeVisible();
+  await expect(page.getByText(/จากเกณฑ์ประมาณ 8/)).toBeVisible();
   await expect(page.getByText(/พื้นความมั่นใจ 0\.55\/0\.70 จึงยังอยู่/)).toBeVisible();
   await expect(page.getByText(/ไม่ใช่เหตุให้เปลี่ยนสูตร/)).toBeVisible();
 });

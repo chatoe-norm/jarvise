@@ -28,7 +28,7 @@ function floorLine(lesson: LossLesson): string {
   const ev =
     lesson.auto_ev == null ? "ยังไม่มี" : lesson.auto_ev < 0 ? "ติดลบ" : "ไม่ติดลบ";
   if (lesson.floors_unchanged) {
-    return `auto_* ปิดแล้ว ${lesson.auto_closed} ไม้ จากเกณฑ์ประมาณ 10 และ EV ของ auto_* ${ev} พื้นความมั่นใจ 0.55/0.70 จึงยังอยู่`;
+    return `auto_* ปิดแล้ว ${lesson.auto_closed} ไม้ จากเกณฑ์ประมาณ 8 และ EV ของ auto_* ${ev} พื้นความมั่นใจ 0.55/0.70 จึงยังอยู่`;
   }
   return `auto_* ปิดแล้ว ${lesson.auto_closed} ไม้ และ EV ของ auto_* ${ev} หน้านี้ยังไม่สั่งให้เปลี่ยนสูตร`;
 }
