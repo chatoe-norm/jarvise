@@ -1,0 +1,55 @@
+{
+  "deployment_mode": "PAPER_SIMULATED",
+  "allowed_assets": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT"
+  ],
+  "venue_config": {
+    "primary_spot": "BINANCE_TH_OR_COINBASE_ADVANCED",
+    "primary_futures": "HYPERLIQUID_OR_PHEMEX",
+    "default_order_type": "LIMIT",
+    "max_leverage": 1,
+    "paper_shield_active": true,
+    "live_trading_gated": true
+  },
+  "risk_parameters": {
+    "max_equity_risk_percent_per_trade": 1.0,
+    "min_equity_risk_percent_per_trade": 0.25,
+    "min_risk_reward_ratio": 2.0,
+    "atr_period": 14,
+    "min_atr_stop_multiplier": 1.5,
+    "per_trade_usd_cap": 100.0,
+    "daily_drawdown_halt_percent": 2.5,
+    "daily_spend_usd_cap": 300.0,
+    "profit_lock": {
+      "stage1_breakeven_r": 0.5,
+      "stage1_fee_buffer_bps": 20.0,
+      "stage2_trail_r": 1.0
+    }
+  },
+  "signal_gates": {
+    "min_confidence_score": 0.65,
+    "require_multi_timeframe_alignment": [
+      "1D",
+      "4H",
+      "1H",
+      "15m"
+    ],
+    "require_volume_confirmation": true,
+    "pullback_rule": {
+      "trend": "UP",
+      "ema_period": 20,
+      "rsi_band": [
+        45,
+        70
+      ]
+    }
+  },
+  "kill_switch": {
+    "auto_flat_on_invalidation": true,
+    "lock_on_daily_drawdown": true,
+    "require_manual_written_review_to_unlock": true
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "env": {
+    "vars": {
+      "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
+      "OPENCLAW_PAPER_ONLY": "true",
+      "JARVISE_PAPER_ONLY": "true",
+      "JARVISE_GUARDRAILS_POLICY": "/opt/jarvise/config/guardrails.policy.json",
+      "QDRANT_URL": "http://qdrant:6333",
+      "REDIS_URL": "redis://redis:6379/0"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openrouter/openrouter/auto"
+      },
+      "models": {
+        "openrouter/openrouter/auto": {}
+      }
+    }
+  },
+  "skills": {
+    "load": {
+      "extraDirs": [
+        "/plugins/jarvise-openclaw/skills"
+      ]
+    },
+    "entries": {
+      "jarvise-signal-analyzer": { "enabled": true },
+      "jarvise-risk-guard": { "enabled": true },
+      "jarvise-order-router": { "enabled": true },
+      "crypto-market-intel": { "enabled": true },
+      "blackswan": { "enabled": true },
+      "secretclaw": { "enabled": true },
+      "ggshield-scanner": { "enabled": true },
+      "jarvise-paper-research": { "enabled": true },
+      "jarvise-doctrine-rag": { "enabled": true },
+      "jarvise-binance-intel": { "enabled": true },
+      "jarvise-news-ingest": { "enabled": true }
+    }
+  },
+  "mcpServers": {
+    "tradingview": {
+      "command": "uvx",
+      "args": [
+        "--python",
+        "3.13",
+        "--from",
+        "tradingview-mcp-server",
+        "tradingview-mcp"
+      ],
+      "env": {
+        "JARVISE_PAPER_ONLY": "true",
+        "NOTE": "Research overlay only — screener/MTF/chat backtest. Do not write OHLCV into jarvise.db or drive paper/live fills from TV signals alone."
+      }
+    },
+    "cmc-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "cmc-mcp-server"
+      ],
+      "env": {
+        "JARVISE_PAPER_ONLY": "true",
+        "NOTE": "Market cap dominance, Fear & Greed Index, Altcoin Season Index"
+      }
+    },
+    "coingecko": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mcp.api.coingecko.com/mcp"
+      ],
+      "env": {
+        "JARVISE_PAPER_ONLY": "true"
+      }
+    },
+    "jarvise-qdrant": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-qdrant"
+      ],
+      "env": {
+        "QDRANT_URL": "http://qdrant:6333",
+        "COLLECTION_NAME": "jarvise_doctrine",
+        "JARVISE_PAPER_ONLY": "true"
+      }
+    },
+    "jarvise-redis": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-redis",
+        "redis://redis:6379"
+      ],
+      "env": {
+        "JARVISE_PAPER_ONLY": "true"
+      }
+    }
+  }
+}

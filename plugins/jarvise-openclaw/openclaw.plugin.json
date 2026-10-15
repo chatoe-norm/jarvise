@@ -7,7 +7,14 @@
     "./skills/jarvise-paper-research",
     "./skills/jarvise-doctrine-rag",
     "./skills/jarvise-binance-intel",
-    "./skills/jarvise-news-ingest"
+    "./skills/jarvise-news-ingest",
+    "./skills/jarvise-signal-analyzer",
+    "./skills/jarvise-risk-guard",
+    "./skills/jarvise-order-router",
+    "./skills/crypto-market-intel",
+    "./skills/blackswan",
+    "./skills/secretclaw",
+    "./skills/ggshield-scanner"
   ],
   "configSchema": {
     "type": "object",
