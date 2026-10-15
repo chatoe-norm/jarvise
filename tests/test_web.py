@@ -533,6 +533,64 @@ def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:
     assert any(p["symbol"] == "BTCUSDT" for p in payload["positions"])
 
 
+def test_api_paper_quotes_newest_close_without_writing(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    apply_signal(
+        conn,
+        analysis={
+            "analysis_id": "p-quote",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "invalidation_price": 97.0,
+            "size_pct_equity": 5.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        mid_price=100.0,
+        timeframe="4h",
+        now_ms=1_700_000_000_000,
+    )
+    stored = get_paper_position(conn, "BTCUSDT")
+    assert stored is not None
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": 1_700_000_100_000,
+                "timeframe": "1h",
+                "open": 110.0,
+                "high": 111.0,
+                "low": 109.0,
+                "close": 110.0,
+                "volume": 1.0,
+            }
+        ],
+    )
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+
+    client = TestClient(app)
+    api = client.get("/api/paper")
+    assert api.status_code == 200
+    row = next(p for p in api.json()["positions"] if p["symbol"] == "BTCUSDT")
+    qty = float(stored["qty"])
+    entry = float(stored["entry_price"])
+    assert row["mark_price"] == 110.0
+    assert row["unrealized_pnl"] == round((110.0 - entry) * qty, 8)
+
+    again = open_db(db)
+    try:
+        kept = get_paper_position(again, "BTCUSDT")
+    finally:
+        again.close()
+    assert kept is not None
+    assert kept["unrealized_pnl"] == stored["unrealized_pnl"]
+
+
 def test_api_paper_metrics_and_persist_json(monkeypatch, tmp_path: Path) -> None:
     _stub_control_deps(monkeypatch)
     db = tmp_path / "jarvise.db"

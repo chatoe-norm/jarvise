@@ -53,6 +53,18 @@ export function PaperPage() {
 
   useEffect(() => {
     void load();
+    const timer = window.setInterval(() => {
+      void api
+        .paper()
+        .then((next) => {
+          setPaper(next);
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          setError(err instanceof Error ? err.message : String(err));
+        });
+    }, 30_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   async function persist() {
@@ -247,6 +259,7 @@ export function PaperPage() {
       <Card>
         <CardHeader>
           <CardTitle>Open positions</CardTitle>
+          <CardDescription>อัปเดตทุก 30 วินาที จากแท่งปิดล่าสุดที่เก็บไว้</CardDescription>
         </CardHeader>
         <CardContent>
           {positions.length === 0 ? (

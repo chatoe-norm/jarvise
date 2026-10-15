@@ -15,6 +15,30 @@ from jarvise_ingest.db import (
 from jarvise_paper.engine import mark_equity
 
 
+def quote_positions(conn: Any, positions: list[dict]) -> list[dict]:
+    """Copy positions with unrealized PnL from the newest stored close.
+
+    Does not write the ledger. The stored ``unrealized_pnl`` column stays until
+    ``mark_to_market`` runs.
+    """
+    quoted = [dict(pos) for pos in positions]
+    marks = mark_prices(conn, [str(pos["symbol"]) for pos in quoted])
+    for pos in quoted:
+        symbol = str(pos["symbol"]).upper()
+        stored = marks.get(symbol)
+        mark = float(pos["entry_price"]) if stored is None else stored
+        marks[symbol] = mark
+        entry = float(pos["entry_price"])
+        qty = float(pos["qty"])
+        if str(pos["side"]) == "long":
+            unreal = (mark - entry) * qty
+        else:
+            unreal = (entry - mark) * qty
+        pos["unrealized_pnl"] = round(unreal, 8)
+        pos["mark_price"] = mark
+    return quoted
+
+
 def mark_prices(conn: Any, symbols: list[str]) -> dict[str, float]:
     marks: dict[str, float] = {}
     for raw in symbols:
