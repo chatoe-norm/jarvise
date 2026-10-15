@@ -28,8 +28,21 @@ def _short(**over: object) -> dict:
     return pos
 
 
-def test_trail_stop_stays_put_below_one_r() -> None:
-    assert trail_stop(_short(), best_low=2460.0, best_high=2530.0) is None
+def test_trail_stop_stays_put_below_breakeven() -> None:
+    # 2507.49 - 2490.0 = 17.49 < 0.5 * 54.97 (27.485) -> stays put
+    assert trail_stop(_short(), best_low=2490.0, best_high=2530.0) is None
+
+
+def test_trail_stop_locks_breakeven_at_half_r() -> None:
+    # 2507.49 - 2470.0 = 37.49 >= 0.5 * 54.97 (27.485) and < 1R -> breakeven (+20 bps fee buffer)
+    entry = 2507.49
+    res = trail_stop(_short(), best_low=2470.0, best_high=2530.0)
+    expected_be = round(entry * (1.0 - 0.002), 8)
+    assert res == expected_be
+
+
+def test_trail_stop_stays_put_below_one_r_when_breakeven_disabled() -> None:
+    assert trail_stop(_short(), best_low=2460.0, best_high=2530.0, breakeven_r=None) is None
 
 
 def test_trail_stop_reaches_entry_at_one_r() -> None:
@@ -53,8 +66,12 @@ def test_trail_stop_long_mirrors_short() -> None:
         "stop_price": 90.0,
         "initial_stop_price": 90.0,
     }
-    assert trail_stop(pos, best_low=95.0, best_high=109.0) is None
-    assert trail_stop(pos, best_low=95.0, best_high=110.0) == 100.0
+    # risk = 10.0, 0.5R = 5.0
+    assert trail_stop(pos, best_low=95.0, best_high=104.0) is None
+    # 106.0 reaches >= 0.5R (5.0) -> breakeven 100.0 * 1.002 = 100.2
+    assert trail_stop(pos, best_low=95.0, best_high=106.0) == 100.2
+    # 110.0 reaches 1.0R -> 110.0 - 10.0 = 100.0
+    assert trail_stop(pos, best_low=95.0, best_high=110.0, breakeven_r=None) == 100.0
     locked = {**pos, "stop_price": 105.0}
     assert trail_stop(locked, best_low=95.0, best_high=116.0) == 106.0
     assert trail_stop(locked, best_low=95.0, best_high=114.0) is None

@@ -203,3 +203,81 @@ def persist_auto_run(conn: Any, payload: dict[str, Any]) -> None:
         )
     except Exception:  # noqa: BLE001 — never fail the job on audit persistence
         pass
+
+
+def get_outcome_memory(
+    conn: Any,
+    *,
+    symbol: str | None = None,
+    limit: int = 5,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    """Retrieve structured memory of recent closed trades, winrate, and loss lessons."""
+    ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    all_outcomes = list_paper_decision_outcomes(conn, limit=50)
+
+    # 30-day stats
+    by_src = metrics_by_decision_source(conn, since_ms=ts - WINDOW_30D_MS)
+    auto_stats = by_src.get("auto_claude") or _bucket_stats([])
+
+    # Symbol-specific stats
+    sym_rows = (
+        [r for r in all_outcomes if str(r.get("symbol") or "").upper() == str(symbol or "").upper()]
+        if symbol
+        else []
+    )
+    sym_pnls = [float(r["pnl_usd"]) for r in sym_rows]
+    sym_stats = _bucket_stats(sym_pnls) if sym_pnls else None
+
+    # Recent closed trades
+    recent_trades = []
+    for r in all_outcomes[:limit]:
+        pnl = float(r.get("pnl_usd") or 0.0)
+        is_win = pnl > 0
+        hold_hrs = round(float(r.get("hold_ms") or 0.0) / 3_600_000.0, 1)
+        recent_trades.append(
+            {
+                "symbol": str(r.get("symbol") or ""),
+                "side": str(r.get("side") or ""),
+                "pnl_usd": round(pnl, 2),
+                "r_multiple": round(float(r.get("r_multiple") or 0.0), 4)
+                if r.get("r_multiple") is not None
+                else None,
+                "hold_hours": hold_hrs,
+                "decision_source": str(r.get("decision_source") or ""),
+                "result": "win" if is_win else "loss",
+            }
+        )
+
+    # Synthesize loss lesson bullets
+    lessons: list[str] = []
+    if auto_stats.get("closed_trades", 0) > 0:
+        wr = auto_stats.get("win_rate") or 0.0
+        ev = auto_stats.get("expected_value_ev") or 0.0
+        lessons.append(
+            f"30d auto winrate: {wr:.1%} ({auto_stats.get('wins', 0)}W, {auto_stats.get('losses', 0)}L), EV: ${ev:.2f}"
+        )
+    if recent_trades:
+        loss_sides = [t["side"] for t in recent_trades if t["result"] == "loss"]
+        win_sides = [t["side"] for t in recent_trades if t["result"] == "win"]
+        if "long" in loss_sides and "short" in win_sides:
+            lessons.append(
+                "Recent winning trades were shorts; recent long attempts experienced adverse reversals."
+            )
+        elif len(loss_sides) > len(win_sides):
+            lessons.append(
+                f"Caution: {len(loss_sides)} of last {len(recent_trades)} closed trades were losses."
+            )
+
+    return {
+        "auto_30d": {
+            "closed_trades": auto_stats.get("closed_trades", 0),
+            "wins": auto_stats.get("wins", 0),
+            "losses": auto_stats.get("losses", 0),
+            "win_rate": auto_stats.get("win_rate"),
+            "expected_value_ev": auto_stats.get("expected_value_ev"),
+        },
+        "symbol_stats": sym_stats,
+        "recent_closed_trades": recent_trades,
+        "loss_lessons": lessons,
+    }
