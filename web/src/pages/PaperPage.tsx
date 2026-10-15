@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { EquityChart, WinLossChart } from "@/components/Charts";
 import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
@@ -34,12 +34,52 @@ function floorLine(lesson: LossLesson): string {
   return `auto_* ปิดแล้ว ${lesson.auto_closed} ไม้ และ EV ของ auto_* ${ev} หน้านี้ยังไม่สั่งให้เปลี่ยนสูตร`;
 }
 
+function exitReasonBadge(reason?: string) {
+  if (!reason) return <span className="text-[var(--color-muted)] text-xs font-mono">—</span>;
+  const r = reason.toLowerCase();
+  if (r.includes("stop")) {
+    return (
+      <Badge variant="outline" className="border-rose-500/40 text-rose-400 text-[10px] font-mono">
+        Stop Hit
+      </Badge>
+    );
+  }
+  if (r.includes("profit") || r.includes("trail") || r.includes("breakeven")) {
+    return (
+      <Badge variant="outline" className="border-emerald-500/40 text-emerald-400 text-[10px] font-mono">
+        Profit Lock
+      </Badge>
+    );
+  }
+  if (r.includes("flat")) {
+    return (
+      <Badge variant="outline" className="border-amber-500/40 text-amber-400 text-[10px] font-mono">
+        FLAT Signal
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="border-[var(--color-border)] text-[var(--color-muted)] text-[10px] font-mono">
+      {reason}
+    </Badge>
+  );
+}
+
 export function PaperPage() {
   const [paper, setPaper] = useState<PaperPayload | null>(null);
   const [metrics, setMetrics] = useState<MetricsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [closing, setClosing] = useState<string | null>(null);
+
+  const sortedTrades = useMemo(() => {
+    if (!metrics?.trades) return [];
+    return [...metrics.trades].sort((a, b) => {
+      const tsA = Number(a.close_ts) || 0;
+      const tsB = Number(b.close_ts) || 0;
+      return tsB - tsA;
+    });
+  }, [metrics?.trades]);
 
   async function load() {
     setError(null);
@@ -456,22 +496,23 @@ export function PaperPage() {
               <Badge variant="outline">{metrics.trades.length} Closed Rounds</Badge>
             </div>
             <CardDescription>
-              ประวัติผลการเทรดที่ปิดรอบแล้วตามลำดับ FIFO พร้อมผลกำไร/ขาดทุนสุทธิ
+              ประวัติผลการเทรดที่ปิดรอบแล้ว เรียงจากรายการล่าสุดอยู่แถวบนสุด พร้อมผลกำไร/ขาดทุนสุทธิ
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="overflow-x-auto -mx-1 sm:mx-0 max-h-80">
-              <table className="w-full min-w-[420px] text-left text-sm">
-                <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs sticky top-0 bg-[var(--color-card)]">
+              <table className="w-full min-w-[500px] text-left text-sm">
+                <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs sticky top-0 bg-[var(--color-card)] z-10">
                   <tr>
                     <th className="py-2 pr-3">Closed Date</th>
                     <th className="py-2 pr-3">Symbol</th>
+                    <th className="py-2 pr-3">Exit Reason</th>
                     <th className="py-2 pr-3 text-right">PnL (USD)</th>
                     <th className="py-2 text-right">Outcome</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--color-border)]/50">
-                  {metrics.trades.map((t, idx) => {
+                  {sortedTrades.map((t, idx) => {
                     const pnl = Number(t.pnl_usd) || 0;
                     const dateStr =
                       t.close_ts != null
@@ -487,6 +528,9 @@ export function PaperPage() {
                         </td>
                         <td className="py-2.5 pr-3 font-medium font-mono text-xs">
                           {t.symbol || "—"}
+                        </td>
+                        <td className="py-2.5 pr-3">
+                          {exitReasonBadge(t.exit_reason)}
                         </td>
                         <td className="py-2.5 pr-3 tabular-nums font-mono text-xs text-right font-medium">
                           <span

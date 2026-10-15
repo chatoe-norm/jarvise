@@ -229,30 +229,32 @@ export function ExchangePage() {
               {(data.balances || []).length === 0 ? (
                 <p className="text-sm text-[var(--color-muted)]">No non-zero assets</p>
               ) : (
-                <table className="w-full text-left text-sm">
-                  <thead className="text-[var(--color-muted)]">
-                    <tr className="border-b border-[var(--color-border)]">
-                      <th className="py-2 pr-3">Asset</th>
-                      <th className="py-2 pr-3">Free</th>
-                      <th className="py-2 pr-3">Locked</th>
-                      <th className="py-2 pr-3">Total</th>
-                      <th className="py-2">~USD</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(data.balances || []).map((b) => (
-                      <tr key={b.asset} className="border-b border-[var(--color-border)]/60">
-                        <td className="py-2 pr-3 font-medium">{b.asset}</td>
-                        <td className="py-2 pr-3 tabular-nums">{formatQty(b.free)}</td>
-                        <td className="py-2 pr-3 tabular-nums">{formatQty(b.locked)}</td>
-                        <td className="py-2 pr-3 tabular-nums">{formatQty(b.total)}</td>
-                        <td className="py-2">
-                          <UsdCell usd={b.usd} pricing={b.pricing} />
-                        </td>
+                <div className="overflow-x-auto -mx-1 sm:mx-0">
+                  <table className="w-full min-w-[500px] text-left text-sm">
+                    <thead className="text-[var(--color-muted)]">
+                      <tr className="border-b border-[var(--color-border)]">
+                        <th className="py-2 pr-3">Asset</th>
+                        <th className="py-2 pr-3">Free</th>
+                        <th className="py-2 pr-3">Locked</th>
+                        <th className="py-2 pr-3">Total</th>
+                        <th className="py-2">~USD</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {(data.balances || []).map((b) => (
+                        <tr key={b.asset} className="border-b border-[var(--color-border)]/60">
+                          <td className="py-2 pr-3 font-medium">{b.asset}</td>
+                          <td className="py-2 pr-3 tabular-nums">{formatQty(b.free)}</td>
+                          <td className="py-2 pr-3 tabular-nums">{formatQty(b.locked)}</td>
+                          <td className="py-2 pr-3 tabular-nums">{formatQty(b.total)}</td>
+                          <td className="py-2">
+                            <UsdCell usd={b.usd} pricing={b.pricing} />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </CardContent>
           </Card>
