@@ -584,7 +584,13 @@ def test_ev_gate_still_flat_exits_without_claude(tmp_path: Path, monkeypatch: py
     pending(conn, "fx", "BTCUSDT", action="flat", size_pct_equity=0.0, confidence_score=0.40)
     monkeypatch.setattr(
         "jarvise_paper.auto_decide.auto_ev_gate_status",
-        lambda conn, now_ms=None: {"enabled": True, "blocked": True, "reason": "auto_ev_gate", "n": 8, "ev": -1.0},
+        lambda conn, now_ms=None: {
+            "enabled": True,
+            "blocked": True,
+            "reason": "auto_ev_gate",
+            "n": 8,
+            "ev": -1.0,
+        },
     )
     chat = _chat("approve")
     out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
@@ -601,7 +607,13 @@ def test_ev_gate_skips_when_no_rule_rows(tmp_path: Path, monkeypatch: pytest.Mon
     pending(conn, "ok", "BTCUSDT", action="long")
     monkeypatch.setattr(
         "jarvise_paper.auto_decide.auto_ev_gate_status",
-        lambda conn, now_ms=None: {"enabled": True, "blocked": True, "reason": "auto_ev_gate", "n": 8, "ev": -1.0},
+        lambda conn, now_ms=None: {
+            "enabled": True,
+            "blocked": True,
+            "reason": "auto_ev_gate",
+            "n": 8,
+            "ev": -1.0,
+        },
     )
     chat = _chat("approve")
     out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
