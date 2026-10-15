@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { EquityChart, WinLossChart } from "@/components/Charts";
 import { KpiStrip } from "@/components/KpiStrip";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type LossLesson, type MetricsPayload, type PaperPayload } from "@/lib/api";
 import { buildEquityPoints } from "@/lib/equity";
 import { decisionSourceLabel } from "@/lib/copy";
-import { formatNum, formatQty } from "@/lib/utils";
+import { cn, formatNum, formatQty } from "@/lib/utils";
 
 function evSign(ev: number | null | undefined): string {
   if (ev == null) return "ยังไม่มี EV";
@@ -256,10 +257,38 @@ export function PaperPage() {
         </Card>
       ) : null}
 
-      <Card>
+      <Card className="border-[var(--color-border)]">
         <CardHeader>
-          <CardTitle>Open positions</CardTitle>
-          <CardDescription>อัปเดตทุก 30 วินาที จากแท่งปิดล่าสุดที่เก็บไว้</CardDescription>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <CardTitle>Open positions</CardTitle>
+              <CardDescription>
+                อัปเดตทุก 30 วินาที จากแท่งปิดล่าสุด · คุ้มครองด้วยจุดตัด 1.5× ATR, บังทุน 0.5R และ Trailing 1.0R
+              </CardDescription>
+            </div>
+            {positions.length > 0 ? (
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-[var(--color-muted)]">
+                  Total uPnL:{" "}
+                  <span
+                    className={cn(
+                      "font-mono font-medium",
+                      positions.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0) >= 0
+                        ? "text-[var(--color-ok)]"
+                        : "text-[var(--color-danger)]",
+                    )}
+                  >
+                    {positions.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0) >= 0
+                      ? "+"
+                      : ""}
+                    {formatNum(positions.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0))}{" "}
+                    USD
+                  </span>
+                </span>
+                <Badge variant="ok">{positions.length} Active</Badge>
+              </div>
+            ) : null}
+          </div>
         </CardHeader>
         <CardContent>
           {positions.length === 0 ? (
@@ -269,20 +298,20 @@ export function PaperPage() {
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="text-[var(--color-muted)]">
-                  <tr className="border-b border-[var(--color-border)]">
-                    <th className="py-2 pr-3">Symbol</th>
-                    <th className="py-2 pr-3">Side</th>
-                    <th className="py-2 pr-3">Qty</th>
-                    <th className="py-2 pr-3">Entry</th>
-                    <th className="py-2 pr-3">Stop</th>
-                    <th className="py-2 pr-3">Stop dist</th>
-                    <th className="py-2 pr-3">uPnL</th>
-                    <th className="py-2">R</th>
-                    <th className="py-2" />
+                <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs">
+                  <tr>
+                    <th className="py-2.5 pr-3 font-medium">Symbol</th>
+                    <th className="py-2.5 pr-3 font-medium">Side</th>
+                    <th className="py-2.5 pr-3 font-medium">Qty</th>
+                    <th className="py-2.5 pr-3 font-medium">Entry</th>
+                    <th className="py-2.5 pr-3 font-medium">Stop / Protection</th>
+                    <th className="py-2.5 pr-3 font-medium">Stop dist</th>
+                    <th className="py-2.5 pr-3 font-medium">uPnL</th>
+                    <th className="py-2.5 pr-3 font-medium">R-Multiple</th>
+                    <th className="py-2.5 text-right font-medium">Action</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-[var(--color-border)]/50">
                   {positions.map((p, i) => {
                     const entry = Number(p.entry_price);
                     const stop = p.stop_price != null ? Number(p.stop_price) : null;
@@ -291,7 +320,7 @@ export function PaperPage() {
                         ? (Math.abs(entry - stop) / Math.abs(entry)) * 100
                         : null;
                     const qty = Number(p.qty);
-                    const unrealized = Number(p.unrealized_pnl);
+                    const unrealized = Number(p.unrealized_pnl) || 0;
                     const initialStop =
                       p.initial_stop_price != null ? Number(p.initial_stop_price) : stop;
                     const risk =
@@ -300,39 +329,116 @@ export function PaperPage() {
                         : null;
                     const rMultiple =
                       risk != null && risk > 0 && Number.isFinite(qty) && qty !== 0
-                        ? unrealized / qty / risk
+                        ? unrealized / (qty * risk)
                         : null;
-                    const trailed = String(p.stop_source ?? "") === "trail";
+                    const stopSource = String(p.stop_source ?? "").toLowerCase();
                     const symbol = String(p.symbol ?? "");
+                    const side = String(p.side ?? "").toLowerCase();
+
                     return (
-                    <tr key={i} className="border-b border-[var(--color-border)]/60">
-                      <td className="py-2 pr-3">{symbol}</td>
-                      <td className="py-2 pr-3">{String(p.side ?? "")}</td>
-                      <td className="py-2 pr-3 tabular-nums">{formatQty(p.qty)}</td>
-                      <td className="py-2 pr-3 tabular-nums">{formatNum(p.entry_price)}</td>
-                      <td className="py-2 pr-3 tabular-nums">
-                        {stop != null ? formatNum(stop) : "—"}
-                        {trailed ? (
-                          <span className="ml-2 text-xs text-[var(--color-muted)]">ล็อกกำไร</span>
-                        ) : null}
-                      </td>
-                      <td className="py-2 pr-3 tabular-nums">
-                        {dist != null ? `${formatNum(dist)}%` : "—"}
-                      </td>
-                      <td className="py-2 pr-3 tabular-nums">{formatNum(p.unrealized_pnl)}</td>
-                      <td className="py-2 pr-3 tabular-nums">
-                        {rMultiple != null ? formatNum(rMultiple) : "—"}
-                      </td>
-                      <td className="py-2">
-                        <Button
-                          variant="outline"
-                          disabled={closing === symbol}
-                          onClick={() => void closePosition(symbol, unrealized)}
-                        >
-                          {closing === symbol ? "…" : "ปิดไม้"}
-                        </Button>
-                      </td>
-                    </tr>
+                      <tr key={i} className="hover:bg-[var(--color-card)]/50 transition-colors">
+                        <td className="py-3 pr-3 font-semibold">{symbol}</td>
+                        <td className="py-3 pr-3">
+                          <span
+                            className={cn(
+                              "inline-block rounded px-1.5 py-0.5 text-xs font-mono uppercase font-semibold",
+                              side === "long"
+                                ? "bg-[var(--color-ok)]/15 text-[var(--color-ok)]"
+                                : "bg-rose-500/15 text-rose-400",
+                            )}
+                          >
+                            {side}
+                          </span>
+                        </td>
+                        <td className="py-3 pr-3 tabular-nums font-mono text-xs">
+                          {formatQty(p.qty)}
+                        </td>
+                        <td className="py-3 pr-3 tabular-nums font-mono text-xs">
+                          {formatNum(p.entry_price)}
+                        </td>
+                        <td className="py-3 pr-3 font-mono text-xs">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="tabular-nums">
+                              {stop != null ? formatNum(stop) : "—"}
+                            </span>
+                            {stopSource === "breakeven" ? (
+                              <Badge variant="ok" className="text-[10px] px-1 py-0">
+                                บังทุน (BE +20bps)
+                              </Badge>
+                            ) : stopSource === "trail" ? (
+                              <Badge variant="default" className="text-[10px] px-1 py-0">
+                                ล็อกกำไร (Trail 1R)
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline" className="text-[10px] px-1 py-0">
+                                จุดตัด 1.5× ATR
+                              </Badge>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 pr-3 tabular-nums font-mono text-xs text-[var(--color-muted)]">
+                          {dist != null ? `${formatNum(dist)}%` : "—"}
+                        </td>
+                        <td className="py-3 pr-3 tabular-nums font-mono text-xs font-medium">
+                          <span
+                            className={
+                              unrealized >= 0
+                                ? "text-[var(--color-ok)]"
+                                : "text-[var(--color-danger)]"
+                            }
+                          >
+                            {unrealized >= 0 ? "+" : ""}
+                            {formatNum(unrealized)}
+                          </span>
+                        </td>
+                        <td className="py-3 pr-3 font-mono text-xs">
+                          {rMultiple != null ? (
+                            <div className="space-y-1">
+                              <span
+                                className={cn(
+                                  "font-medium",
+                                  rMultiple >= 0
+                                    ? "text-[var(--color-ok)]"
+                                    : "text-[var(--color-danger)]",
+                                )}
+                              >
+                                {rMultiple >= 0 ? "+" : ""}
+                                {formatNum(rMultiple)}R
+                              </span>
+                              <div className="h-1.5 w-16 rounded-full bg-[var(--color-border)] overflow-hidden">
+                                <div
+                                  className={cn(
+                                    "h-full rounded-full transition-all",
+                                    rMultiple >= 1.0
+                                      ? "bg-[var(--color-accent)]"
+                                      : rMultiple >= 0.5
+                                        ? "bg-[var(--color-ok)]"
+                                        : rMultiple > 0
+                                          ? "bg-amber-400"
+                                          : "bg-rose-500",
+                                  )}
+                                  style={{
+                                    width: `${Math.min(100, Math.max(10, Math.abs(rMultiple) * 100))}%`,
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="py-3 text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 border-[var(--color-border)]"
+                            disabled={closing === symbol}
+                            onClick={() => void closePosition(symbol, unrealized)}
+                          >
+                            {closing === symbol ? "กำลังปิด…" : "ปิดไม้ (FLAT)"}
+                          </Button>
+                        </td>
+                      </tr>
                     );
                   })}
                 </tbody>
@@ -341,6 +447,78 @@ export function PaperPage() {
           )}
         </CardContent>
       </Card>
+
+      {metrics?.trades && metrics.trades.length > 0 ? (
+        <Card className="border-[var(--color-border)]">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>Closed Trades Ledger</CardTitle>
+              <Badge variant="outline">{metrics.trades.length} Closed Rounds</Badge>
+            </div>
+            <CardDescription>
+              ประวัติผลการเทรดที่ปิดรอบแล้วตามลำดับ FIFO พร้อมผลกำไร/ขาดทุนสุทธิ
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto max-h-80">
+              <table className="w-full text-left text-sm">
+                <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs sticky top-0 bg-[var(--color-card)]">
+                  <tr>
+                    <th className="py-2 pr-3">Closed Date</th>
+                    <th className="py-2 pr-3">Symbol</th>
+                    <th className="py-2 pr-3 text-right">PnL (USD)</th>
+                    <th className="py-2 text-right">Outcome</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-border)]/50">
+                  {metrics.trades.map((t, idx) => {
+                    const pnl = Number(t.pnl_usd) || 0;
+                    const dateStr =
+                      t.close_ts != null
+                        ? new Date(t.close_ts).toLocaleString("th-TH", {
+                            dateStyle: "short",
+                            timeStyle: "short",
+                          })
+                        : "—";
+                    return (
+                      <tr key={idx} className="hover:bg-[var(--color-card)]/50 transition-colors">
+                        <td className="py-2.5 pr-3 text-xs text-[var(--color-muted)] font-mono">
+                          {dateStr}
+                        </td>
+                        <td className="py-2.5 pr-3 font-medium font-mono text-xs">
+                          {t.symbol || "—"}
+                        </td>
+                        <td className="py-2.5 pr-3 tabular-nums font-mono text-xs text-right font-medium">
+                          <span
+                            className={
+                              pnl > 0
+                                ? "text-[var(--color-ok)]"
+                                : pnl < 0
+                                  ? "text-[var(--color-danger)]"
+                                  : "text-[var(--color-muted)]"
+                            }
+                          >
+                            {pnl > 0 ? "+" : ""}
+                            {formatNum(pnl)}
+                          </span>
+                        </td>
+                        <td className="py-2.5 text-right">
+                          <Badge
+                            variant={pnl > 0 ? "ok" : pnl < 0 ? "danger" : "muted"}
+                            className="text-[10px] uppercase font-mono"
+                          >
+                            {pnl > 0 ? "WIN" : pnl < 0 ? "LOSS" : "SCRATCH"}
+                          </Badge>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   );
 }

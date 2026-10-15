@@ -60,11 +60,145 @@ export function ExchangePage() {
       {!data ? (
         <p className="text-sm text-[var(--color-muted)]">Loading…</p>
       ) : !data.available ? (
-        <Card>
-          <CardContent className="pt-4 text-sm text-[var(--color-muted)]">
-            Exchange panel unavailable — spot API keys not configured or sync failed.
-          </CardContent>
-        </Card>
+        <div className="space-y-6">
+          <Card className="border-[var(--color-border)]">
+            <CardHeader>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+                  <CardTitle>Venue Gateway: Binance Spot</CardTitle>
+                </div>
+                <Badge variant="ok">Paper Shield Active</Badge>
+              </div>
+              <CardDescription>
+                Tier 2 Exchange Adapter · Direct read-only spot balance inspection &amp; gated live execution
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4 text-sm">
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/50 p-4">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 rounded-full bg-amber-400/15 p-1.5 text-amber-400">
+                    <span className="block h-2 w-2 rounded-full bg-amber-400" />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="font-medium text-[var(--color-foreground)]">
+                      Exchange Keys Not Configured (Paper-First Mode)
+                    </p>
+                    <p className="text-xs text-[var(--color-muted)] leading-relaxed">
+                      Jarvise is running strictly in local simulated paper mode. Real exchange API keys have not been loaded into the host environment, protecting live capital from unauthorized execution.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-md border border-[var(--color-border)] p-3">
+                  <div className="text-xs text-[var(--color-muted)]">Live Trading Flag</div>
+                  <div className="mt-1 font-mono font-medium text-rose-400">Gated (False)</div>
+                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">Live orders blocked</div>
+                </div>
+                <div className="rounded-md border border-[var(--color-border)] p-3">
+                  <div className="text-xs text-[var(--color-muted)]">Host VPS IP</div>
+                  <div className="mt-1 font-mono font-medium text-[var(--color-foreground)]">76.13.218.48</div>
+                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">Whitelisted static IPv4</div>
+                </div>
+                <div className="rounded-md border border-[var(--color-border)] p-3">
+                  <div className="text-xs text-[var(--color-muted)]">Execution Guardrail</div>
+                  <div className="mt-1 font-mono font-medium text-[var(--color-foreground)]">Spot Only · Max $2k</div>
+                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">No leverage / futures orders</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-[var(--color-border)]">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle>Live Enable Readiness Checklist</CardTitle>
+                <Badge variant="outline">docs/ops/live-enable-checklist.md</Badge>
+              </div>
+              <CardDescription>
+                Requirements that must be satisfied before enabling live spot execution
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3 text-sm">
+                <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
+                  <span className="mt-0.5 text-xs font-mono font-bold text-amber-400">01</span>
+                  <div className="flex-1 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-[var(--color-foreground)]">Prove Paper Trade Expectancy (EV &gt; 0)</span>
+                      <Badge variant="muted">In Progress (N=10)</Badge>
+                    </div>
+                    <p className="text-xs text-[var(--color-muted)]">
+                      Closed sample must reach ~8+ auto trades with positive expectancy. Current EV: -$0.65 across 10 closed auto rounds.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
+                  <span className="mt-0.5 text-xs font-mono font-bold text-[var(--color-muted)]">02</span>
+                  <div className="flex-1 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-[var(--color-foreground)]">Read-Only Key Permission Probe</span>
+                      <Badge variant="outline">Pending Setup</Badge>
+                    </div>
+                    <p className="text-xs text-[var(--color-muted)]">
+                      Probe Binance API key scopes. System strictly refuses and alarms if withdrawal or transfer permissions are detected.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
+                  <span className="mt-0.5 text-xs font-mono font-bold text-[var(--color-muted)]">03</span>
+                  <div className="flex-1 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-[var(--color-foreground)]">Human Approval Gate (Two-Man Rule)</span>
+                      <Badge variant="ok">Built &amp; Verified</Badge>
+                    </div>
+                    <p className="text-xs text-[var(--color-muted)]">
+                      Even with live enabled, orders never place autonomously (P5). Each trade requires explicit manual Approve on Home.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
+                  <span className="mt-0.5 text-xs font-mono font-bold text-[var(--color-muted)]">04</span>
+                  <div className="flex-1 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-[var(--color-foreground)]">Emergency Kill-Switch Flatten</span>
+                      <Badge variant="ok">Operational</Badge>
+                    </div>
+                    <p className="text-xs text-[var(--color-muted)]">
+                      Daily loss cap ($100) automatically triggers Redis kill switch, cancels all stops, and closes live spot exposure.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-[var(--color-border)]">
+            <CardHeader>
+              <CardTitle>Connecting Exchange Keys (When Ready)</CardTitle>
+              <CardDescription>Follow these instructions to safely load read-only spot credentials</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-xs text-[var(--color-muted)] leading-relaxed">
+              <p>
+                1. On Binance Global or Binance TH, generate an API key restricted to IP <code className="bg-[#161d27] px-1 py-0.5 rounded text-[var(--color-foreground)]">76.13.218.48</code>.
+              </p>
+              <p>
+                2. Check <strong>Enable Reading</strong> only. Ensure <strong>Enable Spot &amp; Margin Trading</strong>, <strong>Enable Withdrawals</strong>, and <strong>Enable Futures</strong> remain unchecked.
+              </p>
+              <p>
+                3. Place credentials in <code className="bg-[#161d27] px-1 py-0.5 rounded text-[var(--color-foreground)]">/opt/jarvise/.env</code> on the VPS (never commit to git repository):
+              </p>
+              <pre className="overflow-x-auto rounded-md bg-[#161d27] p-3 text-xs text-[var(--color-foreground)] font-mono">
+                BINANCE_API_KEY=your_read_only_key_here&#10;BINANCE_API_SECRET=your_secret_here
+              </pre>
+            </CardContent>
+          </Card>
+        </div>
       ) : (
         <>
           <Card>

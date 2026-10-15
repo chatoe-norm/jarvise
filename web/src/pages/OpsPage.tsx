@@ -179,58 +179,98 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
   }
 
   const jobs = [
-    { key: "ingest", title: "Ingest", data: status?.ingest },
-    { key: "rag", title: "RAG", data: status?.rag },
-    { key: "paper", title: "Paper enqueue", data: status?.paper },
-    { key: "paper_expire", title: "Paper expire", data: status?.paper_expire },
-    { key: "risk_monitor", title: "Risk monitor", data: status?.risk_monitor },
+    { key: "ingest", title: "Market Ingest (1h / 4h / 1d)", data: status?.ingest },
+    { key: "rag", title: "Trading Rules & RAG Refresh", data: status?.rag },
+    { key: "paper", title: "Paper Enqueue & Signal Scan", data: status?.paper },
+    { key: "paper_expire", title: "Paper Expire & Timeout Handler", data: status?.paper_expire },
+    { key: "risk_monitor", title: "Risk Monitor (MTF & Stops)", data: status?.risk_monitor },
   ];
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Ops</h1>
-        <p className="text-sm text-[var(--color-muted)]">
-          Kill switch, pipeline health, trading-rules index — not day-to-day trading.
-        </p>
+    <div className="space-y-6 max-w-7xl mx-auto">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight text-[var(--color-foreground)]">
+            Network Operations Center (NOC)
+          </h1>
+          <p className="text-sm text-[var(--color-muted)]">
+            Infrastructure health, market safety kill-switch, telemetry, and pipeline schedulers.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => void load()}
+          className="border-[var(--color-border)] text-xs font-mono"
+        >
+          {busy ? "Polling…" : "↻ Refresh Telemetry"}
+        </Button>
       </div>
 
       {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}
 
-      <Card>
+      <Card className="border-[var(--color-border)]">
         <CardHeader>
-          <CardTitle>Kill switch</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>Market Safety Kill-Switch</CardTitle>
+            <Badge variant={status?.kill_switch ? "danger" : "ok"}>
+              {status?.kill_switch ? "ENGAGED — Pipeline Blocked" : "CLEAR — Systems Nominal"}
+            </Badge>
+          </div>
           <CardDescription>
-            Halts automated paper schedules that respect the Redis kill key. Live stays gated separately.
+            Master circuit breaker. When engaged, automated paper schedules are paused and order placement is blocked.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-wrap items-center gap-3">
-          <Badge variant={status?.kill_switch ? "danger" : "ok"}>
-            {status?.kill_switch ? "ENGAGED" : "clear"}
-          </Badge>
-          <Button
-            variant="danger"
-            disabled={busy}
-            onClick={() => void setKill("on")}
-          >
-            Engage
-          </Button>
-          <Button variant="ok" disabled={busy} onClick={() => void setKill("off")}>
-            Clear
-          </Button>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/40 p-4">
+            <div className="space-y-1">
+              <div className="text-xs text-[var(--color-muted)]">Circuit Breaker Status</div>
+              <div className="text-sm font-medium">
+                {status?.kill_switch ? (
+                  <span className="text-rose-400 font-mono">
+                    Engaged: {(status as Record<string, unknown>).kill_switch_state ? String(((status as Record<string, unknown>).kill_switch_state as Record<string, unknown>).reason || "Safety Triggered") : "Safety Triggered"}
+                  </span>
+                ) : (
+                  <span className="text-[var(--color-ok)] font-mono">
+                    Normal · All fail-closed safety checks green
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="danger"
+                size="sm"
+                disabled={busy || status?.kill_switch}
+                onClick={() => void setKill("on")}
+              >
+                Engage Kill-Switch
+              </Button>
+              <Button
+                variant="ok"
+                size="sm"
+                disabled={busy || !status?.kill_switch}
+                onClick={() => void setKill("off")}
+              >
+                Clear &amp; Resume
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className="border-[var(--color-border)]">
         <CardHeader>
-          <CardTitle>Risk caps</CardTitle>
+          <CardTitle>Risk Caps &amp; Guardrails</CardTitle>
+          <CardDescription>Hard limits enforced by the engine across both paper and live execution</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-2 text-sm sm:grid-cols-3">
+        <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm">
           {status?.risk_caps
             ? Object.entries(status.risk_caps).map(([k, v]) => (
-                <div key={k}>
-                  <div className="text-xs text-[var(--color-muted)]">{k}</div>
-                  <div className="font-medium tabular-nums">{String(v)}</div>
+                <div key={k} className="rounded-md border border-[var(--color-border)] bg-[var(--color-card)]/30 p-3">
+                  <div className="text-xs text-[var(--color-muted)] font-mono">{k}</div>
+                  <div className="mt-1 font-mono font-bold text-base text-[var(--color-foreground)]">{String(v)}</div>
                 </div>
               ))
             : "—"}
