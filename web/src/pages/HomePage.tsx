@@ -3,7 +3,7 @@ import { ApprovalQueue } from "@/components/ApprovalQueue";
 import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { DashboardPayload, PaperAutoStatus, StatusPayload } from "@/lib/api";
+import type { DashboardPayload, NewsHome, PaperAutoStatus, StatusPayload } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
 import { relativeAge } from "@/lib/utils";
 
@@ -93,6 +93,34 @@ function MarketContextCard({ status }: { status: StatusPayload }) {
             {hasAlt ? <span className="text-2xl font-semibold tabular-nums text-[var(--color-foreground)]">{alt}</span> : "ไม่มีข้อมูล"}
           </p>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function NewsCard({ news }: { news: NewsHome | null | undefined }) {
+  const lines = news?.lines?.length ? news.lines : ["ยังไม่มีรายงานข่าว"];
+  const when = news?.generated_at_ms != null ? relativeAge(news.generated_at_ms) : null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>News</CardTitle>
+        <CardDescription>
+          ข่าวที่เกิดแล้วเทียบกับแท่งรายวันถัดไป เป็นบริบทอย่างเดียว ไม่เข้าคิวและไม่เปลี่ยนความมั่นใจ
+          {news?.window_years != null ? ` · ย้อน ${news.window_years} ปี` : ""}
+          {when ? ` · ${when}` : ""}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2 text-sm">
+        <ul className="list-disc space-y-1 pl-5">
+          {lines.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+        {news?.digest_note ? <p className="text-[var(--color-muted)]">{news.digest_note}</p> : null}
+        {news?.errors?.length ? (
+          <p className="text-[var(--color-muted)]">แหล่งข่าวบางส่วนใช้ไม่ได้: {news.errors.length} รายการ</p>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -196,6 +224,8 @@ export function HomePage({
       />
 
       <MarketContextCard status={data.status} />
+
+      <NewsCard news={data.news} />
     </div>
   );
 }

@@ -58,6 +58,7 @@ data/analytics/sources/firecrawl/
 data/analytics/sources/openclaw/*
 !data/analytics/sources/openclaw/.gitkeep
 data/analytics/candle-graph/
+data/analytics/news-reaction/
 data/research/news-reaction/
 
 # Local sync salvage

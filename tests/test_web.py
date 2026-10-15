@@ -476,6 +476,28 @@ def test_api_dashboard_bundle(monkeypatch, tmp_path: Path) -> None:
     assert "status" in data
     assert "paper" in data
     assert "metrics" in data
+    assert data["news"]["not_a_trade_signal"] is True
+    assert data["news"]["available"] is False
+
+
+def test_api_dashboard_includes_news_context(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    report = db.parent / "news-reaction" / "latest.json"
+    report.parent.mkdir()
+    report.write_text(
+        '{"not_a_trade_signal": true, "lines": ["บริบทข่าว ไม่ใช่สัญญาณ"], "window_years": 3}',
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    data = client.get("/api/dashboard").json()
+    assert data["news"]["available"] is True
+    assert data["news"]["lines"][0] == "บริบทข่าว ไม่ใช่สัญญาณ"
+    assert data["news"]["not_a_trade_signal"] is True
 
 
 def test_api_paper_ledger(monkeypatch, tmp_path: Path) -> None:

@@ -51,7 +51,44 @@ def default_digest_dir() -> Path:
 
 
 def default_report_path() -> Path:
+    """Report the web process can read.
+
+    On the VPS the web container mounts only the analytics directory, so when
+    ``JARVISE_DB`` is set the file sits beside that database. A local run
+    without that variable keeps the research path.
+    """
+    raw = (os.environ.get("JARVISE_NEWS_REACTION") or "").strip()
+    if raw:
+        return Path(raw)
+    db = (os.environ.get("JARVISE_DB") or "").strip()
+    if db:
+        return Path(db).expanduser().parent / "news-reaction" / "latest.json"
     return Path("data/research/news-reaction/latest.json")
+
+
+def news_home_view(report: dict[str, Any] | None) -> dict[str, Any]:
+    """Slim context for Home. Never a signal and never an approval."""
+    if not report:
+        return {
+            "ok": True,
+            "not_a_trade_signal": True,
+            "available": False,
+            "lines": ["ยังไม่มีรายงานข่าว"],
+            "digest_note": None,
+            "errors": [],
+            "generated_at_ms": None,
+            "window_years": None,
+        }
+    return {
+        "ok": True,
+        "not_a_trade_signal": True,
+        "available": True,
+        "lines": [str(line) for line in (report.get("lines") or []) if str(line).strip()],
+        "digest_note": report.get("digest_note"),
+        "errors": [str(err) for err in (report.get("errors") or [])],
+        "generated_at_ms": report.get("generated_at_ms"),
+        "window_years": report.get("window_years"),
+    }
 
 
 def read_digests(directory: Path) -> tuple[list[dict[str, Any]], str | None]:

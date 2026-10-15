@@ -287,6 +287,17 @@ export type ExchangePayload = {
   error?: string;
 };
 
+export type NewsHome = {
+  ok?: boolean;
+  not_a_trade_signal?: boolean;
+  available?: boolean;
+  lines?: string[];
+  digest_note?: string | null;
+  errors?: string[];
+  generated_at_ms?: number | null;
+  window_years?: number | null;
+};
+
 export type DashboardPayload = {
   ok: boolean;
   status: StatusPayload;
@@ -294,6 +305,7 @@ export type DashboardPayload = {
   approvals: ApprovalRow[];
   paper: PaperPayload;
   metrics: MetricsPayload;
+  news?: NewsHome | null;
 };
 
 async function request<T>(

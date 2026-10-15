@@ -17,7 +17,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from jarvise_analyze.explain import confidence_breakdown
-from jarvise_context.news_sources import load_report
+from jarvise_context.news_sources import load_report, news_home_view
 from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_exchange.value import value_spot_balances
@@ -722,6 +722,7 @@ def api_dashboard(_: None = Depends(require_auth)) -> dict[str, Any]:
         "approvals": approvals,
         "paper": paper_payload,
         "metrics": load_metrics(),
+        "news": news_home_view(load_report()),
     }
 
 
