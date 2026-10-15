@@ -25,7 +25,8 @@ def quote_positions(conn: Any, positions: list[dict]) -> list[dict]:
     marks = mark_prices(conn, [str(pos["symbol"]) for pos in quoted])
     for pos in quoted:
         symbol = str(pos["symbol"]).upper()
-        mark = float(marks.get(symbol, pos["entry_price"]))
+        stored = marks.get(symbol)
+        mark = float(pos["entry_price"]) if stored is None else stored
         marks[symbol] = mark
         entry = float(pos["entry_price"])
         qty = float(pos["qty"])
