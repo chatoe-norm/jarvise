@@ -10,7 +10,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { equityDomain } from "@/lib/equity";
+import { equityDomain, type EquityPoint } from "@/lib/equity";
+import { formatNum } from "@/lib/utils";
 
 const tooltipStyle = {
   background: "#121820",
@@ -19,11 +20,32 @@ const tooltipStyle = {
   fontSize: 12,
 };
 
-export function EquityChart({
-  points,
+function EquityTooltip({
+  active,
+  payload,
 }: {
-  points: Array<{ t: string; equity: number }>;
+  active?: boolean;
+  payload?: Array<{ payload?: EquityPoint }>;
 }) {
+  const row = payload?.[0]?.payload;
+  if (!active || !row) return null;
+  const pnl = row.pnl;
+  const pnlText =
+    pnl == null ? null : `${pnl > 0 ? "+" : ""}${formatNum(pnl)} ดอลลาร์`;
+  return (
+    <div style={tooltipStyle} className="px-2 py-1.5">
+      <div>{row.t}</div>
+      {row.symbol ? (
+        <div>
+          {row.symbol} {pnlText}
+        </div>
+      ) : null}
+      <div>Equity {formatNum(row.equity)}</div>
+    </div>
+  );
+}
+
+export function EquityChart({ points }: { points: EquityPoint[] }) {
   if (points.length === 0) {
     return (
       <div className="flex h-48 items-center justify-center text-sm text-[var(--color-muted)]">
@@ -33,9 +55,9 @@ export function EquityChart({
   }
   const [yMin, yMax] = equityDomain(points);
   return (
-    <div className="h-48 w-full">
+    <div className="h-64 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={points}>
+        <AreaChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
           <defs>
             <linearGradient id="eq" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#3d9cf0" stopOpacity={0.35} />
@@ -43,15 +65,22 @@ export function EquityChart({
             </linearGradient>
           </defs>
           <CartesianGrid stroke="#1e2a38" strokeDasharray="3 3" />
-          <XAxis dataKey="t" tick={{ fill: "#8b9aab", fontSize: 11 }} />
+          <XAxis
+            dataKey="t"
+            interval={0}
+            angle={-40}
+            textAnchor="end"
+            height={72}
+            tick={{ fill: "#8b9aab", fontSize: 10 }}
+          />
           <YAxis
             domain={[yMin, yMax]}
             tick={{ fill: "#8b9aab", fontSize: 11 }}
             width={64}
           />
-          <Tooltip contentStyle={tooltipStyle} />
+          <Tooltip content={<EquityTooltip />} />
           <Area
-            type="monotone"
+            type="stepAfter"
             dataKey="equity"
             stroke="#3d9cf0"
             fill="url(#eq)"
