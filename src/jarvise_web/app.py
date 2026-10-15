@@ -17,6 +17,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from jarvise_analyze.explain import confidence_breakdown
+from jarvise_context.news_sources import load_report
 from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_exchange.value import value_spot_balances
@@ -421,6 +422,7 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         doctrine=fetch_doctrine(doctrine_query(row)),
         claude=claude,
         signal_candle=signal_candle,
+        news_report=load_report(),
     )
 
 
