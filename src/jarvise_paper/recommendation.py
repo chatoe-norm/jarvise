@@ -110,6 +110,10 @@ def _what_happened(candle: Mapping[str, Any] | None, safety: Mapping[str, Any] |
         else:
             lines.append(f"ความผันผวนปกติ ({pct:.1f}% ต่อแท่ง)")
 
+    vol = _f(c.get("volume"))
+    if vol is not None and vol > 0:
+        lines.append(f"ปริมาณการซื้อขายแท่งล่าสุด: {vol:,.2f}")
+
     reasons = list((safety or {}).get("reasons") or [])
     if reasons:
         lines.append("market safety พบ: " + "; ".join(str(r) for r in reasons))

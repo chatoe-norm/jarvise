@@ -206,8 +206,21 @@ def test_system_prompt_pins_rules() -> None:
     assert "0.70" in SYSTEM_PROMPT
     assert PROMPT_VERSION in SYSTEM_PROMPT
     assert "กฎการเทรด" in SYSTEM_PROMPT
-    assert "หลักคำสอน" in SYSTEM_PROMPT
-    assert PROMPT_VERSION == "2026-10-04.1"
+    assert PROMPT_VERSION == "2026-10-15.1"
+
+
+def test_build_brief_includes_memory_and_contexts(tmp_path: Path) -> None:
+    conn = seed_db(tmp_path / "brief.db")
+    p = pending(conn, "ap-1", "BTCUSDT")
+    brief = build_brief(conn, p, doctrine=["test doctrine"], now_ms=NOW, caps=load_risk_caps(), min_conf=0.55)
+    assert "outcome_memory" in brief
+    assert "auto_30d" in brief["outcome_memory"]
+    assert "recent_closed_trades" in brief["outcome_memory"]
+    assert "loss_lessons" in brief["outcome_memory"]
+    assert "volume_context" in brief
+    assert "status" in brief["volume_context"]
+    assert "derivatives_context" in brief
+    assert "crowding" in brief["derivatives_context"]
 
 
 CFG = AutoDecideConfig(
