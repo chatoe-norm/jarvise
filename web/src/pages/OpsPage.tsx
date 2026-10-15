@@ -223,7 +223,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/40 p-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/40 p-4">
             <div className="space-y-1">
               <div className="text-xs text-[var(--color-muted)]">Circuit Breaker Status</div>
               <div className="text-sm font-medium">
@@ -238,10 +238,11 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 w-full sm:w-auto">
               <Button
                 variant="danger"
                 size="sm"
+                className="flex-1 sm:flex-initial"
                 disabled={busy || status?.kill_switch}
                 onClick={() => void setKill("on")}
               >
@@ -250,6 +251,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
               <Button
                 variant="ok"
                 size="sm"
+                className="flex-1 sm:flex-initial"
                 disabled={busy || !status?.kill_switch}
                 onClick={() => void setKill("off")}
               >
@@ -265,7 +267,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           <CardTitle>Risk Caps &amp; Guardrails</CardTitle>
           <CardDescription>Hard limits enforced by the engine across both paper and live execution</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm">
+        <CardContent className="grid grid-cols-2 gap-2.5 sm:grid-cols-2 lg:grid-cols-4 text-sm">
           {status?.risk_caps
             ? Object.entries(status.risk_caps).map(([k, v]) => (
                 <div key={k} className="rounded-md border border-[var(--color-border)] bg-[var(--color-card)]/30 p-3">

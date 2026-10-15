@@ -31,8 +31,9 @@ export function AppShell({
   const live = Boolean(status?.live_trading);
 
   return (
-    <div className="flex min-h-full bg-[var(--color-background)]">
-      <aside className="flex w-60 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-sidebar)]">
+    <div className="flex min-h-screen flex-col md:flex-row bg-[var(--color-background)]">
+      {/* Desktop Sidebar (md+) */}
+      <aside className="hidden md:flex w-60 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-sidebar)]">
         <div className="border-b border-[var(--color-border)] px-4 py-5">
           <div className="flex items-center gap-2">
             <div className="h-2.5 w-2.5 rounded-full bg-[var(--color-ok)] animate-pulse" />
@@ -91,8 +92,37 @@ export function AppShell({
           </div>
         </div>
       </aside>
+
+      {/* Main Area */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-sidebar)]/60 backdrop-blur px-6 py-2.5">
+        {/* Mobile Top Header (< md) */}
+        <header className="flex md:hidden items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-sidebar)] px-4 py-2.5 sticky top-0 z-40 backdrop-blur-md">
+          <div className="flex items-center gap-2">
+            <div className="h-2 w-2 rounded-full bg-[var(--color-ok)] animate-pulse" />
+            <span className="text-base font-bold tracking-tight text-[var(--color-foreground)]">Jarvise</span>
+            <span className="rounded bg-[var(--color-card)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--color-muted)] border border-[var(--color-border)]">
+              paper_liquid
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {kill ? (
+              <Badge variant="danger" className="text-[10px] py-0 px-1.5 animate-pulse">
+                KILL ENGAGED
+              </Badge>
+            ) : (
+              <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-muted)] font-mono">
+                <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-ok)]" />
+                <span>NOC Green</span>
+              </div>
+            )}
+            <Badge variant={live ? "danger" : "ok"} className="text-[10px] py-0 px-1.5">
+              {live ? "LIVE" : "PAPER"}
+            </Badge>
+          </div>
+        </header>
+
+        {/* Desktop Header (md+) */}
+        <header className="hidden md:flex flex-wrap items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-sidebar)]/60 backdrop-blur px-6 py-2.5">
           <div className="flex flex-wrap items-center gap-2.5">
             <Badge variant={live ? "danger" : "ok"}>
               {live
@@ -117,9 +147,64 @@ export function AppShell({
             </div>
           )}
         </header>
-        <main className="flex-1 overflow-auto p-6">
+
+        {/* Page Content with safe padding for mobile bottom bar */}
+        <main className="flex-1 overflow-auto p-3.5 sm:p-5 md:p-6 pb-24 md:pb-6">
           <Outlet />
         </main>
+
+        {/* Mobile Bottom Navigation Bar (< md) */}
+        <nav className="fixed bottom-0 left-0 right-0 z-50 flex md:hidden items-center justify-around border-t border-[var(--color-border)] bg-[var(--color-sidebar)]/95 backdrop-blur-lg px-1 py-1 safe-area-bottom shadow-lg">
+          {nav.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) =>
+                cn(
+                  "relative flex flex-1 flex-col items-center justify-center gap-1 py-1.5 text-[11px] font-medium transition-all text-[var(--color-muted)] active:scale-95",
+                  isActive
+                    ? "text-[var(--color-foreground)] font-semibold"
+                    : "hover:text-[var(--color-foreground)]",
+                )
+              }
+            >
+              {({ isActive }) => (
+                <>
+                  <div
+                    className={cn(
+                      "flex items-center justify-center rounded-full p-1 transition-colors",
+                      isActive
+                        ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
+                        : "text-[var(--color-muted)]",
+                    )}
+                  >
+                    <item.icon className="h-5 w-5 shrink-0" />
+                  </div>
+                  <span className="tracking-tight">{item.label}</span>
+                  {item.to === "/" && pendingCount > 0 ? (
+                    <span className="absolute top-1 right-3 rounded-full bg-[var(--color-accent)] px-1.5 py-0.2 text-[9px] font-bold text-black animate-pulse">
+                      {pendingCount}
+                    </span>
+                  ) : null}
+                  {item.to === "/paper" && openPositionsCount > 0 ? (
+                    <span className="absolute top-1 right-3 rounded-full bg-[var(--color-ok)] px-1.5 py-0.2 text-[9px] font-bold text-black">
+                      {openPositionsCount}
+                    </span>
+                  ) : null}
+                  {item.to === "/ops" ? (
+                    <span
+                      className={cn(
+                        "absolute top-1.5 right-4 h-1.5 w-1.5 rounded-full",
+                        kill ? "bg-[var(--color-danger)] animate-ping" : "bg-[var(--color-ok)]",
+                      )}
+                    />
+                  ) : null}
+                </>
+              )}
+            </NavLink>
+          ))}
+        </nav>
       </div>
     </div>
   );

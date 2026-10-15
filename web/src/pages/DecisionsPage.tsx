@@ -233,8 +233,8 @@ export function DecisionsPage() {
           ) : null}
           {rows.length > 0 ? (
             <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
+              <div className="overflow-x-auto -mx-1 sm:mx-0">
+                <table className="w-full min-w-[760px] text-left text-sm">
                   <thead className="text-[var(--color-muted)]">
                     <tr className="border-b border-[var(--color-border)]">
                       <th className="py-2 pr-2">No</th>

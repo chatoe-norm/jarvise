@@ -7,22 +7,24 @@ export function KpiStrip({
   items: Array<{ label: string; value: unknown; hint?: string }>;
 }) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid grid-cols-2 gap-2.5 sm:gap-3 lg:grid-cols-4">
       {items.map((item) => (
-        <Card key={item.label}>
-          <CardHeader>
-            <CardTitle className="text-[var(--color-muted)] font-medium">
+        <Card key={item.label} className="p-1 sm:p-2">
+          <CardHeader className="p-3 pb-1">
+            <CardTitle className="text-xs sm:text-sm text-[var(--color-muted)] font-medium">
               {item.label}
             </CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-semibold tabular-nums">
+          <CardContent className="p-3 pt-0">
+            <div className="text-lg sm:text-2xl font-bold tracking-tight tabular-nums text-[var(--color-foreground)]">
               {typeof item.value === "string" || typeof item.value === "number"
                 ? formatNum(item.value)
                 : "—"}
             </div>
             {item.hint ? (
-              <div className="mt-1 text-xs text-[var(--color-muted)]">{item.hint}</div>
+              <div className="mt-0.5 text-[10px] sm:text-xs text-[var(--color-muted)] truncate">
+                {item.hint}
+              </div>
             ) : null}
           </CardContent>
         </Card>

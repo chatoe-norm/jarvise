@@ -126,8 +126,8 @@ function ActivePositionsCard({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
+        <div className="overflow-x-auto -mx-1 sm:mx-0">
+          <table className="w-full min-w-[560px] text-left text-sm">
             <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs">
               <tr>
                 <th className="pb-2 font-medium">Symbol</th>
