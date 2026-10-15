@@ -71,17 +71,21 @@ JOBS_URL = os.environ.get("JARVISE_JOBS_URL", "http://jobs:8090")
 DEFAULT_DB = Path("data/analytics/jarvise.db")
 
 _PKG_DIR = Path(__file__).resolve().parent
-_STATIC_CANDIDATES = [
-    Path(os.environ["JARVISE_WEB_DIST"]) if os.environ.get("JARVISE_WEB_DIST") else None,
-    _PKG_DIR / "static",
-    Path(__file__).resolve().parents[2] / "web" / "dist",
-]
 
 
 def static_dir() -> Path | None:
     """Prefer a built SPA (has assets/), else any index.html fallback."""
+    env_dist = os.environ.get("JARVISE_WEB_DIST")
+    if env_dist:
+        p = Path(env_dist)
+        if (p / "index.html").is_file():
+            return p
+    candidates = [
+        _PKG_DIR / "static",
+        Path(__file__).resolve().parents[2] / "web" / "dist",
+    ]
     found: Path | None = None
-    for candidate in _STATIC_CANDIDATES:
+    for candidate in candidates:
         if candidate is None or not (candidate / "index.html").is_file():
             continue
         if (candidate / "assets").is_dir():
@@ -868,6 +872,47 @@ def analytics_legacy(_: None = Depends(require_auth)) -> FileResponse:
 @app.get("/ops")
 def spa_routes(_: None = Depends(require_auth)) -> FileResponse:
     return spa_index()
+
+
+@app.get("/manifest.webmanifest")
+@app.get("/manifest.json")
+def manifest() -> FileResponse:
+    root = static_dir()
+    if root and (root / "manifest.webmanifest").is_file():
+        return FileResponse(root / "manifest.webmanifest", media_type="application/manifest+json")
+    raise HTTPException(status_code=404, detail="manifest not found")
+
+
+@app.get("/sw.js")
+def service_worker() -> FileResponse:
+    root = static_dir()
+    if root and (root / "sw.js").is_file():
+        return FileResponse(root / "sw.js", media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="sw.js not found")
+
+
+@app.get("/icon.svg")
+def icon_svg() -> FileResponse:
+    root = static_dir()
+    if root and (root / "icon.svg").is_file():
+        return FileResponse(root / "icon.svg", media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="icon.svg not found")
+
+
+@app.get("/icon-192.png")
+def icon_192() -> FileResponse:
+    root = static_dir()
+    if root and (root / "icon-192.png").is_file():
+        return FileResponse(root / "icon-192.png", media_type="image/png")
+    raise HTTPException(status_code=404, detail="icon-192.png not found")
+
+
+@app.get("/icon-512.png")
+def icon_512() -> FileResponse:
+    root = static_dir()
+    if root and (root / "icon-512.png").is_file():
+        return FileResponse(root / "icon-512.png", media_type="image/png")
+    raise HTTPException(status_code=404, detail="icon-512.png not found")
 
 
 class _AssetsBasicAuth(StaticFiles):

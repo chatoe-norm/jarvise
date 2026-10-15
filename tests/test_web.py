@@ -1022,3 +1022,41 @@ def test_paper_close_works_while_kill_switch_engaged(monkeypatch, tmp_path: Path
         assert get_paper_position(conn, "BTCUSDT") is None
     finally:
         conn.close()
+
+
+def test_pwa_static_assets(tmp_path: Path, monkeypatch) -> None:
+    static_dir = tmp_path / "dist"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+    (static_dir / "manifest.webmanifest").write_text('{"name": "Jarvise"}', encoding="utf-8")
+    (static_dir / "sw.js").write_text("// sw", encoding="utf-8")
+    (static_dir / "icon.svg").write_text("<svg></svg>", encoding="utf-8")
+    (static_dir / "icon-192.png").write_bytes(b"\x89PNG")
+    (static_dir / "icon-512.png").write_bytes(b"\x89PNG")
+
+    monkeypatch.setenv("JARVISE_WEB_DIST", str(static_dir))
+    client = TestClient(app)
+
+    m1 = client.get("/manifest.webmanifest")
+    assert m1.status_code == 200
+    assert m1.headers["content-type"].startswith("application/manifest+json")
+    assert m1.json()["name"] == "Jarvise"
+
+    m2 = client.get("/manifest.json")
+    assert m2.status_code == 200
+
+    sw = client.get("/sw.js")
+    assert sw.status_code == 200
+    assert "javascript" in sw.headers["content-type"]
+
+    icon = client.get("/icon.svg")
+    assert icon.status_code == 200
+    assert "svg" in icon.headers["content-type"]
+
+    i192 = client.get("/icon-192.png")
+    assert i192.status_code == 200
+    assert "image/png" in i192.headers["content-type"]
+
+    i512 = client.get("/icon-512.png")
+    assert i512.status_code == 200
+    assert "image/png" in i512.headers["content-type"]
