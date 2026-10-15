@@ -37,6 +37,7 @@ export default function App() {
           <AppShell
             status={dash?.status ?? null}
             pendingCount={dash?.pending_count ?? 0}
+            openPositionsCount={(dash?.paper?.positions as unknown[])?.length ?? 0}
           />
         }
       >

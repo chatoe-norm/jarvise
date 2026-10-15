@@ -126,13 +126,13 @@ export function DecisionsPage() {
         </p>
       </div>
 
-      <Card>
-        <CardContent className="pt-4">
+      <Card className="border-[var(--color-border)]">
+        <CardContent className="pt-4 space-y-3">
           <form className="flex flex-wrap items-end gap-3" onSubmit={onFilter}>
             <label className="text-xs text-[var(--color-muted)]">
               Symbol
               <input
-                className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)]"
+                className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)] font-mono"
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}
                 placeholder="BTCUSDT"
@@ -141,7 +141,7 @@ export function DecisionsPage() {
             <label className="text-xs text-[var(--color-muted)]">
               Timeframe
               <input
-                className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)]"
+                className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)] font-mono"
                 value={timeframe}
                 onChange={(e) => setTimeframe(e.target.value)}
                 placeholder="4h"
@@ -164,6 +164,55 @@ export function DecisionsPage() {
               Clear
             </Button>
           </form>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-[var(--color-border)]/50 text-xs text-[var(--color-muted)]">
+            <span>Quick:</span>
+            {["ALL", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"].map((sym) => {
+              const active = (sym === "ALL" && !symbol) || symbol === sym;
+              return (
+                <button
+                  key={sym}
+                  type="button"
+                  onClick={() => {
+                    const target = sym === "ALL" ? "" : sym;
+                    setSymbol(target);
+                    setPage(1);
+                    void load(target, timeframe, 1, pageSize);
+                  }}
+                  className={`rounded px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                    active
+                      ? "bg-[var(--color-accent)] text-white font-medium"
+                      : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]"
+                  }`}
+                >
+                  {sym}
+                </button>
+              );
+            })}
+            <span className="ml-2">TF:</span>
+            {["ALL", "4h", "1h", "1d"].map((tf) => {
+              const active = (tf === "ALL" && !timeframe) || timeframe === tf;
+              return (
+                <button
+                  key={tf}
+                  type="button"
+                  onClick={() => {
+                    const target = tf === "ALL" ? "" : tf;
+                    setTimeframe(target);
+                    setPage(1);
+                    void load(symbol, target, 1, pageSize);
+                  }}
+                  className={`rounded px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                    active
+                      ? "bg-[var(--color-accent)] text-white font-medium"
+                      : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]"
+                  }`}
+                >
+                  {tf}
+                </button>
+              );
+            })}
+          </div>
         </CardContent>
       </Card>
 
@@ -227,14 +276,18 @@ export function DecisionsPage() {
                             </td>
                             <td className="py-2 pr-2">{String(r.timeframe ?? "")}</td>
                             <td className="py-2 pr-2">
-                              <Badge variant="muted">
-                                {String(r.regime_state ?? "—")}
-                              </Badge>
+                              {(() => {
+                                const reg = String(r.regime_state ?? "—");
+                                const variant = reg === "trend_up" ? "ok" : reg === "trend_down" ? "danger" : "muted";
+                                return <Badge variant={variant}>{reg}</Badge>;
+                              })()}
                             </td>
                             <td className="py-2 pr-2">
-                              <Badge variant="outline">
-                                {String(r.action ?? "—")}
-                              </Badge>
+                              {(() => {
+                                const act = String(r.action ?? "—");
+                                const variant = act === "long" ? "ok" : act === "short" ? "danger" : "outline";
+                                return <Badge variant={variant}>{act.toUpperCase()}</Badge>;
+                              })()}
                             </td>
                             <td className="py-2 pr-2">
                               <OutcomeCell row={r} />

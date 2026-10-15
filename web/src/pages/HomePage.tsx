@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { DashboardPayload, NewsHome, PaperAutoStatus, StatusPayload } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
-import { relativeAge } from "@/lib/utils";
+import { cn, formatNum, relativeAge } from "@/lib/utils";
 
 type AutoEntry = {
   id: string;
@@ -15,7 +15,7 @@ type AutoEntry = {
 };
 
 function collectAutoEntries(auto: PaperAutoStatus | null | undefined): AutoEntry[] {
-  if (!auto || auto.skipped) return [];
+  if (!auto) return [];
   const out: AutoEntry[] = [];
   for (const row of auto.approved || []) {
     out.push({ id: row.id, symbol: row.symbol, reason: row.reason, kind: "approved" });
@@ -56,10 +56,178 @@ function kindVariant(
 }
 
 function fngBand(value: number): string {
-  if (value < 25) return "กลัวสุดขีด";
-  if (value < 50) return "กลัว";
-  if (value < 75) return "โลภ";
-  return "โลภสุดขีด";
+  if (value < 25) return "กลัวสุดขีด (Extreme Fear)";
+  if (value < 50) return "กลัว (Fear)";
+  if (value < 75) return "โลภ (Greed)";
+  return "โลภสุดขีด (Extreme Greed)";
+}
+
+function ActivePositionsCard({
+  positions,
+}: {
+  positions: Array<Record<string, unknown>>;
+}) {
+  if (!positions || positions.length === 0) {
+    return (
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base font-semibold">Active Paper Positions</CardTitle>
+            <Badge variant="muted">0 Open</Badge>
+          </div>
+          <CardDescription>Simulated portfolio trades currently in play</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-col items-center justify-center py-6 text-center text-sm text-[var(--color-muted)]">
+            <p>No open positions in the paper ledger.</p>
+            <p className="mt-1 text-xs">Waiting for new high-confidence signals aligned with HTF trend.</p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const totalUnrealized = positions.reduce(
+    (sum, p) => sum + (Number(p.unrealized_pnl) || 0),
+    0,
+  );
+
+  return (
+    <Card className="border-[var(--color-border)]">
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CardTitle className="text-base font-semibold">Active Paper Positions</CardTitle>
+            <Badge variant="ok">{positions.length} Active</Badge>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-[var(--color-muted)]">
+              Total uPnL:{" "}
+              <span
+                className={cn(
+                  "font-mono font-medium",
+                  totalUnrealized >= 0 ? "text-[var(--color-ok)]" : "text-[var(--color-danger)]",
+                )}
+              >
+                {totalUnrealized >= 0 ? "+" : ""}
+                {formatNum(totalUnrealized)} USD
+              </span>
+            </div>
+            <Link
+              to="/paper"
+              className="text-xs text-[var(--color-accent)] hover:underline font-medium"
+            >
+              Full Ledger &amp; Charts →
+            </Link>
+          </div>
+        </div>
+        <CardDescription>
+          Live simulated positions protected by 1.5× ATR stop, 0.5R Breakeven lock, and 1.0R Trail
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs">
+              <tr>
+                <th className="pb-2 font-medium">Symbol</th>
+                <th className="pb-2 font-medium">Side</th>
+                <th className="pb-2 font-medium">Entry</th>
+                <th className="pb-2 font-medium">Stop / Protection</th>
+                <th className="pb-2 font-medium">uPnL</th>
+                <th className="pb-2 font-medium text-right">R-Multiple</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--color-border)]/50">
+              {positions.map((p, i) => {
+                const side = String(p.side || "").toLowerCase();
+                const uPnl = Number(p.unrealized_pnl) || 0;
+                const stopSource = String(p.stop_source || "");
+                const entry = Number(p.entry_price);
+                const stop = p.stop_price != null ? Number(p.stop_price) : null;
+                const qty = Number(p.qty);
+                const initialStop =
+                  p.initial_stop_price != null ? Number(p.initial_stop_price) : stop;
+                const risk =
+                  initialStop != null && Number.isFinite(entry)
+                    ? Math.abs(entry - initialStop)
+                    : null;
+                const rMultiple =
+                  risk != null && risk > 0 && Number.isFinite(qty) && qty !== 0
+                    ? uPnl / (qty * risk)
+                    : null;
+
+                return (
+                  <tr key={i} className="hover:bg-[var(--color-card)]/50 transition-colors">
+                    <td className="py-2.5 font-medium">{String(p.symbol || "")}</td>
+                    <td className="py-2.5">
+                      <span
+                        className={cn(
+                          "inline-block rounded px-1.5 py-0.5 text-xs font-mono uppercase font-semibold",
+                          side === "long"
+                            ? "bg-[var(--color-ok)]/15 text-[var(--color-ok)]"
+                            : "bg-rose-500/15 text-rose-400",
+                        )}
+                      >
+                        {side}
+                      </span>
+                    </td>
+                    <td className="py-2.5 font-mono text-xs tabular-nums">{formatNum(entry)}</td>
+                    <td className="py-2.5 font-mono text-xs">
+                      {stop != null ? (
+                        <div className="flex items-center gap-1.5">
+                          <span>{formatNum(stop)}</span>
+                          {stopSource === "breakeven" ? (
+                            <Badge variant="ok" className="text-[10px] px-1 py-0">
+                              BE +20bps
+                            </Badge>
+                          ) : stopSource === "trail" ? (
+                            <Badge variant="default" className="text-[10px] px-1 py-0">
+                              Trail 1R
+                            </Badge>
+                          ) : (
+                            <span className="text-[10px] text-[var(--color-muted)]">Initial</span>
+                          )}
+                        </div>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="py-2.5 font-mono text-xs tabular-nums">
+                      <span
+                        className={
+                          uPnl >= 0 ? "text-[var(--color-ok)]" : "text-[var(--color-danger)]"
+                        }
+                      >
+                        {uPnl >= 0 ? "+" : ""}
+                        {formatNum(uPnl)}
+                      </span>
+                    </td>
+                    <td className="py-2.5 font-mono text-xs tabular-nums text-right">
+                      {rMultiple != null ? (
+                        <span
+                          className={
+                            rMultiple >= 0
+                              ? "text-[var(--color-ok)] font-medium"
+                              : "text-[var(--color-danger)]"
+                          }
+                        >
+                          {rMultiple >= 0 ? "+" : ""}
+                          {formatNum(rMultiple)}R
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function MarketContextCard({ status }: { status: StatusPayload }) {
@@ -70,28 +238,37 @@ function MarketContextCard({ status }: { status: StatusPayload }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Market context</CardTitle>
+        <CardTitle>Market Context</CardTitle>
         <CardDescription>
-          Fear &amp; Greed and altseason are context only — they never enqueue or size a trade.
+          Macro sentiment &amp; dominance context (not a directional trade signal)
         </CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-3 sm:grid-cols-2 text-sm">
-        <div>
-          <div className="text-xs text-[var(--color-muted)]">Fear &amp; Greed</div>
+      <CardContent className="grid gap-4 sm:grid-cols-2 text-sm">
+        <div className="rounded-lg border border-[var(--color-border)] p-3">
+          <div className="text-xs text-[var(--color-muted)]">Fear &amp; Greed Index</div>
           {hasFng ? (
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <span className="text-2xl font-semibold tabular-nums">{fng}</span>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <span className="text-2xl font-bold tabular-nums font-mono">{fng}</span>
               <Badge variant="muted">{fngBand(fng)}</Badge>
             </div>
           ) : (
             <p className="mt-1 text-[var(--color-muted)]">{status.sentiment_note || "ไม่มีข้อมูล"}</p>
           )}
         </div>
-        <div>
-          <div className="text-xs text-[var(--color-muted)]">Altcoin season</div>
-          <p className="mt-1 text-[var(--color-muted)]">
-            {hasAlt ? <span className="text-2xl font-semibold tabular-nums text-[var(--color-foreground)]">{alt}</span> : "ไม่มีข้อมูล"}
-          </p>
+        <div className="rounded-lg border border-[var(--color-border)] p-3">
+          <div className="text-xs text-[var(--color-muted)]">Altcoin Season Index</div>
+          <div className="mt-1.5">
+            {hasAlt ? (
+              <span className="text-2xl font-bold tabular-nums font-mono text-[var(--color-foreground)]">
+                {alt}
+              </span>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-[var(--color-muted)]">Bitcoin Dominant</span>
+                <Badge variant="outline" className="text-[10px]">Macro Context</Badge>
+              </div>
+            )}
+          </div>
         </div>
       </CardContent>
     </Card>
@@ -99,27 +276,26 @@ function MarketContextCard({ status }: { status: StatusPayload }) {
 }
 
 function NewsCard({ news }: { news: NewsHome | null | undefined }) {
-  const lines = news?.lines?.length ? news.lines : ["ยังไม่มีรายงานข่าว"];
+  const lines = news?.lines?.length ? news.lines : ["ยังไม่มีรายงานข่าวรอบล่าสุด"];
   const when = news?.generated_at_ms != null ? relativeAge(news.generated_at_ms) : null;
   return (
     <Card>
       <CardHeader>
-        <CardTitle>News</CardTitle>
+        <CardTitle>Intelligence &amp; News Digest</CardTitle>
         <CardDescription>
-          ข่าวที่เกิดแล้วเทียบกับแท่งรายวันถัดไป เป็นบริบทอย่างเดียว ไม่เข้าคิวและไม่เปลี่ยนความมั่นใจ
+          OpenClaw / n8n news digest context
           {news?.window_years != null ? ` · ย้อน ${news.window_years} ปี` : ""}
           {when ? ` · ${when}` : ""}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2 text-sm">
-        <ul className="list-disc space-y-1 pl-5">
+        <ul className="list-disc space-y-1.5 pl-5 text-[var(--color-foreground)]/90">
           {lines.map((line) => (
             <li key={line}>{line}</li>
           ))}
         </ul>
-        {news?.digest_note ? <p className="text-[var(--color-muted)]">{news.digest_note}</p> : null}
-        {news?.errors?.length ? (
-          <p className="text-[var(--color-muted)]">แหล่งข่าวบางส่วนใช้ไม่ได้: {news.errors.length} รายการ</p>
+        {news?.digest_note ? (
+          <p className="text-xs text-[var(--color-muted)] italic pt-1">{news.digest_note}</p>
         ) : null}
       </CardContent>
     </Card>
@@ -131,33 +307,54 @@ function LastAutoDecideCard({
 }: {
   auto: PaperAutoStatus | null | undefined;
 }) {
+  if (!auto) return null;
   const entries = collectAutoEntries(auto);
-  if (!auto || entries.length === 0) return null;
+  const evGate = auto.auto_ev_gate;
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Last auto-decide</CardTitle>
+    <Card className="border-[var(--color-border)]">
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CardTitle className="text-base font-semibold">Latest Auto-Decide Review</CardTitle>
+            {evGate?.blocked ? (
+              <Badge variant="muted">EV Gate Active</Badge>
+            ) : (
+              <Badge variant="ok">Processed</Badge>
+            )}
+          </div>
+          <span className="text-xs text-[var(--color-muted)]">
+            {auto.at_ms != null ? relativeAge(auto.at_ms) : ""}
+            {auto.model ? ` · ${auto.model}` : ""}
+          </span>
+        </div>
         <CardDescription>
-          Queue empty — latest Claude / rule outcomes
-          {auto.at_ms != null ? ` · ${relativeAge(auto.at_ms)}` : ""}
-          {auto.model ? ` · ${auto.model}` : ""}.{" "}
+          Claude (OpenRouter) second-layer review after 4h candidate enqueue.{" "}
           <Link to="/ops" className="text-[var(--color-accent)] underline-offset-2 hover:underline">
-            Full detail on Ops
+            View details on Ops →
           </Link>
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <ul className="space-y-3 text-sm">
-          {entries.slice(0, 6).map((e) => (
-            <li key={`${e.kind}-${e.id}`} className="space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={kindVariant(e.kind)}>{e.kind}</Badge>
-                <span className="font-medium">{e.symbol || e.id}</span>
-              </div>
-              <p className="text-[var(--color-muted)]">{resolveReasonLabel(e.reason)}</p>
-            </li>
-          ))}
-        </ul>
+      <CardContent className="space-y-3">
+        {evGate?.blocked ? (
+          <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-card)]/70 p-3 text-xs text-[var(--color-muted)]">
+            <span className="font-medium text-[var(--color-foreground)]">Soft EV Gate Armed:</span>{" "}
+            Candidates deferred until closed sample expectancy improves (current sample N={evGate.n}, EV={formatNum(evGate.ev)}). Capital preservation protects paper portfolio.
+          </div>
+        ) : null}
+        {entries.length > 0 ? (
+          <ul className="space-y-2 text-sm">
+            {entries.slice(0, 4).map((e) => (
+              <li key={`${e.kind}-${e.id}`} className="flex items-center justify-between gap-2 rounded border border-[var(--color-border)]/50 px-3 py-1.5 text-xs">
+                <div className="flex items-center gap-2">
+                  <Badge variant={kindVariant(e.kind)}>{e.kind}</Badge>
+                  <span className="font-medium font-mono">{e.symbol || e.id}</span>
+                </div>
+                <span className="text-[var(--color-muted)]">{resolveReasonLabel(e.reason)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -188,13 +385,14 @@ export function HomePage({
 
   const m = data.metrics;
   const queueEmpty = (data.approvals || []).length === 0;
+  const positions = ((data.paper as Record<string, unknown>)?.positions as Array<Record<string, unknown>>) || [];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-7xl mx-auto">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight">Now</h1>
+        <h1 className="text-xl font-bold tracking-tight text-[var(--color-foreground)]">Command Control</h1>
         <p className="text-sm text-[var(--color-muted)]">
-          Decide pending paper candidates, then glance at portfolio health.
+          Decide pending candidates, monitor active paper positions, and verify portfolio safety.
         </p>
       </div>
 
@@ -217,15 +415,19 @@ export function HomePage({
           },
           {
             label: "Open positions",
-            value: (data.paper.positions || []).length,
+            value: positions.length,
             hint: "Paper only",
           },
         ]}
       />
 
-      <MarketContextCard status={data.status} />
+      <ActivePositionsCard positions={positions} />
 
-      <NewsCard news={data.news} />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <MarketContextCard status={data.status} />
+        <NewsCard news={data.news} />
+      </div>
     </div>
   );
 }
+
