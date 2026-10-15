@@ -6,10 +6,12 @@ from fastapi.testclient import TestClient
 
 from jarvise_ingest.db import (
     ensure_paper_account,
+    get_paper_position,
     open_db,
     upsert_analysis_output,
     upsert_macro_sentiment,
     upsert_market_technicals,
+    upsert_paper_position,
     upsert_pending_approval,
 )
 from jarvise_paper.engine import apply_signal
@@ -836,3 +838,107 @@ def test_api_analysis_explain_ladder(monkeypatch, tmp_path: Path) -> None:
     assert body["breakdown"]["gates"]["flat_below"] == 0.55
     assert body["breakdown"]["gates"]["doctrine_free_approve"] == 0.70
     assert any(s["delta"] == -0.1 for s in body["breakdown"]["steps"])
+
+
+def _seed_open_btc(db: Path) -> None:
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": 1_000,
+                "timeframe": "4h",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1.0,
+            }
+        ],
+    )
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "qty": 0.1,
+            "entry_price": 100.0,
+            "entry_ts": 1_000,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "stop_price": 97.0,
+            "stop_source": "analysis",
+            "initial_stop_price": 97.0,
+        },
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_paper_close_flattens_open_position(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    monkeypatch.delenv("JARVISE_LIVE_TRADING", raising=False)
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    db = tmp_path / "close.db"
+    _seed_open_btc(db)
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.post(
+        "/paper/close",
+        data={"symbol": "BTCUSDT"},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["fills"][0]["reason"] == "close_manual"
+    conn = open_db(db)
+    try:
+        assert get_paper_position(conn, "BTCUSDT") is None
+    finally:
+        conn.close()
+
+
+def test_paper_close_refuses_when_live(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    monkeypatch.setenv("JARVISE_LIVE_TRADING", "true")
+    db = tmp_path / "live.db"
+    _seed_open_btc(db)
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.post(
+        "/paper/close",
+        data={"symbol": "BTCUSDT"},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 409
+    conn = open_db(db)
+    try:
+        assert get_paper_position(conn, "BTCUSDT") is not None
+    finally:
+        conn.close()
+
+
+def test_paper_close_works_while_kill_switch_engaged(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    monkeypatch.delenv("JARVISE_LIVE_TRADING", raising=False)
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    monkeypatch.setattr("jarvise_web.app.redis_get_strict", lambda key: "1")
+    db = tmp_path / "kill.db"
+    _seed_open_btc(db)
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.post(
+        "/paper/close",
+        data={"symbol": "BTCUSDT"},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    conn = open_db(db)
+    try:
+        assert get_paper_position(conn, "BTCUSDT") is None
+    finally:
+        conn.close()

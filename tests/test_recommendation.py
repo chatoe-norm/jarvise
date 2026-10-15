@@ -35,6 +35,7 @@ def test_template_thresholds() -> None:
     assert template_recommendation("long", 0.60) == "approve_with_caution"
     assert template_recommendation("long", 0.40) == "reject"
     assert template_recommendation("flat", 0.90) == "reject"
+    assert template_recommendation("flat", 0.40, position_side="short") == "approve"
     assert template_recommendation(None, None) == "reject"
 
 
@@ -161,6 +162,23 @@ def test_card_flat_explains_reject_and_missing_ema200() -> None:
     assert any("EMA200" in line for line in card["what_happened"])
 
 
+def test_card_flat_with_open_position_recommends_close() -> None:
+    flat = {**APPROVAL, "action": "flat", "confidence_score": 0.4, "size_pct_equity": 0.0}
+    card = build_recommendation(
+        approval=flat,
+        candle=CANDLE,
+        analysis=None,
+        account=ACCOUNT,
+        position={"symbol": "ETHUSDT", "side": "short", "qty": 0.04},
+        safety=SAFETY_OK,
+        doctrine=[],
+        claude=None,
+    )
+    assert card["recommendation"] == "approve"
+    assert card["headline"] == "แนะนำ: APPROVE — ปิดไม้ตามสัญญาณ FLAT"
+    assert any("approve ปิดไม้" in line for line in card["checklist"])
+
+
 def test_card_claude_source_and_open_position_and_safety_reasons() -> None:
     card = build_recommendation(
         approval=APPROVAL,
@@ -179,5 +197,5 @@ def test_card_claude_source_and_open_position_and_safety_reasons() -> None:
     )
     assert card["recommendation_source"] == "claude"
     assert card["claude"]["decision"] == "defer"
-    assert any("ถือ BTCUSDT อยู่แล้ว" in line for line in card["checklist"])
+    assert any("ถือ BTCUSDT อยู่แล้ว" in line and "ไม่เติมไม้" in line for line in card["checklist"])
     assert any("book_stale_ms=1" in line for line in card["what_happened"])

@@ -375,4 +375,10 @@ export const api = {
     }),
   persistMetrics: () =>
     request<{ ok: boolean }>("/paper/metrics/persist", { method: "POST" }),
+  closePosition: (symbol: string) =>
+    request<{ ok: boolean; error?: string; fills?: unknown[] }>("/paper/close", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ symbol }),
+    }),
 };

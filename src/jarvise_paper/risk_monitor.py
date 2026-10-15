@@ -12,6 +12,7 @@ from jarvise_ingest.db import (
     get_paper_account,
 )
 from jarvise_paper.marking import mark_to_market
+from jarvise_paper.profit_lock import run_profit_lock
 from jarvise_paper.stops import run_stop_monitor
 from jarvise_risk import check_caps, engage_kill_switch, load_risk_caps, utc_day_bounds_ms
 
@@ -20,6 +21,7 @@ def run_risk_monitor(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
     ensure_paper_account(conn)
     mtm = mark_to_market(conn, now_ms=ts, persist=True)
+    profit_lock = run_profit_lock(conn, now_ms=ts)
     stops = run_stop_monitor(conn, now_ms=ts)
     mtm_after = mark_to_market(conn, now_ms=ts + 1, persist=True)
     caps = load_risk_caps()
@@ -47,6 +49,7 @@ def run_risk_monitor(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
         "paper_only": True,
         "at_ms": ts,
         "mtm": mtm_after,
+        "profit_lock": profit_lock,
         "stops": stops,
         "day_mtm_pnl": round(mtm_pnl, 8),
         "halted": halted,

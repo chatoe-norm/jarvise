@@ -8,15 +8,21 @@ from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
 from jarvise_ingest.db import (
     get_paper_position,
     load_candles_in_range,
+    range_since_entry,
     reset_paper_ledger,
+    set_position_stop,
     upsert_analysis_output,
 )
 from jarvise_paper.auto_decide import flat_exit_needed, same_side_already_open
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.metrics import compute_paper_metrics
+from jarvise_paper.profit_lock import trail_stop
+from jarvise_paper.stops import evaluate_stop
 
 PaperPolicy = Literal["naive", "rules"]
 PAPER_POLICIES: tuple[str, ...] = ("naive", "rules")
+StopMode = Literal["off", "fixed", "trail"]
+STOP_MODES: tuple[str, ...] = ("off", "fixed", "trail")
 FROZEN_STRATEGY_NOTE = (
     "Frozen strategy. In-sample and out-of-sample are separate holdouts. "
     "Do not keep the window with the better EV. Do not suggest a confidence floor."
@@ -34,6 +40,7 @@ def replay_range(
     apply_paper: bool = False,
     dry_run: bool = False,
     paper_policy: PaperPolicy = "naive",
+    stops: StopMode = "off",
 ) -> dict[str, Any]:
     """Walk closed candles in range; upsert analysis; optionally paper-fill.
 
@@ -43,6 +50,8 @@ def replay_range(
     """
     if paper_policy not in PAPER_POLICIES:
         raise ValueError(f"paper_policy must be one of {PAPER_POLICIES}")
+    if stops not in STOP_MODES:
+        raise ValueError(f"stops must be one of {STOP_MODES}")
     if apply_paper and not dry_run:
         reset_paper_ledger(conn)
 
@@ -72,19 +81,22 @@ def replay_range(
             analyses.append(result)
             if not (apply_paper and not dry_run):
                 continue
+            skip_fill = False
             if paper_policy == "rules":
                 disposition = _rules_disposition(conn, result)
                 policy_counts[disposition] = policy_counts.get(disposition, 0) + 1
-                if disposition in {"hold", "defer", "skip"}:
-                    continue
-            applied = apply_signal(
-                conn,
-                analysis=result,
-                mid_price=float(candle["close"]),
-                timeframe=timeframe,
-                now_ms=int(candle["timestamp"]),
-            )
-            fills_total += len(applied.get("fills") or [])
+                skip_fill = disposition in {"hold", "defer", "skip"}
+            if not skip_fill:
+                applied = apply_signal(
+                    conn,
+                    analysis=result,
+                    mid_price=float(candle["close"]),
+                    timeframe=timeframe,
+                    now_ms=int(candle["timestamp"]),
+                )
+                fills_total += len(applied.get("fills") or [])
+            if stops != "off":
+                fills_total += apply_replay_stop(conn, {**candle, "symbol": sym}, mode=stops)
 
     metrics = None
     if apply_paper and not dry_run:
@@ -101,6 +113,7 @@ def replay_range(
         "dry_run": dry_run,
         "apply_paper": apply_paper,
         "paper_policy": paper_policy,
+        "stops": stops,
         "timeframe": timeframe,
         "since_ms": int(since_ms),
         "until_ms": int(until_ms),
@@ -130,6 +143,7 @@ def replay_is_oos(
     apply_paper: bool = False,
     dry_run: bool = False,
     paper_policy: PaperPolicy = "naive",
+    stops: StopMode = "off",
 ) -> dict[str, Any]:
     """Score one frozen strategy on two chronological windows.
 
@@ -150,6 +164,7 @@ def replay_is_oos(
         apply_paper=apply_paper,
         dry_run=dry_run,
         paper_policy=paper_policy,
+        stops=stops,
     )
     out_of_sample = replay_range(
         conn,
@@ -161,6 +176,7 @@ def replay_is_oos(
         apply_paper=apply_paper,
         dry_run=dry_run,
         paper_policy=paper_policy,
+        stops=stops,
     )
     return {
         "ok": bool(in_sample.get("ok")) and bool(out_of_sample.get("ok")),
@@ -170,6 +186,7 @@ def replay_is_oos(
         "dry_run": dry_run,
         "apply_paper": apply_paper,
         "paper_policy": paper_policy,
+        "stops": stops,
         "timeframe": timeframe,
         "since_ms": int(since_ms),
         "oos_since_ms": int(oos_since_ms),
@@ -178,6 +195,70 @@ def replay_is_oos(
         "out_of_sample": out_of_sample,
         "note": FROZEN_STRATEGY_NOTE,
     }
+
+
+def apply_replay_stop(conn: Any, candle: dict[str, Any], *, mode: str) -> int:
+    """Close one open paper position if this bar hits its stop. Returns fill count.
+
+    ``fixed`` keeps the entry stop. ``trail`` tightens it by 1R from the best
+    price since entry before the hit check. Extremes before a trail move do not
+    count as a hit.
+    """
+    if mode not in {"fixed", "trail"}:
+        return 0
+    symbol = str(candle.get("symbol") or "").upper()
+    if not symbol:
+        return 0
+    pos = get_paper_position(conn, symbol)
+    if pos is None or pos.get("stop_price") is None or pos.get("entry_ts") is None:
+        return 0
+    ts = int(candle["timestamp"])
+    if mode == "trail":
+        low, high = range_since_entry(conn, symbol, entry_ts=int(pos["entry_ts"]), until_ms=ts)
+        new_stop = trail_stop(pos, best_low=low, best_high=high)
+        if new_stop is not None:
+            set_position_stop(
+                conn,
+                symbol,
+                stop_price=new_stop,
+                stop_source="trail",
+                moved_ts=ts,
+            )
+            pos = get_paper_position(conn, symbol)
+            if pos is None:
+                return 0
+    raw_since = pos.get("stop_moved_ts")
+    if raw_since is None:
+        raw_since = pos.get("entry_ts")
+    if raw_since is None:
+        return 0
+    bar_low, bar_high = range_since_entry(conn, symbol, entry_ts=int(raw_since), until_ms=ts)
+    hit = evaluate_stop(
+        pos,
+        mid=float(candle["close"]),
+        low_since_entry=bar_low,
+        high_since_entry=bar_high,
+    )
+    if hit is None:
+        return 0
+    prefix = "trail" if str(pos.get("stop_source") or "") == "trail" else "stop"
+    applied = apply_signal(
+        conn,
+        analysis={
+            "analysis_id": f"{prefix}-{symbol}-{ts}",
+            "symbol": symbol,
+            "action": "flat",
+            "regime_state": "stop",
+            "confidence_score": 0.0,
+            "size_pct_equity": 0.0,
+        },
+        mid_price=hit.fill_mid,
+        timeframe=str(candle.get("timeframe") or "4h"),
+        now_ms=ts,
+        decision_source="stop",
+        exit_reason="stop_hit",
+    )
+    return len(applied.get("fills") or [])
 
 
 def _rules_disposition(conn: Any, result: dict[str, Any]) -> str:

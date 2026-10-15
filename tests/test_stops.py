@@ -11,6 +11,7 @@ from jarvise_ingest.db import (
     open_db,
     upsert_analysis_output,
     upsert_market_technicals,
+    upsert_paper_position,
     write_indicators,
 )
 from jarvise_paper.engine import apply_signal
@@ -206,3 +207,54 @@ def test_backfill_stops_dry_run_then_apply(tmp_path: Path) -> None:
     pos = get_paper_position(conn, "ETHUSDT")
     assert pos["stop_price"] is not None
     assert pos["stop_source"] == "backfill"
+
+
+def test_stop_monitor_ignores_extremes_before_stop_move(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    conn = open_db(tmp_path / "trail-hit.db")
+    ensure_paper_account(conn)
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "ETHUSDT",
+                "timestamp": 1_000,
+                "timeframe": "4h",
+                "open": 2500.0,
+                "high": 2537.69,
+                "low": 2480.0,
+                "close": 2510.0,
+                "volume": 1.0,
+            },
+            {
+                "symbol": "ETHUSDT",
+                "timestamp": 6_000,
+                "timeframe": "4h",
+                "open": 2420.0,
+                "high": 2430.0,
+                "low": 2410.0,
+                "close": 2421.0,
+                "volume": 1.0,
+            },
+        ],
+    )
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "ETHUSDT",
+            "side": "short",
+            "qty": 0.04,
+            "entry_price": 2507.49,
+            "entry_ts": 1_000,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "stop_price": 2458.66,
+            "stop_source": "trail",
+            "initial_stop_price": 2562.46,
+            "stop_moved_ts": 5_000,
+        },
+    )
+    conn.commit()
+    report = run_stop_monitor(conn, now_ms=7_000)
+    assert report["closed"] == 0
+    assert get_paper_position(conn, "ETHUSDT") is not None

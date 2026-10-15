@@ -38,6 +38,7 @@ export function PaperPage() {
   const [metrics, setMetrics] = useState<MetricsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [closing, setClosing] = useState<string | null>(null);
 
   async function load() {
     setError(null);
@@ -63,6 +64,23 @@ export function PaperPage() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function closePosition(symbol: string, unrealized: number) {
+    const ok = window.confirm(
+      `ปิด ${symbol} ตอนนี้? กำไรลอยประมาณ ${formatNum(unrealized)} ดอลลาร์ จะกลายเป็นผลที่ปิดแล้ว`,
+    );
+    if (!ok) return;
+    setClosing(symbol);
+    setError(null);
+    try {
+      await api.closePosition(symbol);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setClosing(null);
     }
   }
 
@@ -246,7 +264,9 @@ export function PaperPage() {
                     <th className="py-2 pr-3">Entry</th>
                     <th className="py-2 pr-3">Stop</th>
                     <th className="py-2 pr-3">Stop dist</th>
-                    <th className="py-2">uPnL</th>
+                    <th className="py-2 pr-3">uPnL</th>
+                    <th className="py-2">R</th>
+                    <th className="py-2" />
                   </tr>
                 </thead>
                 <tbody>
@@ -257,19 +277,48 @@ export function PaperPage() {
                       stop != null && Number.isFinite(entry) && entry !== 0
                         ? (Math.abs(entry - stop) / Math.abs(entry)) * 100
                         : null;
+                    const qty = Number(p.qty);
+                    const unrealized = Number(p.unrealized_pnl);
+                    const initialStop =
+                      p.initial_stop_price != null ? Number(p.initial_stop_price) : stop;
+                    const risk =
+                      initialStop != null && Number.isFinite(entry)
+                        ? Math.abs(entry - initialStop)
+                        : null;
+                    const rMultiple =
+                      risk != null && risk > 0 && Number.isFinite(qty) && qty !== 0
+                        ? unrealized / qty / risk
+                        : null;
+                    const trailed = String(p.stop_source ?? "") === "trail";
+                    const symbol = String(p.symbol ?? "");
                     return (
                     <tr key={i} className="border-b border-[var(--color-border)]/60">
-                      <td className="py-2 pr-3">{String(p.symbol ?? "")}</td>
+                      <td className="py-2 pr-3">{symbol}</td>
                       <td className="py-2 pr-3">{String(p.side ?? "")}</td>
                       <td className="py-2 pr-3 tabular-nums">{formatQty(p.qty)}</td>
                       <td className="py-2 pr-3 tabular-nums">{formatNum(p.entry_price)}</td>
                       <td className="py-2 pr-3 tabular-nums">
                         {stop != null ? formatNum(stop) : "—"}
+                        {trailed ? (
+                          <span className="ml-2 text-xs text-[var(--color-muted)]">ล็อกกำไร</span>
+                        ) : null}
                       </td>
                       <td className="py-2 pr-3 tabular-nums">
                         {dist != null ? `${formatNum(dist)}%` : "—"}
                       </td>
-                      <td className="py-2 tabular-nums">{formatNum(p.unrealized_pnl)}</td>
+                      <td className="py-2 pr-3 tabular-nums">{formatNum(p.unrealized_pnl)}</td>
+                      <td className="py-2 pr-3 tabular-nums">
+                        {rMultiple != null ? formatNum(rMultiple) : "—"}
+                      </td>
+                      <td className="py-2">
+                        <Button
+                          variant="outline"
+                          disabled={closing === symbol}
+                          onClick={() => void closePosition(symbol, unrealized)}
+                        >
+                          {closing === symbol ? "…" : "ปิดไม้"}
+                        </Button>
+                      </td>
                     </tr>
                     );
                   })}

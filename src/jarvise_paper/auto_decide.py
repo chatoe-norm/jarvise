@@ -304,16 +304,7 @@ def run_auto_decide(
         persist_auto_run(conn, out)
         return out
     gate = auto_ev_gate_status(conn, now_ms=ts)
-    if gate.get("blocked"):
-        out = {
-            **base,
-            "ok": True,
-            "skipped": True,
-            "reason": "auto_ev_gate",
-            "auto_ev_gate": gate,
-        }
-        persist_auto_run(conn, out)
-        return out
+    claude_blocked = bool(gate.get("blocked"))
 
     lookup = doctrine_lookup or _default_doctrine
     caps = load_risk_caps()
@@ -376,6 +367,9 @@ def run_auto_decide(
                     )
             except Exception as exc:  # noqa: BLE001
                 apply_failed.append({**entry, "reason": rule_reason, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        if claude_blocked:
+            deferred.append({**entry, "reason": "auto_ev_gate"})
             continue
         if claude_slots >= cfg.max_per_run:
             deferred.append({**entry, "reason": "deferred_cap"})
@@ -523,5 +517,9 @@ def run_auto_decide(
         "halted": halted,
         "auto_ev_gate": gate,
     }
+    if claude_blocked:
+        out["reason"] = "auto_ev_gate"
+        out["claude_skipped"] = True
+        out["skipped"] = not approved and not apply_failed
     persist_auto_run(conn, out)
     return out

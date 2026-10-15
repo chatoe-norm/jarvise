@@ -81,17 +81,24 @@ def run_stop_monitor(conn: Any, *, now_ms: int) -> dict[str, Any]:
             continue
         symbol = str(pos["symbol"])
         mid = load_newest_close(conn, symbol)
-        low, high = range_since_entry(conn, symbol, entry_ts=int(pos["entry_ts"]))
+        since = pos.get("stop_moved_ts")
+        if since is None:
+            since = pos.get("entry_ts")
+        if since is None:
+            low, high = None, None
+        else:
+            low, high = range_since_entry(conn, symbol, entry_ts=int(since))
         hit = evaluate_stop(pos, mid=mid, low_since_entry=low, high_since_entry=high)
         if hit is None:
             continue
         tf = "4h"
         candle = load_latest_candle(conn, symbol, tf)
         timeframe = str(candle["timeframe"]) if candle else tf
+        prefix = "trail" if str(pos.get("stop_source") or "") == "trail" else "stop"
         apply_signal(
             conn,
             analysis={
-                "analysis_id": f"stop-{symbol}-{now_ms}",
+                "analysis_id": f"{prefix}-{symbol}-{now_ms}",
                 "symbol": symbol,
                 "action": "flat",
                 "regime_state": "stop",
