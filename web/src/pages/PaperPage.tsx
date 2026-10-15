@@ -120,7 +120,7 @@ export function PaperPage() {
         <Card>
           <CardHeader>
             <CardTitle>Equity curve</CardTitle>
-            <CardDescription>Closed round-trips from starting equity</CardDescription>
+            <CardDescription>แต่ละจุดคือไม้ที่ปิดหนึ่งไม้</CardDescription>
           </CardHeader>
           <CardContent>
             <EquityChart points={points} />
