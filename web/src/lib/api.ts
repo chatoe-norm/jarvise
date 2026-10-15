@@ -216,6 +216,10 @@ export type MetricsPayload = {
     close_ts?: number;
     pnl_usd?: number;
     symbol?: string;
+    exit_reason?: string;
+    qty?: number;
+    entry_price?: number;
+    exit_price?: number;
   }>;
   unmatched_orders?: number;
   by_decision_source?: Record<string, SourceMetrics>;
