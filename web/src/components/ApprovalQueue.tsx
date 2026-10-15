@@ -98,8 +98,8 @@ export function ApprovalQueue({
             No pending approvals — pipeline idle. Paper jobs enqueue here on schedule.
           </p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
+          <div className="overflow-x-auto -mx-1 sm:mx-0">
+            <table className="w-full min-w-[620px] text-left text-sm">
               <thead className="text-[var(--color-muted)]">
                 <tr className="border-b border-[var(--color-border)]">
                   <th className="py-2 pr-3 font-medium">Symbol</th>

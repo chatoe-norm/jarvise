@@ -78,3 +78,8 @@ htmlcov/
 
 # Model / HF cache written by jobs (HF_HOME=/app/data/.cache/hf)
 data/.cache/
+
+# Test results and temporary files
+web/test-results/
+.cursor/hooks/
+*.db.bak

@@ -296,8 +296,8 @@ export function PaperPage() {
               No open paper positions. Run <code>jarvise paper run</code> then Approve.
             </p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
+            <div className="overflow-x-auto -mx-1 sm:mx-0">
+              <table className="w-full min-w-[700px] text-left text-sm">
                 <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs">
                   <tr>
                     <th className="py-2.5 pr-3 font-medium">Symbol</th>
@@ -460,8 +460,8 @@ export function PaperPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="overflow-x-auto max-h-80">
-              <table className="w-full text-left text-sm">
+            <div className="overflow-x-auto -mx-1 sm:mx-0 max-h-80">
+              <table className="w-full min-w-[420px] text-left text-sm">
                 <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs sticky top-0 bg-[var(--color-card)]">
                   <tr>
                     <th className="py-2 pr-3">Closed Date</th>
