@@ -93,6 +93,23 @@ def load_risk_caps() -> RiskCaps:
     )
 
 
+def load_guardrails_policy(path: str = "config/guardrails.policy.json") -> dict[str, Any]:
+    """Load declarative guardrails policy from config/guardrails.policy.json if present."""
+    import json
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("Failed to load guardrails policy from %s: %s", path, exc)
+        return {}
+
+
 def utc_day_bounds_ms(now_ms: int) -> tuple[int, int]:
     """UTC calendar day [start, end) in unix milliseconds."""
     day_ms = 86_400_000
