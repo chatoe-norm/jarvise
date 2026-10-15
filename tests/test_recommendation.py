@@ -199,3 +199,35 @@ def test_card_claude_source_and_open_position_and_safety_reasons() -> None:
     assert card["claude"]["decision"] == "defer"
     assert any("ถือ BTCUSDT อยู่แล้ว" in line and "ไม่เติมไม้" in line for line in card["checklist"])
     assert any("book_stale_ms=1" in line for line in card["what_happened"])
+
+
+def test_news_report_does_not_change_recommendation() -> None:
+    plain = build_recommendation(
+        approval=APPROVAL,
+        candle=CANDLE,
+        analysis=ANALYSIS,
+        account=ACCOUNT,
+        position=None,
+        safety=SAFETY_OK,
+        doctrine=[],
+        claude=None,
+    )
+    with_news = build_recommendation(
+        approval=APPROVAL,
+        candle=CANDLE,
+        analysis=ANALYSIS,
+        account=ACCOUNT,
+        position=None,
+        safety=SAFETY_OK,
+        doctrine=[],
+        claude=None,
+        news_report={
+            "not_a_trade_signal": True,
+            "lines": ["บริบทข่าว ไม่ใช่สัญญาณ", "รวมทุกธีม — BTC วันถัดไป มัธยฐาน +1.0% จาก 1 วัน"],
+        },
+    )
+    assert with_news["recommendation"] == plain["recommendation"]
+    assert with_news["headline"] == plain["headline"]
+    assert with_news["checklist"] == plain["checklist"]
+    assert with_news["news_context"]["not_a_trade_signal"] is True
+    assert with_news["news_context"]["lines"][0] == "บริบทข่าว ไม่ใช่สัญญาณ"

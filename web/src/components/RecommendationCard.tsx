@@ -118,6 +118,12 @@ export function RecommendationCard({
       <Section title="เช็คก่อนกด">
         <List items={data.checklist} />
       </Section>
+
+      {data.news_context?.lines?.length ? (
+        <Section title="บริบทข่าว ไม่ใช่สัญญาณ">
+          <List items={data.news_context.lines} />
+        </Section>
+      ) : null}
     </div>
   );
 }

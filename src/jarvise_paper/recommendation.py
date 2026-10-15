@@ -161,6 +161,16 @@ def _checklist(approval: Mapping[str, Any], position: Mapping[str, Any] | None) 
     return lines
 
 
+def news_context_block(report: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Card copy for a precomputed study. Missing report leaves the checklist unchanged."""
+    if not report or report.get("not_a_trade_signal") is not True:
+        return None
+    lines = [str(line) for line in (report.get("lines") or []) if str(line).strip()]
+    if not lines:
+        return None
+    return {"not_a_trade_signal": True, "lines": lines}
+
+
 def build_recommendation(
     *,
     approval: Mapping[str, Any],
@@ -172,6 +182,7 @@ def build_recommendation(
     doctrine: list[str],
     claude: Mapping[str, Any] | None,
     signal_candle: Mapping[str, Any] | None = None,
+    news_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     action = str(approval.get("action") or "flat").lower()
     conf = float(approval.get("confidence_score") or 0.0)
@@ -200,6 +211,7 @@ def build_recommendation(
         "risk": _risk(approval, candle, analysis, account),
         "doctrine": list(doctrine),
         "checklist": _checklist(approval, position),
+        "news_context": news_context_block(news_report),
         "thesis": (analysis or {}).get("thesis"),
         "claude": dict(claude) if claude else None,
         "confidence_breakdown": breakdown,

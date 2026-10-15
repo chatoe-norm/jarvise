@@ -148,6 +148,7 @@ export type RecommendationPayload = {
   };
   doctrine: string[];
   checklist: string[];
+  news_context?: { not_a_trade_signal: true; lines: string[] } | null;
   thesis?: string | null;
   claude: {
     decision: string;

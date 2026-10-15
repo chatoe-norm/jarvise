@@ -108,6 +108,16 @@ charts_app = typer.Typer(
 )
 app.add_typer(charts_app, name="charts")
 
+context_app = typer.Typer(
+    name="context",
+    help="Research context that does not change a trade signal.",
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    pretty_exceptions_show_locals=False,
+)
+app.add_typer(context_app, name="context")
+
 
 class OutputFormat(str, Enum):
     text = "text"
@@ -158,6 +168,40 @@ def require_initialized(root: Path) -> None:
         f"jarvise init --path {root} --yes",
         "jarvise init --yes",
     )
+
+
+@context_app.command("news-reaction")
+def context_news_reaction(
+    output: Annotated[
+        OutputFormat,
+        typer.Option("--output", help="text prints the context lines; json prints the report."),
+    ] = OutputFormat.text,
+) -> None:
+    """Compare watchlist headlines and saved digests with the next daily closes.
+
+    Writes data/research/news-reaction/latest.json. Does not change approvals.
+    """
+    from jarvise_context.news_sources import default_report_path, run_news_reaction
+    from jarvise_ingest.db import open_db
+
+    db_path = analytics_db_path()
+    conn = open_db(db_path) if db_path.is_file() else None
+    try:
+        report = run_news_reaction(conn)
+    finally:
+        if conn is not None:
+            conn.close()
+    path = default_report_path()
+    if output is OutputFormat.json:
+        typer.echo(json.dumps(report, ensure_ascii=False))
+        return
+    for line in report.get("lines") or []:
+        typer.echo(line)
+    if report.get("digest_note"):
+        typer.echo(report["digest_note"])
+    for err in report.get("errors") or []:
+        typer.echo(f"source: {err}")
+    typer.echo(f"report: {path}")
 
 
 @charts_app.command("export")
