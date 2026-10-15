@@ -152,6 +152,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=("With --replay: apply_signal each bar into isolated --db (refuses default live ledger path)"),
     )
     p.add_argument(
+        "--stops",
+        choices=["off", "fixed", "trail"],
+        default="off",
+        help=(
+            "With --apply-paper: off leaves stops unsimulated. "
+            "fixed exits at the entry stop. trail tightens the stop by 1R after price moves 1R."
+        ),
+    )
+    p.add_argument(
         "--paper-policy",
         choices=["naive", "rules"],
         default="naive",
@@ -231,6 +240,12 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.stops != "off" and not args.apply_paper:
+        print(
+            "Error: --stops requires --apply-paper.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
     if args.paper_policy == "rules" and not args.apply_paper:
         print(
             "Error: --paper-policy rules requires --apply-paper.\n  " + REPLAY_EXAMPLE,
@@ -276,6 +291,7 @@ def run(argv: list[str] | None = None) -> int:
                     apply_paper=args.apply_paper,
                     dry_run=args.dry_run,
                     paper_policy=args.paper_policy,
+                    stops=args.stops,
                 )
                 if args.apply_paper and args.paper_policy == "rules":
                     report["note"] += (
@@ -297,6 +313,7 @@ def run(argv: list[str] | None = None) -> int:
                     apply_paper=args.apply_paper,
                     dry_run=args.dry_run,
                     paper_policy=args.paper_policy,
+                    stops=args.stops,
                 )
                 if args.apply_paper and args.paper_policy == "rules":
                     report["note"] = (

@@ -39,6 +39,7 @@ from jarvise_ingest.db import (
 )
 from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
+from jarvise_paper.close import close_position
 from jarvise_paper.ledger import load_paper_ledger
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
@@ -791,6 +792,31 @@ async def approvals_reject(
     if wants_json(request):
         return JSONResponse({"ok": True, "id": id})
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/paper/close")
+async def paper_close(
+    request: Request,
+    symbol: str = Form(...),
+    _: None = Depends(require_auth),
+) -> Any:
+    if live_trading_enabled():
+        detail = {"ok": False, "error": "live_trading_enabled", "symbol": symbol}
+        if wants_json(request):
+            return JSONResponse(detail, status_code=409)
+        raise HTTPException(status_code=409, detail="live_trading_enabled")
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="no database")
+    conn = open_db(path)
+    try:
+        result = close_position(conn, symbol)
+    finally:
+        conn.close()
+    status_code = 200 if result.get("ok") else 400
+    if wants_json(request):
+        return JSONResponse(result, status_code=status_code)
+    return RedirectResponse("/paper", status_code=303)
 
 
 @app.post("/paper/metrics/persist")

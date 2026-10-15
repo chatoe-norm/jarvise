@@ -566,6 +566,52 @@ def test_flat_with_open_position_auto_exits_without_claude(tmp_path: Path) -> No
     assert get_paper_position(conn, "BTCUSDT") is None
 
 
+def test_ev_gate_still_flat_exits_without_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = seed_db(tmp_path / "gate.db")
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "qty": 0.001,
+            "entry_price": 85000.0,
+            "entry_ts": 1,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+        },
+    )
+    conn.commit()
+    pending(conn, "fx", "BTCUSDT", action="flat", size_pct_equity=0.0, confidence_score=0.40)
+    monkeypatch.setattr(
+        "jarvise_paper.auto_decide.auto_ev_gate_status",
+        lambda conn, now_ms=None: {"enabled": True, "blocked": True, "reason": "auto_ev_gate", "n": 8, "ev": -1.0},
+    )
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert chat.calls == []
+    assert out["reason"] == "auto_ev_gate"
+    assert out["claude_skipped"] is True
+    assert out["skipped"] is False
+    assert out["approved"][0]["reason"] == FLAT_EXIT
+    assert get_paper_position(conn, "BTCUSDT") is None
+
+
+def test_ev_gate_skips_when_no_rule_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = seed_db(tmp_path / "gate-skip.db")
+    pending(conn, "ok", "BTCUSDT", action="long")
+    monkeypatch.setattr(
+        "jarvise_paper.auto_decide.auto_ev_gate_status",
+        lambda conn, now_ms=None: {"enabled": True, "blocked": True, "reason": "auto_ev_gate", "n": 8, "ev": -1.0},
+    )
+    chat = _chat("approve")
+    out = run_auto_decide(conn, now_ms=NOW, config=CFG, chat=chat, doctrine_lookup=DOCTRINE)
+    assert chat.calls == []
+    assert out["skipped"] is True
+    assert out["claude_skipped"] is True
+    assert out["approved"] == []
+    assert out["deferred"][0]["reason"] == "auto_ev_gate"
+
+
 def test_same_side_open_auto_holds_without_claude(tmp_path: Path) -> None:
     conn = seed_db(tmp_path / "ss.db")
     upsert_paper_position(

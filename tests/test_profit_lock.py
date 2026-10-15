@@ -1,0 +1,173 @@
+"""1R profit lock: tighten only, and replay stops close on the bar extreme."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from jarvise_analyze.replay import apply_replay_stop
+from jarvise_ingest.db import (
+    ensure_paper_account,
+    get_paper_position,
+    open_db,
+    upsert_market_technicals,
+    upsert_paper_position,
+)
+from jarvise_paper.profit_lock import run_profit_lock, trail_stop
+from jarvise_paper.stops import run_stop_monitor
+
+
+def _short(**over: object) -> dict:
+    pos = {
+        "symbol": "ETHUSDT",
+        "side": "short",
+        "entry_price": 2507.49,
+        "stop_price": 2562.46,
+        "initial_stop_price": 2562.46,
+    }
+    pos.update(over)
+    return pos
+
+
+def test_trail_stop_stays_put_below_one_r() -> None:
+    assert trail_stop(_short(), best_low=2460.0, best_high=2530.0) is None
+
+
+def test_trail_stop_reaches_entry_at_one_r() -> None:
+    entry = 2507.49
+    risk = 2562.46 - entry
+    new_stop = trail_stop(_short(), best_low=entry - risk, best_high=2530.0)
+    assert new_stop == entry
+
+
+def test_trail_stop_follows_and_does_not_loosen() -> None:
+    armed = _short(stop_price=2458.66)
+    tighter = trail_stop(armed, best_low=2400.0, best_high=2500.0)
+    assert tighter is not None and tighter < 2458.66
+    assert trail_stop(armed, best_low=2450.0, best_high=2500.0) is None
+
+
+def test_trail_stop_long_mirrors_short() -> None:
+    pos = {
+        "side": "long",
+        "entry_price": 100.0,
+        "stop_price": 90.0,
+        "initial_stop_price": 90.0,
+    }
+    assert trail_stop(pos, best_low=95.0, best_high=109.0) is None
+    assert trail_stop(pos, best_low=95.0, best_high=110.0) == 100.0
+    locked = {**pos, "stop_price": 105.0}
+    assert trail_stop(locked, best_low=95.0, best_high=116.0) == 106.0
+    assert trail_stop(locked, best_low=95.0, best_high=114.0) is None
+
+
+def test_profit_lock_then_old_high_does_not_stop(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    conn = open_db(tmp_path / "lock.db")
+    ensure_paper_account(conn)
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "ETHUSDT",
+                "timestamp": 1_000,
+                "timeframe": "4h",
+                "open": 2507.0,
+                "high": 2537.69,
+                "low": 2403.69,
+                "close": 2421.6,
+                "volume": 1.0,
+            }
+        ],
+    )
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "ETHUSDT",
+            "side": "short",
+            "qty": 0.044754263154700505,
+            "entry_price": 2507.49,
+            "entry_ts": 1_000,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "stop_price": 2562.46,
+            "stop_source": "analysis",
+            "initial_stop_price": 2562.46,
+            "stop_moved_ts": None,
+        },
+    )
+    conn.commit()
+    moved = run_profit_lock(conn, now_ms=5_000)
+    assert moved["moved"][0]["symbol"] == "ETHUSDT"
+    pos = get_paper_position(conn, "ETHUSDT")
+    assert pos is not None
+    assert abs(pos["stop_price"] - (2403.69 + (2562.46 - 2507.49))) < 1e-6
+    assert pos["stop_source"] == "trail"
+    assert pos["stop_moved_ts"] == 5_000
+    report = run_stop_monitor(conn, now_ms=5_001)
+    assert report["closed"] == 0
+    assert get_paper_position(conn, "ETHUSDT") is not None
+
+
+def test_replay_trail_closes_when_later_bar_hits(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    conn = open_db(tmp_path / "replay-stop.db")
+    ensure_paper_account(conn)
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "SOLUSDT",
+            "side": "short",
+            "qty": 1.0,
+            "entry_price": 100.0,
+            "entry_ts": 1_000,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "stop_price": 110.0,
+            "stop_source": "analysis",
+            "initial_stop_price": 110.0,
+            "stop_moved_ts": None,
+        },
+    )
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "SOLUSDT",
+                "timestamp": 2_000,
+                "timeframe": "4h",
+                "open": 100.0,
+                "high": 95.0,
+                "low": 89.0,
+                "close": 90.0,
+                "volume": 1.0,
+            },
+            {
+                "symbol": "SOLUSDT",
+                "timestamp": 3_000,
+                "timeframe": "4h",
+                "open": 90.0,
+                "high": 100.0,
+                "low": 89.5,
+                "close": 99.0,
+                "volume": 1.0,
+            },
+        ],
+    )
+    conn.commit()
+    assert (
+        apply_replay_stop(
+            conn,
+            {"symbol": "SOLUSDT", "timestamp": 2_000, "timeframe": "4h", "close": 90.0},
+            mode="trail",
+        )
+        == 0
+    )
+    locked = get_paper_position(conn, "SOLUSDT")
+    assert locked is not None and locked["stop_price"] == 99.0
+    fills = apply_replay_stop(
+        conn,
+        {"symbol": "SOLUSDT", "timestamp": 3_000, "timeframe": "4h", "close": 99.0},
+        mode="trail",
+    )
+    assert fills == 1
+    assert get_paper_position(conn, "SOLUSDT") is None

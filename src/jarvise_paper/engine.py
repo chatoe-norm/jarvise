@@ -250,6 +250,8 @@ def apply_signal(
                 "realized_pnl": 0.0,
                 "stop_price": inv_f,
                 "stop_source": "analysis",
+                "initial_stop_price": inv_f,
+                "stop_moved_ts": None,
                 "approval_id": stamp_approval,
             }
             working[symbol] = new_pos
@@ -272,6 +274,8 @@ def apply_signal(
         p["unrealized_pnl"] = round(unreal, 8)
         p.setdefault("stop_price", p.get("stop_price"))
         p.setdefault("stop_source", p.get("stop_source"))
+        p.setdefault("initial_stop_price", p.get("stop_price"))
+        p.setdefault("stop_moved_ts", p.get("stop_moved_ts"))
         p.setdefault("approval_id", p.get("approval_id"))
         if not dry_run:
             upsert_paper_position(conn, p)

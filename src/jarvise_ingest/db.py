@@ -150,7 +150,9 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     realized_pnl REAL NOT NULL DEFAULT 0,
     stop_price REAL,
     stop_source TEXT,
-    approval_id TEXT
+    approval_id TEXT,
+    initial_stop_price REAL,
+    stop_moved_ts INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS approval_queue (
@@ -493,6 +495,15 @@ def _migrate_stop_and_marks(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "paper_positions", "stop_price", "REAL")
     _add_column_if_missing(conn, "paper_positions", "stop_source", "TEXT")
     _add_column_if_missing(conn, "paper_positions", "approval_id", "TEXT")
+    _add_column_if_missing(conn, "paper_positions", "initial_stop_price", "REAL")
+    _add_column_if_missing(conn, "paper_positions", "stop_moved_ts", "INTEGER")
+    conn.execute(
+        """
+        UPDATE paper_positions
+        SET initial_stop_price = stop_price
+        WHERE initial_stop_price IS NULL AND stop_price IS NOT NULL
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
@@ -941,15 +952,28 @@ def load_newest_close(conn: sqlite3.Connection, symbol: str) -> float | None:
 
 
 def range_since_entry(
-    conn: sqlite3.Connection, symbol: str, *, entry_ts: int
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    entry_ts: int,
+    until_ms: int | None = None,
 ) -> tuple[float | None, float | None]:
-    cur = conn.execute(
-        """
-        SELECT MIN(low), MAX(high) FROM market_technicals
-        WHERE symbol=? AND timestamp >= ?
-        """,
-        (symbol.upper(), int(entry_ts)),
-    )
+    if until_ms is None:
+        cur = conn.execute(
+            """
+            SELECT MIN(low), MAX(high) FROM market_technicals
+            WHERE symbol=? AND timestamp >= ?
+            """,
+            (symbol.upper(), int(entry_ts)),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT MIN(low), MAX(high) FROM market_technicals
+            WHERE symbol=? AND timestamp >= ? AND timestamp <= ?
+            """,
+            (symbol.upper(), int(entry_ts), int(until_ms)),
+        )
     row = cur.fetchone()
     if row is None:
         return None, None
@@ -1381,14 +1405,16 @@ def upsert_paper_position(conn: sqlite3.Connection, row: dict) -> None:
     payload.setdefault("stop_price", None)
     payload.setdefault("stop_source", None)
     payload.setdefault("approval_id", None)
+    payload.setdefault("initial_stop_price", payload.get("stop_price"))
+    payload.setdefault("stop_moved_ts", None)
     conn.execute(
         """
         INSERT INTO paper_positions (
             symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl,
-            stop_price, stop_source, approval_id
+            stop_price, stop_source, approval_id, initial_stop_price, stop_moved_ts
         ) VALUES (
             :symbol, :side, :qty, :entry_price, :entry_ts, :unrealized_pnl, :realized_pnl,
-            :stop_price, :stop_source, :approval_id
+            :stop_price, :stop_source, :approval_id, :initial_stop_price, :stop_moved_ts
         )
         ON CONFLICT(symbol) DO UPDATE SET
             side=excluded.side,
@@ -1399,7 +1425,9 @@ def upsert_paper_position(conn: sqlite3.Connection, row: dict) -> None:
             realized_pnl=excluded.realized_pnl,
             stop_price=excluded.stop_price,
             stop_source=excluded.stop_source,
-            approval_id=excluded.approval_id
+            approval_id=excluded.approval_id,
+            initial_stop_price=excluded.initial_stop_price,
+            stop_moved_ts=excluded.stop_moved_ts
         """,
         payload,
     )
@@ -1413,7 +1441,7 @@ def get_paper_position(conn: sqlite3.Connection, symbol: str) -> dict | None:
     cur = conn.execute(
         """
         SELECT symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl,
-               stop_price, stop_source, approval_id
+               stop_price, stop_source, approval_id, initial_stop_price, stop_moved_ts
         FROM paper_positions WHERE symbol=?
         """,
         (symbol.upper(),),
@@ -1426,7 +1454,7 @@ def list_paper_positions(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.execute(
         """
         SELECT symbol, side, qty, entry_price, entry_ts, unrealized_pnl, realized_pnl,
-               stop_price, stop_source, approval_id
+               stop_price, stop_source, approval_id, initial_stop_price, stop_moved_ts
         FROM paper_positions
         ORDER BY symbol
         """
@@ -1865,14 +1893,16 @@ def set_position_stop(
     *,
     stop_price: float,
     stop_source: str,
+    moved_ts: int | None = None,
     commit: bool = True,
 ) -> None:
     conn.execute(
         """
-        UPDATE paper_positions SET stop_price = ?, stop_source = ?
+        UPDATE paper_positions
+        SET stop_price = ?, stop_source = ?, stop_moved_ts = COALESCE(?, stop_moved_ts)
         WHERE symbol = ?
         """,
-        (float(stop_price), stop_source, symbol.upper()),
+        (float(stop_price), stop_source, None if moved_ts is None else int(moved_ts), symbol.upper()),
     )
     _commit(conn, commit=commit)
 

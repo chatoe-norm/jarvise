@@ -26,10 +26,19 @@ def confidence_label(conf: float | None) -> str:
     return "ต่ำ"
 
 
-def template_recommendation(action: str | None, conf: float | None) -> str:
+def template_recommendation(
+    action: str | None,
+    conf: float | None,
+    *,
+    position_side: str | None = None,
+) -> str:
     act = (action or "flat").lower()
     c = float(conf or 0.0)
-    if act == "flat" or c < CAUTION_CONF:
+    if act == "flat":
+        if position_side:
+            return "approve"
+        return "reject"
+    if c < CAUTION_CONF:
         return "reject"
     if c >= APPROVE_CONF:
         return "approve"
@@ -59,7 +68,9 @@ def _f(value: Any) -> float | None:
         return None
 
 
-def _headline(rec: str, action: str, conf: float) -> str:
+def _headline(rec: str, action: str, conf: float, *, position_side: str | None = None) -> str:
+    if action == "flat" and position_side:
+        return "แนะนำ: APPROVE — ปิดไม้ตามสัญญาณ FLAT"
     if action == "flat":
         return "แนะนำ: REJECT — สัญญาณ flat (approve ไม่เปิดตำแหน่งใหม่; ถ้ามีตำแหน่งเปิดอยู่จะถูกปิด)"
     if rec == "approve":
@@ -134,11 +145,16 @@ def _checklist(approval: Mapping[str, Any], position: Mapping[str, Any] | None) 
     symbol = str(approval.get("symbol") or "")
     timeframe = str(approval.get("timeframe") or "")
     lines = [f"มีข่าวใหญ่ใน {timeframe} ข้างหน้าหรือไม่ (ระบบไม่เห็นข่าว)"]
+    action = str(approval.get("action") or "flat").lower()
     if position:
-        lines.append(
-            f"พอร์ตถือ {symbol} อยู่แล้ว ({position.get('side')} {position.get('qty')}) "
-            "— approve จะเพิ่มหรือกลับทิศตำแหน่งเดิม"
-        )
+        held = str(position.get("side") or "").lower()
+        held_line = f"พอร์ตถือ {symbol} อยู่แล้ว ({position.get('side')} {position.get('qty')})"
+        if action == "flat":
+            lines.append(f"{held_line} — approve ปิดไม้")
+        elif held == action:
+            lines.append(f"{held_line} — approve ไม่เติมไม้")
+        else:
+            lines.append(f"{held_line} — approve ปิดไม้เดิมแล้วเปิดฝั่งใหม่")
     else:
         lines.append("พอร์ตยังไม่ถือตำแหน่งเดียวกันซ้ำ")
     lines.append("คำสั่งนี้เป็น paper เท่านั้น — ไม่มีเงินจริงถูกส่งไปตลาด")
@@ -159,7 +175,8 @@ def build_recommendation(
 ) -> dict[str, Any]:
     action = str(approval.get("action") or "flat").lower()
     conf = float(approval.get("confidence_score") or 0.0)
-    rec = template_recommendation(action, conf)
+    position_side = str(position.get("side")) if position and position.get("side") else None
+    rec = template_recommendation(action, conf, position_side=position_side)
     explain_src = signal_candle if signal_candle is not None else candle
     breakdown = confidence_breakdown(explain_src or {})
     what = _what_happened(candle, safety)
@@ -178,7 +195,7 @@ def build_recommendation(
         "recommendation": rec,
         "recommendation_source": "claude" if claude else "template",
         "confidence_label": confidence_label(conf),
-        "headline": _headline(rec, action, conf),
+        "headline": _headline(rec, action, conf, position_side=position_side),
         "what_happened": what,
         "risk": _risk(approval, candle, analysis, account),
         "doctrine": list(doctrine),
