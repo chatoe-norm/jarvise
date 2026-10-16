@@ -1174,4 +1174,3 @@ def test_api_paper_auto_decide_run(monkeypatch) -> None:
     resp = client.post("/api/paper/auto-decide/run", headers={"accept": "application/json"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
-

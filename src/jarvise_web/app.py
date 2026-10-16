@@ -1127,7 +1127,7 @@ async def api_paper_auto_decide_save_config(
             enabled_val = str(form["enabled"]).lower() in {"1", "true", "on"}
         if "max_risk_per_trade_pct" in form:
             try:
-                risk_val = float(form["max_risk_per_trade_pct"])
+                risk_val = float(str(form["max_risk_per_trade_pct"]))
             except (ValueError, TypeError):
                 pass
 
