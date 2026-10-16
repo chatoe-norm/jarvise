@@ -1073,7 +1073,7 @@ async def api_doctrine_query(
         headers["X-Jarvise-Token"] = token
     data: dict[str, Any]
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 f"{jobs_url}/doctrine",
                 params={"q": q, "limit": limit},
