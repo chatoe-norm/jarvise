@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -801,6 +802,101 @@ def api_universe(_: None = Depends(require_auth)) -> dict[str, Any]:
         conn.close()
 
 
+def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: str) -> list[str]:
+    from jarvise.charts import export_candle_graphs
+    from jarvise_analyze.cli import main as analyze_main
+    from jarvise_ingest.cli import main as ingest_main
+    from jarvise_ingest.db import count_market, open_db
+
+    results: list[str] = []
+    c = open_db(path)
+    try:
+        for sym in symbols:
+            cnt = count_market(c, sym, timeframe)
+            if cnt < 200:
+                ingest_main(
+                    [
+                        "--symbol",
+                        sym,
+                        "--timeframe",
+                        timeframe,
+                        "--since",
+                        "2021-01-01",
+                        "--skip-derivatives",
+                        "--skip-book",
+                    ]
+                )
+                ingest_main(
+                    [
+                        "--symbol",
+                        sym,
+                        "--timeframe",
+                        htf,
+                        "--since",
+                        "2021-01-01",
+                        "--skip-derivatives",
+                        "--skip-book",
+                    ]
+                )
+                ingest_main(
+                    [
+                        "--symbol",
+                        sym,
+                        "--timeframe",
+                        "1h",
+                        "--limit",
+                        "200",
+                        "--skip-derivatives",
+                    ]
+                )
+            else:
+                ingest_main(
+                    [
+                        "--symbol",
+                        sym,
+                        "--timeframe",
+                        timeframe,
+                        "--limit",
+                        "200",
+                        "--skip-derivatives",
+                    ]
+                )
+                ingest_main(
+                    [
+                        "--symbol",
+                        sym,
+                        "--timeframe",
+                        "1h",
+                        "--limit",
+                        "200",
+                        "--skip-derivatives",
+                    ]
+                )
+                ingest_main(
+                    [
+                        "--symbol",
+                        sym,
+                        "--timeframe",
+                        htf,
+                        "--limit",
+                        "200",
+                        "--skip-derivatives",
+                        "--skip-book",
+                    ]
+                )
+            analyze_main(["--symbol", sym, "--timeframe", timeframe, "--json"])
+            results.append(sym)
+    finally:
+        c.close()
+
+    try:
+        export_candle_graphs(path, symbols, ["1h", timeframe])
+    except Exception:
+        pass
+
+    return results
+
+
 @app.post("/api/universe/add")
 async def api_universe_add(
     request: Request,
@@ -815,6 +911,8 @@ async def api_universe_add(
     if not path.exists():
         raise HTTPException(status_code=404, detail="Database not found")
     universe_id = active_universe_id()
+    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    htf = (os.environ.get("JARVISE_ANALYZE_HTF") or "1d").strip() or "1d"
     conn = open_db(path)
     try:
         add_universe_symbol(conn, universe_id=universe_id, symbol=sym, asset_class=asset_class)
@@ -822,10 +920,85 @@ async def api_universe_add(
         active_symbols = universe_as_of(conn, universe_id, now_ms)
     finally:
         conn.close()
+
+    # Automatically backfill and analyze the newly added coin so data is immediately complete
+    try:
+        await asyncio.to_thread(_sync_market_symbols, [sym], path, timeframe, htf)
+    except Exception as exc:
+        logger.warning("on-demand sync for %s soft-failed: %s", sym, exc)
+
     if wants_json(request):
         return JSONResponse(
             {"ok": True, "symbol": sym, "universe_id": universe_id, "active_symbols": active_symbols}
         )
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.post("/api/universe/sync")
+async def api_universe_sync(
+    request: Request,
+    symbol: str | None = Form(None),
+    _: None = Depends(require_auth),
+) -> Any:
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+    universe_id = active_universe_id()
+    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    htf = (os.environ.get("JARVISE_ANALYZE_HTF") or "1d").strip() or "1d"
+
+    conn = open_db(path)
+    try:
+        now_ms = int(time.time() * 1000)
+        active_syms = universe_as_of(conn, universe_id, now_ms)
+    finally:
+        conn.close()
+
+    if symbol and symbol.strip():
+        target_syms = [symbol.strip().upper()]
+    else:
+        target_syms = active_syms or ["BTCUSDT", "ETHUSDT"]
+
+    results = await asyncio.to_thread(_sync_market_symbols, target_syms, path, timeframe, htf)
+
+    if wants_json(request):
+        return JSONResponse(
+            {
+                "ok": True,
+                "synced_symbols": results,
+                "count": len(results),
+                "timeframe": timeframe,
+            }
+        )
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.post("/api/rag/sync")
+async def api_rag_sync(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
+    def _execute_rag() -> dict[str, Any]:
+        from jarvise import rag as ragmod
+
+        nb_res = ragmod.sync_notebook()
+        ragmod.publish_redis_status("jarvise:rag:notebook", nb_res)
+        idx_res = ragmod.index_sources()
+        payload = {
+            "ok": bool(idx_res.get("ok")),
+            "notebook": nb_res,
+            "index": idx_res,
+            "profile": "chatoe",
+            "notebook_id": "14e11c63-e2ee-4b49-898f-b0cc4c61cb4e",
+            "url": "https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e",
+            "at": ragmod.utc_now_iso(),
+        }
+        ragmod.publish_redis_status("jarvise:rag:last", payload)
+        return payload
+
+    res = await asyncio.to_thread(_execute_rag)
+    if wants_json(request):
+        return JSONResponse(res)
     return RedirectResponse("/ops", status_code=303)
 
 

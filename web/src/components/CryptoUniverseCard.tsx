@@ -5,14 +5,49 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { api, type CryptoSuitability, type UniversePayload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-const SUGGESTED_PAIRS = ["XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "NEARUSDT"];
+export const POPULAR_CRYPTO_OPTIONS = [
+  { symbol: "BTCUSDT", name: "Bitcoin (BTC)" },
+  { symbol: "ETHUSDT", name: "Ethereum (ETH)" },
+  { symbol: "SOLUSDT", name: "Solana (SOL)" },
+  { symbol: "BNBUSDT", name: "BNB (BNB)" },
+  { symbol: "XRPUSDT", name: "Ripple (XRP)" },
+  { symbol: "DOGEUSDT", name: "Dogecoin (DOGE)" },
+  { symbol: "ADAUSDT", name: "Cardano (ADA)" },
+  { symbol: "AVAXUSDT", name: "Avalanche (AVAX)" },
+  { symbol: "SUIUSDT", name: "Sui (SUI)" },
+  { symbol: "LINKUSDT", name: "Chainlink (LINK)" },
+  { symbol: "NEARUSDT", name: "NEAR Protocol (NEAR)" },
+  { symbol: "DOTUSDT", name: "Polkadot (DOT)" },
+  { symbol: "APTUSDT", name: "Aptos (APT)" },
+  { symbol: "LTCUSDT", name: "Litecoin (LTC)" },
+  { symbol: "PEPEUSDT", name: "Pepe (PEPE)" },
+  { symbol: "SHIBUSDT", name: "Shiba Inu (SHIB)" },
+  { symbol: "UNIUSDT", name: "Uniswap (UNI)" },
+  { symbol: "ICPUSDT", name: "Internet Computer (ICP)" },
+  { symbol: "FETUSDT", name: "Artificial Superintelligence (FET)" },
+  { symbol: "RENDERUSDT", name: "Render (RENDER)" },
+  { symbol: "TAOUSDT", name: "Bittensor (TAO)" },
+  { symbol: "AAVEUSDT", name: "Aave (AAVE)" },
+  { symbol: "OPUSDT", name: "Optimism (OP)" },
+  { symbol: "ARBUSDT", name: "Arbitrum (ARB)" },
+  { symbol: "INJUSDT", name: "Injective (INJ)" },
+  { symbol: "FILUSDT", name: "Filecoin (FIL)" },
+  { symbol: "TIAUSDT", name: "Celestia (TIA)" },
+];
 
 export function CryptoUniverseCard() {
   const [data, setData] = useState<UniversePayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [newSymbol, setNewSymbol] = useState("");
+
+  // Dropdown & Form State
+  const [selectedOption, setSelectedOption] = useState<string>("");
+  const [customSymbol, setCustomSymbol] = useState<string>("");
   const [actionBusy, setActionBusy] = useState(false);
+  const [syncingMarket, setSyncingMarket] = useState(false);
+  const [syncingSymbol, setSyncingSymbol] = useState<string | null>(null);
+  const [syncingRag, setSyncingRag] = useState(false);
+  const [ragSyncResult, setRagSyncResult] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [copiedHint, setCopiedHint] = useState(false);
 
@@ -38,13 +73,24 @@ export function CryptoUniverseCard() {
     void loadUniverse();
   }, []);
 
+  const activeSymbols = useMemo(() => new Set(data?.active_symbols || []), [data]);
+
+  const effectiveSymbol = useMemo(() => {
+    if (selectedOption === "CUSTOM") {
+      return customSymbol.trim().toUpperCase();
+    }
+    return selectedOption.trim().toUpperCase();
+  }, [selectedOption, customSymbol]);
+
   async function handleAddSymbol(symToAdd?: string) {
-    const target = (symToAdd || newSymbol).trim().toUpperCase();
+    const target = (symToAdd || effectiveSymbol).trim().toUpperCase();
     if (!target) return;
     setActionBusy(true);
+    setError(null);
     try {
       await api.addUniverseSymbol(target);
-      setNewSymbol("");
+      setSelectedOption("");
+      setCustomSymbol("");
       await loadUniverse();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -62,6 +108,7 @@ export function CryptoUniverseCard() {
       return;
     }
     setActionBusy(true);
+    setError(null);
     try {
       await api.removeUniverseSymbol(sym);
       setConfirmRemove(null);
@@ -75,6 +122,7 @@ export function CryptoUniverseCard() {
 
   async function handleReset(preset: "paper_core" | "paper_liquid") {
     setActionBusy(true);
+    setError(null);
     try {
       await api.resetUniverse(preset);
       await loadUniverse();
@@ -85,7 +133,41 @@ export function CryptoUniverseCard() {
     }
   }
 
-  const activeSymbols = useMemo(() => new Set(data?.active_symbols || []), [data]);
+  async function handleSyncMarket(sym?: string) {
+    if (sym) {
+      setSyncingSymbol(sym);
+    } else {
+      setSyncingMarket(true);
+    }
+    setError(null);
+    try {
+      await api.syncUniverse(sym);
+      await loadUniverse();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncingMarket(false);
+      setSyncingSymbol(null);
+    }
+  }
+
+  async function handleSyncRag() {
+    setSyncingRag(true);
+    setError(null);
+    setRagSyncResult(null);
+    try {
+      const res = await api.syncRag();
+      if (res.ok) {
+        setRagSyncResult("ซิงค์ Gemini LM Doctrine สำเร็จ (อัปเดตลง Qdrant เรียบร้อย)");
+      } else {
+        setRagSyncResult("ซิงค์เสร็จสิ้น แต่พบข้อความแจ้งเตือน");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncingRag(false);
+    }
+  }
 
   const filteredAndSortedItems = useMemo(() => {
     if (!data?.items) return [];
@@ -153,8 +235,6 @@ export function CryptoUniverseCard() {
     return list;
   }, [data, searchQuery, filterTab, sortBy]);
 
-  const quickPicks = SUGGESTED_PAIRS.filter((s) => !activeSymbols.has(s));
-
   return (
     <Card className="border-[var(--color-border)]">
       <CardHeader>
@@ -169,15 +249,25 @@ export function CryptoUniverseCard() {
               </Badge>
             </div>
             <CardDescription className="mt-1">
-              การจัดการรายชื่อเหรียญคริปโตใน Universe และผลวิเคราะห์จัดอันดับสกุลที่โดดเด่น เหมาะแก่การเทรด
+              การจัดการรายชื่อเหรียญคริปโตใน Universe, ซิงค์ข้อมูลแท่งเทียนสมบูรณ์ และจัดอันดับสัญญาณเทรด
             </CardDescription>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              disabled={loading || actionBusy}
+              disabled={loading || actionBusy || syncingMarket}
+              onClick={() => void handleSyncMarket()}
+              className="border-sky-500/40 text-sky-400 hover:bg-sky-500/10 text-xs font-mono"
+              title="ซิงค์ดึง OHLCV ล่าสุดและคำนวณ Indicator/Analysis ทุกเหรียญใน Universe"
+            >
+              {syncingMarket ? "⏳ กำลังซิงค์ข้อมูล…" : "⚡ ซิงค์ข้อมูลตลาด (Sync)"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={loading || actionBusy || syncingMarket}
               onClick={() => void loadUniverse()}
               className="border-[var(--color-border)] text-xs font-mono"
             >
@@ -186,7 +276,7 @@ export function CryptoUniverseCard() {
             <div className="flex items-center gap-1 border border-[var(--color-border)] rounded-md p-0.5 bg-[var(--color-card)]/40 text-xs">
               <button
                 type="button"
-                disabled={actionBusy}
+                disabled={actionBusy || syncingMarket}
                 onClick={() => void handleReset("paper_core")}
                 className="px-2 py-1 rounded hover:bg-[#1f2937] text-[var(--color-muted)] hover:text-white transition-colors"
                 title="รีเซ็ตเป็นคู่เหรียญเริ่มต้น (BTC, ETH)"
@@ -196,7 +286,7 @@ export function CryptoUniverseCard() {
               <span className="text-[var(--color-border)]">|</span>
               <button
                 type="button"
-                disabled={actionBusy}
+                disabled={actionBusy || syncingMarket}
                 onClick={() => void handleReset("paper_liquid")}
                 className="px-2 py-1 rounded hover:bg-[#1f2937] text-[var(--color-muted)] hover:text-white transition-colors"
                 title="รีเซ็ตเป็น 4 สกุลหลัก (BTC, ETH, SOL, BNB)"
@@ -211,7 +301,59 @@ export function CryptoUniverseCard() {
       <CardContent className="space-y-5">
         {error ? <p className="text-xs text-[var(--color-danger)] font-mono">{error}</p> : null}
 
-        {/* Section 1: Add Symbol Form & Quick Picks */}
+        {/* Section 1: Gemini LM Doctrine Sync Card */}
+        <div className="rounded-lg border border-sky-500/30 bg-gradient-to-r from-sky-950/30 via-[#101722] to-indigo-950/30 p-4 space-y-3">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="text-base">📚</span>
+                <span className="text-sm font-bold text-white tracking-tight">
+                  Gemini LM Doctrine Sync (NotebookLM RAG)
+                </span>
+                <Badge variant="outline" className="border-sky-500/40 text-sky-400 font-mono text-[10px]">
+                  profile: chatoe
+                </Badge>
+              </div>
+              <div className="text-xs text-[var(--color-muted)] flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span>บัญชี Google: <strong className="text-slate-300 font-mono">chatoe@gmail.com</strong></span>
+                <span>•</span>
+                <span>Notebook ID: <strong className="text-slate-300 font-mono">14e11c63-e2ee-4b49-898f-b0cc4c61cb4e</strong></span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href="https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-[var(--color-border)] bg-[#161d27] hover:bg-[#1f2937] text-xs font-mono text-sky-400 hover:text-sky-300 transition-colors"
+              >
+                <span>เปิด Gemini NotebookLM</span>
+                <span className="text-[10px]">↗</span>
+              </a>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={syncingRag || actionBusy}
+                onClick={() => void handleSyncRag()}
+                className="border-indigo-500/50 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 text-xs font-mono"
+              >
+                {syncingRag ? "⏳ กำลังซิงค์ Doctrine…" : "📚 Sync Gemini LM"}
+              </Button>
+            </div>
+          </div>
+
+          {ragSyncResult ? (
+            <div className="text-xs text-emerald-400 font-mono flex items-center gap-1.5 bg-emerald-950/30 border border-emerald-500/30 px-3 py-1.5 rounded">
+              <span>✓</span>
+              <span>{ragSyncResult}</span>
+            </div>
+          ) : null}
+        </div>
+
+        {/* Section 2: Add Symbol Dropdown List Form */}
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/40 p-4 space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-0.5">
@@ -219,7 +361,7 @@ export function CryptoUniverseCard() {
                 เพิ่มสกุลเงินเข้า Universe (Add Symbol)
               </div>
               <div className="text-xs text-[var(--color-muted)]">
-                เพิ่มเหรียญเพื่อเปิดระบบมอนิเตอร์, ดาวน์โหลด OHLCV และคัดกรองสัญญาณเทรดอัตโนมัติ
+                เลือกเหรียญจาก Dropdown เพื่อดาวน์โหลด OHLCV, คำนวณอินดิเคเตอร์ และคัดกรองสัญญาณอัตโนมัติ
               </div>
             </div>
 
@@ -228,47 +370,65 @@ export function CryptoUniverseCard() {
                 e.preventDefault();
                 void handleAddSymbol();
               }}
-              className="flex items-center gap-2 w-full sm:w-auto"
+              className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto"
             >
-              <input
-                type="text"
-                placeholder="ระบุ Symbol เช่น XRPUSDT"
-                value={newSymbol}
-                onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
+              <select
+                value={selectedOption}
+                onChange={(e) => {
+                  setSelectedOption(e.target.value);
+                  if (e.target.value !== "CUSTOM") {
+                    setCustomSymbol("");
+                  }
+                }}
                 disabled={actionBusy}
-                className="flex-1 sm:w-48 rounded-md border border-[var(--color-border)] bg-[#101722] px-3 py-1.5 text-xs text-[var(--color-foreground)] placeholder:text-[var(--color-muted)] font-mono uppercase focus:outline-none focus:border-sky-500"
-              />
+                className="rounded-md border border-[var(--color-border)] bg-[#101722] px-3 py-1.5 text-xs text-[var(--color-foreground)] font-mono focus:outline-none focus:border-sky-500 cursor-pointer min-w-[240px]"
+              >
+                <option value="">-- เลือกเหรียญคริปโต (Select Crypto) --</option>
+                <optgroup label="🌟 เหรียญยอดนิยม (Top Pairs)">
+                  {POPULAR_CRYPTO_OPTIONS.map((opt) => {
+                    const inUniverse = activeSymbols.has(opt.symbol);
+                    return (
+                      <option key={opt.symbol} value={opt.symbol} disabled={inUniverse}>
+                        {inUniverse ? `✓ ${opt.symbol} (อยู่ใน Universe แล้ว)` : `${opt.symbol} · ${opt.name}`}
+                      </option>
+                    );
+                  })}
+                </optgroup>
+                <optgroup label="✍️ อื่นๆ">
+                  <option value="CUSTOM">➕ ระบุ Symbol อื่นๆ เอง (Custom)...</option>
+                </optgroup>
+              </select>
+
+              {selectedOption === "CUSTOM" ? (
+                <input
+                  type="text"
+                  placeholder="เช่น TIAUSDT"
+                  value={customSymbol}
+                  onChange={(e) => setCustomSymbol(e.target.value.toUpperCase())}
+                  disabled={actionBusy}
+                  className="w-32 rounded-md border border-[var(--color-border)] bg-[#101722] px-3 py-1.5 text-xs text-[var(--color-foreground)] placeholder:text-[var(--color-muted)] font-mono uppercase focus:outline-none focus:border-sky-500"
+                  autoFocus
+                />
+              ) : null}
+
               <Button
                 type="submit"
                 variant="ok"
                 size="sm"
-                disabled={actionBusy || !newSymbol.trim()}
+                disabled={
+                  actionBusy ||
+                  !effectiveSymbol ||
+                  activeSymbols.has(effectiveSymbol)
+                }
                 className="whitespace-nowrap text-xs"
               >
-                + เพิ่มเหรียญ
+                {actionBusy ? "กำลังบันทึก…" : "+ เพิ่มเหรียญ"}
               </Button>
             </form>
           </div>
-
-          {quickPicks.length > 0 ? (
-            <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs text-[var(--color-muted)]">
-              <span>เหรียญแนะนำ:</span>
-              {quickPicks.map((sym) => (
-                <button
-                  key={sym}
-                  type="button"
-                  disabled={actionBusy}
-                  onClick={() => void handleAddSymbol(sym)}
-                  className="px-2 py-0.5 rounded border border-[var(--color-border)] bg-[#161d27] hover:border-emerald-500 hover:text-emerald-400 font-mono transition-colors text-[11px]"
-                >
-                  + {sym}
-                </button>
-              ))}
-            </div>
-          ) : null}
         </div>
 
-        {/* Section 2: Sorting, Search & Filter Controls */}
+        {/* Section 3: Sorting, Search & Filter Controls */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[var(--color-card)]/20 p-3 rounded-lg border border-[var(--color-border)]">
           <div className="flex flex-wrap items-center gap-2">
             <input
@@ -350,7 +510,7 @@ export function CryptoUniverseCard() {
           </div>
         </div>
 
-        {/* Section 3: Crypto List Cards */}
+        {/* Section 4: Crypto List Cards */}
         {filteredAndSortedItems.length === 0 ? (
           <div className="text-center py-8 text-xs text-[var(--color-muted)]">
             ไม่พบเหรียญที่ตรงกับเงื่อนไขการค้นหา
@@ -364,14 +524,16 @@ export function CryptoUniverseCard() {
                 rank={sortBy === "suitability_desc" ? idx + 1 : undefined}
                 isConfirmingRemove={confirmRemove === item.symbol}
                 busy={actionBusy}
+                syncing={syncingSymbol === item.symbol || syncingMarket}
                 onAdd={() => void handleAddSymbol(item.symbol)}
                 onRemove={() => void handleRemoveSymbol(item.symbol)}
+                onSync={() => void handleSyncMarket(item.symbol)}
               />
             ))}
           </div>
         )}
 
-        {/* Section 4: Ingest Command Hint */}
+        {/* Section 5: Ingest Command Hint */}
         {data?.backfill_hint ? (
           <div className="rounded-md bg-[#161d27] p-3 text-xs border border-[var(--color-border)] space-y-1.5">
             <div className="flex items-center justify-between">
@@ -407,15 +569,19 @@ function CryptoAssetCard({
   rank,
   isConfirmingRemove,
   busy,
+  syncing,
   onAdd,
   onRemove,
+  onSync,
 }: {
   item: CryptoSuitability;
   rank?: number;
   isConfirmingRemove: boolean;
   busy: boolean;
+  syncing?: boolean;
   onAdd: () => void;
   onRemove: () => void;
+  onSync?: () => void;
 }) {
   return (
     <div
@@ -563,18 +729,31 @@ function CryptoAssetCard({
         </div>
       </div>
 
-      {/* Action Footer: Remove / Add button */}
-      <div className="flex items-center justify-between pt-2 border-t border-[var(--color-border)]/50 text-xs">
-        <span className="text-[11px] text-[var(--color-muted)] font-mono">
-          {item.health.newest_age_min != null ? `อัปเดต ${item.health.newest_age_min} นาทีที่แล้ว` : "—"}
-        </span>
+      {/* Action Footer: Age, Sync button & Remove / Add button */}
+      <div className="flex items-center justify-between pt-2 border-t border-[var(--color-border)]/50 text-xs gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[11px] text-[var(--color-muted)] font-mono truncate">
+            {item.health.newest_age_min != null ? `อัปเดต ${item.health.newest_age_min.toFixed(0)} น.ที่แล้ว` : "—"}
+          </span>
+          {onSync && item.is_active ? (
+            <button
+              type="button"
+              disabled={busy || syncing}
+              onClick={onSync}
+              className="text-[10px] text-sky-400 hover:text-sky-300 font-mono underline disabled:opacity-50"
+              title="ซิงค์ดึงข้อมูลแท่งเทียนล่าสุดเฉพาะเหรียญนี้"
+            >
+              {syncing ? "ซิงค์…" : "⚡ ซิงค์"}
+            </button>
+          ) : null}
+        </div>
 
         {item.is_active ? (
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            disabled={busy}
+            disabled={busy || syncing}
             onClick={onRemove}
             className={cn(
               "h-7 text-xs font-mono transition-colors",
@@ -590,7 +769,7 @@ function CryptoAssetCard({
             type="button"
             variant="outline"
             size="sm"
-            disabled={busy}
+            disabled={busy || syncing}
             onClick={onAdd}
             className="h-7 text-xs font-mono border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
           >
