@@ -287,6 +287,20 @@ def test_loss_lesson_exit_mix_symbol_and_floors() -> None:
     assert lesson["auto_closed"] == 3
     assert lesson["auto_ev"] is not None and lesson["auto_ev"] < 0
     assert lesson["floors_unchanged"] is True
+    assert lesson["by_exit"]["manual"] == {"n": 0, "pnl_usd": 0.0}
+
+
+def test_loss_lesson_manual_close_is_not_a_flat_exit() -> None:
+    orders = [
+        _leg("o1", 1, "SOLUSDT", "open_long", 100.0),
+        _leg("c1", 2, "SOLUSDT", "close_manual", 95.0),
+        _leg("o2", 3, "SOLUSDT", "open_long", 100.0),
+        _leg("c2", 4, "SOLUSDT", "close_long", 98.0),
+    ]
+    trades, _, _ = reconstruct_closed_trades(orders)
+    lesson = loss_lesson(trades)
+    assert lesson["by_exit"]["manual"] == {"n": 1, "pnl_usd": -5.0}
+    assert lesson["by_exit"]["flat"] == {"n": 1, "pnl_usd": -2.0}
 
     losing_at_gate = [
         {

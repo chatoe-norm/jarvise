@@ -355,7 +355,7 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
             </div>
             <div className="text-[11px] text-[var(--color-muted)] flex items-center gap-1">
               <span>🛡️</span>
-              <span>เพดานความปลอดภัยตามกฎการเทรด (Doctrine Ceiling): จำกัดสูงสุดไม่เกิน <strong>1.0%</strong> เพื่อรักษาเงินทุน</span>
+              <span>เพดานความปลอดภัยตามกฎการเทรด: จำกัดสูงสุดไม่เกิน <strong>1.0%</strong> เพื่อรักษาเงินทุน</span>
             </div>
           </div>
         </div>

@@ -181,9 +181,9 @@ export function CryptoUniverseCard() {
     try {
       const res = await api.syncRag();
       if (res.ok) {
-        setRagSyncResult("ซิงค์ Gemini LM Doctrine สำเร็จ (อัปเดตลง Qdrant เรียบร้อย)");
+        setRagSyncResult("ซิงค์กฎการเทรดจาก NotebookLM สำเร็จ (อัปเดตลง Qdrant เรียบร้อย)");
       } else {
-        setRagSyncResult("ซิงค์เสร็จสิ้น แต่พบข้อความแจ้งเตือน");
+        setRagSyncResult(`ซิงค์ไม่สำเร็จ: ${res.error || (res.status_code ? `HTTP ${res.status_code}` : "ดู log ของ jobs")}`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -325,14 +325,14 @@ export function CryptoUniverseCard() {
       <CardContent className="space-y-5">
         {error ? <p className="text-xs text-[var(--color-danger)] font-mono">{error}</p> : null}
 
-        {/* Section 1: Gemini LM Doctrine Sync Card */}
+        {/* Section 1: Trading rules (NotebookLM) sync card */}
         <div className="rounded-lg border border-sky-500/30 bg-gradient-to-r from-sky-950/30 via-[#101722] to-indigo-950/30 p-4 space-y-3">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <span className="text-base">📚</span>
                 <span className="text-sm font-bold text-white tracking-tight">
-                  Gemini LM Doctrine Sync (NotebookLM RAG)
+                  ซิงค์กฎการเทรด (NotebookLM RAG)
                 </span>
                 <Badge variant="outline" className="border-sky-500/40 text-sky-400 font-mono text-[10px]">
                   profile: chatoe
@@ -364,7 +364,7 @@ export function CryptoUniverseCard() {
                 onClick={() => void handleSyncRag()}
                 className="border-indigo-500/50 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 text-xs font-mono"
               >
-                {syncingRag ? "⏳ กำลังซิงค์ Doctrine…" : "📚 Sync Gemini LM"}
+                {syncingRag ? "⏳ กำลังซิงค์กฎการเทรด…" : "📚 Sync Gemini LM"}
               </Button>
             </div>
           </div>

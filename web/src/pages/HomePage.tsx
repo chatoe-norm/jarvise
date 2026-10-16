@@ -317,6 +317,12 @@ function NewsCard({ news }: { news: NewsHome | null | undefined }) {
         {news?.digest_note ? (
           <p className="text-xs text-[var(--color-muted)] italic pt-1">{news.digest_note}</p>
         ) : null}
+        {news?.errors && news.errors.length > 0 ? (
+          <p className="text-xs text-amber-400 pt-1">
+            ดึงข่าวไม่สำเร็จ {news.errors.length} หมวด (
+            {news.errors.map((e) => e.split(":")[0]).join(", ")}) — รายงานนี้อาจไม่ครบ
+          </p>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -327,9 +333,21 @@ function LastAutoDecideCard({
 }: {
   auto: PaperAutoStatus | null | undefined;
 }) {
-  if (!auto) return null;
-  const entries = collectAutoEntries(auto);
-  const evGate = auto.auto_ev_gate;
+  if (!auto || typeof auto !== "object") return null;
+  const raw = auto as PaperAutoStatus & { raw?: unknown };
+  // Redis can hand back {raw: "..."} when the job wrote non-JSON; say so instead of "Processed".
+  const unreadable = raw.raw !== undefined && raw.ok === undefined;
+  const entries = unreadable ? [] : collectAutoEntries(auto);
+  const filteredCount = Array.isArray(raw.filtered_out) ? raw.filtered_out.length : 0;
+  const state: { label: string; variant: "ok" | "muted" | "danger" | "outline" } = unreadable
+    ? { label: "อ่านผลไม่ได้", variant: "outline" }
+    : raw.ok === false
+      ? { label: "ล้มเหลว", variant: "danger" }
+      : raw.halted
+        ? { label: "ระบบสั่งหยุด", variant: "danger" }
+        : raw.skipped
+          ? { label: "ข้ามรอบ", variant: "muted" }
+          : { label: "Processed", variant: "ok" };
 
   return (
     <Card className="border-[var(--color-border)]">
@@ -337,11 +355,7 @@ function LastAutoDecideCard({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <CardTitle className="text-base font-semibold">Latest Auto-Decide Review</CardTitle>
-            {evGate?.blocked ? (
-              <Badge variant="muted">EV Gate Active</Badge>
-            ) : (
-              <Badge variant="ok">Processed</Badge>
-            )}
+            <Badge variant={state.variant}>{state.label}</Badge>
           </div>
           <span className="text-xs text-[var(--color-muted)]">
             {auto.at_ms != null ? relativeAge(auto.at_ms) : ""}
@@ -356,11 +370,27 @@ function LastAutoDecideCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {evGate?.blocked ? (
-          <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-card)]/70 p-3 text-xs text-[var(--color-muted)]">
-            <span className="font-medium text-[var(--color-foreground)]">Soft EV Gate Armed:</span>{" "}
-            Candidates deferred until closed sample expectancy improves (current sample N={evGate.n}, EV={formatNum(evGate.ev)}). Capital preservation protects paper portfolio.
-          </div>
+        {/* EV gate numbers live on Paper only; here we just say why the run was skipped. */}
+        {raw.skipped && raw.reason ? (
+          <p className="text-xs text-[var(--color-muted)]">
+            เหตุผล: <span className="text-[var(--color-foreground)]">{resolveReasonLabel(raw.reason)}</span>
+            {raw.reason === "auto_ev_gate" ? (
+              <>
+                {" "}
+                <Link to="/paper" className="text-[var(--color-accent)] underline-offset-2 hover:underline">
+                  ดู EV gate บนหน้า Paper →
+                </Link>
+              </>
+            ) : null}
+          </p>
+        ) : null}
+        {raw.doctrine_unavailable ? (
+          <p className="text-xs text-amber-400">กฎการเทรด (Qdrant) ไม่พร้อมในรอบนี้ — Claude รีวิวโดยไม่มีบริบทกฎ</p>
+        ) : null}
+        {filteredCount > 0 ? (
+          <p className="text-xs text-[var(--color-muted)]">
+            ไม่ส่งรีวิว {filteredCount} การ์ด (เช่น สัญญาณ FLAT ที่ไม่มีไม้ให้ปิด)
+          </p>
         ) : null}
         {entries.length > 0 ? (
           <ul className="space-y-2 text-sm">
@@ -405,7 +435,8 @@ export function HomePage({
 
   const m = data.metrics;
   const queueEmpty = (data.approvals || []).length === 0;
-  const positions = ((data.paper as Record<string, unknown>)?.positions as Array<Record<string, unknown>>) || [];
+  const positions = (data.paper?.positions as Array<Record<string, unknown>>) || [];
+  const openSymbols = new Set(positions.map((p) => String(p.symbol || "")));
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -416,9 +447,17 @@ export function HomePage({
         </p>
       </div>
 
+      {error ? (
+        // Data below is from the last good refresh; say so instead of hiding the failure.
+        <p className="rounded-md border border-amber-500/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-300">
+          อัปเดตล่าสุดไม่สำเร็จ ({error}) — ข้อมูลด้านล่างอาจไม่ใช่ล่าสุด
+        </p>
+      ) : null}
+
       <ApprovalQueue
         rows={data.approvals}
         killSwitch={data.status.kill_switch}
+        openSymbols={openSymbols}
         onChanged={onRefresh}
       />
 
@@ -447,7 +486,6 @@ export function HomePage({
         <MarketContextCard
           status={data.status}
           news={data.news}
-          approvals={data.approvals}
         />
         <NewsCard news={data.news} />
       </div>

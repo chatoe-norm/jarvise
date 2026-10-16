@@ -1,4 +1,4 @@
-/** Owner-facing wording. Stored Claude reasons may still say หลักคำสอน. */
+/** Owner-facing wording. Stored Claude reasons may still say หลักคำสอน or "doctrine". */
 
 import type { AnalysisOutcome, AnalysisOutcomeKind } from "@/lib/api";
 
@@ -12,31 +12,59 @@ export type OutcomeCopy = {
 
 export function ownerReasonCopy(reason: string | null | undefined): string {
   if (reason == null || reason === "") return "—";
-  return reason.replaceAll("หลักคำสอน", "กฎการเทรด");
+  // Whole word only: identifiers such as doctrine_query / jarvise_doctrine stay as written.
+  return reason.replaceAll("หลักคำสอน", "กฎการเทรด").replace(/\bdoctrines?\b/gi, "กฎการเทรด");
 }
+
+/** Fixed auto-decide / approval codes (auto_decide.py, approval.py) → owner copy. */
+const REASON_LABELS: Record<string, string> = {
+  "auto:rule:same_side_hold": "ถือไม้เดิม (ฝั่งเดียวกัน)",
+  "auto:rule:opposite_side_open": "เลื่อน — มีไม้ฝั่งตรงข้าม",
+  "auto:rule:no_doctrine_low_conf": "เลื่อน — กฎการเทรดไม่พร้อม / ความเชื่อมั่นต่ำ",
+  "auto:rule:flat_exit": "ปิดไม้ตามสัญญาณ FLAT",
+  "auto:claude:approve": "อนุมัติ — Claude",
+  "auto:claude:unparseable": "เลื่อน — Claude อ่านผลไม่ได้",
+  deferred_cap: "เลื่อน — ถึงเพดานรอบนี้",
+  missing_api_key: "เลื่อน — ไม่มี API key",
+  auto_decide_disabled: "ปิด auto-decide",
+  auto_decide_running: "ข้าม — มีรอบ auto-decide กำลังรันอยู่",
+  auto_ev_gate: "เลื่อน — EV ของไม้ auto ยังไม่ผ่านเกณฑ์ (ดูหน้า Paper)",
+  already_resolved: "ข้าม — การ์ดถูกตัดสินไปแล้ว",
+  candidate_changed: "ข้าม — สัญญาณเปลี่ยนระหว่างรีวิว",
+  run_halted: "หยุดรอบนี้ — ระบบสั่งหยุด",
+  "kill_switch engaged": "ข้าม — Kill-Switch เปิดอยู่",
+  "kill_switch unreadable": "ข้าม — อ่านสถานะ Kill-Switch ไม่ได้",
+  live_trading_enabled: "ข้าม — โหมด live เปิดอยู่",
+  no_database: "ข้าม — ไม่พบฐานข้อมูล",
+  action_flat: "ไม่ส่งรีวิว — สัญญาณ FLAT",
+  skipped: "ข้ามรอบ",
+  timeout_flat: "หมดเวลา → FLAT",
+  timeout_hold: "หมดเวลา → ถือไม้เดิม",
+  "approval not pending": "การ์ดไม่ได้รออนุมัติแล้ว",
+  "approval expired": "การ์ดหมดอายุ",
+};
 
 /** Owner-facing auto-decide / rule codes. Stored strings stay unchanged. */
 export function resolveReasonLabel(reason: string | null | undefined): string {
   if (reason == null || reason === "") return "—";
-  if (reason === "auto:rule:same_side_hold") return "ถือไม้เดิม (ฝั่งเดียวกัน)";
-  if (reason === "auto:rule:opposite_side_open") return "เลื่อน — มีไม้ฝั่งตรงข้าม";
-  if (reason === "auto:rule:no_doctrine_low_conf") {
-    return "เลื่อน — กฎการเทรดไม่พร้อม / ความเชื่อมั่นต่ำ";
-  }
-  if (reason === "auto:rule:flat_exit") return "ปิดไม้ตามสัญญาณ FLAT";
-  if (reason === "auto:claude:approve") return "อนุมัติ — Claude";
-  if (reason === "auto:claude:unparseable") return "เลื่อน — Claude อ่านผลไม่ได้";
+  const fixed = REASON_LABELS[reason];
+  if (fixed) return fixed;
   if (reason.startsWith("auto:claude:reject:")) {
     const rest = ownerReasonCopy(reason.slice("auto:claude:reject:".length));
     return rest === "—" ? "ปฏิเสธ — Claude" : `ปฏิเสธ — Claude: ${rest}`;
   }
   if (reason.startsWith("auto:claude:error:")) {
-    return `เลื่อน — Claude ผิดพลาด: ${reason.slice("auto:claude:error:".length)}`;
+    return `เลื่อน — Claude ผิดพลาด: ${ownerReasonCopy(reason.slice("auto:claude:error:".length))}`;
   }
-  if (reason === "deferred_cap") return "เลื่อน — ถึงเพดานรอบนี้";
-  if (reason === "missing_api_key") return "เลื่อน — ไม่มี API key";
-  if (reason === "auto_decide_disabled") return "ปิด auto-decide";
-  if (reason === "timeout_flat") return "หมดเวลา → FLAT";
+  if (reason.startsWith("auto:apply_failed:")) {
+    return `เติมคำสั่งไม่สำเร็จ: ${ownerReasonCopy(reason.slice("auto:apply_failed:".length))}`;
+  }
+  if (reason.startsWith("auto:error:")) {
+    return `เลื่อน — ระบบผิดพลาด: ${ownerReasonCopy(reason.slice("auto:error:".length))}`;
+  }
+  if (reason.startsWith("market_safety:")) {
+    return `ตลาดไม่ปลอดภัย: ${reason.slice("market_safety:".length).trim()}`;
+  }
   return ownerReasonCopy(reason);
 }
 
@@ -86,7 +114,7 @@ export function outcomeCopy(
   const kind: AnalysisOutcomeKind = outcome?.kind ?? "not_queued";
   const reason = outcome?.resolve_reason ?? "";
   const actor = decisionActor(reason);
-  const remapped = ownerReasonCopy(reason === "" ? null : reason);
+  const remapped = resolveReasonLabel(reason === "" ? null : reason);
   switch (kind) {
     case "filled": {
       const closed = (outcome?.fill_reasons || []).some((item) =>

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type PipelineRunResult } from "@/lib/api";
+import { summarizeJob } from "@/lib/jobSummary";
 import { relativeAge } from "@/lib/utils";
 
 interface PipelineControlCardProps {
@@ -23,49 +24,49 @@ const PIPELINE_JOBS: JobDef[] = [
   {
     key: "ingest",
     title: "Market Ingest & Indicators",
-    schedule: "ทุก 1 ชม. & ทุกแท่ง 4h",
+    schedule: "n8n ทุก 15 นาที",
     description: "ดึงราคา Binance klines (1h, 4h, 1d) และคำนวณ EMA20/EMA200, RSI, ATR",
     dataKey: "ingest",
   },
   {
     key: "rag",
     title: "Trading Rules & RAG Sync",
-    schedule: "ทุกวัน 07:00 / 19:00",
+    schedule: "n8n ทุก 6 ชม.",
     description: "ซิงค์บันทึกกฎการเทรด NotebookLM และสร้าง Vector Index ลง Qdrant",
     dataKey: "rag",
   },
   {
     key: "paper_run",
     title: "Signal Scan & Enqueue",
-    schedule: "ทุกแท่ง 4h ปิด (Bar Close)",
+    schedule: "n8n ทุก 4 ชม.",
     description: "สแกนสัญญาณเทรดตามกฎ Pullback/Breakout แล้วเข้าคิวรออนุมัติ (Approval Queue)",
     dataKey: "paper",
   },
   {
     key: "paper_expire",
     title: "Paper Timeout & Expire",
-    schedule: "ทุก 5 นาที",
+    schedule: "n8n ทุก 1 ชม.",
     description: "ตรวจเช็กและยกเลิกคำสั่งที่หมดอายุ (Expires At) หากไม่ได้รับการอนุมัติ",
     dataKey: "paper_expire",
   },
   {
     key: "risk_monitor",
     title: "Risk Monitor (MTM & Stops)",
-    schedule: "ทุก 30 วินาที",
+    schedule: "n8n ทุก 15 นาที",
     description: "คำนวณ Mark-to-Market, ตรวจสอบ Stop Loss 1R, และบังคับใช้ Daily Loss Cap",
     dataKey: "risk_monitor",
   },
   {
     key: "ingest_health",
     title: "Ingest Health Probe",
-    schedule: "ทุก 15 นาที",
+    schedule: "n8n ทุก 1 ชม.",
     description: "ตรวจความต่อเนื่องของแท่งเทียน, ความสดใหม่, และความพร้อมของ EMA200",
     dataKey: "ingest_health",
   },
   {
     key: "paper_auto_decide",
     title: "Paper Auto-Decide (Claude)",
-    schedule: "หลัง Ingest/Signal สำเร็จ",
+    schedule: "ต่อจาก Paper Run",
     description: "Claude Sonnet ช่วยวิเคราะห์และตัดสินใจอนุมัติ/ปฏิเสธคำสั่งใน Paper Queue",
     dataKey: "paper_auto",
   },
@@ -79,7 +80,7 @@ const JOB_RUN_WARNINGS: Record<string, string> = {
   paper_auto_decide: "Claude จะอนุมัติ/ปฏิเสธการ์ดที่รออยู่ และอาจเติมคำสั่ง paper",
 };
 
-function parseJobStatus(payload: unknown): {
+function parseJobStatus(dataKey: string, payload: unknown): {
   ok: boolean | null;
   label: string;
   ageMs: number | null;
@@ -95,11 +96,7 @@ function parseJobStatus(payload: unknown): {
   const ok = typeof obj.ok === "boolean" ? obj.ok : null;
   const ageMs = typeof obj.at_ms === "number" ? obj.at_ms : null;
 
-  const bits = Object.entries(obj)
-    .filter(([k]) => !["ok", "at_ms", "telegram_sent", "raw"].includes(k))
-    .slice(0, 3)
-    .map(([k, v]) => `${k}=${typeof v === "object" ? "…" : String(v)}`)
-    .join(" · ");
+  const bits = summarizeJob(dataKey, obj);
 
   return {
     ok,
@@ -180,9 +177,12 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
               </span>
               <span className="text-[10px] opacity-75">{new Date(lastResult.executed_at).toLocaleTimeString()}</span>
             </div>
-            <pre className="overflow-x-auto text-[11px] opacity-90 max-h-36">
-              {JSON.stringify(lastResult.result, null, 2)}
-            </pre>
+            <p className="text-[11px] opacity-90">
+              {summarizeJob(
+                PIPELINE_JOBS.find((j) => j.key === lastResult.job)?.dataKey ?? lastResult.job,
+                lastResult.result,
+              ) || "เสร็จสิ้น"}
+            </p>
           </div>
         )}
 
@@ -196,7 +196,7 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
         <div className="space-y-2.5">
           {PIPELINE_JOBS.map((job) => {
             const rawData = statusPayload ? statusPayload[job.dataKey] : null;
-            const parsed = parseJobStatus(rawData);
+            const parsed = parseJobStatus(job.dataKey, rawData);
             const isRunning = runningJob === job.key;
 
             return (

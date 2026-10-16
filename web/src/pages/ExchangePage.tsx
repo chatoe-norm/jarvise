@@ -3,30 +3,92 @@ import { UsdBars } from "@/components/Charts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { api, type ExchangePayload } from "@/lib/api";
+import { api, type DashboardPayload, type ExchangePayload } from "@/lib/api";
 import { cn, formatNum, formatQty, relativeAge } from "@/lib/utils";
 
+/** Below this a priced balance is dust: shown, but not worth acting on. */
+const DUST_USD = 1;
+
+function isEarnAsset(asset: string, pricing?: string | null): boolean {
+  // Binance Simple Earn balances show up as LD<asset>.
+  return Boolean(pricing?.startsWith("earn_")) || /^LD[A-Z0-9]{2,}$/.test(asset);
+}
+
 function UsdCell({
+  asset,
   usd,
   pricing,
 }: {
+  asset: string;
   usd: number | null;
   pricing?: string | null;
 }) {
+  const earn = isEarnAsset(asset, pricing) ? <Badge variant="muted">Earn</Badge> : null;
   if (usd != null) {
     return (
       <span className="inline-flex flex-wrap items-center gap-2">
-        <span className="tabular-nums">{formatNum(usd)}</span>
-        {pricing?.startsWith("earn_") ? (
-          <Badge variant="muted">Earn</Badge>
-        ) : null}
+        <span className="tabular-nums">{usd > 0 && usd < 0.01 ? "<0.01" : formatNum(usd)}</span>
+        {earn}
+        {usd < DUST_USD ? <Badge variant="outline">dust</Badge> : null}
       </span>
     );
   }
-  return <Badge variant="muted">unpriced · no USDT market</Badge>;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <Badge variant="muted">unpriced · ไม่มีราคา USDT</Badge>
+      {earn}
+    </span>
+  );
 }
 
-function LiveTradingGuideCard() {
+/** Exchange soft-fail codes from app.exchange_payload → what the owner should check. */
+function exchangeErrorCopy(error: string | undefined): { title: string; body: string } {
+  if (!error) {
+    return {
+      title: "ยังไม่ได้ตั้งค่าคีย์ Exchange (Paper-First Mode)",
+      body: "ไม่พบคีย์ Binance ใน environment ของเว็บ ระบบทำงานแบบ paper อย่างเดียว",
+    };
+  }
+  if (error === "auth") {
+    return {
+      title: "พบการตั้งค่าคีย์ แต่โหลดคีย์ไม่สำเร็จ",
+      body: "ตรวจรูปแบบ API key/secret หรือ path ของไฟล์ private key ใน /opt/jarvise/.env และว่าไฟล์ถูก mount เข้า container web",
+    };
+  }
+  return {
+    title: "ดึงยอดคงเหลือจาก Binance ไม่สำเร็จ",
+    body: `ข้อผิดพลาด: ${error} — ตรวจ IP whitelist (76.13.218.48) และสิทธิ์อ่านของคีย์`,
+  };
+}
+
+/** Clipboard API needs a secure context; the Tailscale URL is plain http. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through to the textarea path
+  }
+  const el = document.createElement("textarea");
+  el.value = text;
+  el.setAttribute("readonly", "");
+  el.style.position = "fixed";
+  el.style.opacity = "0";
+  document.body.appendChild(el);
+  el.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  document.body.removeChild(el);
+  return ok;
+}
+
+function LiveTradingGuideCard({ dailyLossCap }: { dailyLossCap: number | null }) {
   const [activeTab, setActiveTab] = useState<"settings" | "steps" | "guardrails">("settings");
   const [copied, setCopied] = useState(false);
 
@@ -51,10 +113,11 @@ BINANCE_TRADE_API_SECRET=your_binance_subaccount_trade_api_secret
 WEB_BASIC_AUTH_USER=admin
 WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
 
-  function copyEnv() {
-    void navigator.clipboard.writeText(envTemplate);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  async function copyEnv() {
+    if (await copyText(envTemplate)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   }
 
   return (
@@ -75,7 +138,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
               รายละเอียดตัวแปร Settings ที่ต้องมีบน VPS ขั้นตอน Audit สิทธิ์ความปลอดภัย และเงื่อนไขการส่งคำสั่งจริง
             </CardDescription>
           </div>
-          <div className="flex items-center gap-1.5 bg-[var(--color-card)]/60 border border-[var(--color-border)] rounded-lg p-1">
+          <div className="flex flex-wrap items-center gap-1.5 bg-[var(--color-card)]/60 border border-[var(--color-border)] rounded-lg p-1">
             <button
               onClick={() => setActiveTab("settings")}
               className={cn(
@@ -124,7 +187,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
               <Button
                 size="sm"
                 variant="outline"
-                onClick={copyEnv}
+                onClick={() => void copyEnv()}
                 className="h-7 text-[11px] font-mono border-[var(--color-border)]"
               >
                 {copied ? "✓ คัดลอกแล้ว" : "📋 คัดลอก .env"}
@@ -243,7 +306,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
                 <span>15-Minute Risk Monitor &amp; Emergency Kill-Switch Flatten</span>
               </div>
               <p className="text-[var(--color-muted)] leading-relaxed">
-                งาน Risk Monitor ทำงานทุก 15 นาที หากการขาดทุนรายวันเกินเพดาน ($100 / Max Daily Loss)
+                งาน Risk Monitor ทำงานทุก 15 นาที หากการขาดทุนรายวันเกินเพดาน (${dailyLossCap != null ? `$${formatNum(dailyLossCap)}` : "Max Daily Loss"})
                 ระบบจะสั่ง Engage Kill-Switch ยกเลิกออเดอร์รออนุมัติทั้งหมด และสั่งขายตัดขาดทุนแบบ Market Sell ทันทีอัตโนมัติ (<code className="text-rose-400">jarvise trade flatten</code>)
               </p>
             </div>
@@ -254,19 +317,34 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
   );
 }
 
-export function ExchangePage() {
+export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | null } = {}) {
   const [data, setData] = useState<ExchangePayload | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setData(await api.exchange());
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    void (async () => {
-      try {
-        setData(await api.exchange());
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    })();
+    void load();
   }, []);
+
+  const status = dashboard?.status;
+  const caps = (status?.risk_caps ?? {}) as Record<string, unknown>;
+  const capNum = (k: string) => (typeof caps[k] === "number" ? (caps[k] as number) : null);
+  const maxNotional = capNum("max_notional_per_order");
+  const dailyLossCap = capNum("max_daily_loss_usd");
+  const gate = dashboard?.metrics?.auto_ev_gate;
+  const liveOn = status?.live_trading === true;
 
   const bars =
     data?.balances
@@ -274,30 +352,37 @@ export function ExchangePage() {
       .map((b) => ({ asset: b.asset, usd: Number(b.usd) })) || [];
   const unpriced = data?.unpriced_count ?? 0;
   const balanceCount = data?.balances?.length ?? 0;
+  const dust = (data?.balances || []).filter((b) => b.usd != null && b.usd < DUST_USD).length;
+  const errCopy = exchangeErrorCopy(data?.error);
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Exchange</h1>
-        <p className="text-sm text-[var(--color-muted)]">
-          Read-only spot balances. Keys missing → panel stays empty (soft-fail).
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold">Exchange</h1>
+          <p className="text-sm text-[var(--color-muted)]">
+            Read-only spot balances. ไม่มีการส่งคำสั่งจากหน้านี้
+          </p>
+        </div>
+        <Button variant="outline" disabled={loading} onClick={() => void load()} className="h-11 sm:h-9">
+          {loading ? "กำลังโหลด…" : "↻ โหลดใหม่"}
+        </Button>
       </div>
 
       {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}
 
       {!data ? (
-        <p className="text-sm text-[var(--color-muted)]">Loading…</p>
+        error ? null : <p className="text-sm text-[var(--color-muted)]">Loading…</p>
       ) : !data.available ? (
         <div className="space-y-6">
           <Card className="border-[var(--color-border)]">
             <CardHeader>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <div className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+                  <div className={cn("h-2.5 w-2.5 rounded-full", data.error ? "bg-rose-400" : "bg-amber-400")} />
                   <CardTitle>Venue Gateway: Binance Spot</CardTitle>
                 </div>
-                <Badge variant="ok">Paper Shield Active</Badge>
+                <Badge variant={liveOn ? "danger" : "ok"}>{liveOn ? "LIVE ON" : "Paper Shield Active"}</Badge>
               </div>
               <CardDescription>
                 Tier 2 Exchange Adapter · Direct read-only spot balance inspection &amp; gated live execution
@@ -305,35 +390,30 @@ export function ExchangePage() {
             </CardHeader>
             <CardContent className="space-y-4 text-sm">
               <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/50 p-4">
-                <div className="flex items-start gap-3">
-                  <div className="mt-0.5 rounded-full bg-amber-400/15 p-1.5 text-amber-400">
-                    <span className="block h-2 w-2 rounded-full bg-amber-400" />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="font-medium text-[var(--color-foreground)]">
-                      Exchange Keys Not Configured (Paper-First Mode)
-                    </p>
-                    <p className="text-xs text-[var(--color-muted)] leading-relaxed">
-                      Jarvise is running strictly in local simulated paper mode. Real exchange API keys have not been loaded into the host environment, protecting live capital from unauthorized execution.
-                    </p>
-                  </div>
-                </div>
+                <p className="font-medium text-[var(--color-foreground)]">{errCopy.title}</p>
+                <p className="mt-1 text-xs text-[var(--color-muted)] leading-relaxed">{errCopy.body}</p>
               </div>
 
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="rounded-md border border-[var(--color-border)] p-3">
                   <div className="text-xs text-[var(--color-muted)]">Live Trading Flag</div>
-                  <div className="mt-1 font-mono font-medium text-rose-400">Gated (False)</div>
-                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">Live orders blocked</div>
+                  <div className={cn("mt-1 font-mono font-medium", liveOn ? "text-rose-400" : "text-emerald-400")}>
+                    {status ? (liveOn ? "ON (true)" : "Gated (false)") : "—"}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">
+                    {liveOn ? "Approve ส่งคำสั่งจริง" : "Live orders blocked"}
+                  </div>
                 </div>
                 <div className="rounded-md border border-[var(--color-border)] p-3">
                   <div className="text-xs text-[var(--color-muted)]">Host VPS IP</div>
                   <div className="mt-1 font-mono font-medium text-[var(--color-foreground)]">76.13.218.48</div>
-                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">Whitelisted static IPv4</div>
+                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">ใช้เป็น IP whitelist ของคีย์</div>
                 </div>
                 <div className="rounded-md border border-[var(--color-border)] p-3">
                   <div className="text-xs text-[var(--color-muted)]">Execution Guardrail</div>
-                  <div className="mt-1 font-mono font-medium text-[var(--color-foreground)]">Spot Only · Max $2k</div>
+                  <div className="mt-1 font-mono font-medium text-[var(--color-foreground)]">
+                    Spot Only{maxNotional != null ? ` · Max $${formatNum(maxNotional, 0)}` : ""}
+                  </div>
                   <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">No leverage / futures orders</div>
                 </div>
               </div>
@@ -342,7 +422,7 @@ export function ExchangePage() {
 
           <Card className="border-[var(--color-border)]">
             <CardHeader>
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <CardTitle>Live Enable Readiness Checklist</CardTitle>
                 <Badge variant="outline">docs/ops/live-enable-checklist.md</Badge>
               </div>
@@ -352,66 +432,46 @@ export function ExchangePage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3 text-sm">
-                <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
-                  <span className="mt-0.5 text-xs font-mono font-bold text-amber-400">01</span>
-                  <div className="flex-1 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-[var(--color-foreground)]">Prove Paper Trade Expectancy (EV &gt; 0)</span>
-                      <Badge variant="muted">In Progress (N=10)</Badge>
-                    </div>
-                    <p className="text-xs text-[var(--color-muted)]">
-                      Closed sample must reach ~8+ auto trades with positive expectancy. Current EV: -$0.65 across 10 closed auto rounds.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
-                  <span className="mt-0.5 text-xs font-mono font-bold text-[var(--color-muted)]">02</span>
-                  <div className="flex-1 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-[var(--color-foreground)]">Read-Only Key Permission Probe</span>
-                      <Badge variant="outline">Pending Setup</Badge>
-                    </div>
-                    <p className="text-xs text-[var(--color-muted)]">
-                      Probe Binance API key scopes. System strictly refuses and alarms if withdrawal or transfer permissions are detected.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
-                  <span className="mt-0.5 text-xs font-mono font-bold text-[var(--color-muted)]">03</span>
-                  <div className="flex-1 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-[var(--color-foreground)]">Human Approval Gate (Two-Man Rule)</span>
-                      <Badge variant="ok">Built &amp; Verified</Badge>
-                    </div>
-                    <p className="text-xs text-[var(--color-muted)]">
-                      Even with live enabled, orders never place autonomously (P5). Each trade requires explicit manual Approve on Home.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
-                  <span className="mt-0.5 text-xs font-mono font-bold text-[var(--color-muted)]">04</span>
-                  <div className="flex-1 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-[var(--color-foreground)]">Emergency Kill-Switch Flatten</span>
-                      <Badge variant="ok">Operational</Badge>
-                    </div>
-                    <p className="text-xs text-[var(--color-muted)]">
-                      Daily loss cap ($100) automatically triggers Redis kill switch, cancels all stops, and closes live spot exposure.
-                    </p>
-                  </div>
-                </div>
+                <ChecklistRow
+                  n="01"
+                  title="Prove Paper Trade Expectancy (EV > 0)"
+                  badge={
+                    gate?.n != null
+                      ? { text: `${gate.blocked ? "ยังไม่ผ่าน" : "ผ่านเกณฑ์"} (N=${gate.n})`, variant: gate.blocked ? "muted" : "ok" }
+                      : { text: "ยังไม่มีข้อมูล", variant: "outline" }
+                  }
+                  body={
+                    gate?.n != null
+                      ? `ต้องมีไม้ auto ปิดแล้ว ≥ ${gate.min_n ?? 8} ไม้ และ EV เป็นบวก — ตอนนี้ N=${gate.n}, EV ${formatNum(gate.ev)} ดอลลาร์ต่อไม้`
+                      : "ต้องมีไม้ auto ปิดแล้วประมาณ 8 ไม้ขึ้นไป และ EV เป็นบวก"
+                  }
+                />
+                <ChecklistRow
+                  n="02"
+                  title="Read-Only Key Permission Probe"
+                  badge={{ text: data.error ? "คีย์มีปัญหา" : "Pending Setup", variant: "outline" }}
+                  body="Probe Binance API key scopes. System strictly refuses and alarms if withdrawal or transfer permissions are detected."
+                />
+                <ChecklistRow
+                  n="03"
+                  title="Human Approval Gate (Two-Man Rule)"
+                  badge={{ text: "Built & Verified", variant: "ok" }}
+                  body="Even with live enabled, orders never place autonomously (P5). Each trade requires explicit manual Approve on Home."
+                />
+                <ChecklistRow
+                  n="04"
+                  title="Emergency Kill-Switch Flatten"
+                  badge={{ text: "Operational", variant: "ok" }}
+                  body={`Daily loss cap${dailyLossCap != null ? ` ($${formatNum(dailyLossCap)})` : ""} automatically triggers Redis kill switch, cancels all stops, and closes live spot exposure.`}
+                />
               </div>
             </CardContent>
           </Card>
 
-          <LiveTradingGuideCard />
+          <LiveTradingGuideCard dailyLossCap={dailyLossCap} />
         </div>
       ) : (
         <>
-          <LiveTradingGuideCard />
           <Card>
             <CardHeader>
               <CardTitle>Spot ~USD</CardTitle>
@@ -419,6 +479,7 @@ export function ExchangePage() {
                 {data.venue} · fetched {relativeAge(data.fetched_at_ms)} · total{" "}
                 {formatNum(data.total_usd)}
                 {unpriced > 0 ? ` · ${unpriced} unpriced` : ""}
+                {dust > 0 ? ` · ${dust} dust (< $${DUST_USD})` : ""}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -459,7 +520,7 @@ export function ExchangePage() {
                           <td className="py-2 pr-3 tabular-nums">{formatQty(b.locked)}</td>
                           <td className="py-2 pr-3 tabular-nums">{formatQty(b.total)}</td>
                           <td className="py-2">
-                            <UsdCell usd={b.usd} pricing={b.pricing} />
+                            <UsdCell asset={b.asset} usd={b.usd} pricing={b.pricing} />
                           </td>
                         </tr>
                       ))}
@@ -469,8 +530,34 @@ export function ExchangePage() {
               )}
             </CardContent>
           </Card>
+          <LiveTradingGuideCard dailyLossCap={dailyLossCap} />
         </>
       )}
+    </div>
+  );
+}
+
+function ChecklistRow({
+  n,
+  title,
+  badge,
+  body,
+}: {
+  n: string;
+  title: string;
+  badge: { text: string; variant: "ok" | "muted" | "outline" };
+  body: string;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-md border border-[var(--color-border)]/60 p-3">
+      <span className="mt-0.5 text-xs font-mono font-bold text-[var(--color-muted)]">{n}</span>
+      <div className="flex-1 space-y-1">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="font-medium text-[var(--color-foreground)]">{title}</span>
+          <Badge variant={badge.variant}>{badge.text}</Badge>
+        </div>
+        <p className="text-xs text-[var(--color-muted)]">{body}</p>
+      </div>
     </div>
   );
 }

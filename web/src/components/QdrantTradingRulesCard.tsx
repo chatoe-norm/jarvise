@@ -88,7 +88,7 @@ export function QdrantTradingRulesCard({
       } else {
         setSyncResult({
           ok: false,
-          msg: "การซิงค์เสร็จสิ้น แต่พบข้อความแจ้งเตือนจากระบบ",
+          msg: `ซิงค์ไม่สำเร็จ: ${res.error || (res.status_code ? `HTTP ${res.status_code}` : "ดู log ของ jobs")}`,
         });
       }
     } catch (err) {
@@ -137,7 +137,7 @@ export function QdrantTradingRulesCard({
                 </CardTitle>
               </div>
               <CardDescription className="text-xs sm:text-sm">
-                ฐานข้อมูลเวกเตอร์สำหรับจัดเก็บและค้นหากฎการเทรด (Doctrine RAG) ประกอบการวิเคราะห์และตัดสินใจของ AI
+                ฐานข้อมูลเวกเตอร์สำหรับจัดเก็บและค้นหากฎการเทรด (RAG) ประกอบการวิเคราะห์และตัดสินใจของ AI
               </CardDescription>
             </div>
           </div>
@@ -254,13 +254,13 @@ export function QdrantTradingRulesCard({
           </div>
         ) : null}
 
-        {/* Interactive Doctrine Query Tester */}
+        {/* Interactive trading-rules query tester */}
         <div className="space-y-3 pt-2 border-t border-[var(--color-border)]">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Search className="h-4 w-4 text-emerald-400" />
               <h3 className="text-sm font-semibold text-[var(--color-foreground)]">
-                เครื่องมือทดสอบค้นหากฎการเทรด (Doctrine Retrieval Tester)
+                เครื่องมือทดสอบค้นหากฎการเทรด (Retrieval Tester)
               </h3>
             </div>
             <span className="text-xs text-[var(--color-muted)]">
@@ -384,7 +384,7 @@ export function QdrantTradingRulesCard({
         <div className="p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/20 text-xs text-[var(--color-muted)] space-y-1.5">
           <div className="font-medium text-[var(--color-foreground)] flex items-center gap-1.5">
             <BookOpen className="h-3.5 w-3.5 text-purple-400" />
-            <span>แหล่งข้อมูลกฎการเทรดที่เชื่อมโยงกับ Qdrant (Doctrine Sources):</span>
+            <span>แหล่งข้อมูลกฎการเทรดที่เชื่อมโยงกับ Qdrant:</span>
           </div>
           <ul className="list-disc list-inside space-y-1 pl-1 text-[11px]">
             <li>

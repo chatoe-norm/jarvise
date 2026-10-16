@@ -113,7 +113,7 @@ export type ApprovalRow = {
   size_pct_equity?: number;
   expires_at_ms?: number;
   regime_state?: string;
-  thesis?: string;
+  analysis_id?: string | null;
   status?: string;
 };
 
@@ -234,6 +234,8 @@ export type LossLesson = {
   by_exit: {
     stop_hit: LossExitBucket;
     flat: LossExitBucket;
+    /** Owner Close button; older backends omit it and count these under flat. */
+    manual?: LossExitBucket;
   };
   by_symbol: Record<string, LossExitBucket>;
   auto_closed: number;
@@ -534,6 +536,8 @@ export const api = {
   syncRag: () =>
     request<{
       ok: boolean;
+      error?: string;
+      status_code?: number;
       notebook?: unknown;
       index?: unknown;
       profile?: string;

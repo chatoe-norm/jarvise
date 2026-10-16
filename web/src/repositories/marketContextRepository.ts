@@ -1,18 +1,20 @@
 import type { SemiDynamicContext } from "@/types/marketContext";
 import { semiDynamicContextSchema } from "@/types/marketContext";
-import type { ApprovalRow, NewsHome } from "@/lib/api";
+import type { NewsHome } from "@/lib/api";
 
-const CACHE_KEY = "jarvise_fng_market_context_v1";
+// v2: context no longer carries a trade suggestion; v1 entries are ignored.
+const CACHE_KEY = "jarvise_fng_market_context_v2";
+/** Cached context only bridges first paint; older than this it is not shown at all. */
+export const CONTEXT_CACHE_TTL_MS = 30 * 60 * 1000;
 
 export interface IMarketContextRepository {
-  getCachedContext(): SemiDynamicContext | null;
+  getCachedContext(nowMs?: number): SemiDynamicContext | null;
   saveCachedContext(context: SemiDynamicContext): void;
   extractNewsBullets(news: NewsHome | null | undefined): {
     bullets: string[];
     generatedAtMs: number | null;
     windowYears: number | null;
   };
-  findActionableApproval(approvals: ApprovalRow[] | undefined): ApprovalRow | null;
 }
 
 export class MarketContextRepository implements IMarketContextRepository {
@@ -20,7 +22,7 @@ export class MarketContextRepository implements IMarketContextRepository {
    * Reads the latest cached SemiDynamicContext from local storage.
    * Runs synchronously in <1ms to support instantaneous (<0.1s) PWA first paint.
    */
-  getCachedContext(): SemiDynamicContext | null {
+  getCachedContext(nowMs: number = Date.now()): SemiDynamicContext | null {
     if (typeof window === "undefined" || !window.localStorage) {
       return null;
     }
@@ -29,7 +31,7 @@ export class MarketContextRepository implements IMarketContextRepository {
       if (!raw) return null;
       const parsed = JSON.parse(raw);
       const validated = semiDynamicContextSchema.safeParse(parsed);
-      if (validated.success) {
+      if (validated.success && nowMs - validated.data.assembledAtMs <= CONTEXT_CACHE_TTL_MS) {
         return validated.data;
       }
       return null;
@@ -81,7 +83,8 @@ export class MarketContextRepository implements IMarketContextRepository {
         .filter((l) => {
           if (!l) return false;
           if (l === "บริบทข่าว ไม่ใช่สัญญาณ") return false;
-          if (l === "ยังไม่มีรายงานข่าวรอบล่าสุด") return false;
+          // Backend placeholder is "ยังไม่มีรายงานข่าว"; older copy added "รอบล่าสุด".
+          if (l.startsWith("ยังไม่มีรายงานข่าว")) return false;
           return true;
         });
 
@@ -90,30 +93,6 @@ export class MarketContextRepository implements IMarketContextRepository {
     }
 
     return { bullets: [], generatedAtMs, windowYears };
-  }
-
-  /**
-   * Finds the most relevant actionable candidate from the pending approvals queue.
-   * Prioritizes 'flat' or 'close' orders, or candidates with high confidence (>= 0.70).
-   */
-  findActionableApproval(approvals: ApprovalRow[] | undefined): ApprovalRow | null {
-    if (!approvals || approvals.length === 0) {
-      return null;
-    }
-
-    // 1. Prioritize pending flat/close orders (useful for locking profits in Greed)
-    const flatOrder = approvals.find((a) => {
-      const action = (a.action || "").toLowerCase();
-      return action === "flat" || action === "close";
-    });
-    if (flatOrder) return flatOrder;
-
-    // 2. Otherwise find candidate with highest confidence score
-    const sorted = [...approvals].sort(
-      (a, b) => (b.confidence_score ?? 0) - (a.confidence_score ?? 0),
-    );
-
-    return sorted[0] ?? null;
   }
 }
 

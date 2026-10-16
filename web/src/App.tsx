@@ -8,6 +8,8 @@ import { HomePage } from "@/pages/HomePage";
 import { OpsPage } from "@/pages/OpsPage";
 import { PaperPage } from "@/pages/PaperPage";
 
+const DASHBOARD_POLL_MS = 30_000;
+
 export default function App() {
   const [dash, setDash] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -28,6 +30,19 @@ export default function App() {
 
   useEffect(() => {
     void refresh();
+    // Queue, positions and the kill switch change server-side (jobs, risk monitor): poll,
+    // but only while the tab is visible, and catch up as soon as it becomes visible again.
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, DASHBOARD_POLL_MS);
+    const onVisible = () => {
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [refresh]);
 
   return (
@@ -52,9 +67,9 @@ export default function App() {
             />
           }
         />
-        <Route path="/paper" element={<PaperPage />} />
+        <Route path="/paper" element={<PaperPage onPositionsChanged={() => void refresh()} />} />
         <Route path="/decisions" element={<DecisionsPage />} />
-        <Route path="/exchange" element={<ExchangePage />} />
+        <Route path="/exchange" element={<ExchangePage dashboard={dash} />} />
         <Route path="/ops" element={<OpsPage onStatusChange={() => void refresh()} />} />
         <Route path="/analytics" element={<Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

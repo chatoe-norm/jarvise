@@ -27,9 +27,9 @@ export async function syncModelRoutingAction(): Promise<ActionResult<ModelRoutin
     console.warn("[syncModelRoutingAction] Remote sync failed, falling back to cached matrix:", message);
     const cached = modelRoutingRepository.getCachedMatrix();
     return {
-      success: true,
+      success: false,
       data: cached,
-      error: `Fallback to cached matrix: ${message}`,
+      error: `โหลดจากเซิร์ฟเวอร์ไม่สำเร็จ ใช้ค่าที่เก็บไว้ในเครื่อง: ${message}`,
       revalidatedAtMs: Date.now(),
     };
   }

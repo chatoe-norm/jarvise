@@ -3,10 +3,9 @@ import type {
   DynamicMarketCause,
   ScoreDomain,
   SemiDynamicContext,
-  SystemActionSuggestion,
 } from "@/types/marketContext";
 import { semiDynamicContextSchema } from "@/types/marketContext";
-import type { ApprovalRow, NewsHome } from "@/lib/api";
+import type { NewsHome } from "@/lib/api";
 import {
   type IMarketContextRepository,
   marketContextRepository,
@@ -21,8 +20,6 @@ export const DOMAIN_MAPPINGS: Record<ScoreDomain, DomainScoreMapping> = {
     themeColor: "#E53935",
     staticDefinition:
       "ตลาดอยู่ในภาวะกลัวจัด (Extreme Fear) สินทรัพย์โดนเทขายอย่างรุนแรงจากความตื่นตระหนก",
-    defaultActionTemplate:
-      "แนะนำ: ตรวจสอบสถานะพอร์ตอย่างระมัดระวัง หลีกเลี่ยงการใช้อารมณ์ Panic Sell และจับตาดูสัญญาณแนวรับสำคัญในระบบ",
   },
   FEAR: {
     domain: "FEAR",
@@ -32,8 +29,6 @@ export const DOMAIN_MAPPINGS: Record<ScoreDomain, DomainScoreMapping> = {
     themeColor: "#FB8C00",
     staticDefinition:
       "ตลาดอยู่ในภาวะกังวล (Fear) นักลงทุนส่วนใหญ่ชะลอการซื้อขายเพื่อประเมินสถานการณ์",
-    defaultActionTemplate:
-      "แนะนำ: ป้องกันความเสี่ยงด้วยการถือเงินสด (Cash) บางส่วน และรอสัญญาณที่มีค่า Conf สูงกว่า 0.70 ในระบบก่อนพิจารณาเข้าออเดอร์",
   },
   NEUTRAL: {
     domain: "NEUTRAL",
@@ -43,8 +38,6 @@ export const DOMAIN_MAPPINGS: Record<ScoreDomain, DomainScoreMapping> = {
     themeColor: "#FDD835",
     staticDefinition:
       "ตลาดอยู่ในภาวะเป็นกลาง (Neutral) แรงซื้อและแรงขายมีความสมดุล ราคามักวิ่งออกข้างเพื่อสะสมพลัง",
-    defaultActionTemplate:
-      "แนะนำ: วางแผนกลยุทธ์รับ-ต้านล่วงหน้า และติดตามการอัปเดตจากโมดูล Intelligence & News Digest เพื่อจับจังหวะการ Breakout",
   },
   GREED: {
     domain: "GREED",
@@ -54,8 +47,6 @@ export const DOMAIN_MAPPINGS: Record<ScoreDomain, DomainScoreMapping> = {
     themeColor: "#4CAF50",
     staticDefinition:
       "ตลาดอยู่ในภาวะโลภ (Greed) สินทรัพย์เป็นขาขึ้นที่แข็งแกร่ง นักลงทุนเริ่มไล่ราคาจากอาการกลัวตกขบวน (FOMO)",
-    defaultActionTemplate:
-      "แนะนำ: หลีกเลี่ยงการเปิด Buy ไล่ราคาที่ยอดพอยท์ และตรวจสอบ Approval Queue ด้านบนเพื่อพิจารณา Approve คำสั่ง flat เพื่อทยอยล็อกกำไร",
   },
   EXTREME_GREED: {
     domain: "EXTREME_GREED",
@@ -65,8 +56,6 @@ export const DOMAIN_MAPPINGS: Record<ScoreDomain, DomainScoreMapping> = {
     themeColor: "#2E7D32",
     staticDefinition:
       "ตลาดอยู่ในภาวะโลภจัด (Extreme Greed) ราคาพุ่งสูงเกินมูลค่าพื้นฐาน และตลาดมีความร้อนแรงเกินไป",
-    defaultActionTemplate:
-      "แนะนำ: ตลาดเสี่ยงต่อการเกิดการปรับฐานลึก (Correction) ในไม่ช้า ควรงดเปิดโพสิชันใหม่เพิ่ม และเน้นการปกป้องเงินทุนเป็นหลัก",
   },
 };
 
@@ -113,90 +102,16 @@ export class MarketContextService {
   }
 
   /**
-   * Generates dynamic actionable recommendation based on current domain and pending approval queue candidates.
+   * Composes the SemiDynamicContext: [Static_Definition] + [Dynamic_Market_Cause].
+   * Fear & Greed is market context only, so there is no trade or queue suggestion here.
    */
-  resolveActionSuggestion(
-    domainMapping: DomainScoreMapping,
-    approvals: ApprovalRow[] | undefined,
-  ): SystemActionSuggestion {
-    const candidate = this.repo.findActionableApproval(approvals);
-
-    if (!candidate || !candidate.symbol) {
-      return {
-        suggestion: domainMapping.defaultActionTemplate,
-        targetSymbol: null,
-        targetConf: null,
-        isDynamic: false,
-      };
-    }
-
-    const symbol = candidate.symbol;
-    const confVal = typeof candidate.confidence_score === "number" ? candidate.confidence_score : null;
-    const confStr = confVal !== null ? confVal.toFixed(2) : "N/A";
-    const action = (candidate.action || "").toLowerCase();
-
-    switch (domainMapping.domain) {
-      case "GREED":
-      case "EXTREME_GREED": {
-        if (action === "flat" || action === "close") {
-          return {
-            suggestion: `แนะนำ: หลีกเลี่ยงการเปิด Buy ไล่ราคา และตรวจสอบ Approval Queue ด้านบนสำหรับเหรียญ ${symbol} (Conf ${confStr}) เพื่อพิจารณา Approve คำสั่ง Flat ล็อกกำไร`,
-            targetSymbol: symbol,
-            targetConf: confVal,
-            isDynamic: true,
-          };
-        }
-        return {
-          suggestion: `แนะนำ: หลีกเลี่ยงการเปิด Buy ไล่ราคาที่ยอดพอยท์ และตรวจสอบ Approval Queue ด้านบนสำหรับเหรียญ ${symbol} (Conf ${confStr}) เพื่อประเมินความเสี่ยงและพิจารณาตัดสินใจอย่างรอบคอบ`,
-          targetSymbol: symbol,
-          targetConf: confVal,
-          isDynamic: true,
-        };
-      }
-      case "EXTREME_FEAR":
-      case "FEAR": {
-        if (confVal !== null && confVal >= 0.70) {
-          return {
-            suggestion: `แนะนำ: แม้ตลาดจะกังวล ตรวจสอบ Approval Queue ด้านบนสำหรับเหรียญ ${symbol} ซึ่งผ่านเกณฑ์ High Confidence (Conf ${confStr}) พร้อมตั้ง Stop ตามวินัยเคร่งครัด`,
-            targetSymbol: symbol,
-            targetConf: confVal,
-            isDynamic: true,
-          };
-        }
-        return {
-          suggestion: `แนะนำ: ป้องกันความเสี่ยงด้วยการถือเงินสด (Cash) บางส่วน รายการใน Approval Queue สำหรับเหรียญ ${symbol} มีค่า Conf (${confStr}) ยังไม่ถึงเกณฑ์ 0.70 ควรงดไล่เปิดออเดอร์`,
-          targetSymbol: symbol,
-          targetConf: confVal,
-          isDynamic: true,
-        };
-      }
-      case "NEUTRAL": {
-        return {
-          suggestion: `แนะนำ: วางแผนกลยุทธ์รับ-ต้านล่วงหน้า ตรวจสอบ Approval Queue ด้านบนสำหรับเหรียญ ${symbol} (Conf ${confStr}) และติดตามการ Breakout`,
-          targetSymbol: symbol,
-          targetConf: confVal,
-          isDynamic: true,
-        };
-      }
-    }
-  }
-
-  /**
-   * Composes the SemiDynamicContext by concatenating:
-   * [Static_Definition] + [Dynamic_Market_Cause] + [System_Action_Suggestion]
-   */
-  composeSemiDynamicContext(params: {
-    score: number;
-    news?: NewsHome | null;
-    approvals?: ApprovalRow[];
-  }): SemiDynamicContext {
+  composeSemiDynamicContext(params: { score: number; news?: NewsHome | null }): SemiDynamicContext {
     const clampedScore = Math.round(Math.max(0, Math.min(100, params.score)));
     const domainMapping = this.getDomainMapping(clampedScore);
     const dynamicCause = this.resolveDynamicMarketCause(params.news);
-    const actionSuggestion = this.resolveActionSuggestion(domainMapping, params.approvals);
 
     const causeText = dynamicCause.bullets.join(" ");
-    const fullMessage = `${domainMapping.staticDefinition} ${causeText} ${actionSuggestion.suggestion}`.trim();
+    const fullMessage = `${domainMapping.staticDefinition} ${causeText}`.trim();
 
     const rawPayload = {
       score: clampedScore,
@@ -205,7 +120,6 @@ export class MarketContextService {
       themeColor: domainMapping.themeColor,
       staticDefinition: domainMapping.staticDefinition,
       dynamicMarketCause: dynamicCause,
-      systemActionSuggestion: actionSuggestion,
       fullConcatenatedMessage: fullMessage,
       assembledAtMs: Date.now(),
     };

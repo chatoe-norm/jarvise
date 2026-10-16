@@ -19,6 +19,7 @@ import { PaperAutoDecideCard } from "@/components/PaperAutoDecideCard";
 import { PipelineControlCard } from "@/components/PipelineControlCard";
 import { QdrantTradingRulesCard } from "@/components/QdrantTradingRulesCard";
 import { RiskCapsControlCard } from "@/components/RiskCapsControlCard";
+import { RiskMonitorCard } from "@/components/RiskMonitorCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -139,6 +140,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         ? "engaged"
         : "clear";
   const qdrantPoints = (status?.qdrant as Record<string, unknown> | undefined)?.points;
+  const riskHalted = (status?.risk_monitor as { halted?: unknown } | null | undefined)?.halted === true;
   const isHealthy = status?.ingest_health?.ok;
 
   const tabs: OpsTab[] = [
@@ -147,9 +149,9 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       label: "Risk Caps",
       labelTh: "เพดานความเสี่ยง",
       icon: Sliders,
-      badge: "Enforced",
-      badgeVariant: "ok",
-      indicatorColor: "bg-emerald-400",
+      badge: riskHalted ? "Halted" : status ? "Enforced" : undefined,
+      badgeVariant: riskHalted ? "danger" : "ok",
+      indicatorColor: riskHalted ? "bg-rose-400" : "bg-emerald-400",
     },
     {
       id: "pipeline",
@@ -192,8 +194,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       label: "AI Models",
       labelTh: "โมเดล OpenRouter",
       icon: Cpu,
-      badge: "5 Tiers",
-      badgeVariant: "outline",
+      badge: "แผน",
+      badgeVariant: "muted",
       indicatorColor: "bg-emerald-400",
     },
     {
@@ -210,8 +212,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       label: "Observability",
       labelTh: "การตรวจวัด",
       icon: BarChart3,
-      badge: "Live",
-      badgeVariant: "ok",
+      badge: undefined,
+      badgeVariant: "outline",
       indicatorColor: "bg-cyan-400",
     },
     {
@@ -382,6 +384,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
 
       {/* Tab Panels */}
       <div className="space-y-6">
+        {(activeTab === "risk" || activeTab === "all") && <RiskMonitorCard monitor={status?.risk_monitor} />}
+
         {(activeTab === "risk" || activeTab === "all") && (
           <RiskCapsControlCard
             initialCaps={status?.risk_caps}
@@ -416,7 +420,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         )}
 
         {(activeTab === "models" || activeTab === "auto_decide" || activeTab === "all") && (
-          <ModelRoutingCard />
+          <ModelRoutingCard activeModel={status?.auto_decide_config?.model} />
         )}
 
         {(activeTab === "rules" || activeTab === "all") && (
