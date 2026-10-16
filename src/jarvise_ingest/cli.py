@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import UTC, datetime
@@ -34,7 +35,7 @@ from jarvise_ingest.universe import PAPER_EQUITY, seed_named_universe
 from jarvise_risk import evaluate_from_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
+DEFAULT_DB = Path(os.environ.get("JARVISE_DB") or (REPO_ROOT / "data" / "analytics" / "jarvise.db"))
 DEFAULT_LIMIT = 200
 EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 1h --skip-derivatives --json"
 BACKFILL_EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives"
