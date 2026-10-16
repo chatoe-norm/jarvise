@@ -388,6 +388,8 @@ def status_payload() -> dict[str, Any]:
         "qdrant": qdrant_info(),
         "fear_greed_index": None if not macro else macro.get("fear_greed_index"),
         "altcoin_season_index": None if not macro else macro.get("altcoin_season_index"),
+        "btc_dominance_pct": None if not macro else macro.get("btc_dominance_pct"),
+        "global_market_cap_usd": None if not macro else macro.get("global_market_cap_usd"),
         "sentiment_note": (None if macro and macro.get("fear_greed_index") is not None else "ไม่มีข้อมูล"),
     }
 

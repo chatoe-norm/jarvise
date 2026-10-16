@@ -89,6 +89,8 @@ export type StatusPayload = {
   qdrant?: QdrantStatus | Record<string, unknown>;
   fear_greed_index?: number | null;
   altcoin_season_index?: number | null;
+  btc_dominance_pct?: number | null;
+  global_market_cap_usd?: number | null;
   sentiment_note?: string | null;
   risk_monitor?: unknown;
   auth_warning?: string | null;

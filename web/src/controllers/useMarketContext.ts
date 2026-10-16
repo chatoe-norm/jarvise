@@ -103,7 +103,22 @@ export function useMarketContext({ score, news, approvals }: UseMarketContextPro
     }
   }, []);
 
+  const [modalTab, setModalTab] = useState<"fear_greed" | "altcoin">("fear_greed");
+
   const openDetails = useCallback(() => {
+    setModalTab("fear_greed");
+    triggerHaptic();
+    setIsOpen(true);
+  }, [triggerHaptic]);
+
+  const openFearGreed = useCallback(() => {
+    setModalTab("fear_greed");
+    triggerHaptic();
+    setIsOpen(true);
+  }, [triggerHaptic]);
+
+  const openAltcoinSeason = useCallback(() => {
+    setModalTab("altcoin");
     triggerHaptic();
     setIsOpen(true);
   }, [triggerHaptic]);
@@ -118,6 +133,18 @@ export function useMarketContext({ score, news, approvals }: UseMarketContextPro
       return !prev;
     });
   }, [triggerHaptic]);
+
+  // Close modal on Escape key press
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen]);
 
   // Quick Action: Dismiss sheet & smooth scroll to Approval Queue
   const scrollToApprovalQueue = useCallback(() => {
@@ -137,7 +164,11 @@ export function useMarketContext({ score, news, approvals }: UseMarketContextPro
     targetScore,
     isOpen,
     isMobile,
+    modalTab,
+    setModalTab,
     openDetails,
+    openFearGreed,
+    openAltcoinSeason,
     closeDetails,
     toggleDetails,
     scrollToApprovalQueue,
