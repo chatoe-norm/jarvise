@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +18,13 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from jarvise_analyze.explain import confidence_breakdown
+from jarvise_analyze.suitability import evaluate_symbol_suitability
 from jarvise_context.news_sources import load_report, news_home_view
 from jarvise_exchange.binance_spot import BinanceSpotClient, resolve_binance_auth
 from jarvise_exchange.sync import sync_spot_balances
 from jarvise_exchange.value import value_spot_balances
 from jarvise_ingest.db import (
+    add_universe_symbol,
     count_analysis_output,
     ensure_paper_account,
     get_analysis_output,
@@ -30,14 +33,21 @@ from jarvise_ingest.db import (
     get_paper_position,
     iter_analysis_outcome_facts,
     latest_macro_sentiment,
+    list_all_known_symbols,
     list_analysis_outcomes,
     list_analysis_output,
     list_approvals,
+    list_universe_memberships,
     load_candle_at,
+    load_latest_analysis,
     load_latest_candle,
     load_recent_ohlcv,
     open_db,
+    remove_universe_symbol,
+    universe_as_of,
 )
+from jarvise_ingest.health import BACKFILL_HINT, ingest_health
+from jarvise_ingest.universe import PAPER_CORE, PAPER_LIQUID, seed_named_universe
 from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.close import close_position
@@ -728,6 +738,143 @@ def api_dashboard(_: None = Depends(require_auth)) -> dict[str, Any]:
         "metrics": load_metrics(),
         "news": news_home_view(load_report()),
     }
+
+
+def active_universe_id() -> str:
+    return os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_liquid"
+
+
+@app.get("/api/universe")
+def api_universe(_: None = Depends(require_auth)) -> dict[str, Any]:
+    path = db_path()
+    universe_id = active_universe_id()
+    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    if not path.exists():
+        return {
+            "ok": True,
+            "universe_id": universe_id,
+            "timeframe": timeframe,
+            "active_symbols": [],
+            "items": [],
+            "backfill_hint": "",
+        }
+    conn = open_db(path)
+    try:
+        seed_named_universe(conn, universe_id)
+        now_ms = int(time.time() * 1000)
+        active_symbols = universe_as_of(conn, universe_id, now_ms)
+        known_symbols = list_all_known_symbols(conn)
+
+        all_syms: list[str] = list(active_symbols)
+        for s in known_symbols:
+            if s not in all_syms:
+                all_syms.append(s)
+
+        health_report = ingest_health(conn, all_syms, timeframe)
+        health_by_sym = health_report.get("symbols") or {}
+
+        items: list[dict[str, Any]] = []
+        for sym in all_syms:
+            analysis = load_latest_analysis(conn, sym, timeframe)
+            candle = load_latest_candle(conn, sym, timeframe)
+            h = health_by_sym.get(sym) or {}
+            pos = get_paper_position(conn, sym)
+            suit = evaluate_symbol_suitability(
+                sym,
+                analysis=analysis,
+                candle=candle,
+                health=h,
+                position=pos,
+            )
+            suit["is_active"] = sym in active_symbols
+            items.append(suit)
+
+        hint = BACKFILL_HINT.format(symbols=",".join(active_symbols), timeframe=timeframe)
+        return {
+            "ok": True,
+            "universe_id": universe_id,
+            "timeframe": timeframe,
+            "active_symbols": active_symbols,
+            "items": items,
+            "backfill_hint": hint,
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/api/universe/add")
+async def api_universe_add(
+    request: Request,
+    symbol: str = Form(...),
+    asset_class: str = Form("crypto"),
+    _: None = Depends(require_auth),
+) -> Any:
+    sym = symbol.strip().upper()
+    if not sym or len(sym) < 3 or not sym.isalnum():
+        raise HTTPException(status_code=400, detail="Invalid symbol format")
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+    universe_id = active_universe_id()
+    conn = open_db(path)
+    try:
+        add_universe_symbol(conn, universe_id=universe_id, symbol=sym, asset_class=asset_class)
+        now_ms = int(time.time() * 1000)
+        active_symbols = universe_as_of(conn, universe_id, now_ms)
+    finally:
+        conn.close()
+    if wants_json(request):
+        return JSONResponse({"ok": True, "symbol": sym, "universe_id": universe_id, "active_symbols": active_symbols})
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.post("/api/universe/remove")
+async def api_universe_remove(
+    request: Request,
+    symbol: str = Form(...),
+    _: None = Depends(require_auth),
+) -> Any:
+    sym = symbol.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="Symbol required")
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+    universe_id = active_universe_id()
+    conn = open_db(path)
+    try:
+        remove_universe_symbol(conn, universe_id=universe_id, symbol=sym)
+        now_ms = int(time.time() * 1000)
+        active_symbols = universe_as_of(conn, universe_id, now_ms)
+    finally:
+        conn.close()
+    if wants_json(request):
+        return JSONResponse({"ok": True, "symbol": sym, "universe_id": universe_id, "active_symbols": active_symbols})
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.post("/api/universe/reset")
+async def api_universe_reset(
+    request: Request,
+    preset: str = Form("paper_liquid"),
+    _: None = Depends(require_auth),
+) -> Any:
+    preset = preset.strip().lower()
+    if preset not in (PAPER_CORE, PAPER_LIQUID):
+        raise HTTPException(status_code=400, detail=f"Unsupported preset {preset}")
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+    conn = open_db(path)
+    try:
+        seed_named_universe(conn, preset)
+        now_ms = int(time.time() * 1000)
+        active_symbols = universe_as_of(conn, preset, now_ms)
+    finally:
+        conn.close()
+    if wants_json(request):
+        return JSONResponse({"ok": True, "preset": preset, "active_symbols": active_symbols})
+    return RedirectResponse("/ops", status_code=303)
 
 
 @app.post("/kill-switch")

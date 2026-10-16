@@ -237,6 +237,45 @@ export type MetricsPayload = {
   error?: string;
 };
 
+export type CryptoSuitability = {
+  symbol: string;
+  score: number;
+  grade: "high" | "medium_high" | "moderate" | "low";
+  label: string;
+  color: string;
+  reasons: string[];
+  action: string;
+  regime_state: string;
+  confidence_score: number;
+  thesis?: string | null;
+  analysis_timestamp?: number | null;
+  candle: {
+    close: number | null;
+    ema_20: number | null;
+    ema_200: number | null;
+    rsi_14: number | null;
+    atr_14: number | null;
+  };
+  health: {
+    rows: number;
+    ema200_ready: number;
+    newest_age_min: number | null;
+    gaps: number;
+  };
+  has_open_position: boolean;
+  is_active?: boolean;
+};
+
+export type UniversePayload = {
+  ok: boolean;
+  universe_id: string;
+  timeframe: string;
+  active_symbols: string[];
+  items: CryptoSuitability[];
+  backfill_hint?: string;
+  error?: string;
+};
+
 export type AnalysisOutcomeKind =
   | "filled"
   | "hold"
@@ -404,4 +443,32 @@ export const api = {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ symbol }),
     }),
+  universe: () => request<UniversePayload>("/api/universe"),
+  addUniverseSymbol: (symbol: string, assetClass = "crypto") =>
+    request<{ ok: boolean; symbol: string; universe_id: string; active_symbols: string[] }>(
+      "/api/universe/add",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ symbol, asset_class: assetClass }),
+      },
+    ),
+  removeUniverseSymbol: (symbol: string) =>
+    request<{ ok: boolean; symbol: string; universe_id: string; active_symbols: string[] }>(
+      "/api/universe/remove",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ symbol }),
+      },
+    ),
+  resetUniverse: (preset: "paper_core" | "paper_liquid") =>
+    request<{ ok: boolean; preset: string; active_symbols: string[] }>(
+      "/api/universe/reset",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ preset }),
+      },
+    ),
 };
