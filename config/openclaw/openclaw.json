@@ -15,7 +15,100 @@
         "primary": "openrouter/openrouter/auto"
       },
       "models": {
-        "openrouter/openrouter/auto": {}
+        "openrouter/openrouter/auto": {},
+        "anthropic/claude-sonnet-5": {},
+        "anthropic/claude-sonnet-4.6": {},
+        "anthropic/claude-opus-5.5": {},
+        "deepseek/deepseek-v4.1-flash": {},
+        "minimax/minimax-m3": {},
+        "google/gemini-3.8-flash": {},
+        "deepseek/deepseek-v4-pro": {},
+        "openai/gpt-5.6-luna": {},
+        "z-ai/glm-5.3-flash": {},
+        "nvidia/nemotron-3-ultra-550b-a55b:free": {},
+        "nvidia/nemotron-3-super:free": {}
+      }
+    },
+    "entries": {
+      "doctrine_judge": {
+        "identity": {
+          "name": "Doctrine Judge",
+          "emoji": "⚖️",
+          "theme": "doctrine"
+        },
+        "model": {
+          "primary": "anthropic/claude-sonnet-5",
+          "fallbacks": [
+            "anthropic/claude-sonnet-4.6",
+            "anthropic/claude-opus-5.5"
+          ]
+        },
+        "temperature": 0.0,
+        "description": "ตรวจสอบกฎ 1% Risk, Token Audit Veto (HIGH risk -> FLAT), และเงื่อนไข Pullback 6 ข้อ"
+      },
+      "heartbeat_ingest": {
+        "identity": {
+          "name": "Heartbeat Ingest",
+          "emoji": "💓",
+          "theme": "ingest"
+        },
+        "model": {
+          "primary": "deepseek/deepseek-v4.1-flash",
+          "fallbacks": [
+            "minimax/minimax-m3",
+            "google/gemini-3.8-flash"
+          ]
+        },
+        "temperature": 0.1,
+        "description": "รันสแกนตลาด 24/7 รอบละ 30 นาที ดึงข้อมูล TradingView, CMC, และ CoinGlass V4 API"
+      },
+      "quant_analyzer": {
+        "identity": {
+          "name": "Quant Analyzer",
+          "emoji": "📐",
+          "theme": "quant"
+        },
+        "model": {
+          "primary": "deepseek/deepseek-v4-pro",
+          "fallbacks": [
+            "openai/gpt-5.6-luna",
+            "anthropic/claude-sonnet-5"
+          ]
+        },
+        "temperature": 0.0,
+        "description": "คำนวณสมการ EV, ระยะ Stop-Loss (>= 1.5x ATR), และสร้าง JSON Signal"
+      },
+      "context_digest": {
+        "identity": {
+          "name": "Context Digest",
+          "emoji": "📰",
+          "theme": "context"
+        },
+        "model": {
+          "primary": "google/gemini-3.8-flash",
+          "fallbacks": [
+            "z-ai/glm-5.3-flash",
+            "deepseek/deepseek-v4.1-flash"
+          ]
+        },
+        "temperature": 0.3,
+        "description": "สรุปข่าวสาร Macro และสร้างข้อความภาษาไทยแบบ Semi-Dynamic สำหรับ Fear & Greed Index"
+      },
+      "paper_sandbox": {
+        "identity": {
+          "name": "Paper Sandbox",
+          "emoji": "🧪",
+          "theme": "sandbox"
+        },
+        "model": {
+          "primary": "nvidia/nemotron-3-ultra-550b-a55b:free",
+          "fallbacks": [
+            "nvidia/nemotron-3-super:free",
+            "google/gemini-3.8-flash"
+          ]
+        },
+        "temperature": 0.1,
+        "description": "โหมดทดสอบระบบจำลอง (Paper Trading) แบบไม่เสียค่าใช้จ่าย"
       }
     }
   },
@@ -36,7 +129,8 @@
       "jarvise-paper-research": { "enabled": true },
       "jarvise-doctrine-rag": { "enabled": true },
       "jarvise-binance-intel": { "enabled": true },
-      "jarvise-news-ingest": { "enabled": true }
+      "jarvise-news-ingest": { "enabled": true },
+      "claw-compactor": { "enabled": true }
     }
   },
   "mcpServers": {

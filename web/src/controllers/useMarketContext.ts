@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { SemiDynamicContext } from "@/types/marketContext";
 import { marketContextService } from "@/services/marketContextService";
 import { marketContextRepository } from "@/repositories/marketContextRepository";
+import { useHapticFeedback } from "@/controllers/useHapticFeedback";
 import type { ApprovalRow, NewsHome } from "@/lib/api";
 
 export interface UseMarketContextProps {
@@ -93,15 +94,7 @@ export function useMarketContext({ score, news, approvals }: UseMarketContextPro
   }, [targetScore]);
 
   // Haptic feedback trigger for mobile
-  const triggerHaptic = useCallback(() => {
-    if (typeof window !== "undefined" && typeof navigator !== "undefined" && "vibrate" in navigator) {
-      try {
-        navigator.vibrate(15);
-      } catch {
-        // Safe ignore
-      }
-    }
-  }, []);
+  const { triggerHaptic } = useHapticFeedback(15);
 
   const [modalTab, setModalTab] = useState<"fear_greed" | "altcoin">("fear_greed");
 

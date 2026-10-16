@@ -1276,3 +1276,15 @@ def test_api_observability_preview_and_persist(monkeypatch, tmp_path: Path) -> N
     resp2 = client.post("/api/observability/persist", headers={"accept": "application/json"})
     assert resp2.status_code == 200
     assert resp2.json()["ok"] is True
+
+
+def test_api_openclaw_model_routing(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    client = TestClient(app)
+    resp = client.get("/api/openclaw/model-routing")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["totalAgents"] == 5
+    assert "DOCTRINE_JUDGE" in data["agents"]
+    assert data["agents"]["DOCTRINE_JUDGE"]["primaryModel"] == "anthropic/claude-sonnet-5"
+    assert data["agents"]["CONTEXT_DIGEST"]["primaryModel"] == "google/gemini-3.8-flash"

@@ -573,6 +573,7 @@ export const api = {
     request<{ ok: boolean; metrics?: unknown }>("/api/observability/persist", {
       method: "POST",
     }),
+  getModelRouting: () => request<import("@/types/modelRouting").ModelRoutingMatrix>("/api/openclaw/model-routing"),
 };
 
 export type RiskCapsPayload = {
