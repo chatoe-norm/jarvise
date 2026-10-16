@@ -4,10 +4,21 @@ import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
 import { api, type LossLesson, type MetricsPayload, type PaperPayload } from "@/lib/api";
 import { buildEquityPoints } from "@/lib/equity";
 import { decisionSourceLabel } from "@/lib/copy";
+import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
 import { cn, formatNum, formatQty } from "@/lib/utils";
+
+const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
+
 
 function evSign(ev: number | null | undefined): string {
   if (ev == null) return "ยังไม่มี EV";
@@ -80,6 +91,53 @@ export function PaperPage() {
       return tsB - tsA;
     });
   }, [metrics?.trades]);
+
+  const [filterSymbol, setFilterSymbol] = useState("");
+  const [filterOutcome, setFilterOutcome] = useState<"ALL" | "WIN" | "LOSS" | "SCRATCH">("ALL");
+  const [filterExitReason, setFilterExitReason] = useState<string>("ALL");
+  const [tradePage, setTradePage] = useState(1);
+  const [tradePageSize, setTradePageSize] = useState<number>(10);
+
+  const filteredTrades = useMemo(() => {
+    return sortedTrades.filter((t) => {
+      if (filterSymbol) {
+        const sym = String(t.symbol || "").toLowerCase();
+        if (!sym.includes(filterSymbol.toLowerCase().trim())) return false;
+      }
+      if (filterOutcome !== "ALL") {
+        const pnl = Number(t.pnl_usd) || 0;
+        if (filterOutcome === "WIN" && pnl <= 0) return false;
+        if (filterOutcome === "LOSS" && pnl >= 0) return false;
+        if (filterOutcome === "SCRATCH" && pnl !== 0) return false;
+      }
+      if (filterExitReason !== "ALL") {
+        const reason = String(t.exit_reason || "").toLowerCase();
+        if (filterExitReason === "stop" && !reason.includes("stop")) return false;
+        if (
+          filterExitReason === "profit_lock" &&
+          !reason.includes("profit") &&
+          !reason.includes("trail") &&
+          !reason.includes("breakeven")
+        )
+          return false;
+        if (filterExitReason === "flat" && !reason.includes("flat")) return false;
+        if (filterExitReason === "manual" && !reason.includes("manual")) return false;
+      }
+      return true;
+    });
+  }, [sortedTrades, filterSymbol, filterOutcome, filterExitReason]);
+
+  const totalTradesCount = filteredTrades.length;
+  const tradePageCount = Math.max(1, Math.ceil(totalTradesCount / tradePageSize) || 1);
+  const safeTradePage = Math.min(tradePage, tradePageCount);
+  const tradeFrom = totalTradesCount === 0 ? 0 : (safeTradePage - 1) * tradePageSize + 1;
+  const tradeTo = Math.min(safeTradePage * tradePageSize, totalTradesCount);
+
+  const paginatedTrades = useMemo(() => {
+    const start = (safeTradePage - 1) * tradePageSize;
+    return filteredTrades.slice(start, start + tradePageSize);
+  }, [filteredTrades, safeTradePage, tradePageSize]);
+
 
   async function load() {
     setError(null);
@@ -375,194 +433,415 @@ export function PaperPage() {
                     const symbol = String(p.symbol ?? "");
                     const side = String(p.side ?? "").toLowerCase();
 
+                    const closeAdvice = evaluateCloseRecommendation(p);
+
                     return (
-                      <tr key={i} className="hover:bg-[var(--color-card)]/50 transition-colors">
-                        <td className="py-3 pr-3 font-semibold">{symbol}</td>
-                        <td className="py-3 pr-3">
-                          <span
-                            className={cn(
-                              "inline-block rounded px-1.5 py-0.5 text-xs font-mono uppercase font-semibold",
-                              side === "long"
-                                ? "bg-[var(--color-ok)]/15 text-[var(--color-ok)]"
-                                : "bg-rose-500/15 text-rose-400",
-                            )}
-                          >
-                            {side}
-                          </span>
-                        </td>
-                        <td className="py-3 pr-3 tabular-nums font-mono text-xs">
-                          {formatQty(p.qty)}
-                        </td>
-                        <td className="py-3 pr-3 tabular-nums font-mono text-xs">
-                          {formatNum(p.entry_price)}
-                        </td>
-                        <td className="py-3 pr-3 font-mono text-xs">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="tabular-nums">
-                              {stop != null ? formatNum(stop) : "—"}
-                            </span>
-                            {stopSource === "breakeven" ? (
-                              <Badge variant="ok" className="text-[10px] px-1 py-0">
-                                บังทุน (BE +20bps)
-                              </Badge>
-                            ) : stopSource === "trail" ? (
-                              <Badge variant="default" className="text-[10px] px-1 py-0">
-                                ล็อกกำไร (Trail 1R)
-                              </Badge>
-                            ) : (
-                              <Badge variant="outline" className="text-[10px] px-1 py-0">
-                                จุดตัด 1.5× ATR
-                              </Badge>
-                            )}
-                          </div>
-                        </td>
-                        <td className="py-3 pr-3 tabular-nums font-mono text-xs text-[var(--color-muted)]">
-                          {dist != null ? `${formatNum(dist)}%` : "—"}
-                        </td>
-                        <td className="py-3 pr-3 tabular-nums font-mono text-xs font-medium">
-                          <span
-                            className={
-                              unrealized >= 0
-                                ? "text-[var(--color-ok)]"
-                                : "text-[var(--color-danger)]"
-                            }
-                          >
-                            {unrealized >= 0 ? "+" : ""}
-                            {formatNum(unrealized)}
-                          </span>
-                        </td>
-                        <td className="py-3 pr-3 font-mono text-xs">
-                          {rMultiple != null ? (
-                            <div className="space-y-1">
+                      <tr key={symbol || i} className="hover:bg-[var(--color-card)]/50 transition-colors">
+                            <td className="py-3 pr-3 font-semibold">{symbol}</td>
+                            <td className="py-3 pr-3">
                               <span
                                 className={cn(
-                                  "font-medium",
-                                  rMultiple >= 0
-                                    ? "text-[var(--color-ok)]"
-                                    : "text-[var(--color-danger)]",
+                                  "inline-block rounded px-1.5 py-0.5 text-xs font-mono uppercase font-semibold",
+                                  side === "long"
+                                    ? "bg-[var(--color-ok)]/15 text-[var(--color-ok)]"
+                                    : "bg-rose-500/15 text-rose-400",
                                 )}
                               >
-                                {rMultiple >= 0 ? "+" : ""}
-                                {formatNum(rMultiple)}R
+                                {side}
                               </span>
-                              <div className="h-1.5 w-16 rounded-full bg-[var(--color-border)] overflow-hidden">
-                                <div
-                                  className={cn(
-                                    "h-full rounded-full transition-all",
-                                    rMultiple >= 1.0
-                                      ? "bg-[var(--color-accent)]"
-                                      : rMultiple >= 0.5
-                                        ? "bg-[var(--color-ok)]"
-                                        : rMultiple > 0
-                                          ? "bg-amber-400"
-                                          : "bg-rose-500",
-                                  )}
-                                  style={{
-                                    width: `${Math.min(100, Math.max(10, Math.abs(rMultiple) * 100))}%`,
-                                  }}
-                                />
+                            </td>
+                            <td className="py-3 pr-3 tabular-nums font-mono text-xs">
+                              {formatQty(p.qty)}
+                            </td>
+                            <td className="py-3 pr-3 tabular-nums font-mono text-xs">
+                              {formatNum(p.entry_price)}
+                            </td>
+                            <td className="py-3 pr-3 font-mono text-xs">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="tabular-nums">
+                                  {stop != null ? formatNum(stop) : "—"}
+                                </span>
+                                {stopSource === "breakeven" ? (
+                                  <Badge variant="ok" className="text-[10px] px-1 py-0">
+                                    บังทุน (BE +20bps)
+                                  </Badge>
+                                ) : stopSource === "trail" ? (
+                                  <Badge variant="default" className="text-[10px] px-1 py-0">
+                                    ล็อกกำไร (Trail 1R)
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="outline" className="text-[10px] px-1 py-0">
+                                    จุดตัด 1.5× ATR
+                                  </Badge>
+                                )}
                               </div>
-                            </div>
-                          ) : (
-                            "—"
-                          )}
-                        </td>
-                        <td className="py-3 text-right">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 border-[var(--color-border)]"
-                            disabled={closing === symbol}
-                            onClick={() => void closePosition(symbol, unrealized)}
-                          >
-                            {closing === symbol ? "กำลังปิด…" : "ปิดไม้ (FLAT)"}
-                          </Button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                            </td>
+                            <td className="py-3 pr-3 tabular-nums font-mono text-xs text-[var(--color-muted)]">
+                              {dist != null ? `${formatNum(dist)}%` : "—"}
+                            </td>
+                            <td className="py-3 pr-3 tabular-nums font-mono text-xs font-medium">
+                              <span
+                                className={
+                                  unrealized >= 0
+                                    ? "text-[var(--color-ok)]"
+                                    : "text-[var(--color-danger)]"
+                                }
+                              >
+                                {unrealized >= 0 ? "+" : ""}
+                                {formatNum(unrealized)}
+                              </span>
+                            </td>
+                            <td className="py-3 pr-3 font-mono text-xs">
+                              {rMultiple != null ? (
+                                <div className="space-y-1">
+                                  <span
+                                    className={cn(
+                                      "font-medium",
+                                      rMultiple >= 0
+                                        ? "text-[var(--color-ok)]"
+                                        : "text-[var(--color-danger)]",
+                                    )}
+                                  >
+                                    {rMultiple >= 0 ? "+" : ""}
+                                    {formatNum(rMultiple)}R
+                                  </span>
+                                  <div className="h-1.5 w-16 rounded-full bg-[var(--color-border)] overflow-hidden">
+                                    <div
+                                      className={cn(
+                                        "h-full rounded-full transition-all",
+                                        rMultiple >= 1.0
+                                          ? "bg-[var(--color-accent)]"
+                                          : rMultiple >= 0.5
+                                            ? "bg-[var(--color-ok)]"
+                                            : rMultiple > 0
+                                              ? "bg-amber-400"
+                                              : "bg-rose-500",
+                                      )}
+                                      style={{
+                                        width: `${Math.min(100, Math.max(10, Math.abs(rMultiple) * 100))}%`,
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td className="py-3 text-right">
+                              <div className="inline-flex flex-col items-end gap-1">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className={cn(
+                                    "text-xs transition-all duration-200 border flex items-center gap-1.5 font-medium shadow-sm",
+                                    closeAdvice.btnClass,
+                                  )}
+                                  disabled={closing === symbol}
+                                  onClick={() => void closePosition(symbol, unrealized)}
+                                  title={closeAdvice.tooltip}
+                                >
+                                  <span
+                                    className={cn(
+                                      "inline-block w-2.5 h-2.5 rounded-full shrink-0",
+                                      closeAdvice.dotClass,
+                                    )}
+                                  />
+                                  <span>{closing === symbol ? "กำลังปิด…" : "ปิดไม้ (FLAT)"}</span>
+                                </Button>
+                                <span
+                                  className={cn(
+                                    "text-[10px] font-mono font-medium flex items-center gap-1",
+                                    closeAdvice.textClass,
+                                  )}
+                                  title={closeAdvice.tooltip}
+                                >
+                                  {closeAdvice.label}
+                                </span>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
-      {metrics?.trades && metrics.trades.length > 0 ? (
-        <Card className="border-[var(--color-border)]">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle>Closed Trades Ledger</CardTitle>
-              <Badge variant="outline">{metrics.trades.length} Closed Rounds</Badge>
-            </div>
-            <CardDescription>
-              ประวัติผลการเทรดที่ปิดรอบแล้ว เรียงจากรายการล่าสุดอยู่แถวบนสุด พร้อมผลกำไร/ขาดทุนสุทธิ
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-x-auto -mx-1 sm:mx-0 max-h-80">
-              <table className="w-full min-w-[500px] text-left text-sm">
-                <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs sticky top-0 bg-[var(--color-card)] z-10">
-                  <tr>
-                    <th className="py-2 pr-3">Closed Date</th>
-                    <th className="py-2 pr-3">Symbol</th>
-                    <th className="py-2 pr-3">Exit Reason</th>
-                    <th className="py-2 pr-3 text-right">PnL (USD)</th>
-                    <th className="py-2 text-right">Outcome</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[var(--color-border)]/50">
-                  {sortedTrades.map((t, idx) => {
-                    const pnl = Number(t.pnl_usd) || 0;
-                    const dateStr =
-                      t.close_ts != null
-                        ? new Date(t.close_ts).toLocaleString("th-TH", {
-                            dateStyle: "short",
-                            timeStyle: "short",
-                          })
-                        : "—";
-                    return (
-                      <tr key={idx} className="hover:bg-[var(--color-card)]/50 transition-colors">
-                        <td className="py-2.5 pr-3 text-xs text-[var(--color-muted)] font-mono">
-                          {dateStr}
-                        </td>
-                        <td className="py-2.5 pr-3 font-medium font-mono text-xs">
-                          {t.symbol || "—"}
-                        </td>
-                        <td className="py-2.5 pr-3">
-                          {exitReasonBadge(t.exit_reason)}
-                        </td>
-                        <td className="py-2.5 pr-3 tabular-nums font-mono text-xs text-right font-medium">
-                          <span
-                            className={
-                              pnl > 0
-                                ? "text-[var(--color-ok)]"
-                                : pnl < 0
-                                  ? "text-[var(--color-danger)]"
-                                  : "text-[var(--color-muted)]"
-                            }
+          {metrics?.trades && metrics.trades.length > 0 ? (
+            <Card className="border-[var(--color-border)]">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Closed Trades Ledger</CardTitle>
+                    <CardDescription>
+                      ประวัติผลการเทรดที่ปิดรอบแล้ว เรียงจากรายการล่าสุดอยู่แถวบนสุด พร้อมตัวกรองและระบบแบ่งหน้า
+                    </CardDescription>
+                  </div>
+                  <Badge variant="outline">{metrics.trades.length} Closed Rounds</Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Filter Controls matching DecisionsPage style */}
+                <div className="p-3 rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-card)]/40 space-y-3">
+                  <form
+                    className="flex flex-wrap items-end gap-3"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      setTradePage(1);
+                    }}
+                  >
+                    <label className="text-xs text-[var(--color-muted)]">
+                      Symbol
+                      <input
+                        className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)] font-mono"
+                        value={filterSymbol}
+                        onChange={(e) => {
+                          setFilterSymbol(e.target.value);
+                          setTradePage(1);
+                        }}
+                        placeholder="BTCUSDT"
+                      />
+                    </label>
+                    <label className="text-xs text-[var(--color-muted)]">
+                      Outcome
+                      <select
+                        className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)]"
+                        value={filterOutcome}
+                        onChange={(e) => {
+                          setFilterOutcome(e.target.value as "ALL" | "WIN" | "LOSS" | "SCRATCH");
+                          setTradePage(1);
+                        }}
+                      >
+                        <option value="ALL">All Outcomes</option>
+                        <option value="WIN">Wins (+PnL)</option>
+                        <option value="LOSS">Losses (-PnL)</option>
+                        <option value="SCRATCH">Scratch (0 PnL)</option>
+                      </select>
+                    </label>
+                    <label className="text-xs text-[var(--color-muted)]">
+                      Exit Reason
+                      <select
+                        className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)]"
+                        value={filterExitReason}
+                        onChange={(e) => {
+                          setFilterExitReason(e.target.value);
+                          setTradePage(1);
+                        }}
+                      >
+                        <option value="ALL">All Reasons</option>
+                        <option value="stop">Stop Hit</option>
+                        <option value="profit_lock">Profit Lock / Trail</option>
+                        <option value="flat">FLAT Signal</option>
+                        <option value="manual">Manual Close</option>
+                      </select>
+                    </label>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setFilterSymbol("");
+                        setFilterOutcome("ALL");
+                        setFilterExitReason("ALL");
+                        setTradePage(1);
+                      }}
+                    >
+                      Clear Filters
+                    </Button>
+                  </form>
+
+                  {/* Quick Filter Chips */}
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[var(--color-border)]/50 text-xs text-[var(--color-muted)]">
+                    <span>Quick:</span>
+                    {["ALL", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"].map((sym) => {
+                      const active =
+                        (sym === "ALL" && !filterSymbol) ||
+                        filterSymbol.toUpperCase() === sym;
+                      return (
+                        <button
+                          key={sym}
+                          type="button"
+                          onClick={() => {
+                            setFilterSymbol(sym === "ALL" ? "" : sym);
+                            setTradePage(1);
+                          }}
+                          className={cn(
+                            "rounded px-2 py-0.5 font-mono text-[11px] transition-colors",
+                            active
+                              ? "bg-[var(--color-accent)] text-white font-medium"
+                              : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]",
+                          )}
+                        >
+                          {sym}
+                        </button>
+                      );
+                    })}
+                    <span className="ml-2">Outcome:</span>
+                    {[
+                      { label: "ALL", val: "ALL" },
+                      { label: "Wins 🟢", val: "WIN" },
+                      { label: "Losses 🔴", val: "LOSS" },
+                    ].map((item) => {
+                      const active = filterOutcome === item.val;
+                      return (
+                        <button
+                          key={item.val}
+                          type="button"
+                          onClick={() => {
+                            setFilterOutcome(
+                              item.val as "ALL" | "WIN" | "LOSS" | "SCRATCH",
+                            );
+                            setTradePage(1);
+                          }}
+                          className={cn(
+                            "rounded px-2 py-0.5 text-[11px] transition-colors",
+                            active
+                              ? "bg-[var(--color-accent)] text-white font-medium"
+                              : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]",
+                          )}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {paginatedTrades.length === 0 ? (
+                  <div className="py-8 text-center text-sm text-[var(--color-muted)]">
+                    ไม่พบประวัติการเทรดที่ตรงกับเงื่อนไขการค้นหา
+                  </div>
+                ) : (
+                  <>
+                    <div className="overflow-x-auto -mx-1 sm:mx-0">
+                      <table className="w-full min-w-[620px] text-left text-sm">
+                        <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs sticky top-0 bg-[var(--color-card)] z-10">
+                          <tr>
+                            <th className="py-2.5 pr-2 w-12">No</th>
+                            <th className="py-2.5 pr-3">Closed Date</th>
+                            <th className="py-2.5 pr-3">Symbol</th>
+                            <th className="py-2.5 pr-3">Exit Reason</th>
+                            <th className="py-2.5 pr-3 text-right">PnL (USD)</th>
+                            <th className="py-2.5 text-right">Outcome</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[var(--color-border)]/50">
+                          {paginatedTrades.map((t, idx) => {
+                            const rowNo = tradeFrom + idx;
+                            const pnl = Number(t.pnl_usd) || 0;
+                            const dateStr =
+                              t.close_ts != null
+                                ? new Date(t.close_ts).toLocaleString("th-TH", {
+                                    dateStyle: "short",
+                                    timeStyle: "short",
+                                  })
+                                : "—";
+                            return (
+                              <tr
+                                key={idx}
+                                className="hover:bg-[var(--color-card)]/50 transition-colors"
+                              >
+                                <td className="py-2.5 pr-2 text-xs font-mono text-[var(--color-muted)]">
+                                  {rowNo}
+                                </td>
+                                <td className="py-2.5 pr-3 text-xs text-[var(--color-muted)] font-mono">
+                                  {dateStr}
+                                </td>
+                                <td className="py-2.5 pr-3 font-medium font-mono text-xs">
+                                  {t.symbol || "—"}
+                                </td>
+                                <td className="py-2.5 pr-3">
+                                  {exitReasonBadge(t.exit_reason)}
+                                </td>
+                                <td className="py-2.5 pr-3 tabular-nums font-mono text-xs text-right font-medium">
+                                  <span
+                                    className={
+                                      pnl > 0
+                                        ? "text-[var(--color-ok)]"
+                                        : pnl < 0
+                                          ? "text-[var(--color-danger)]"
+                                          : "text-[var(--color-muted)]"
+                                    }
+                                  >
+                                    {pnl > 0 ? "+" : ""}
+                                    {formatNum(pnl)}
+                                  </span>
+                                </td>
+                                <td className="py-2.5 text-right">
+                                  <Badge
+                                    variant={pnl > 0 ? "ok" : pnl < 0 ? "danger" : "muted"}
+                                    className="text-[10px] uppercase font-mono"
+                                  >
+                                    {pnl > 0 ? "WIN" : pnl < 0 ? "LOSS" : "SCRATCH"}
+                                  </Badge>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Pagination Controls */}
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[var(--color-border)]/50">
+                      <p className="text-xs text-[var(--color-muted)]">
+                        Showing {tradeFrom}–{tradeTo} of {totalTradesCount}
+                        {totalTradesCount !== metrics.trades.length
+                          ? ` (filtered from ${metrics.trades.length})`
+                          : ""}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <label className="flex items-center gap-2 text-xs text-[var(--color-muted)]">
+                          Rows
+                          <select
+                            className="rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)]"
+                            value={tradePageSize}
+                            onChange={(e) => {
+                              setTradePageSize(Number(e.target.value));
+                              setTradePage(1);
+                            }}
                           >
-                            {pnl > 0 ? "+" : ""}
-                            {formatNum(pnl)}
-                          </span>
-                        </td>
-                        <td className="py-2.5 text-right">
-                          <Badge
-                            variant={pnl > 0 ? "ok" : pnl < 0 ? "danger" : "muted"}
-                            className="text-[10px] uppercase font-mono"
-                          >
-                            {pnl > 0 ? "WIN" : pnl < 0 ? "LOSS" : "SCRATCH"}
-                          </Badge>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
+                            {PAGE_SIZES.map((n) => (
+                              <option key={n} value={n}>
+                                {n}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <Pagination className="mx-0 w-auto justify-end">
+                          <PaginationContent>
+                            <PaginationItem>
+                              <PaginationPrevious
+                                disabled={safeTradePage <= 1}
+                                onClick={() => setTradePage((p) => Math.max(1, p - 1))}
+                              />
+                            </PaginationItem>
+                            <PaginationItem>
+                              <span className="px-2 text-xs text-[var(--color-muted)]">
+                                Page {safeTradePage} / {tradePageCount}
+                              </span>
+                            </PaginationItem>
+                            <PaginationItem>
+                              <PaginationNext
+                                disabled={safeTradePage >= tradePageCount}
+                                onClick={() =>
+                                  setTradePage((p) =>
+                                    Math.min(tradePageCount, p + 1),
+                                  )
+                                }
+                              />
+                            </PaginationItem>
+                          </PaginationContent>
+                        </Pagination>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
     </div>
   );
 }

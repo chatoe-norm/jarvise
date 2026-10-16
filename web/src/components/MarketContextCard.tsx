@@ -170,73 +170,103 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
         </div>
 
         {/* DESKTOP GRID VIEW (Fear & Greed + Altcoin Season) */}
-        <div className="hidden md:grid gap-4 sm:grid-cols-2 text-sm">
-          {/* F&G Card with Hover Popover */}
+        <div className="hidden md:grid gap-4 sm:grid-cols-2 text-sm relative">
+          {/* F&G Card */}
           <div
-            className="relative rounded-lg border border-[var(--color-border)] p-3.5 bg-[var(--color-card)]/60 hover:bg-[var(--color-card)] transition-colors cursor-pointer group"
+            className="rounded-lg border border-[var(--color-border)] p-3.5 bg-[var(--color-card)]/60 hover:bg-[var(--color-card)] transition-colors cursor-pointer group flex flex-col justify-between"
             onMouseEnter={() => setDesktopHover(true)}
             onMouseLeave={() => setDesktopHover(false)}
             onClick={toggleDetails}
           >
-            <div className="flex items-center justify-between text-xs text-[var(--color-muted)]">
-              <div className="flex items-center gap-1.5">
-                <Gauge className="w-3.5 h-3.5" style={{ color: themeColor }} />
-                <span>Fear &amp; Greed Index</span>
+            <div>
+              <div className="flex items-center justify-between text-xs text-[var(--color-muted)]">
+                <div className="flex items-center gap-1.5">
+                  <Gauge className="w-3.5 h-3.5" style={{ color: themeColor }} />
+                  <span>Fear &amp; Greed Index</span>
+                </div>
+                <button
+                  type="button"
+                  className="p-1 rounded hover:bg-[var(--color-border)]/50 text-[var(--color-muted)] group-hover:text-[var(--color-accent)] transition-colors touch-target-safe"
+                  aria-label="ดูรายละเอียดจิตวิทยาตลาด"
+                >
+                  <Info className="w-3.5 h-3.5" />
+                </button>
               </div>
-              <button
-                type="button"
-                className="p-1 rounded hover:bg-[var(--color-border)]/50 text-[var(--color-muted)] group-hover:text-[var(--color-accent)] transition-colors touch-target-safe"
-                aria-label="ดูรายละเอียดจิตวิทยาตลาด"
-              >
-                <Info className="w-3.5 h-3.5" />
-              </button>
+
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <span
+                  className="text-3xl font-extrabold tabular-nums font-mono"
+                  style={{
+                    color: themeColor,
+                    textShadow: `0 0 16px ${themeColor}55`,
+                  }}
+                >
+                  {displayScore}
+                </span>
+                <span
+                  className="px-2.5 py-1 rounded-md text-xs font-semibold"
+                  style={{
+                    backgroundColor: `${themeColor}18`,
+                    color: themeColor,
+                    border: `1px solid ${themeColor}35`,
+                    boxShadow: `0 0 8px ${themeColor}20`,
+                  }}
+                >
+                  {statusLabel}
+                </span>
+              </div>
             </div>
 
-            <div className="mt-2 flex flex-wrap items-center gap-3">
-              <span
-                className="text-3xl font-extrabold tabular-nums font-mono"
-                style={{
-                  color: themeColor,
-                  textShadow: `0 0 16px ${themeColor}55`,
-                }}
-              >
-                {displayScore}
-              </span>
-              <span
-                className="px-2.5 py-1 rounded-md text-xs font-semibold"
-                style={{
-                  backgroundColor: `${themeColor}18`,
-                  color: themeColor,
-                  border: `1px solid ${themeColor}35`,
-                  boxShadow: `0 0 8px ${themeColor}20`,
-                }}
-              >
-                {statusLabel}
-              </span>
-            </div>
-
-            <p className="mt-2 text-xs text-[var(--color-muted)] line-clamp-1">
+            <p className="mt-2 text-xs text-[var(--color-muted)] leading-relaxed">
               {staticDef}
             </p>
+          </div>
 
-            {/* DESKTOP SMART POPOVER / TOOLTIP */}
-            {showDesktopPopover && (
-              <div
-                className="absolute z-50 left-0 top-full mt-2 w-96 p-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] shadow-2xl animate-fade-in backdrop-blur-md"
-                style={{
-                  boxShadow: `0 12px 36px rgba(0,0,0,0.6), 0 0 18px ${themeColor}20`,
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
+          {/* Altcoin Season Index */}
+          <div className="rounded-lg border border-[var(--color-border)] p-3.5 bg-[var(--color-card)]/60 flex flex-col justify-between">
+            <div>
+              <div className="text-xs text-[var(--color-muted)]">Altcoin Season Index</div>
+              <div className="mt-2">
+                {hasAlt ? (
+                  <span className="text-3xl font-extrabold tabular-nums font-mono text-[var(--color-foreground)]">
+                    {alt}
+                  </span>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-[var(--color-muted)]">Bitcoin Dominant</span>
+                    <Badge variant="outline" className="text-[10px]">
+                      Macro Context
+                    </Badge>
+                  </div>
+                )}
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-[var(--color-muted)] leading-relaxed">
+              ประเมินการหมุนเวียนเม็ดเงินระหว่าง BTC และ Altcoins ในภาพรวม
+            </p>
+          </div>
+
+          {/* DESKTOP MODAL (BOTTOM-TO-TOP SLIDE-UP IN RED FRAME AREA) */}
+          {showDesktopPopover && (
+            <div
+              className="absolute z-30 inset-y-0 right-0 w-full sm:w-[calc(50%-0.5rem)] p-4 rounded-lg border border-[var(--color-border)] bg-[#0d1522]/98 shadow-2xl animate-slide-up backdrop-blur-md overflow-y-auto flex flex-col justify-between"
+              style={{
+                boxShadow: `0 12px 36px rgba(0,0,0,0.7), 0 0 20px ${themeColor}25`,
+              }}
+              onClick={(e) => e.stopPropagation()}
+              onMouseEnter={() => setDesktopHover(true)}
+              onMouseLeave={() => setDesktopHover(false)}
+            >
+              <div>
                 {/* Popover Header */}
                 <div className="flex items-center justify-between pb-2 border-b border-[var(--color-border)]/80">
                   <div className="flex items-center gap-2">
-                    <span className="text-base font-bold text-[var(--color-foreground)]">
+                    <span className="text-sm font-bold text-[var(--color-foreground)]">
                       📊 Fear &amp; Greed: {displayScore}
                     </span>
                     <Badge
                       variant="outline"
-                      className="text-[11px] font-semibold"
+                      className="text-[10px] font-semibold"
                       style={{ color: themeColor, borderColor: `${themeColor}50` }}
                     >
                       {statusLabel}
@@ -245,14 +275,15 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                   <button
                     type="button"
                     onClick={closeDetails}
-                    className="p-1 rounded text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+                    className="p-1 rounded text-[var(--color-muted)] hover:text-[var(--color-foreground)] hover:bg-[var(--color-border)]/40 transition-colors"
+                    aria-label="ปิดรายละเอียด"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
 
                 {/* Section 1: Definition */}
-                <div className="mt-3 text-xs text-[var(--color-muted)] leading-relaxed">
+                <div className="mt-2 text-xs text-[var(--color-muted)] leading-relaxed">
                   <span className="font-semibold text-[var(--color-foreground)]">
                     [ความหมาย]:
                   </span>{" "}
@@ -260,9 +291,9 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                 </div>
 
                 {/* Section 2: AI Intelligence */}
-                <div className="mt-3 p-2.5 rounded-lg bg-[var(--color-background)]/70 border border-[var(--color-border)]/70">
+                <div className="mt-2 p-2 rounded-lg bg-[var(--color-background)]/80 border border-[var(--color-border)]/70">
                   <div className="flex items-center justify-between text-[11px] font-semibold text-[var(--color-accent)] mb-1">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1">
                       <Sparkles className="w-3.5 h-3.5" />
                       <span>[สาเหตุตลาดวันนี้] 🤖 AI Intelligence</span>
                     </div>
@@ -284,9 +315,9 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
 
                 {/* Section 3: Antigravity Action Suggestion */}
                 <div
-                  className="mt-3 p-2.5 rounded-lg border text-xs"
+                  className="mt-2 p-2 rounded-lg border text-xs"
                   style={{
-                    backgroundColor: `${themeColor}10`,
+                    backgroundColor: `${themeColor}12`,
                     borderColor: `${themeColor}35`,
                   }}
                 >
@@ -298,44 +329,22 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                     {actionSuggestion}
                   </p>
                 </div>
-
-                {/* Quick Action Button */}
-                <div className="mt-3 pt-2 border-t border-[var(--color-border)]/80 flex justify-end">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={scrollToApprovalQueue}
-                    className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold touch-target-safe"
-                  >
-                    <span>ไปที่ Approval Queue</span>
-                    <ArrowUp className="w-3.5 h-3.5" />
-                  </Button>
-                </div>
               </div>
-            )}
-          </div>
 
-          {/* Altcoin Season Index */}
-          <div className="rounded-lg border border-[var(--color-border)] p-3.5 bg-[var(--color-card)]/60">
-            <div className="text-xs text-[var(--color-muted)]">Altcoin Season Index</div>
-            <div className="mt-2">
-              {hasAlt ? (
-                <span className="text-3xl font-extrabold tabular-nums font-mono text-[var(--color-foreground)]">
-                  {alt}
-                </span>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-[var(--color-muted)]">Bitcoin Dominant</span>
-                  <Badge variant="outline" className="text-[10px]">
-                    Macro Context
-                  </Badge>
-                </div>
-              )}
+              {/* Quick Action Button */}
+              <div className="mt-2.5 pt-2 border-t border-[var(--color-border)]/80">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={scrollToApprovalQueue}
+                  className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold touch-target-safe"
+                >
+                  <span>ไปที่ Approval Queue</span>
+                  <ArrowUp className="w-3.5 h-3.5" />
+                </Button>
+              </div>
             </div>
-            <p className="mt-2 text-xs text-[var(--color-muted)]">
-              ประเมินการหมุนเวียนเม็ดเงินระหว่าง BTC และ Altcoins ในภาพรวม
-            </p>
-          </div>
+          )}
         </div>
       </CardContent>
 

@@ -6,7 +6,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { MarketContextCard } from "@/components/MarketContextCard";
 import type { DashboardPayload, NewsHome, PaperAutoStatus } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
+import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
 import { cn, formatNum, relativeAge } from "@/lib/utils";
+
 
 type AutoEntry = {
   id: string;
@@ -130,6 +132,7 @@ function ActivePositionsCard({
                 <th className="pb-2 font-medium">Stop / Protection</th>
                 <th className="pb-2 font-medium">uPnL</th>
                 <th className="pb-2 font-medium text-right">R-Multiple</th>
+                <th className="pb-2 font-medium text-right">Close Advice</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--color-border)]/50">
@@ -150,6 +153,7 @@ function ActivePositionsCard({
                   risk != null && risk > 0 && Number.isFinite(qty) && qty !== 0
                     ? uPnl / (qty * risk)
                     : null;
+                const closeAdvice = evaluateCloseRecommendation(p);
 
                 return (
                   <tr key={i} className="hover:bg-[var(--color-card)]/50 transition-colors">
@@ -212,6 +216,18 @@ function ActivePositionsCard({
                       ) : (
                         "—"
                       )}
+                    </td>
+                    <td className="py-2.5 font-mono text-xs tabular-nums text-right">
+                      <span
+                        className={cn(
+                          "inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded border",
+                          closeAdvice.btnClass,
+                        )}
+                        title={closeAdvice.tooltip}
+                      >
+                        <span className={cn("w-2 h-2 rounded-full", closeAdvice.dotClass)} />
+                        {closeAdvice.label}
+                      </span>
                     </td>
                   </tr>
                 );
