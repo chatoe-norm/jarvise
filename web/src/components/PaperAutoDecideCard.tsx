@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type AutoDecideConfigPayload, type PaperAutoStatus } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
 import { cn, relativeAge } from "@/lib/utils";
@@ -24,12 +25,20 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: "ok" | "err" } | null>(null);
+  // Last values the backend confirmed; a failed save rolls the toggle back to these.
+  const [savedEnabled, setSavedEnabled] = useState<boolean>(Boolean(initialConfig?.enabled));
+  const [savedRiskPct, setSavedRiskPct] = useState<string>(
+    initialConfig?.max_risk_per_trade_pct != null ? String(initialConfig.max_risk_per_trade_pct) : "1.0",
+  );
+  const { confirm, dialog } = useConfirm();
 
   useEffect(() => {
     if (initialConfig) {
       setEnabled(Boolean(initialConfig.enabled));
+      setSavedEnabled(Boolean(initialConfig.enabled));
       if (initialConfig.max_risk_per_trade_pct != null) {
         setRiskPct(String(initialConfig.max_risk_per_trade_pct));
+        setSavedRiskPct(String(initialConfig.max_risk_per_trade_pct));
       }
       if (initialConfig.model) {
         setModel(initialConfig.model);
@@ -50,13 +59,17 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
         max_risk_per_trade_pct: clampedRisk,
       });
       setEnabled(res.enabled);
+      setSavedEnabled(res.enabled);
       setRiskPct(String(res.max_risk_per_trade_pct));
+      setSavedRiskPct(String(res.max_risk_per_trade_pct));
       setMessage({
         text: `บันทึกการตั้งค่าเรียบร้อย: ${targetEnabled ? "เปิด AI Autotrade" : "ปิด AI (ผู้ใช้เทรดเอง + AI Guardrail)"} · ความเสี่ยง ${clampedRisk}% ของทุน`,
         type: "ok",
       });
       onRefresh?.();
     } catch (err) {
+      // The backend kept its old state; show that, not the optimistic toggle.
+      setEnabled(savedEnabled);
       setMessage({
         text: `เกิดข้อผิดพลาดในการบันทึก: ${err instanceof Error ? err.message : String(err)}`,
         type: "err",
@@ -64,6 +77,24 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
     } finally {
       setSaving(false);
     }
+  }
+
+  /** Mode switch saves only the mode; a half-typed risk % is not sent along with it. */
+  async function selectMode(next: boolean) {
+    if (saving || next === savedEnabled) {
+      setEnabled(savedEnabled);
+      return;
+    }
+    if (next) {
+      const ok = await confirm({
+        title: "เปิด AI Autotrade?",
+        body: "Claude จะอนุมัติ/ปฏิเสธการ์ดใน Approval Queue และปิดไม้ตามสัญญาณ FLAT หรือ Stop โดยไม่รอคุณกด (paper เท่านั้น)",
+        confirmLabel: "เปิด AI Autotrade",
+      });
+      if (!ok) return;
+    }
+    setEnabled(next);
+    await handleSave(next, savedRiskPct);
   }
 
   async function handleRunNow() {
@@ -110,6 +141,7 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
 
   return (
     <Card className="border-[var(--color-border)] shadow-sm">
+      {dialog}
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
@@ -163,9 +195,15 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
         <div className="grid gap-3 sm:grid-cols-2">
           {/* Option 1: On (AI Autotrade) */}
           <div
-            onClick={() => {
-              setEnabled(true);
-              void handleSave(true);
+            role="radio"
+            aria-checked={enabled}
+            tabIndex={0}
+            onClick={() => void selectMode(true)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                void selectMode(true);
+              }
             }}
             className={cn(
               "relative flex flex-col justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200",
@@ -205,9 +243,15 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
 
           {/* Option 2: Off (User Trade + AI Guardrail) */}
           <div
-            onClick={() => {
-              setEnabled(false);
-              void handleSave(false);
+            role="radio"
+            aria-checked={!enabled}
+            tabIndex={0}
+            onClick={() => void selectMode(false)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                void selectMode(false);
+              }
             }}
             className={cn(
               "relative flex flex-col justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200",

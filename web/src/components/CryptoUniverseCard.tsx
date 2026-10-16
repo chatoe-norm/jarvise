@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type CryptoSuitability, type UniversePayload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -50,6 +51,7 @@ export function CryptoUniverseCard() {
   const [ragSyncResult, setRagSyncResult] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [copiedHint, setCopiedHint] = useState(false);
+  const { confirm, dialog } = useConfirm();
 
   // Sorting & Filtering State
   const [sortBy, setSortBy] = useState<string>("suitability_desc");
@@ -85,6 +87,12 @@ export function CryptoUniverseCard() {
   async function handleAddSymbol(symToAdd?: string) {
     const target = (symToAdd || effectiveSymbol).trim().toUpperCase();
     if (!target) return;
+    const ok = await confirm({
+      title: `เพิ่ม ${target} เข้า Universe?`,
+      body: "ระบบจะ backfill แท่งเทียนย้อนหลังและเริ่มสแกนสัญญาณคู่นี้ในรอบถัดไป",
+      confirmLabel: "เพิ่ม",
+    });
+    if (!ok) return;
     setActionBusy(true);
     setError(null);
     try {
@@ -121,6 +129,13 @@ export function CryptoUniverseCard() {
   }
 
   async function handleReset(preset: "paper_core" | "paper_liquid") {
+    const ok = await confirm({
+      title: `รีเซ็ต Universe เป็น ${preset}?`,
+      body: "การสแกนสัญญาณรอบถัดไปจะใช้รายการคู่เหรียญตาม preset นี้",
+      confirmLabel: "รีเซ็ต",
+      tone: "danger",
+    });
+    if (!ok) return;
     setActionBusy(true);
     setError(null);
     try {
@@ -134,6 +149,14 @@ export function CryptoUniverseCard() {
   }
 
   async function handleSyncMarket(sym?: string) {
+    if (!sym) {
+      const ok = await confirm({
+        title: "ซิงค์ตลาดทุกคู่ใน Universe?",
+        body: "ดึงแท่งเทียนและคำนวณ indicator ใหม่ทุกคู่ อาจใช้เวลาหลายนาที",
+        confirmLabel: "ซิงค์ทั้งหมด",
+      });
+      if (!ok) return;
+    }
     if (sym) {
       setSyncingSymbol(sym);
     } else {
@@ -237,6 +260,7 @@ export function CryptoUniverseCard() {
 
   return (
     <Card className="border-[var(--color-border)]">
+      {dialog}
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>

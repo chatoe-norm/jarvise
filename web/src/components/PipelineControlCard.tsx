@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type PipelineRunResult } from "@/lib/api";
 import { relativeAge } from "@/lib/utils";
 
@@ -70,6 +71,14 @@ const PIPELINE_JOBS: JobDef[] = [
   },
 ];
 
+/** Jobs that change the book or the queue, not just refresh data. */
+const JOB_RUN_WARNINGS: Record<string, string> = {
+  paper_run: "สแกนสัญญาณใหม่และอาจเพิ่ม/แทนที่การ์ดใน Approval Queue",
+  paper_expire: "การ์ดที่หมดอายุจะถูกปิด และโพสิชันที่ไม่ได้ถือฝั่งเดิมอาจถูกปิดเป็น FLAT",
+  risk_monitor: "ถ้าขาดทุนเกินเพดาน ระบบจะเปิด Kill-Switch และยกเลิกการ์ดที่รออนุมัติ",
+  paper_auto_decide: "Claude จะอนุมัติ/ปฏิเสธการ์ดที่รออยู่ และอาจเติมคำสั่ง paper",
+};
+
 function parseJobStatus(payload: unknown): {
   ok: boolean | null;
   label: string;
@@ -105,8 +114,17 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
   const [lastResult, setLastResult] = useState<PipelineRunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rawOpen, setRawOpen] = useState(false);
+  const { confirm, dialog } = useConfirm();
 
   const handleRunJob = async (jobKey: string) => {
+    const job = PIPELINE_JOBS.find((j) => j.key === jobKey);
+    const ok = await confirm({
+      title: `รัน "${job?.title ?? jobKey}" ตอนนี้?`,
+      body: JOB_RUN_WARNINGS[jobKey] ?? "งานนี้จะรันนอกตารางเวลาปกติหนึ่งรอบ",
+      confirmLabel: "รันเลย",
+      tone: JOB_RUN_WARNINGS[jobKey] ? "danger" : "default",
+    });
+    if (!ok) return;
     setRunningJob(jobKey);
     setError(null);
     try {
@@ -146,6 +164,7 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
       </CardHeader>
 
       <CardContent className="space-y-4">
+        {dialog}
         {/* Latest Run Notification Banner */}
         {lastResult && (
           <div

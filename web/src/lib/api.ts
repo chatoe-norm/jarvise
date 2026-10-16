@@ -1,3 +1,4 @@
+import { errorMessage } from "@/lib/errors";
 import { dashboardSchema, paperSchema, statusSchema } from "@/lib/schemas";
 
 export type IngestHealthStatus = {
@@ -78,6 +79,13 @@ export type StatusPayload = {
   paper_only: boolean;
   live_trading: boolean;
   kill_switch: boolean;
+  /** known:false = Redis unreadable; approvals fail closed. */
+  kill_switch_state?: {
+    engaged?: boolean;
+    known?: boolean;
+    reason?: string | null;
+    error?: string | null;
+  } | null;
   ingest: unknown;
   rag: unknown;
   paper: unknown;
@@ -406,7 +414,7 @@ async function request<T>(
   });
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(text || `HTTP ${resp.status}`);
+    throw new Error(errorMessage(text, resp.status));
   }
   const ct = resp.headers.get("content-type") || "";
   if (ct.includes("application/json")) {
@@ -417,6 +425,14 @@ async function request<T>(
     return data as T;
   }
   return {} as T;
+}
+
+/** A 200 body with ok:false is still a refusal; never let it read as success. */
+function requireOk<T extends { ok: boolean; error?: string | null }>(data: T): T {
+  if (data && data.ok === false) {
+    throw new Error(data.error || "request refused");
+  }
+  return data;
 }
 
 export const api = {
@@ -453,17 +469,17 @@ export const api = {
     request<OhlcvPayload>(`/api/approvals/${encodeURIComponent(id)}/ohlcv`),
   exchange: () => request<ExchangePayload>("/api/exchange"),
   approve: (id: string) =>
-    request<{ ok: boolean }>("/approvals/approve", {
+    request<{ ok: boolean; error?: string | null }>("/approvals/approve", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ id }),
-    }),
+    }).then(requireOk),
   reject: (id: string) =>
-    request<{ ok: boolean }>("/approvals/reject", {
+    request<{ ok: boolean; error?: string | null }>("/approvals/reject", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ id }),
-    }),
+    }).then(requireOk),
   killSwitch: (state: "on" | "off") =>
     request<{ ok: boolean; kill_switch: boolean }>("/kill-switch", {
       method: "POST",

@@ -45,7 +45,9 @@ export function ModelRoutingCard() {
     }
   }
 
-  const agentsList: AgentProfile[] = Object.values(matrix.agents);
+  // The API is not schema-checked; a payload without agents must not blank the page.
+  const agentsList: AgentProfile[] =
+    matrix?.agents && typeof matrix.agents === "object" ? Object.values(matrix.agents) : [];
 
   return (
     <Card className="relative overflow-hidden border-[var(--color-border)] bg-[var(--color-card)]/80 backdrop-blur-sm">
