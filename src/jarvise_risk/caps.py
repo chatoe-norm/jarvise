@@ -80,18 +80,134 @@ class RiskCaps:
         }
 
 
+RISK_CAP_KEYS: dict[str, tuple[str, str, float]] = {
+    "max_notional_per_order": (
+        "jarvise:risk:max_notional_per_order",
+        "JARVISE_MAX_NOTIONAL_PER_ORDER",
+        DEFAULT_MAX_NOTIONAL,
+    ),
+    "max_daily_loss_usd": (
+        "jarvise:risk:max_daily_loss_usd",
+        "JARVISE_MAX_DAILY_LOSS_USD",
+        DEFAULT_MAX_DAILY_LOSS,
+    ),
+    "drawdown_lock_pct": (
+        "jarvise:risk:drawdown_lock_pct",
+        "JARVISE_DRAWDOWN_LOCK_PCT",
+        DEFAULT_DRAWDOWN_LOCK_PCT,
+    ),
+    "max_open_positions": (
+        "jarvise:risk:max_open_positions",
+        "JARVISE_MAX_OPEN_POSITIONS",
+        float(DEFAULT_MAX_OPEN_POSITIONS),
+    ),
+    "max_gross_notional_pct": (
+        "jarvise:risk:max_gross_notional_pct",
+        "JARVISE_MAX_GROSS_NOTIONAL_PCT",
+        DEFAULT_MAX_GROSS_NOTIONAL_PCT,
+    ),
+    "max_symbol_notional_pct": (
+        "jarvise:risk:max_symbol_notional_pct",
+        "JARVISE_MAX_SYMBOL_NOTIONAL_PCT",
+        DEFAULT_MAX_SYMBOL_NOTIONAL_PCT,
+    ),
+    "max_correlated_bucket_pct": (
+        "jarvise:risk:max_correlated_bucket_pct",
+        "JARVISE_MAX_CORRELATED_BUCKET_PCT",
+        DEFAULT_MAX_CORRELATED_BUCKET_PCT,
+    ),
+}
+
+
+def _read_cap_float(redis_key: str, env_var: str, default: float) -> float:
+    url = os.environ.get("REDIS_URL")
+    if url:
+        try:
+            client = _redis_client(url)
+            val = client.get(redis_key)
+            if val is not None and str(val).strip():
+                return float(str(val).strip())
+        except Exception:
+            pass
+    return _fenv(env_var, default)
+
+
+def set_risk_cap(name: str, value: float) -> float:
+    """Set a risk cap in Redis and os.environ. Clamps/validates to safe bounds."""
+    if name == "max_risk_per_trade_pct":
+        return set_max_risk_per_trade_pct(value)
+
+    cfg = RISK_CAP_KEYS.get(name)
+    if cfg is None:
+        raise ValueError(f"Unknown risk cap: {name}")
+    redis_key, env_var, default = cfg
+
+    val = float(value)
+    if name in {
+        "drawdown_lock_pct",
+        "max_gross_notional_pct",
+        "max_symbol_notional_pct",
+        "max_correlated_bucket_pct",
+    }:
+        val = max(0.0, min(100.0, val))
+    elif name == "max_open_positions":
+        val = float(max(0, int(val)))
+    else:
+        val = max(0.0, val)
+
+    formatted = str(int(val)) if name == "max_open_positions" else str(val)
+    os.environ[env_var] = formatted
+    url = os.environ.get("REDIS_URL")
+    if url:
+        try:
+            client = _redis_client(url)
+            client.set(redis_key, formatted)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to set %s in Redis: %s", redis_key, exc)
+    return val
+
+
 def load_risk_caps() -> RiskCaps:
     return RiskCaps(
-        max_notional_per_order=_fenv("JARVISE_MAX_NOTIONAL_PER_ORDER", DEFAULT_MAX_NOTIONAL),
-        max_daily_loss_usd=_fenv("JARVISE_MAX_DAILY_LOSS_USD", DEFAULT_MAX_DAILY_LOSS),
-        drawdown_lock_pct=_fenv("JARVISE_DRAWDOWN_LOCK_PCT", DEFAULT_DRAWDOWN_LOCK_PCT),
-        max_open_positions=max(
-            0, int(_fenv("JARVISE_MAX_OPEN_POSITIONS", float(DEFAULT_MAX_OPEN_POSITIONS)))
+        max_notional_per_order=_read_cap_float(
+            RISK_CAP_KEYS["max_notional_per_order"][0],
+            RISK_CAP_KEYS["max_notional_per_order"][1],
+            DEFAULT_MAX_NOTIONAL,
         ),
-        max_gross_notional_pct=_fenv("JARVISE_MAX_GROSS_NOTIONAL_PCT", DEFAULT_MAX_GROSS_NOTIONAL_PCT),
-        max_symbol_notional_pct=_fenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", DEFAULT_MAX_SYMBOL_NOTIONAL_PCT),
-        max_correlated_bucket_pct=_fenv(
-            "JARVISE_MAX_CORRELATED_BUCKET_PCT", DEFAULT_MAX_CORRELATED_BUCKET_PCT
+        max_daily_loss_usd=_read_cap_float(
+            RISK_CAP_KEYS["max_daily_loss_usd"][0],
+            RISK_CAP_KEYS["max_daily_loss_usd"][1],
+            DEFAULT_MAX_DAILY_LOSS,
+        ),
+        drawdown_lock_pct=_read_cap_float(
+            RISK_CAP_KEYS["drawdown_lock_pct"][0],
+            RISK_CAP_KEYS["drawdown_lock_pct"][1],
+            DEFAULT_DRAWDOWN_LOCK_PCT,
+        ),
+        max_open_positions=max(
+            0,
+            int(
+                _read_cap_float(
+                    RISK_CAP_KEYS["max_open_positions"][0],
+                    RISK_CAP_KEYS["max_open_positions"][1],
+                    float(DEFAULT_MAX_OPEN_POSITIONS),
+                )
+            ),
+        ),
+        max_gross_notional_pct=_read_cap_float(
+            RISK_CAP_KEYS["max_gross_notional_pct"][0],
+            RISK_CAP_KEYS["max_gross_notional_pct"][1],
+            DEFAULT_MAX_GROSS_NOTIONAL_PCT,
+        ),
+        max_symbol_notional_pct=_read_cap_float(
+            RISK_CAP_KEYS["max_symbol_notional_pct"][0],
+            RISK_CAP_KEYS["max_symbol_notional_pct"][1],
+            DEFAULT_MAX_SYMBOL_NOTIONAL_PCT,
+        ),
+        max_correlated_bucket_pct=_read_cap_float(
+            RISK_CAP_KEYS["max_correlated_bucket_pct"][0],
+            RISK_CAP_KEYS["max_correlated_bucket_pct"][1],
+            DEFAULT_MAX_CORRELATED_BUCKET_PCT,
         ),
     )
 

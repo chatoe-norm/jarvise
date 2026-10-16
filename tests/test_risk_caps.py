@@ -524,3 +524,30 @@ def test_drawdown_blocks_approve(tmp_path: Path, monkeypatch) -> None:
     assert result["ok"] is False
     assert "drawdown" in (result["error"] or "")
     conn.close()
+
+
+def test_set_risk_cap_and_load_risk_caps(monkeypatch) -> None:
+    from jarvise_risk.caps import load_risk_caps, set_risk_cap
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    # Set cap without redis updates os.environ and is read by load_risk_caps
+    set_risk_cap("max_notional_per_order", 3500.0)
+    set_risk_cap("max_daily_loss_usd", 250.0)
+    set_risk_cap("drawdown_lock_pct", 7.5)
+    set_risk_cap("max_open_positions", 4)
+    set_risk_cap("max_gross_notional_pct", 25.0)
+    set_risk_cap("max_symbol_notional_pct", 12.0)
+    set_risk_cap("max_correlated_bucket_pct", 18.0)
+    set_risk_cap("max_risk_per_trade_pct", 0.75)
+
+    caps = load_risk_caps()
+    assert caps.max_notional_per_order == 3500.0
+    assert caps.max_daily_loss_usd == 250.0
+    assert caps.drawdown_lock_pct == 7.5
+    assert caps.max_open_positions == 4
+    assert caps.max_gross_notional_pct == 25.0
+    assert caps.max_symbol_notional_pct == 12.0
+    assert caps.max_correlated_bucket_pct == 18.0
+
+    d = caps.as_dict()
+    assert d["max_risk_per_trade_pct"] == 0.75
