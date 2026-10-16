@@ -1768,7 +1768,6 @@ def list_all_known_symbols(conn: sqlite3.Connection) -> list[str]:
     return [str(r[0]) for r in cur.fetchall()]
 
 
-
 _APPROVAL_COLUMNS = """
     id, created_at_ms, expires_at_ms, symbol, timeframe, analysis_id,
     action, regime_state, confidence_score, size_pct_equity, invalidation_price, status,

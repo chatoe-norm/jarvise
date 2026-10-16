@@ -823,7 +823,9 @@ async def api_universe_add(
     finally:
         conn.close()
     if wants_json(request):
-        return JSONResponse({"ok": True, "symbol": sym, "universe_id": universe_id, "active_symbols": active_symbols})
+        return JSONResponse(
+            {"ok": True, "symbol": sym, "universe_id": universe_id, "active_symbols": active_symbols}
+        )
     return RedirectResponse("/ops", status_code=303)
 
 
@@ -848,7 +850,9 @@ async def api_universe_remove(
     finally:
         conn.close()
     if wants_json(request):
-        return JSONResponse({"ok": True, "symbol": sym, "universe_id": universe_id, "active_symbols": active_symbols})
+        return JSONResponse(
+            {"ok": True, "symbol": sym, "universe_id": universe_id, "active_symbols": active_symbols}
+        )
     return RedirectResponse("/ops", status_code=303)
 
 

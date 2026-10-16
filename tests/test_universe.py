@@ -124,4 +124,3 @@ def test_universe_add_remove_and_list_memberships(tmp_path: Path) -> None:
     assert "ADAUSDT" not in symbols_after
     assert "XRPUSDT" in symbols_after
     conn.close()
-
