@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { CryptoUniverseCard } from "@/components/CryptoUniverseCard";
 import { PaperAutoDecideCard } from "@/components/PaperAutoDecideCard";
+import { QdrantTradingRulesCard } from "@/components/QdrantTradingRulesCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -294,16 +295,11 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         onRefresh={() => void load()}
       />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Qdrant trading rules</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-[var(--color-muted)]">
-          {status?.qdrant
-            ? `exists=${String(status.qdrant.exists)} · points=${String(status.qdrant.points ?? "—")} · status=${String(status.qdrant.status ?? "—")}`
-            : "—"}
-        </CardContent>
-      </Card>
+      <QdrantTradingRulesCard
+        qdrant={status?.qdrant}
+        ragStatus={status?.rag}
+        onRefresh={() => void load()}
+      />
     </div>
   );
 }

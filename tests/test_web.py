@@ -1174,3 +1174,18 @@ def test_api_paper_auto_decide_run(monkeypatch) -> None:
     resp = client.post("/api/paper/auto-decide/run", headers={"accept": "application/json"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+def test_api_doctrine_query(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    monkeypatch.setattr(
+        "jarvise.rag.doctrine_snippets",
+        lambda q, limit=3: [{"text": "pullback rule", "source": "test.txt", "score": 0.85}],
+    )
+    client = TestClient(app)
+    resp = client.get("/api/doctrine/query?q=pullback&limit=2", headers={"accept": "application/json"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert len(data["hits"]) == 1
+    assert data["hits"][0]["text"] == "pullback rule"

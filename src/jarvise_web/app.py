@@ -235,16 +235,34 @@ def qdrant_info() -> dict[str, Any]:
         with httpx.Client(timeout=5.0) as client:
             resp = client.get(f"{QDRANT_URL}/collections/{COLLECTION}")
             if resp.status_code == 404:
-                return {"exists": False, "points": 0}
+                return {
+                    "exists": False,
+                    "points": 0,
+                    "collection": COLLECTION,
+                    "url": QDRANT_URL,
+                    "status": "red",
+                }
             resp.raise_for_status()
             result = resp.json().get("result") or {}
+            points = result.get("points_count") or result.get("indexed_vectors_count") or 0
+            raw_status = result.get("status") or ("green" if points > 0 else "yellow")
             return {
                 "exists": True,
-                "points": (result.get("points_count") or result.get("indexed_vectors_count") or 0),
-                "status": result.get("status"),
+                "collection": COLLECTION,
+                "url": QDRANT_URL,
+                "points": points,
+                "status": raw_status,
+                "vectors_count": result.get("vectors_count") or points,
             }
     except Exception as exc:  # noqa: BLE001
-        return {"exists": False, "error": str(exc)}
+        return {
+            "exists": False,
+            "collection": COLLECTION,
+            "url": QDRANT_URL,
+            "points": 0,
+            "status": "red",
+            "error": str(exc),
+        }
 
 
 def _outcome_from_lookup(row: dict[str, Any], lookup: dict[str, dict]) -> dict[str, Any]:
@@ -1038,6 +1056,53 @@ async def api_rag_sync(
     if wants_json(request):
         return JSONResponse(data)
     return RedirectResponse("/ops", status_code=303)
+
+
+@app.get("/api/doctrine/query")
+async def api_doctrine_query(
+    request: Request,
+    q: str = Query("pullback EMA20"),
+    limit: int = Query(3, ge=1, le=10),
+    _: None = Depends(require_auth),
+) -> Any:
+    jobs_url = os.environ.get("JARVISE_JOBS_URL") or "http://jobs:8090"
+    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-Jarvise-Token"] = token
+    data: dict[str, Any]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{jobs_url}/doctrine",
+                params={"q": q, "limit": limit},
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+            else:
+                data = {
+                    "ok": False,
+                    "query": q,
+                    "hits": [],
+                    "error": f"jobs returned status {resp.status_code}",
+                }
+    except Exception as exc:
+        try:
+            from jarvise.rag import doctrine_snippets
+
+            hits = await asyncio.to_thread(doctrine_snippets, q, limit=limit)
+            data = {"ok": True, "query": q, "hits": hits, "paper_only": True}
+        except Exception as local_exc:
+            data = {
+                "ok": False,
+                "query": q,
+                "hits": [],
+                "error": f"jobs failed ({exc}); local fallback failed ({local_exc})",
+            }
+
+    return JSONResponse(data)
 
 
 @app.post("/api/universe/remove")

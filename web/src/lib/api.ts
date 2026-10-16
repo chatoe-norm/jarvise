@@ -49,6 +49,31 @@ export type AutoDecideConfigPayload = {
   model?: string;
 };
 
+export type QdrantStatus = {
+  exists?: boolean;
+  points?: number;
+  vectors_count?: number;
+  status?: string;
+  collection?: string;
+  url?: string;
+  error?: string;
+  optimizer_status?: string;
+};
+
+export type DoctrineSnippet = {
+  text: string;
+  source?: string;
+  score?: number;
+};
+
+export type DoctrineQueryResponse = {
+  ok: boolean;
+  query: string;
+  hits: DoctrineSnippet[];
+  paper_only?: boolean;
+  error?: string;
+};
+
 export type StatusPayload = {
   paper_only: boolean;
   live_trading: boolean;
@@ -61,7 +86,7 @@ export type StatusPayload = {
   paper_auto?: PaperAutoStatus | null;
   auto_decide_config?: AutoDecideConfigPayload | null;
   risk_caps: Record<string, unknown>;
-  qdrant: Record<string, unknown>;
+  qdrant?: QdrantStatus | Record<string, unknown>;
   fear_greed_index?: number | null;
   altcoin_season_index?: number | null;
   sentiment_note?: string | null;
@@ -512,4 +537,9 @@ export const api = {
     request<PaperAutoStatus & { ok: boolean; error?: string }>("/api/paper/auto-decide/run", {
       method: "POST",
     }),
+  queryDoctrine: (q: string, limit: number = 3) =>
+    request<DoctrineQueryResponse>(
+      `/api/doctrine/query?${new URLSearchParams({ q, limit: String(limit) }).toString()}`,
+    ),
 };
+
