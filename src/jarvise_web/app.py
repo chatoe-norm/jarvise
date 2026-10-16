@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import secrets
 import time
@@ -407,6 +408,46 @@ def load_metrics() -> dict[str, Any]:
         conn.close()
     report["db"] = str(path)
     return report
+
+
+_PCT_RISK_CAPS = frozenset(
+    {"drawdown_lock_pct", "max_gross_notional_pct", "max_symbol_notional_pct", "max_correlated_bucket_pct"}
+)
+
+
+def validate_risk_cap_updates(updates: dict[str, Any]) -> tuple[dict[str, float], dict[str, str]]:
+    """Parse owner cap edits. Every cap must be a positive finite number; blanks are skipped."""
+    parsed: dict[str, float] = {}
+    errors: dict[str, str] = {}
+    for k, v in updates.items():
+        if k not in RISK_CAP_KEYS and k != "max_risk_per_trade_pct":
+            continue
+        if v is None or v == "":
+            continue
+        try:
+            val = float(v)
+        except (ValueError, TypeError):
+            errors[k] = "must be a number"
+            continue
+        if not math.isfinite(val) or val <= 0:
+            errors[k] = "must be greater than 0"
+        elif k == "max_open_positions" and val != int(val):
+            errors[k] = "must be a whole number"
+        elif k == "max_risk_per_trade_pct" and val > 1.0:
+            errors[k] = "must be at most 1.0"
+        elif k in _PCT_RISK_CAPS and val > 100.0:
+            errors[k] = "must be at most 100"
+        else:
+            parsed[k] = val
+    return parsed, errors
+
+
+def jobs_auth_headers() -> dict[str, str]:
+    """Headers for web -> jobs calls. The jobs service only checks ``X-Jarvise-Token``."""
+    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}", "X-Jarvise-Token": token}
 
 
 def fetch_doctrine(query: str, *, limit: int = 3) -> list[str]:
@@ -1029,8 +1070,7 @@ async def api_rag_sync(
     _: None = Depends(require_auth),
 ) -> Any:
     jobs_url = os.environ.get("JARVISE_JOBS_URL") or "http://jobs:8090"
-    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers = jobs_auth_headers()
     data: dict[str, Any]
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -1229,8 +1269,7 @@ async def api_paper_auto_decide_run(
     _: None = Depends(require_auth),
 ) -> Any:
     jobs_url = os.environ.get("JARVISE_JOBS_URL") or "http://jobs:8090"
-    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers = jobs_auth_headers()
     data: dict[str, Any]
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1273,14 +1312,20 @@ async def api_risk_caps_save(
         form = await request.form()
         updates = dict(form)
 
-    for k, v in updates.items():
-        if v is None or v == "":
-            continue
-        if k in RISK_CAP_KEYS or k == "max_risk_per_trade_pct":
-            try:
-                set_risk_cap(k, float(v))
-            except (ValueError, TypeError) as exc:
-                logger.warning("Failed to parse cap %s value %r: %s", k, v, exc)
+    parsed, field_errors = validate_risk_cap_updates(updates)
+    if field_errors:
+        # Apply nothing: a half-saved cap set (e.g. daily loss 0) can halt trading.
+        data = {
+            "ok": False,
+            "error": "invalid risk caps",
+            "field_errors": field_errors,
+            "risk_caps": load_risk_caps().as_dict(),
+        }
+        if wants_json(request):
+            return JSONResponse(data, status_code=400)
+        raise HTTPException(status_code=400, detail=field_errors)
+    for k, val in parsed.items():
+        set_risk_cap(k, val)
 
     data = {"ok": True, "risk_caps": load_risk_caps().as_dict()}
     if wants_json(request):
@@ -1643,7 +1688,11 @@ async def approvals_approve(
     finally:
         conn.close()
     if wants_json(request):
-        return JSONResponse({"ok": True, "result": result if isinstance(result, dict) else {"id": id}})
+        payload = result if isinstance(result, dict) else {"id": id}
+        ok = bool(payload.get("ok", True))
+        body = {"ok": ok, "error": None if ok else payload.get("error"), "result": payload}
+        # 409 so the dashboard can never show a refused approve as a success.
+        return JSONResponse(body, status_code=200 if ok else 409)
     return RedirectResponse("/", status_code=303)
 
 
@@ -1655,11 +1704,13 @@ async def approvals_reject(
 ) -> Any:
     conn = open_db(db_path())
     try:
-        reject_approval(conn, id, reason="ui")
+        result = reject_approval(conn, id, reason="ui")
     finally:
         conn.close()
     if wants_json(request):
-        return JSONResponse({"ok": True, "id": id})
+        ok = bool(result.get("ok"))
+        body = {"ok": ok, "id": id, "error": None if ok else result.get("error")}
+        return JSONResponse(body, status_code=200 if ok else 409)
     return RedirectResponse("/", status_code=303)
 
 
@@ -1749,7 +1800,12 @@ def manifest() -> FileResponse:
 def service_worker() -> FileResponse:
     root = static_dir()
     if root and (root / "sw.js").is_file():
-        return FileResponse(root / "sw.js", media_type="application/javascript")
+        # no-cache so a changed worker (new cache strategy) reaches browsers on the next visit.
+        return FileResponse(
+            root / "sw.js",
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-cache"},
+        )
     raise HTTPException(status_code=404, detail="sw.js not found")
 
 

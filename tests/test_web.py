@@ -1214,6 +1214,65 @@ def test_api_risk_caps_get_and_save(monkeypatch) -> None:
     assert data["risk_caps"]["drawdown_lock_pct"] == 6.0
 
 
+def test_api_risk_caps_rejects_zero_and_negative(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    saved: list[tuple[str, float]] = []
+    monkeypatch.setattr("jarvise_web.app.set_risk_cap", lambda k, v: saved.append((k, v)) or v)
+    client = TestClient(app)
+    for bad in (
+        {"max_daily_loss_usd": 0},
+        {"max_open_positions": -1},
+        {"max_open_positions": 2.5},
+        {"max_risk_per_trade_pct": 1.5},
+        {"drawdown_lock_pct": 150},
+        {"max_notional_per_order": "abc"},
+    ):
+        resp = client.post("/api/risk/caps", json=bad, headers={"accept": "application/json"})
+        assert resp.status_code == 400, bad
+        body = resp.json()
+        assert body["ok"] is False
+        assert set(body["field_errors"]) == set(bad)
+    # One invalid field blocks the whole save.
+    resp = client.post(
+        "/api/risk/caps",
+        json={"max_notional_per_order": 1500, "max_daily_loss_usd": 0},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 400
+    assert saved == []
+
+
+def test_approve_refused_is_not_reported_as_success(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "jarvise.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+    resp = client.post("/approvals/approve", data={"id": "missing"}, headers={"accept": "application/json"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["error"] == "approval not pending"
+    assert body["result"]["ok"] is False
+
+    resp = client.post("/approvals/reject", data={"id": "missing"}, headers={"accept": "application/json"})
+    assert resp.status_code == 409
+    assert resp.json()["ok"] is False
+
+
+def test_jobs_auth_headers_send_jobs_token(monkeypatch) -> None:
+    from jarvise_web.app import jobs_auth_headers
+
+    monkeypatch.delenv("JARVISE_JOBS_TOKEN", raising=False)
+    assert jobs_auth_headers() == {}
+    monkeypatch.setenv("JARVISE_JOBS_TOKEN", "t0k")
+    headers = jobs_auth_headers()
+    # jobs.py only checks X-Jarvise-Token.
+    assert headers["X-Jarvise-Token"] == "t0k"
+
+
 def test_api_pipeline_run(monkeypatch) -> None:
     _stub_control_deps(monkeypatch)
     monkeypatch.setattr(

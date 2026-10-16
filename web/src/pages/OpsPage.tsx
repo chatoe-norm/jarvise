@@ -22,6 +22,7 @@ import { RiskCapsControlCard } from "@/components/RiskCapsControlCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type StatusPayload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -50,6 +51,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const { confirm, dialog } = useConfirm();
 
   const [activeTab, setActiveTab] = useState<OpsTabId>(() => {
     if (typeof window !== "undefined") {
@@ -61,6 +64,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           "health",
           "universe",
           "auto_decide",
+          "models",
           "rules",
           "observability",
           "all",
@@ -73,11 +77,14 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
   });
 
   async function load() {
+    setRefreshing(true);
     try {
       setStatus(await api.status());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -93,6 +100,21 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
   };
 
   async function setKill(state: "on" | "off") {
+    const ok = await confirm(
+      state === "on"
+        ? {
+            title: "เปิด Kill-Switch?",
+            body: "หยุดการเติมคำสั่ง paper และการอนุมัติทั้งหมดจนกว่าจะปลดล็อก",
+            confirmLabel: "เปิด Kill-Switch",
+            tone: "danger",
+          }
+        : {
+            title: "ปลด Kill-Switch และกลับมาทำงาน?",
+            body: "ตรวจสอบสาเหตุที่ทำให้ระบบหยุดก่อน ตารางงาน paper อัตโนมัติจะกลับมาทำงานทันที",
+            confirmLabel: "ปลดล็อก",
+          },
+    );
+    if (!ok) return;
     setBusy(true);
     try {
       await api.killSwitch(state);
@@ -105,6 +127,17 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
     }
   }
 
+  const ksState = status?.kill_switch_state as
+    | { engaged?: boolean; known?: boolean; reason?: string | null; error?: string | null }
+    | undefined;
+  // known:false = Redis unreadable. Approvals fail closed, but it is not a confirmed engage.
+  const killMode: "loading" | "unknown" | "engaged" | "clear" = !status
+    ? "loading"
+    : ksState?.known === false
+      ? "unknown"
+      : status.kill_switch
+        ? "engaged"
+        : "clear";
   const qdrantPoints = (status?.qdrant as Record<string, unknown> | undefined)?.points;
   const isHealthy = status?.ingest_health?.ok;
 
@@ -207,14 +240,15 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         <Button
           variant="outline"
           size="sm"
-          disabled={busy}
+          disabled={refreshing}
           onClick={() => void load()}
-          className="border-[var(--color-border)] text-xs font-mono"
+          className="border-[var(--color-border)] text-xs font-mono h-11 sm:h-8"
         >
-          {busy ? "Polling…" : "↻ Refresh Telemetry"}
+          {refreshing ? "Polling…" : "↻ Refresh Telemetry"}
         </Button>
       </div>
 
+      {dialog}
       {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}
 
       {/* Emergency Market Safety Kill-Switch Compact Header */}
@@ -225,9 +259,13 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
               <div
                 className={cn(
                   "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
-                  status?.kill_switch
+                  killMode === "engaged"
                     ? "border-rose-500/50 bg-rose-500/15 text-rose-400 animate-pulse"
-                    : "border-emerald-500/50 bg-emerald-500/15 text-emerald-400",
+                    : killMode === "unknown"
+                      ? "border-amber-500/50 bg-amber-500/15 text-amber-400"
+                      : killMode === "clear"
+                        ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-400"
+                        : "border-[var(--color-border)] text-[var(--color-muted)]",
                 )}
               >
                 <Shield className="h-5 w-5" />
@@ -237,30 +275,41 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                   <span className="text-sm font-semibold text-[var(--color-foreground)]">
                     Market Safety Kill-Switch
                   </span>
-                  <Badge variant={status?.kill_switch ? "danger" : "ok"} className="text-[10px] py-0 px-1.5">
-                    {status?.kill_switch ? "ENGAGED" : "CLEAR · NORMAL"}
+                  <Badge
+                    variant={killMode === "engaged" ? "danger" : killMode === "clear" ? "ok" : "outline"}
+                    className="text-[10px] py-0 px-1.5"
+                  >
+                    {killMode === "engaged"
+                      ? "ENGAGED"
+                      : killMode === "unknown"
+                        ? "ไม่ทราบสถานะ"
+                        : killMode === "clear"
+                          ? "CLEAR · NORMAL"
+                          : "กำลังโหลด…"}
                   </Badge>
                 </div>
                 <div className="text-xs text-[var(--color-muted)] font-mono">
-                  {status?.kill_switch ? (
-                    <span className="text-rose-400">
-                      Circuit Breaker: {String((status as Record<string, unknown>).kill_switch_state ? ((status as Record<string, unknown>).kill_switch_state as Record<string, unknown>).reason || "Safety Triggered" : "Safety Triggered")}
+                  {killMode === "engaged" ? (
+                    <span className="text-rose-400">Circuit Breaker: {ksState?.reason || "Safety Triggered"}</span>
+                  ) : killMode === "unknown" ? (
+                    <span className="text-amber-400">
+                      อ่านสถานะจาก Redis ไม่ได้ ({ksState?.error || "redis"}) · การอนุมัติถูกบล็อกไว้ก่อน (fail-closed)
                     </span>
-                  ) : (
+                  ) : killMode === "clear" ? (
                     <span className="text-emerald-400/90">
                       All fail-closed guardrails active · Automated paper schedules permitted
                     </span>
-                  )}
+                  ) : null}
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
+            <div className="flex items-center gap-3 w-full sm:w-auto">
               <Button
                 variant="danger"
                 size="sm"
-                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-8"
-                disabled={busy || status?.kill_switch}
+                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9"
+                disabled={busy || killMode === "engaged" || killMode === "loading"}
                 onClick={() => void setKill("on")}
               >
                 Engage Kill-Switch
@@ -268,8 +317,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
               <Button
                 variant="ok"
                 size="sm"
-                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-8"
-                disabled={busy || !status?.kill_switch}
+                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9"
+                disabled={busy || killMode !== "engaged"}
                 onClick={() => void setKill("off")}
               >
                 Clear &amp; Resume

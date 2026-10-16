@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type BackfillPayload, type IngestHealthStatus } from "@/lib/api";
 import { relativeAge } from "@/lib/utils";
 
@@ -18,6 +19,7 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
   const [targetSymbol, setTargetSymbol] = useState("ALL");
   const [feedback, setFeedback] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
   const [backfillResult, setBackfillResult] = useState<BackfillPayload | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   const handleRunHealthCheck = async () => {
     setChecking(true);
@@ -38,6 +40,12 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
   };
 
   const handleStartBackfill = async () => {
+    const ok = await confirm({
+      title: "เริ่ม Backfill & Repair?",
+      body: `ดึงแท่ง ${selectedTf} ของ ${targetSymbol === "ALL" ? "ทุกคู่" : targetSymbol} ย้อนหลังตั้งแต่ ${sinceDate} และคำนวณ indicator ใหม่ทั้งชุด อาจใช้เวลาหลายนาที`,
+      confirmLabel: "เริ่ม Backfill",
+    });
+    if (!ok) return;
     setBackfilling(true);
     setFeedback(null);
     setBackfillResult(null);
@@ -65,10 +73,13 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
     }
   };
 
-  const symbolsList = health?.symbols ? Object.keys(health.symbols) : [];
+  const symbolRows =
+    health?.symbols && typeof health.symbols === "object" ? Object.entries(health.symbols) : [];
+  const symbolsList = symbolRows.map(([sym]) => sym);
 
   return (
     <Card className="border-[var(--color-border)]">
+      {dialog}
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
@@ -119,13 +130,13 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
         )}
 
         {/* Per-Symbol Matrix */}
-        {!health ? (
+        {!health || symbolRows.length === 0 ? (
           <div className="rounded-lg border border-[var(--color-border)] p-4 text-center text-sm text-[var(--color-muted)]">
             ยังไม่มีข้อมูลผลการตรวจ Ingest Health กรุณากดปุ่ม <b>"⚡ Run Health Check Now"</b> ด้านบน
           </div>
         ) : (
           <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-            {Object.entries(health.symbols).map(([sym, s]) => {
+            {symbolRows.map(([sym, s]) => {
               const emaReady = s.ema200_ready > 0;
               const isFresh = s.newest_age_min != null && s.newest_age_min <= 240;
               const hasGaps = s.gaps > 0;
@@ -173,7 +184,7 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
         )}
 
         {/* Active Alerts */}
-        {health?.alerts && health.alerts.length > 0 && (
+        {Array.isArray(health?.alerts) && health.alerts.length > 0 && (
           <div className="rounded-lg border border-amber-500/40 bg-amber-950/20 p-3 space-y-1 text-xs">
             <div className="font-semibold text-amber-300">⚠️ รายการที่ต้องดำเนินการแก้ไข (Alerts):</div>
             <ul className="list-disc space-y-0.5 pl-5 text-amber-200">

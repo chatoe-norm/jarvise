@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type RiskCapsPayload } from "@/lib/api";
+import { capsToRaw, validateRiskCaps, type RiskCapField } from "@/lib/riskCaps";
 
 interface RiskCapsControlCardProps {
   initialCaps?: Record<string, unknown> | null;
@@ -21,10 +22,18 @@ const DEFAULT_CAPS: RiskCapsPayload = {
 };
 
 export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlCardProps) {
-  const [caps, setCaps] = useState<RiskCapsPayload>(DEFAULT_CAPS);
-  const [savedCaps, setSavedCaps] = useState<RiskCapsPayload>(DEFAULT_CAPS);
+  // Inputs hold raw text so a cleared field is an error, never a silent 0.
+  const [raw, setRaw] = useState<Record<RiskCapField, string>>(() => capsToRaw(DEFAULT_CAPS));
+  const [savedRaw, setSavedRaw] = useState<Record<RiskCapField, string>>(() => capsToRaw(DEFAULT_CAPS));
+  // Until the server caps arrive the card shows defaults; saving those would overwrite real caps.
+  const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
+  const isDirty = JSON.stringify(raw) !== JSON.stringify(savedRaw);
+  const dirtyRef = useRef(isDirty);
+  dirtyRef.current = isDirty;
+  const { caps: validCaps, errors } = validateRiskCaps(raw);
+  const caps = raw;
 
   useEffect(() => {
     if (initialCaps) {
@@ -38,21 +47,20 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
         max_correlated_bucket_pct: Number(initialCaps.max_correlated_bucket_pct ?? DEFAULT_CAPS.max_correlated_bucket_pct),
         max_risk_per_trade_pct: Number(initialCaps.max_risk_per_trade_pct ?? DEFAULT_CAPS.max_risk_per_trade_pct),
       };
-      setCaps(merged);
-      setSavedCaps(merged);
+      const next = capsToRaw(merged);
+      setSavedRaw(next);
+      // A background refresh must not wipe edits the owner has not saved yet.
+      if (!dirtyRef.current) setRaw(next);
+      setLoaded(true);
     }
   }, [initialCaps]);
 
-  const isDirty = JSON.stringify(caps) !== JSON.stringify(savedCaps);
-
-  const handleFieldChange = (field: keyof RiskCapsPayload, value: string) => {
-    const num = parseFloat(value);
-    setCaps((prev) => ({
-      ...prev,
-      [field]: isNaN(num) ? 0 : field === "max_risk_per_trade_pct" ? Math.min(1.0, Math.max(0, num)) : num,
-    }));
+  const handleFieldChange = (field: RiskCapField, value: string) => {
+    setRaw((prev) => ({ ...prev, [field]: value }));
     setFeedback(null);
   };
+
+  const setCaps = (next: RiskCapsPayload) => setRaw(capsToRaw(next));
 
   const applyPreset = (preset: "default" | "liquid" | "conservative") => {
     if (preset === "default") {
@@ -84,13 +92,15 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
   };
 
   const handleSave = async () => {
+    if (!validCaps || !loaded) return;
     setSaving(true);
     setFeedback(null);
     try {
-      const res = await api.saveRiskCaps(caps);
+      const res = await api.saveRiskCaps(validCaps);
       if (res.ok && res.risk_caps) {
-        setSavedCaps(res.risk_caps);
-        setCaps(res.risk_caps);
+        const next = capsToRaw(res.risk_caps);
+        setSavedRaw(next);
+        setRaw(next);
         setFeedback({ type: "ok", msg: "บันทึกการตั้งค่า Risk Caps สำเร็จ และซิงค์ลง Redis/Engine เรียบร้อย" });
         onRefresh?.();
       } else {
@@ -104,9 +114,13 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
   };
 
   const handleReset = () => {
-    setCaps(savedCaps);
+    setRaw(savedRaw);
     setFeedback(null);
   };
+
+  const fieldError = (field: RiskCapField) =>
+    errors[field] ? <p className="text-[11px] font-semibold text-rose-400">{errors[field]}</p> : null;
+  const hasErrors = Object.keys(errors).length > 0;
 
   return (
     <Card className="border-[var(--color-border)]">
@@ -127,7 +141,7 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
                 Unsaved Changes
               </Badge>
             )}
-            <Badge variant="ok">Live Guardrails Active</Badge>
+            <Badge variant={loaded ? "ok" : "outline"}>{loaded ? "Guardrails Active" : "กำลังโหลดค่าจริง…"}</Badge>
           </div>
         </div>
       </CardHeader>
@@ -183,11 +197,12 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               id="cap_notional"
               type="number"
               step="100"
-              min="0"
+              min="0.01"
               value={caps.max_notional_per_order}
               onChange={(e) => handleFieldChange("max_notional_per_order", e.target.value)}
               className="w-full rounded-md border border-[var(--color-border)] bg-[#11161f] px-2.5 py-1.5 font-mono text-sm text-[var(--color-foreground)] focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
+            {fieldError("max_notional_per_order")}
             <p className="text-[11px] text-[var(--color-muted)]">เพดาน Notional สูงสุดต่อ 1 ไม้</p>
           </div>
 
@@ -203,11 +218,12 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               id="cap_daily_loss"
               type="number"
               step="10"
-              min="0"
+              min="0.01"
               value={caps.max_daily_loss_usd}
               onChange={(e) => handleFieldChange("max_daily_loss_usd", e.target.value)}
               className="w-full rounded-md border border-[var(--color-border)] bg-[#11161f] px-2.5 py-1.5 font-mono text-sm text-[var(--color-foreground)] focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
+            {fieldError("max_daily_loss_usd")}
             <p className="text-[11px] text-[var(--color-muted)]">ขาดทุนรายวันสูงสุดก่อนสั่งหยุด</p>
           </div>
 
@@ -223,12 +239,13 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               id="cap_drawdown"
               type="number"
               step="0.5"
-              min="0"
+              min="0.01"
               max="100"
               value={caps.drawdown_lock_pct}
               onChange={(e) => handleFieldChange("drawdown_lock_pct", e.target.value)}
               className="w-full rounded-md border border-[var(--color-border)] bg-[#11161f] px-2.5 py-1.5 font-mono text-sm text-[var(--color-foreground)] focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
+            {fieldError("drawdown_lock_pct")}
             <p className="text-[11px] text-[var(--color-muted)]">Drawdown รวมเทียบทุนเริ่มต้น</p>
           </div>
 
@@ -244,12 +261,13 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               id="cap_positions"
               type="number"
               step="1"
-              min="0"
+              min="1"
               max="20"
               value={caps.max_open_positions}
               onChange={(e) => handleFieldChange("max_open_positions", e.target.value)}
               className="w-full rounded-md border border-[var(--color-border)] bg-[#11161f] px-2.5 py-1.5 font-mono text-sm text-[var(--color-foreground)] focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
+            {fieldError("max_open_positions")}
             <p className="text-[11px] text-[var(--color-muted)]">จำนวน Position พร้อมกันสูงสุด</p>
           </div>
 
@@ -265,12 +283,13 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               id="cap_gross"
               type="number"
               step="1"
-              min="0"
+              min="0.01"
               max="100"
               value={caps.max_gross_notional_pct}
               onChange={(e) => handleFieldChange("max_gross_notional_pct", e.target.value)}
               className="w-full rounded-md border border-[var(--color-border)] bg-[#11161f] px-2.5 py-1.5 font-mono text-sm text-[var(--color-foreground)] focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
+            {fieldError("max_gross_notional_pct")}
             <p className="text-[11px] text-[var(--color-muted)]">รวม Notional ทุกตัวเทียบทุน</p>
           </div>
 
@@ -286,12 +305,13 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               id="cap_symbol"
               type="number"
               step="1"
-              min="0"
+              min="0.01"
               max="100"
               value={caps.max_symbol_notional_pct}
               onChange={(e) => handleFieldChange("max_symbol_notional_pct", e.target.value)}
               className="w-full rounded-md border border-[var(--color-border)] bg-[#11161f] px-2.5 py-1.5 font-mono text-sm text-[var(--color-foreground)] focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
+            {fieldError("max_symbol_notional_pct")}
             <p className="text-[11px] text-[var(--color-muted)]">Notional ต่อ 1 เหรียญเทียบทุน</p>
           </div>
 
@@ -307,12 +327,13 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               id="cap_bucket"
               type="number"
               step="1"
-              min="0"
+              min="0.01"
               max="100"
               value={caps.max_correlated_bucket_pct}
               onChange={(e) => handleFieldChange("max_correlated_bucket_pct", e.target.value)}
               className="w-full rounded-md border border-[var(--color-border)] bg-[#11161f] px-2.5 py-1.5 font-mono text-sm text-[var(--color-foreground)] focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
+            {fieldError("max_correlated_bucket_pct")}
             <p className="text-[11px] text-[var(--color-muted)]">กลุ่มเหรียญสัมพันธ์ (BTC+ETH)</p>
           </div>
 
@@ -328,12 +349,13 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               id="cap_risk_trade"
               type="number"
               step="0.05"
-              min="0"
+              min="0.01"
               max="1.0"
               value={caps.max_risk_per_trade_pct}
               onChange={(e) => handleFieldChange("max_risk_per_trade_pct", e.target.value)}
               className="w-full rounded-md border border-amber-500/40 bg-[#11161f] px-2.5 py-1.5 font-mono text-sm text-amber-200 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
+            {fieldError("max_risk_per_trade_pct")}
             <p className="text-[11px] text-amber-400/80">ความเสี่ยงต่อไม้ (ล็อกเพดานที่ 1.0%)</p>
           </div>
         </div>
@@ -369,13 +391,13 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             </Button>
             <Button
               type="button"
-              variant={isDirty ? "ok" : "outline"}
+              variant={isDirty && !hasErrors ? "ok" : "outline"}
               size="sm"
-              disabled={!isDirty || saving}
+              disabled={!isDirty || saving || hasErrors || !loaded}
               onClick={() => void handleSave()}
-              className="text-xs font-mono font-semibold"
+              className="text-xs font-mono font-semibold h-11 sm:h-8"
             >
-              {saving ? "กำลังบันทึก…" : "💾 บันทึก Risk Caps"}
+              {saving ? "กำลังบันทึก…" : hasErrors ? "แก้ช่องที่ผิดก่อนบันทึก" : "💾 บันทึก Risk Caps"}
             </Button>
           </div>
         </div>
