@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -12,7 +13,7 @@ from jarvise_ingest.db import SCHEMA_VERSION, db_pragmas, open_db
 from jarvise_ingest.retention import parse_age, prune, table_counts
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
+DEFAULT_DB = Path(os.environ.get("JARVISE_DB") or (REPO_ROOT / "data" / "analytics" / "jarvise.db"))
 
 db_app = typer.Typer(
     name="db",

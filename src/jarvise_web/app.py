@@ -824,6 +824,8 @@ def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: st
                         "2021-01-01",
                         "--skip-derivatives",
                         "--skip-book",
+                        "--db",
+                        str(path),
                     ]
                 )
                 ingest_main(
@@ -836,6 +838,8 @@ def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: st
                         "2021-01-01",
                         "--skip-derivatives",
                         "--skip-book",
+                        "--db",
+                        str(path),
                     ]
                 )
                 ingest_main(
@@ -847,6 +851,8 @@ def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: st
                         "--limit",
                         "200",
                         "--skip-derivatives",
+                        "--db",
+                        str(path),
                     ]
                 )
             else:
@@ -859,6 +865,8 @@ def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: st
                         "--limit",
                         "200",
                         "--skip-derivatives",
+                        "--db",
+                        str(path),
                     ]
                 )
                 ingest_main(
@@ -870,6 +878,8 @@ def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: st
                         "--limit",
                         "200",
                         "--skip-derivatives",
+                        "--db",
+                        str(path),
                     ]
                 )
                 ingest_main(
@@ -882,9 +892,11 @@ def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: st
                         "200",
                         "--skip-derivatives",
                         "--skip-book",
+                        "--db",
+                        str(path),
                     ]
                 )
-            analyze_main(["--symbol", sym, "--timeframe", timeframe, "--json"])
+            analyze_main(["--symbol", sym, "--timeframe", timeframe, "--db", str(path), "--json"])
             results.append(sym)
     finally:
         c.close()
