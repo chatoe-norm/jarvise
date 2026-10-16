@@ -1,4 +1,15 @@
 import { useEffect, useState } from "react";
+import {
+  Activity,
+  BarChart3,
+  BookOpen,
+  Bot,
+  Coins,
+  Layers,
+  Shield,
+  Sliders,
+  Workflow,
+} from "lucide-react";
 import { CryptoUniverseCard } from "@/components/CryptoUniverseCard";
 import { IngestHealthControlCard } from "@/components/IngestHealthControlCard";
 import { ObservabilityControlCard } from "@/components/ObservabilityControlCard";
@@ -8,13 +19,55 @@ import { QdrantTradingRulesCard } from "@/components/QdrantTradingRulesCard";
 import { RiskCapsControlCard } from "@/components/RiskCapsControlCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { api, type StatusPayload } from "@/lib/api";
+import { cn } from "@/lib/utils";
+
+type OpsTabId =
+  | "risk"
+  | "pipeline"
+  | "health"
+  | "universe"
+  | "auto_decide"
+  | "rules"
+  | "observability"
+  | "all";
+
+interface OpsTab {
+  id: OpsTabId;
+  label: string;
+  labelTh: string;
+  icon: React.ComponentType<{ className?: string }>;
+  badge?: string;
+  badgeVariant?: "ok" | "danger" | "outline" | "default" | "muted";
+  indicatorColor?: string;
+}
 
 export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const [activeTab, setActiveTab] = useState<OpsTabId>(() => {
+    if (typeof window !== "undefined") {
+      const hash = window.location.hash.replace("#", "").toLowerCase() as OpsTabId;
+      if (
+        [
+          "risk",
+          "pipeline",
+          "health",
+          "universe",
+          "auto_decide",
+          "rules",
+          "observability",
+          "all",
+        ].includes(hash)
+      ) {
+        return hash;
+      }
+    }
+    return "risk";
+  });
 
   async function load() {
     try {
@@ -29,6 +82,13 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
     void load();
   }, []);
 
+  const handleTabChange = (tab: OpsTabId) => {
+    setActiveTab(tab);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", `#${tab}`);
+    }
+  };
+
   async function setKill(state: "on" | "off") {
     setBusy(true);
     try {
@@ -42,8 +102,87 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
     }
   }
 
+  const qdrantPoints = (status?.qdrant as Record<string, unknown> | undefined)?.points;
+  const isHealthy = status?.ingest_health?.ok;
+
+  const tabs: OpsTab[] = [
+    {
+      id: "risk",
+      label: "Risk Caps",
+      labelTh: "เพดานความเสี่ยง",
+      icon: Sliders,
+      badge: "Enforced",
+      badgeVariant: "ok",
+      indicatorColor: "bg-emerald-400",
+    },
+    {
+      id: "pipeline",
+      label: "Pipeline & Jobs",
+      labelTh: "ไปป์ไลน์ & Jobs",
+      icon: Workflow,
+      badge: "7 Jobs",
+      badgeVariant: "outline",
+      indicatorColor: "bg-violet-400",
+    },
+    {
+      id: "health",
+      label: "Ingest Health",
+      labelTh: "สุขภาพแท่งเทียน",
+      icon: Activity,
+      badge: isHealthy == null ? undefined : isHealthy ? "OK" : "Alert",
+      badgeVariant: isHealthy == null ? "outline" : isHealthy ? "ok" : "danger",
+      indicatorColor: isHealthy ? "bg-emerald-400" : "bg-rose-400",
+    },
+    {
+      id: "universe",
+      label: "Universe",
+      labelTh: "พอร์ตเหรียญ",
+      icon: Coins,
+      badge: "Crypto",
+      badgeVariant: "outline",
+      indicatorColor: "bg-amber-400",
+    },
+    {
+      id: "auto_decide",
+      label: "Auto-Decide",
+      labelTh: "AI Autotrade",
+      icon: Bot,
+      badge: status?.auto_decide_config?.enabled ? "AI ON" : "AI OFF",
+      badgeVariant: status?.auto_decide_config?.enabled ? "ok" : "muted",
+      indicatorColor: status?.auto_decide_config?.enabled ? "bg-emerald-400" : "bg-slate-400",
+    },
+    {
+      id: "rules",
+      label: "Trading Rules",
+      labelTh: "กฎการเทรด RAG",
+      icon: BookOpen,
+      badge: qdrantPoints != null ? `${String(qdrantPoints)} pts` : "Qdrant",
+      badgeVariant: "outline",
+      indicatorColor: "bg-blue-400",
+    },
+    {
+      id: "observability",
+      label: "Observability",
+      labelTh: "การตรวจวัด",
+      icon: BarChart3,
+      badge: "Live",
+      badgeVariant: "ok",
+      indicatorColor: "bg-cyan-400",
+    },
+    {
+      id: "all",
+      label: "View All",
+      labelTh: "แสดงทั้งหมด",
+      icon: Layers,
+      badge: "Full",
+      badgeVariant: "muted",
+      indicatorColor: "bg-slate-400",
+    },
+  ];
+
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-5 max-w-7xl mx-auto">
+      {/* Top Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-[var(--color-foreground)]">
@@ -66,40 +205,49 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
 
       {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}
 
-      {/* Market Safety Kill-Switch */}
-      <Card className="border-[var(--color-border)]">
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle>Market Safety Kill-Switch</CardTitle>
-            <Badge variant={status?.kill_switch ? "danger" : "ok"}>
-              {status?.kill_switch ? "ENGAGED — Pipeline Blocked" : "CLEAR — Systems Nominal"}
-            </Badge>
-          </div>
-          <CardDescription>
-            Master circuit breaker. When engaged, automated paper schedules are paused and order placement is blocked.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/40 p-4">
-            <div className="space-y-1">
-              <div className="text-xs text-[var(--color-muted)]">Circuit Breaker Status</div>
-              <div className="text-sm font-medium">
-                {status?.kill_switch ? (
-                  <span className="text-rose-400 font-mono">
-                    Engaged: {(status as Record<string, unknown>).kill_switch_state ? String(((status as Record<string, unknown>).kill_switch_state as Record<string, unknown>).reason || "Safety Triggered") : "Safety Triggered"}
-                  </span>
-                ) : (
-                  <span className="text-[var(--color-ok)] font-mono">
-                    Normal · All fail-closed safety checks green
-                  </span>
+      {/* Emergency Market Safety Kill-Switch Compact Header */}
+      <Card className="border-[var(--color-border)] bg-[var(--color-card)]/40">
+        <CardContent className="p-3.5 sm:p-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div
+                className={cn(
+                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
+                  status?.kill_switch
+                    ? "border-rose-500/50 bg-rose-500/15 text-rose-400 animate-pulse"
+                    : "border-emerald-500/50 bg-emerald-500/15 text-emerald-400",
                 )}
+              >
+                <Shield className="h-5 w-5" />
+              </div>
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-[var(--color-foreground)]">
+                    Market Safety Kill-Switch
+                  </span>
+                  <Badge variant={status?.kill_switch ? "danger" : "ok"} className="text-[10px] py-0 px-1.5">
+                    {status?.kill_switch ? "ENGAGED" : "CLEAR · NORMAL"}
+                  </Badge>
+                </div>
+                <div className="text-xs text-[var(--color-muted)] font-mono">
+                  {status?.kill_switch ? (
+                    <span className="text-rose-400">
+                      Circuit Breaker: {String((status as Record<string, unknown>).kill_switch_state ? ((status as Record<string, unknown>).kill_switch_state as Record<string, unknown>).reason || "Safety Triggered" : "Safety Triggered")}
+                    </span>
+                  ) : (
+                    <span className="text-emerald-400/90">
+                      All fail-closed guardrails active · Automated paper schedules permitted
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
+
             <div className="flex items-center gap-2 w-full sm:w-auto">
               <Button
                 variant="danger"
                 size="sm"
-                className="flex-1 sm:flex-initial"
+                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-8"
                 disabled={busy || status?.kill_switch}
                 onClick={() => void setKill("on")}
               >
@@ -108,7 +256,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
               <Button
                 variant="ok"
                 size="sm"
-                className="flex-1 sm:flex-initial"
+                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-8"
                 disabled={busy || !status?.kill_switch}
                 onClick={() => void setKill("off")}
               >
@@ -119,45 +267,107 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         </CardContent>
       </Card>
 
-      {/* 1. Risk Caps & Guardrails (Control / Settings Component) */}
-      <RiskCapsControlCard
-        initialCaps={status?.risk_caps}
-        onRefresh={() => void load()}
-      />
+      {/* Tablet & Desktop Tab Menu Bar */}
+      <div className="rounded-xl border border-[var(--color-border)] bg-[#0d121a]/90 p-1.5 shadow-sm backdrop-blur-md">
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 sm:flex-wrap">
+          {tabs.map((t) => {
+            const isActive = activeTab === t.id;
+            const Icon = t.icon;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => handleTabChange(t.id)}
+                className={cn(
+                  "group relative flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-all duration-150 cursor-pointer",
+                  isActive
+                    ? "bg-[#18202c] text-[var(--color-foreground)] shadow-sm border border-[var(--color-border)] font-semibold"
+                    : "text-[var(--color-muted)] hover:bg-[var(--color-card)]/50 hover:text-[var(--color-foreground)] border border-transparent",
+                )}
+              >
+                <Icon
+                  className={cn(
+                    "h-3.5 w-3.5 shrink-0 transition-colors",
+                    isActive
+                      ? "text-[var(--color-accent)]"
+                      : "text-[var(--color-muted)] group-hover:text-[var(--color-foreground)]",
+                  )}
+                />
+                <span>{t.label}</span>
+                {t.badge && (
+                  <Badge
+                    variant={t.badgeVariant ?? "outline"}
+                    className={cn(
+                      "text-[10px] py-0 px-1.5 font-mono",
+                      !isActive && "opacity-75",
+                    )}
+                  >
+                    {t.badge}
+                  </Badge>
+                )}
+                {isActive && (
+                  <span
+                    className={cn(
+                      "absolute -bottom-1.5 left-1/2 h-0.5 w-6 -translate-x-1/2 rounded-full",
+                      t.indicatorColor || "bg-[var(--color-accent)]",
+                    )}
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
-      {/* 2. Observability (Live Telemetry & Snapshot Controls) */}
-      <ObservabilityControlCard
-        onRefresh={() => void load()}
-      />
+      {/* Tab Panels */}
+      <div className="space-y-6">
+        {(activeTab === "risk" || activeTab === "all") && (
+          <RiskCapsControlCard
+            initialCaps={status?.risk_caps}
+            onRefresh={() => void load()}
+          />
+        )}
 
-      {/* 3. Pipeline (Interactive Job Controllers & Execution Triggers) */}
-      <PipelineControlCard
-        statusPayload={status as unknown as Record<string, unknown>}
-        onRefresh={() => void load()}
-      />
+        {(activeTab === "pipeline" || activeTab === "all") && (
+          <PipelineControlCard
+            statusPayload={status as unknown as Record<string, unknown>}
+            onRefresh={() => void load()}
+          />
+        )}
 
-      {/* Crypto Universe Management */}
-      <CryptoUniverseCard />
+        {(activeTab === "health" || activeTab === "all") && (
+          <IngestHealthControlCard
+            health={status?.ingest_health}
+            onRefresh={() => void load()}
+          />
+        )}
 
-      {/* 4. Ingest Health & One-Click Data Repair */}
-      <IngestHealthControlCard
-        health={status?.ingest_health}
-        onRefresh={() => void load()}
-      />
+        {(activeTab === "universe" || activeTab === "all") && (
+          <CryptoUniverseCard />
+        )}
 
-      {/* Paper Auto-Decide (AI Autotrade Toggle & Risk Control) */}
-      <PaperAutoDecideCard
-        auto={status?.paper_auto}
-        initialConfig={status?.auto_decide_config}
-        onRefresh={() => void load()}
-      />
+        {(activeTab === "auto_decide" || activeTab === "all") && (
+          <PaperAutoDecideCard
+            auto={status?.paper_auto}
+            initialConfig={status?.auto_decide_config}
+            onRefresh={() => void load()}
+          />
+        )}
 
-      {/* Qdrant Trading Rules & Query Tester */}
-      <QdrantTradingRulesCard
-        qdrant={status?.qdrant}
-        ragStatus={status?.rag}
-        onRefresh={() => void load()}
-      />
+        {(activeTab === "rules" || activeTab === "all") && (
+          <QdrantTradingRulesCard
+            qdrant={status?.qdrant}
+            ragStatus={status?.rag}
+            onRefresh={() => void load()}
+          />
+        )}
+
+        {(activeTab === "observability" || activeTab === "all") && (
+          <ObservabilityControlCard
+            onRefresh={() => void load()}
+          />
+        )}
+      </div>
     </div>
   );
 }
