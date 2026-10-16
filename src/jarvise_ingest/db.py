@@ -1674,6 +1674,100 @@ def universe_as_of(conn: sqlite3.Connection, universe_id: str, as_of_ms: int) ->
     return [str(row[0]) for row in cur.fetchall()]
 
 
+def list_universe_memberships(
+    conn: sqlite3.Connection,
+    universe_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """List memberships from universe_membership, optionally filtered by universe_id."""
+    if universe_id:
+        cur = conn.execute(
+            """
+            SELECT universe_id, symbol, asset_class, listed_at, delisted_at
+            FROM universe_membership
+            WHERE universe_id=?
+            ORDER BY symbol
+            """,
+            (universe_id,),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT universe_id, symbol, asset_class, listed_at, delisted_at
+            FROM universe_membership
+            ORDER BY universe_id, symbol
+            """
+        )
+    return [
+        {
+            "universe_id": str(r[0]),
+            "symbol": str(r[1]),
+            "asset_class": str(r[2]),
+            "listed_at": int(r[3]),
+            "delisted_at": int(r[4]) if r[4] is not None else None,
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def add_universe_symbol(
+    conn: sqlite3.Connection,
+    *,
+    universe_id: str,
+    symbol: str,
+    asset_class: str = "crypto",
+    listed_at: int = 1_609_459_200_000,
+) -> bool:
+    """Add or re-activate a symbol in a universe."""
+    sym = symbol.strip().upper()
+    if not sym:
+        return False
+    # Clear any previous entry for this exact pair in the universe to avoid duplication/stale delisted
+    conn.execute(
+        "DELETE FROM universe_membership WHERE universe_id=? AND symbol=?",
+        (universe_id, sym),
+    )
+    conn.execute(
+        """
+        INSERT INTO universe_membership (universe_id, symbol, asset_class, listed_at, delisted_at)
+        VALUES (?, ?, ?, ?, NULL)
+        """,
+        (universe_id, sym, asset_class, listed_at),
+    )
+    conn.commit()
+    return True
+
+
+def remove_universe_symbol(
+    conn: sqlite3.Connection,
+    *,
+    universe_id: str,
+    symbol: str,
+) -> bool:
+    """Remove a symbol from a universe."""
+    sym = symbol.strip().upper()
+    if not sym:
+        return False
+    cur = conn.execute(
+        "DELETE FROM universe_membership WHERE universe_id=? AND symbol=?",
+        (universe_id, sym),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def list_all_known_symbols(conn: sqlite3.Connection) -> list[str]:
+    """Union of symbols present in universe_membership and market_technicals."""
+    cur = conn.execute(
+        """
+        SELECT DISTINCT symbol FROM universe_membership
+        UNION
+        SELECT DISTINCT symbol FROM market_technicals
+        ORDER BY symbol
+        """
+    )
+    return [str(r[0]) for r in cur.fetchall()]
+
+
 _APPROVAL_COLUMNS = """
     id, created_at_ms, expires_at_ms, symbol, timeframe, analysis_id,
     action, regime_state, confidence_score, size_pct_equity, invalidation_price, status,

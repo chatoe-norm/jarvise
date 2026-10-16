@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CryptoUniverseCard } from "@/components/CryptoUniverseCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -360,6 +361,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           ) : null}
         </CardContent>
       </Card>
+
+      <CryptoUniverseCard />
 
       <IngestHealthCard health={status?.ingest_health} />
 

@@ -95,3 +95,32 @@ def test_universe_as_of_unknown_universe_is_empty(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "t.db")
     assert universe_as_of(conn, "nope", as_of_ms=1_700_000_000_000) == []
     conn.close()
+
+
+def test_universe_add_remove_and_list_memberships(tmp_path: Path) -> None:
+    from jarvise_ingest.db import (
+        add_universe_symbol,
+        list_all_known_symbols,
+        list_universe_memberships,
+        remove_universe_symbol,
+    )
+
+    conn = open_db(tmp_path / "t.db")
+    assert add_universe_symbol(conn, universe_id="paper_liquid", symbol="ADAUSDT") is True
+    assert add_universe_symbol(conn, universe_id="paper_liquid", symbol="XRPUSDT") is True
+
+    items = list_universe_memberships(conn, universe_id="paper_liquid")
+    symbols = [item["symbol"] for item in items]
+    assert "ADAUSDT" in symbols
+    assert "XRPUSDT" in symbols
+
+    known = list_all_known_symbols(conn)
+    assert "ADAUSDT" in known
+
+    # Remove ADAUSDT
+    assert remove_universe_symbol(conn, universe_id="paper_liquid", symbol="ADAUSDT") is True
+    items_after = list_universe_memberships(conn, universe_id="paper_liquid")
+    symbols_after = [item["symbol"] for item in items_after]
+    assert "ADAUSDT" not in symbols_after
+    assert "XRPUSDT" in symbols_after
+    conn.close()
