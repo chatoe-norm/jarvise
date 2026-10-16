@@ -37,7 +37,6 @@ from jarvise_ingest.db import (
     list_analysis_outcomes,
     list_analysis_output,
     list_approvals,
-    list_universe_memberships,
     load_candle_at,
     load_latest_analysis,
     load_latest_candle,
