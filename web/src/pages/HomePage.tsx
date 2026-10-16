@@ -3,7 +3,8 @@ import { ApprovalQueue } from "@/components/ApprovalQueue";
 import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { DashboardPayload, NewsHome, PaperAutoStatus, StatusPayload } from "@/lib/api";
+import { MarketContextCard } from "@/components/MarketContextCard";
+import type { DashboardPayload, NewsHome, PaperAutoStatus } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
 import { cn, formatNum, relativeAge } from "@/lib/utils";
 
@@ -53,13 +54,6 @@ function kindVariant(
       return _exhaustive;
     }
   }
-}
-
-function fngBand(value: number): string {
-  if (value < 25) return "กลัวสุดขีด (Extreme Fear)";
-  if (value < 50) return "กลัว (Fear)";
-  if (value < 75) return "โลภ (Greed)";
-  return "โลภสุดขีด (Extreme Greed)";
 }
 
 function ActivePositionsCard({
@@ -224,51 +218,6 @@ function ActivePositionsCard({
               })}
             </tbody>
           </table>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function MarketContextCard({ status }: { status: StatusPayload }) {
-  const fng = status.fear_greed_index;
-  const hasFng = typeof fng === "number" && Number.isFinite(fng);
-  const alt = status.altcoin_season_index;
-  const hasAlt = typeof alt === "number" && Number.isFinite(alt);
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Market Context</CardTitle>
-        <CardDescription>
-          Macro sentiment &amp; dominance context (not a directional trade signal)
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4 sm:grid-cols-2 text-sm">
-        <div className="rounded-lg border border-[var(--color-border)] p-3">
-          <div className="text-xs text-[var(--color-muted)]">Fear &amp; Greed Index</div>
-          {hasFng ? (
-            <div className="mt-1.5 flex flex-wrap items-center gap-2">
-              <span className="text-2xl font-bold tabular-nums font-mono">{fng}</span>
-              <Badge variant="muted">{fngBand(fng)}</Badge>
-            </div>
-          ) : (
-            <p className="mt-1 text-[var(--color-muted)]">{status.sentiment_note || "ไม่มีข้อมูล"}</p>
-          )}
-        </div>
-        <div className="rounded-lg border border-[var(--color-border)] p-3">
-          <div className="text-xs text-[var(--color-muted)]">Altcoin Season Index</div>
-          <div className="mt-1.5">
-            {hasAlt ? (
-              <span className="text-2xl font-bold tabular-nums font-mono text-[var(--color-foreground)]">
-                {alt}
-              </span>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-[var(--color-muted)]">Bitcoin Dominant</span>
-                <Badge variant="outline" className="text-[10px]">Macro Context</Badge>
-              </div>
-            )}
-          </div>
         </div>
       </CardContent>
     </Card>
@@ -479,7 +428,11 @@ export function HomePage({
       <ActivePositionsCard positions={positions} />
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <MarketContextCard status={data.status} />
+        <MarketContextCard
+          status={data.status}
+          news={data.news}
+          approvals={data.approvals}
+        />
         <NewsCard news={data.news} />
       </div>
     </div>
