@@ -88,3 +88,41 @@ def test_gdelt_failure_keeps_other_themes() -> None:
     assert any(err.startswith("fed:") for err in errors)
     assert {event["theme"] for event in events} == {"chips_ai", "geopolitics", "people"}
     assert {event["day"] for event in events} == {"2024-01-02"}
+
+
+def test_parse_digest_text_and_format_executive_lines() -> None:
+    from jarvise_context.news_reaction import context_lines
+    from jarvise_context.news_sources import parse_digest_text
+
+    sample_md = """# Digest
+1. **NVIDIA — $250M UK compute donation** — 2026-10-14
+   https://nvidia.com/news
+   Primary release: UK AI research safety spend. Frontier-lab capex tracks crypto risk appetite.
+
+2. **US dollar soft as focus turns to CPI and Fed speakers** — 2026-10-14
+   https://cnbc.com/news
+   CNBC: markets await CPI. Rate-path data is the macro backdrop.
+"""
+    items = parse_digest_text(sample_md)
+    assert len(items) == 2
+    assert items[0]["theme"] == "chips_ai"
+    assert "NVIDIA" in items[0]["title"]
+    assert items[1]["theme"] == "fed"
+
+    summary = {
+        "combined": {"label": "รวมทุกธีม", "event_days": 1},
+        "themes": [
+            {
+                "theme": "chips_ai",
+                "label": "ชิปและ AI",
+                "event_days": 1,
+                "symbols": {
+                    "BTCUSDT": {"horizon_1d": {"n": 1, "median_pct": 0.69}},
+                },
+            }
+        ],
+    }
+    lines = context_lines(summary, digest_items=items)
+    assert lines[0] == "บริบทข่าว ไม่ใช่สัญญาณ"
+    assert any("ชิปและ AI" in line and "→" in line for line in lines)
+    assert any("ธนาคารกลางสหรัฐ" in line and "→" in line for line in lines)

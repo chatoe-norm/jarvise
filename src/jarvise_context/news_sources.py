@@ -33,10 +33,24 @@ THEME_QUERIES: tuple[tuple[str, str], ...] = (
 )
 
 _THEME_WORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("chips_ai", ("nvidia", "amd", "tsmc", "asml", "samsung", "openai", "anthropic", "microsoft", "google")),
-    ("geopolitics", ("iran", "china", "india", "japan", "europe", "usa")),
-    ("fed", ("federal reserve", "fomc", "policy rate")),
-    ("people", ("elon musk", "sam altman", "michael saylor", "vitalik", "donald trump")),
+    (
+        "chips_ai",
+        (
+            "nvidia",
+            "amd",
+            "tsmc",
+            "asml",
+            "samsung",
+            "openai",
+            "anthropic",
+            "microsoft",
+            "google",
+            "ai model",
+        ),
+    ),
+    ("geopolitics", ("iran", "china", "india", "japan", "europe", "usa", "russia", "hormuz", "washington")),
+    ("fed", ("federal reserve", "fomc", "policy rate", "fed", "cpi", "inflation", "bowman", "interest rate")),
+    ("people", ("elon musk", "sam altman", "michael saylor", "saylor", "vitalik", "donald trump", "trump")),
 )
 
 _DIGEST_NAME = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -85,6 +99,7 @@ def news_home_view(report: dict[str, Any] | None) -> dict[str, Any]:
         "available": True,
         "lines": [str(line) for line in (report.get("lines") or []) if str(line).strip()],
         "digest_note": report.get("digest_note"),
+        "digest_items": report.get("digest_items") or [],
         "errors": [str(err) for err in (report.get("errors") or [])],
         "generated_at_ms": report.get("generated_at_ms"),
         "window_years": report.get("window_years"),
@@ -179,6 +194,65 @@ def load_daily_candles(conn: Any, symbol: str) -> list[dict[str, Any]]:
     return rows
 
 
+def parse_digest_text(content: str) -> list[dict[str, Any]]:
+    """Parse structured news items from an OpenClaw digest markdown file."""
+    if not content or not content.strip():
+        return []
+    blocks = re.split(r"\n(?=\d+\.\s+\*\*)", content)
+    items: list[dict[str, Any]] = []
+    for b in blocks:
+        m = re.match(r"^\d+\.\s+\*\*(.*?)\*\*(?:[^\n]*)?\n(.*)", b.strip(), re.DOTALL)
+        if not m:
+            continue
+        title = m.group(1).strip()
+        title = re.sub(r"\s*[—–-]\s*\d{4}-\d{2}-\d{2}.*", "", title).strip()
+        body = m.group(2).strip()
+        url = ""
+        comment_lines = []
+        for line in body.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("Not a trade signal"):
+                continue
+            if line.startswith("http://") or line.startswith("https://"):
+                url = line
+            else:
+                comment_lines.append(line)
+        comment = " ".join(comment_lines)
+        scores: dict[str, int] = {}
+        for theme, words in _THEME_WORDS:
+            score = 0
+            for w in words:
+                if w in title.lower():
+                    score += 3
+                if w in comment.lower():
+                    score += 1
+            scores[theme] = score
+        best_theme = max(scores, key=lambda k: scores[k]) if scores else "digest"
+        if scores[best_theme] == 0:
+            best_theme = "digest"
+        items.append(
+            {
+                "theme": best_theme,
+                "title": title,
+                "url": url,
+                "comment": comment,
+            }
+        )
+    return items
+
+
+def parse_digest_items_from_dir(directory: Path) -> list[dict[str, Any]]:
+    """Parse items from the latest digest markdown file in directory."""
+    if not directory.is_dir():
+        return []
+    md_files = sorted(directory.glob("*.md"))
+    if not md_files:
+        return []
+    latest_file = md_files[-1]
+    text = latest_file.read_text(encoding="utf-8", errors="replace")
+    return parse_digest_text(text)
+
+
 def build_report(
     *,
     events: list[dict[str, Any]],
@@ -187,6 +261,7 @@ def build_report(
     digest_note: str | None,
     digest_dir: str,
     now_ms: int,
+    digest_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     summary = summarize_reactions(events, candles_by_symbol)
     return {
@@ -198,10 +273,11 @@ def build_report(
         "generated_at_ms": now_ms,
         "digest_dir": digest_dir,
         "digest_note": digest_note,
+        "digest_items": digest_items or [],
         "errors": errors,
         "theme_labels": THEME_LABELS,
         **summary,
-        "lines": context_lines(summary),
+        "lines": context_lines(summary, digest_items=digest_items),
     }
 
 
@@ -234,6 +310,7 @@ def run_news_reaction(
     moment = now or datetime.now(tz=UTC)
     folder = digest_dir if digest_dir is not None else default_digest_dir()
     digest_events, digest_note = read_digests(folder)
+    digest_items = parse_digest_items_from_dir(folder)
     gdelt_events, errors = fetch_gdelt(now=moment, client=client)
     candles: dict[str, list[dict[str, Any]]] = {}
     if conn is None:
@@ -252,6 +329,7 @@ def run_news_reaction(
         digest_note=digest_note,
         digest_dir=str(folder),
         now_ms=int(moment.timestamp() * 1000),
+        digest_items=digest_items,
     )
     write_report(report_path or default_report_path(), report)
     return report

@@ -297,6 +297,12 @@ export type NewsHome = {
   available?: boolean;
   lines?: string[];
   digest_note?: string | null;
+  digest_items?: Array<{
+    theme: string;
+    title: string;
+    url?: string;
+    comment?: string;
+  }> | null;
   errors?: string[];
   generated_at_ms?: number | null;
   window_years?: number | null;

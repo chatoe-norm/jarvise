@@ -278,22 +278,77 @@ function MarketContextCard({ status }: { status: StatusPayload }) {
 function NewsCard({ news }: { news: NewsHome | null | undefined }) {
   const lines = news?.lines?.length ? news.lines : ["ยังไม่มีรายงานข่าวรอบล่าสุด"];
   const when = news?.generated_at_ms != null ? relativeAge(news.generated_at_ms) : null;
+  const disclaimer = lines[0] === "บริบทข่าว ไม่ใช่สัญญาณ" ? lines[0] : null;
+  const contentLines = disclaimer ? lines.slice(1) : lines;
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Intelligence &amp; News Digest</CardTitle>
+    <Card className="border-[var(--color-border)]">
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CardTitle className="text-base font-semibold">Intelligence &amp; News Digest</CardTitle>
+            <Badge variant="muted">บริบทข่าว ไม่ใช่สัญญาณ</Badge>
+          </div>
+          <span className="text-xs text-[var(--color-muted)]">
+            {news?.window_years != null ? `ย้อน ${news.window_years} ปี` : ""}
+            {when ? ` · ${when}` : ""}
+          </span>
+        </div>
         <CardDescription>
-          OpenClaw / n8n news digest context
-          {news?.window_years != null ? ` · ย้อน ${news.window_years} ปี` : ""}
-          {when ? ` · ${when}` : ""}
+          สรุปประเด็นข่าวเฝ้าระวังจาก OpenClaw พร้อมบริบทผลกระทบต่อตลาด (Context only, Not a trade signal)
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-2 text-sm">
-        <ul className="list-disc space-y-1.5 pl-5 text-[var(--color-foreground)]/90">
-          {lines.map((line) => (
-            <li key={line}>{line}</li>
-          ))}
-        </ul>
+      <CardContent className="space-y-3 text-sm">
+        {contentLines.length === 0 ? (
+          <p className="text-sm text-[var(--color-muted)]">ยังไม่มีรายงานข่าวรอบล่าสุด</p>
+        ) : (
+          <div className="space-y-2.5">
+            {contentLines.map((line, idx) => {
+              const colonIdx = line.indexOf(":");
+              const arrowIdx = line.indexOf("→");
+              if (colonIdx > 0 && arrowIdx > colonIdx) {
+                const theme = line.slice(0, colonIdx).trim();
+                const headline = line.slice(colonIdx + 1, arrowIdx).trim();
+                const rest = line.slice(arrowIdx + 1).trim();
+                const statMatch = rest.match(/^(.*?)\s*(\([^)]*(?:BTC|ETH|วันถัดไป)[^)]*\))$/);
+                const impactText = statMatch ? statMatch[1] : rest;
+                const statText = statMatch ? statMatch[2] : null;
+                return (
+                  <div
+                    key={idx}
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-card)]/60 p-2.5 space-y-1.5"
+                  >
+                    <div className="flex flex-wrap items-baseline gap-1.5">
+                      <span className="font-semibold text-xs text-[var(--color-accent)] uppercase tracking-wide">
+                        {theme}:
+                      </span>
+                      <span className="text-xs font-medium text-[var(--color-foreground)]">
+                        {headline}
+                      </span>
+                    </div>
+                    <div className="text-xs text-[var(--color-muted)] flex flex-wrap items-center justify-between gap-2 pl-2 border-l-2 border-[var(--color-border)]">
+                      <div className="flex items-start gap-1.5 flex-1 min-w-[200px]">
+                        <span className="text-[var(--color-accent)] font-bold">→</span>
+                        <span>{impactText}</span>
+                      </div>
+                      {statText ? (
+                        <span className="shrink-0 text-[10px] font-mono text-[var(--color-muted)] bg-[var(--color-border)]/50 px-1.5 py-0.5 rounded">
+                          {statText}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              }
+              return (
+                <div key={idx} className="text-xs text-[var(--color-foreground)]/90 flex items-start gap-2">
+                  <span className="text-[var(--color-muted)]">•</span>
+                  <span>{line}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
         {news?.digest_note ? (
           <p className="text-xs text-[var(--color-muted)] italic pt-1">{news.digest_note}</p>
         ) : null}
