@@ -990,27 +990,38 @@ async def api_rag_sync(
     request: Request,
     _: None = Depends(require_auth),
 ) -> Any:
-    def _execute_rag() -> dict[str, Any]:
-        from jarvise import rag as ragmod
+    jobs_url = os.environ.get("JARVISE_JOBS_URL") or "http://jobs:8090"
+    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    data: dict[str, Any]
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(f"{jobs_url}/jobs/rag-refresh", headers=headers)
+            if resp.status_code in (200, 202):
+                data = resp.json()
+            else:
+                data = {"ok": False, "status_code": resp.status_code, "error": resp.text[:500]}
+    except Exception as exc:
+        try:
+            from jarvise import rag as ragmod
 
-        nb_res = ragmod.sync_notebook()
-        ragmod.publish_redis_status("jarvise:rag:notebook", nb_res)
-        idx_res = ragmod.index_sources()
-        payload = {
-            "ok": bool(idx_res.get("ok")),
-            "notebook": nb_res,
-            "index": idx_res,
-            "profile": "chatoe",
-            "notebook_id": "14e11c63-e2ee-4b49-898f-b0cc4c61cb4e",
-            "url": "https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e",
-            "at": ragmod.utc_now_iso(),
-        }
-        ragmod.publish_redis_status("jarvise:rag:last", payload)
-        return payload
+            nb_res = await asyncio.to_thread(ragmod.sync_notebook)
+            idx_res = await asyncio.to_thread(ragmod.index_sources)
+            data = {
+                "ok": bool(idx_res.get("ok")),
+                "notebook": nb_res,
+                "index": idx_res,
+                "profile": "chatoe",
+            }
+        except Exception as local_exc:
+            data = {"ok": False, "error": f"jobs failed ({exc}); local fallback failed ({local_exc})"}
 
-    res = await asyncio.to_thread(_execute_rag)
+    data["notebook_id"] = "14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
+    data["url"] = "https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
+    data["profile"] = "chatoe"
+
     if wants_json(request):
-        return JSONResponse(res)
+        return JSONResponse(data)
     return RedirectResponse("/ops", status_code=303)
 
 
