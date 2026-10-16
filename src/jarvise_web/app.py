@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
+from jarvise.model_routing import load_model_routing_matrix
 from jarvise_analyze.explain import confidence_breakdown
 from jarvise_analyze.suitability import evaluate_symbol_suitability
 from jarvise_context.news_sources import load_report, news_home_view
@@ -1170,6 +1171,12 @@ async def api_paper_auto_decide_get_config(_: None = Depends(require_auth)) -> d
         "hard_max_risk_pct": HARD_MAX_RISK_PER_TRADE_PCT,
         "model": cfg.model,
     }
+
+
+@app.get("/api/openclaw/model-routing")
+async def api_openclaw_model_routing(_: None = Depends(require_auth)) -> Any:
+    """Returns the OpenRouter Multi-Tier Model Routing Matrix for all autonomous agents."""
+    return JSONResponse(load_model_routing_matrix())
 
 
 @app.post("/api/paper/auto-decide/config")

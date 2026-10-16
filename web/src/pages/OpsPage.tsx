@@ -5,6 +5,7 @@ import {
   BookOpen,
   Bot,
   Coins,
+  Cpu,
   Layers,
   Shield,
   Sliders,
@@ -12,6 +13,7 @@ import {
 } from "lucide-react";
 import { CryptoUniverseCard } from "@/components/CryptoUniverseCard";
 import { IngestHealthControlCard } from "@/components/IngestHealthControlCard";
+import { ModelRoutingCard } from "@/components/ModelRoutingCard";
 import { ObservabilityControlCard } from "@/components/ObservabilityControlCard";
 import { PaperAutoDecideCard } from "@/components/PaperAutoDecideCard";
 import { PipelineControlCard } from "@/components/PipelineControlCard";
@@ -29,6 +31,7 @@ type OpsTabId =
   | "health"
   | "universe"
   | "auto_decide"
+  | "models"
   | "rules"
   | "observability"
   | "all";
@@ -150,6 +153,15 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       badge: status?.auto_decide_config?.enabled ? "AI ON" : "AI OFF",
       badgeVariant: status?.auto_decide_config?.enabled ? "ok" : "muted",
       indicatorColor: status?.auto_decide_config?.enabled ? "bg-emerald-400" : "bg-slate-400",
+    },
+    {
+      id: "models",
+      label: "AI Models",
+      labelTh: "โมเดล OpenRouter",
+      icon: Cpu,
+      badge: "5 Tiers",
+      badgeVariant: "outline",
+      indicatorColor: "bg-emerald-400",
     },
     {
       id: "rules",
@@ -352,6 +364,10 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
             initialConfig={status?.auto_decide_config}
             onRefresh={() => void load()}
           />
+        )}
+
+        {(activeTab === "models" || activeTab === "auto_decide" || activeTab === "all") && (
+          <ModelRoutingCard />
         )}
 
         {(activeTab === "rules" || activeTab === "all") && (
