@@ -18,6 +18,36 @@ const nav = [
   { to: "/ops", label: "Ops", icon: Shield },
 ];
 
+type Noc = { tone: "ok" | "warn" | "danger" | "unknown"; label: string };
+
+/** Header health: green only when the kill switch is clear, ingest health is OK and risk is not halted. */
+function nocState(status: StatusPayload | null): Noc {
+  if (!status) return { tone: "unknown", label: "กำลังโหลด…" };
+  const ks = status.kill_switch_state;
+  if (ks && ks.known === false) return { tone: "warn", label: "Kill switch unknown" };
+  if (status.kill_switch) return { tone: "danger", label: "Kill switch engaged" };
+  const risk = status.risk_monitor as { halted?: unknown } | null | undefined;
+  if (risk?.halted === true) return { tone: "danger", label: "Risk halted" };
+  const health = status.ingest_health as { ok?: unknown } | null | undefined;
+  if (health && health.ok === false) return { tone: "warn", label: "Ingest alert" };
+  return { tone: "ok", label: "NOC Systems Green" };
+}
+
+/** Symbols the last ingest-health probe covered (the active universe as the jobs see it). */
+function universeSymbols(status: StatusPayload | null): string[] {
+  const health = status?.ingest_health as { symbols?: unknown } | null | undefined;
+  const syms = health?.symbols;
+  if (!syms || typeof syms !== "object") return [];
+  return Object.keys(syms as Record<string, unknown>).map((s) => s.replace(/USDT$/, ""));
+}
+
+const NOC_DOT: Record<Noc["tone"], string> = {
+  ok: "bg-[var(--color-ok)]",
+  warn: "bg-amber-400",
+  danger: "bg-[var(--color-danger)] animate-pulse",
+  unknown: "bg-[var(--color-muted)]",
+};
+
 export function AppShell({
   status,
   pendingCount,
@@ -29,6 +59,8 @@ export function AppShell({
 }) {
   const kill = Boolean(status?.kill_switch);
   const live = Boolean(status?.live_trading);
+  const noc = nocState(status);
+  const universe = universeSymbols(status);
 
   return (
     <div className="flex min-h-screen flex-col md:flex-row bg-[var(--color-background)]">
@@ -100,9 +132,11 @@ export function AppShell({
           <div className="flex items-center gap-2">
             <div className="h-2 w-2 rounded-full bg-[var(--color-ok)] animate-pulse" />
             <span className="text-base font-bold tracking-tight text-[var(--color-foreground)]">Jarvise</span>
-            <span className="rounded bg-[var(--color-card)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--color-muted)] border border-[var(--color-border)]">
-              paper_liquid
-            </span>
+            {universe.length > 0 ? (
+              <span className="rounded bg-[var(--color-card)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--color-muted)] border border-[var(--color-border)]">
+                {universe.length} คู่
+              </span>
+            ) : null}
           </div>
           <div className="flex items-center gap-2">
             {kill ? (
@@ -111,8 +145,8 @@ export function AppShell({
               </Badge>
             ) : (
               <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-muted)] font-mono">
-                <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-ok)]" />
-                <span>NOC Green</span>
+                <span className={cn("h-1.5 w-1.5 rounded-full", NOC_DOT[noc.tone])} />
+                <span>{noc.tone === "ok" ? "NOC Green" : noc.label}</span>
               </div>
             )}
             <Badge variant={live ? "danger" : "ok"} className="text-[10px] py-0 px-1.5">
@@ -129,12 +163,11 @@ export function AppShell({
                 ? "LIVE APPROVAL ENABLED — Size-capped spot"
                 : "PAPER ONLY — No order placement"}
             </Badge>
-            <Badge variant="outline" className="border-[var(--color-border)] font-mono text-xs">
-              Universe: paper_liquid (BTC/ETH/SOL/BNB)
-            </Badge>
-            <Badge variant="outline" className="border-[var(--color-border)] font-mono text-xs">
-              HTF: 1d EMA200 active
-            </Badge>
+            {universe.length > 0 ? (
+              <Badge variant="outline" className="border-[var(--color-border)] font-mono text-xs">
+                Universe: {universe.length} คู่ ({universe.join("/")})
+              </Badge>
+            ) : null}
           </div>
           {kill ? (
             <Badge variant="danger" className="animate-pulse">
@@ -142,8 +175,8 @@ export function AppShell({
             </Badge>
           ) : (
             <div className="flex items-center gap-2 text-xs text-[var(--color-muted)] font-mono">
-              <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-ok)]" />
-              <span>NOC Systems Green</span>
+              <span className={cn("inline-block h-2 w-2 rounded-full", NOC_DOT[noc.tone])} />
+              <span>{noc.label}</span>
             </div>
           )}
         </header>

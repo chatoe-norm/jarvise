@@ -159,10 +159,12 @@ def loss_lesson(trades: list[dict[str, Any]]) -> dict[str, Any]:
     by_exit = {
         "stop_hit": {"n": 0, "pnl_usd": 0.0},
         "flat": {"n": 0, "pnl_usd": 0.0},
+        "manual": {"n": 0, "pnl_usd": 0.0},
     }
     for trade in losses:
         reason = str(trade.get("exit_reason") or "")
-        key = "stop_hit" if reason == "stop_hit" else "flat"
+        # close_manual is the owner's Close button, not a FLAT signal; keep it out of "flat".
+        key = "stop_hit" if reason == "stop_hit" else "manual" if reason == "close_manual" else "flat"
         by_exit[key]["n"] += 1
         by_exit[key]["pnl_usd"] += float(trade["pnl_usd"])
     for bucket in by_exit.values():

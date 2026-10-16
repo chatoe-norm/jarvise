@@ -4,6 +4,7 @@ import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   Pagination,
   PaginationContent,
@@ -45,43 +46,74 @@ function floorLine(lesson: LossLesson): string {
   return `auto_* ปิดแล้ว ${lesson.auto_closed} ไม้ และ EV ของ auto_* ${ev} หน้านี้ยังไม่สั่งให้เปลี่ยนสูตร`;
 }
 
-function exitReasonBadge(reason?: string) {
-  if (!reason) return <span className="text-[var(--color-muted)] text-xs font-mono">—</span>;
-  const r = reason.toLowerCase();
-  if (r.includes("stop")) {
-    return (
-      <Badge variant="outline" className="border-rose-500/40 text-rose-400 text-[10px] font-mono">
-        Stop Hit
-      </Badge>
-    );
-  }
-  if (r.includes("profit") || r.includes("trail") || r.includes("breakeven")) {
-    return (
-      <Badge variant="outline" className="border-emerald-500/40 text-emerald-400 text-[10px] font-mono">
-        Profit Lock
-      </Badge>
-    );
-  }
-  if (r.includes("flat")) {
-    return (
-      <Badge variant="outline" className="border-amber-500/40 text-amber-400 text-[10px] font-mono">
-        FLAT Signal
-      </Badge>
-    );
-  }
-  return (
-    <Badge variant="outline" className="border-[var(--color-border)] text-[var(--color-muted)] text-[10px] font-mono">
-      {reason}
-    </Badge>
-  );
+type ExitKind = "stop_loss" | "stop_profit" | "flat" | "manual" | "other";
+
+/**
+ * Backend exit_reason values: stop_hit (initial, breakeven and trailing stops alike),
+ * close_long / close_short (FLAT signal) and close_manual (Close button).
+ * A stop that closed in profit is the trailing/breakeven lock doing its job.
+ */
+export function exitKind(reason: string | undefined, pnlUsd: number): ExitKind {
+  const r = String(reason || "").toLowerCase();
+  if (r === "stop_hit") return pnlUsd > 0 ? "stop_profit" : "stop_loss";
+  if (r === "close_manual") return "manual";
+  if (r === "close_long" || r === "close_short") return "flat";
+  return "other";
 }
 
-export function PaperPage() {
+function exitReasonBadge(reason: string | undefined, pnlUsd: number) {
+  if (!reason) return <span className="text-[var(--color-muted)] text-xs font-mono">—</span>;
+  switch (exitKind(reason, pnlUsd)) {
+    case "stop_loss":
+      return (
+        <Badge variant="outline" className="border-rose-500/40 text-rose-400 text-[10px] font-mono">
+          Stop Hit
+        </Badge>
+      );
+    case "stop_profit":
+      return (
+        <Badge variant="outline" className="border-emerald-500/40 text-emerald-400 text-[10px] font-mono">
+          Stop ล็อกกำไร
+        </Badge>
+      );
+    case "flat":
+      return (
+        <Badge variant="outline" className="border-amber-500/40 text-amber-400 text-[10px] font-mono">
+          FLAT Signal
+        </Badge>
+      );
+    case "manual":
+      return (
+        <Badge variant="outline" className="border-sky-500/40 text-sky-300 text-[10px] font-mono">
+          ปิดเอง
+        </Badge>
+      );
+    default:
+      return (
+        <Badge variant="outline" className="border-[var(--color-border)] text-[var(--color-muted)] text-[10px] font-mono">
+          {reason}
+        </Badge>
+      );
+  }
+}
+
+/** `auto` is the rollup of every auto_* source; with a single auto_* source it is a duplicate row. */
+function visibleSourceKeys(src: Record<string, unknown>): string[] {
+  const keys = Object.keys(src);
+  const autoSources = keys.filter((k) => k.startsWith("auto_"));
+  return autoSources.length <= 1 ? keys.filter((k) => k !== "auto") : keys;
+}
+
+export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => void } = {}) {
   const [paper, setPaper] = useState<PaperPayload | null>(null);
   const [metrics, setMetrics] = useState<MetricsPayload | null>(null);
+  // Action errors (close, persist) stay until the next action; poll errors are separate
+  // so a background refresh can't wipe a failed close message.
   const [error, setError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [closing, setClosing] = useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   const sortedTrades = useMemo(() => {
     if (!metrics?.trades) return [];
@@ -111,17 +143,11 @@ export function PaperPage() {
         if (filterOutcome === "SCRATCH" && pnl !== 0) return false;
       }
       if (filterExitReason !== "ALL") {
-        const reason = String(t.exit_reason || "").toLowerCase();
-        if (filterExitReason === "stop" && !reason.includes("stop")) return false;
-        if (
-          filterExitReason === "profit_lock" &&
-          !reason.includes("profit") &&
-          !reason.includes("trail") &&
-          !reason.includes("breakeven")
-        )
-          return false;
-        if (filterExitReason === "flat" && !reason.includes("flat")) return false;
-        if (filterExitReason === "manual" && !reason.includes("manual")) return false;
+        const kind = exitKind(t.exit_reason, Number(t.pnl_usd) || 0);
+        if (filterExitReason === "stop" && kind !== "stop_loss") return false;
+        if (filterExitReason === "profit_lock" && kind !== "stop_profit") return false;
+        if (filterExitReason === "flat" && kind !== "flat") return false;
+        if (filterExitReason === "manual" && kind !== "manual") return false;
       }
       return true;
     });
@@ -140,34 +166,28 @@ export function PaperPage() {
 
 
   async function load() {
-    setError(null);
     try {
+      // Metrics too: a stop hit changes EV, the ledger and the equity curve, not only positions.
       const [p, m] = await Promise.all([api.paper(), api.metrics()]);
       setPaper(p);
       setMetrics(m);
+      setPollError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setPollError(err instanceof Error ? err.message : String(err));
     }
   }
 
   useEffect(() => {
     void load();
     const timer = window.setInterval(() => {
-      void api
-        .paper()
-        .then((next) => {
-          setPaper(next);
-          setError(null);
-        })
-        .catch((err: unknown) => {
-          setError(err instanceof Error ? err.message : String(err));
-        });
+      if (!document.hidden) void load();
     }, 30_000);
     return () => window.clearInterval(timer);
   }, []);
 
   async function persist() {
     setBusy(true);
+    setError(null);
     try {
       await api.persistMetrics();
       await load();
@@ -179,15 +199,21 @@ export function PaperPage() {
   }
 
   async function closePosition(symbol: string, unrealized: number) {
-    const ok = window.confirm(
-      `ปิด ${symbol} ตอนนี้? กำไรลอยประมาณ ${formatNum(unrealized)} ดอลลาร์ จะกลายเป็นผลที่ปิดแล้ว`,
-    );
+    const pnlWord = unrealized >= 0 ? "กำไรลอย" : "ขาดทุนลอย";
+    const ok = await confirm({
+      title: `ปิด ${symbol} ตอนนี้?`,
+      body: `${pnlWord}ประมาณ ${formatNum(unrealized)} ดอลลาร์ จะกลายเป็นผลที่ปิดแล้ว (paper)`,
+      confirmLabel: "ปิดโพสิชัน",
+      tone: "danger",
+    });
     if (!ok) return;
     setClosing(symbol);
     setError(null);
     try {
       await api.closePosition(symbol);
       await load();
+      // Home and the shell badges read the dashboard payload, not this page's state.
+      onPositionsChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -212,7 +238,21 @@ export function PaperPage() {
         </Button>
       </div>
 
+      {dialog}
       {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}
+      {pollError ? (
+        <p className="rounded-md border border-amber-500/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-300">
+          อัปเดตล่าสุดไม่สำเร็จ ({pollError}){paper ? " — ข้อมูลด้านล่างอาจไม่ใช่ล่าสุด" : ""}
+        </p>
+      ) : null}
+      {metrics && metrics.ok === false ? (
+        <p className="text-sm text-[var(--color-danger)]">
+          คำนวณ metrics ไม่สำเร็จ: {String((metrics as { error?: unknown }).error ?? "unknown error")}
+        </p>
+      ) : null}
+      {!paper && !pollError ? (
+        <p className="text-sm text-[var(--color-muted)]">กำลังโหลดสมุด paper…</p>
+      ) : null}
 
       <KpiStrip
         items={[
@@ -267,7 +307,7 @@ export function PaperPage() {
         <CardContent className="space-y-3 text-sm">
           {(() => {
             const src = metrics?.by_decision_source_30d || {};
-            const keys = Object.keys(src);
+            const keys = visibleSourceKeys(src);
             if (keys.length === 0) {
               return (
                 <p className="text-[var(--color-muted)]">
@@ -341,9 +381,16 @@ export function PaperPage() {
             </p>
             <p>
               ไม้ที่แพ้ปิดที่จุดตัด {metrics.loss_lesson.by_exit.stop_hit.n} ไม้ รวม{" "}
-              {formatNum(metrics.loss_lesson.by_exit.stop_hit.pnl_usd)} ดอลลาร์ และปิดตาม FLAT{" "}
+              {formatNum(metrics.loss_lesson.by_exit.stop_hit.pnl_usd)} ดอลลาร์ ปิดตาม FLAT{" "}
               {metrics.loss_lesson.by_exit.flat.n} ไม้ รวม{" "}
               {formatNum(metrics.loss_lesson.by_exit.flat.pnl_usd)} ดอลลาร์
+              {metrics.loss_lesson.by_exit.manual ? (
+                <>
+                  {" "}
+                  และปิดเอง {metrics.loss_lesson.by_exit.manual.n} ไม้ รวม{" "}
+                  {formatNum(metrics.loss_lesson.by_exit.manual.pnl_usd)} ดอลลาร์
+                </>
+              ) : null}
             </p>
             <p>{worstSymbol(metrics.loss_lesson)}</p>
             <p>{floorLine(metrics.loss_lesson)}</p>
@@ -631,8 +678,8 @@ export function PaperPage() {
                         }}
                       >
                         <option value="ALL">All Reasons</option>
-                        <option value="stop">Stop Hit</option>
-                        <option value="profit_lock">Profit Lock / Trail</option>
+                        <option value="stop">Stop Hit (ขาดทุน)</option>
+                        <option value="profit_lock">Stop ล็อกกำไร</option>
                         <option value="flat">FLAT Signal</option>
                         <option value="manual">Manual Close</option>
                       </select>
@@ -753,7 +800,7 @@ export function PaperPage() {
                                   {t.symbol || "—"}
                                 </td>
                                 <td className="py-2.5 pr-3">
-                                  {exitReasonBadge(t.exit_reason)}
+                                  {exitReasonBadge(t.exit_reason, Number(t.pnl_usd) || 0)}
                                 </td>
                                 <td className="py-2.5 pr-3 tabular-nums font-mono text-xs text-right font-medium">
                                   <span

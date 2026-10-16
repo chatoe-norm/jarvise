@@ -30,9 +30,12 @@ export type AgentProfile = z.infer<typeof agentProfileSchema>;
 export const modelRoutingMatrixSchema = z.object({
   version: z.string().default("2026-10-16"),
   agents: z.record(agentRoleEnumSchema, agentProfileSchema),
-  availableModels: z.array(z.string()),
+  // The backend sends neither availableModels nor lastSyncedAtMs; "source" says where the
+  // matrix came from ("defaults" = hardcoded in model_routing.py, else the config path).
+  availableModels: z.array(z.string()).optional(),
   totalAgents: z.number().int().min(1),
-  lastSyncedAtMs: z.number(),
+  lastSyncedAtMs: z.number().optional(),
+  source: z.string().optional(),
 });
 
 export type ModelRoutingMatrix = z.infer<typeof modelRoutingMatrixSchema>;

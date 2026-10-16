@@ -1,6 +1,4 @@
 import {
-  Activity,
-  ArrowUp,
   Coins,
   Compass,
   Gauge,
@@ -14,15 +12,25 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { ApprovalRow, NewsHome, StatusPayload } from "@/lib/api";
+import type { NewsHome, StatusPayload } from "@/lib/api";
 import { useMarketContext } from "@/controllers/useMarketContext";
 import { cn } from "@/lib/utils";
 
 export interface MarketContextCardProps {
   status: StatusPayload;
   news?: NewsHome | null;
-  approvals?: ApprovalRow[];
 }
+
+const NO_DATA_COLOR = "#94a3b8";
+
+/** Shown when the Altcoin Season Index has not been computed yet. Never a made-up number. */
+const NO_ALT_PHASE = {
+  phase: 0,
+  label: "ไม่มีข้อมูล",
+  themeColor: NO_DATA_COLOR,
+  desc: "ยังไม่มีค่า Altcoin Season Index จากผู้ให้บริการข้อมูล",
+  badgeVariant: "muted" as const,
+};
 
 function getAltseasonPhase(score: number): {
   phase: number;
@@ -127,13 +135,13 @@ const ROTATION_PHASES = [
   },
 ];
 
-export function MarketContextCard({ status, news, approvals }: MarketContextCardProps) {
+export function MarketContextCard({ status, news }: MarketContextCardProps) {
   const fng = status.fear_greed_index;
   const hasFng = typeof fng === "number" && Number.isFinite(fng);
   const alt = status.altcoin_season_index;
   const hasAlt = typeof alt === "number" && Number.isFinite(alt);
-  const altScore = hasAlt ? alt : 50; // Fallback neutral if not seeded yet
-  const altPhase = getAltseasonPhase(altScore);
+  const altText = hasAlt ? String(Math.round(alt)) : "—";
+  const altPhase = hasAlt ? getAltseasonPhase(alt) : NO_ALT_PHASE;
   const btcDom = typeof status.btc_dominance_pct === "number" ? status.btc_dominance_pct : null;
   const globalMcap =
     typeof status.global_market_cap_usd === "number" ? status.global_market_cap_usd : null;
@@ -148,19 +156,20 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
     openFearGreed,
     openAltcoinSeason,
     closeDetails,
-    scrollToApprovalQueue,
   } = useMarketContext({
     score: hasFng ? fng : null,
     news,
-    approvals,
   });
 
-  const themeColor = context?.themeColor || "#FDD835";
-  const statusLabel = context?.statusLabel || (hasFng ? `${fng} Point` : "Neutral (เป็นกลาง)");
+  // With no live score, show the backend note ("ไม่มีข้อมูล"), never a guessed regime.
+  const fngContext = hasFng ? context : null;
+  const themeColor = fngContext?.themeColor || NO_DATA_COLOR;
+  const statusLabel = fngContext?.statusLabel || (hasFng ? `${fng} Point` : status.sentiment_note || "ไม่มีข้อมูล");
   const staticDef =
-    context?.staticDefinition ||
-    "ตลาดอยู่ในสภาวะสมดุลระหว่างแรงซื้อและแรงขาย ข้อมูลมหภาคใช้เพื่อประเมินบริบท ไม่ใช่สัญญาณเปิดออเดอร์";
-  const actionSuggestion = context?.systemActionSuggestion.suggestion;
+    fngContext?.staticDefinition ||
+    (hasFng
+      ? "ข้อมูลมหภาคใช้เพื่อประเมินบริบท ไม่ใช่สัญญาณเปิดออเดอร์"
+      : "ยังไม่มีค่าดัชนี Fear & Greed จากผู้ให้บริการข้อมูล");
 
   return (
     <Card className="relative overflow-visible">
@@ -258,13 +267,13 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
               className="text-lg font-extrabold tabular-nums font-mono tracking-tight"
               style={{ color: altPhase.themeColor }}
             >
-              {hasAlt ? alt : "84"}
+              {altText}
             </span>
           </div>
         </div>
 
         {/* DESKTOP / TABLET GRID VIEW */}
-        <div className="hidden md:grid gap-4 sm:grid-cols-2 text-sm">
+        <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-1 2xl:grid-cols-2 text-sm">
           {/* Card 1: Fear & Greed Index */}
           <div
             role="button"
@@ -368,7 +377,7 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                     textShadow: `0 0 16px ${altPhase.themeColor}45`,
                   }}
                 >
-                  {hasAlt ? alt : "84"}
+                  {altText}
                 </span>
                 <span
                   className="px-2.5 py-0.5 rounded-md text-xs font-semibold"
@@ -402,7 +411,7 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
       {isOpen && (
         <div
           className={cn(
-            "fixed inset-0 z-50 bg-black/75 backdrop-blur-sm animate-fade-in",
+            "fixed inset-0 z-[60] bg-black/75 backdrop-blur-sm animate-fade-in",
             isMobile
               ? "flex flex-col justify-end"
               : "flex items-center justify-center p-4 sm:p-6",
@@ -485,7 +494,7 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                 <Coins className="w-3.5 h-3.5" style={{ color: altPhase.themeColor }} />
                 <span>Altcoin Season</span>
                 <span className="font-mono text-[10px] px-1.5 py-0.2 rounded bg-[var(--color-border)]/50">
-                  {hasAlt ? alt : "84"}
+                  {altText}
                 </span>
               </button>
             </div>
@@ -571,26 +580,7 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                   </div>
                 </div>
 
-                {/* Section: Antigravity Action Recommendation */}
-                <div
-                  className="p-3.5 rounded-xl border text-xs space-y-1.5"
-                  style={{
-                    backgroundColor: `${themeColor}10`,
-                    borderColor: `${themeColor}40`,
-                  }}
-                >
-                  <div
-                    className="flex items-center gap-1.5 font-bold"
-                    style={{ color: themeColor }}
-                  >
-                    <Activity className="w-4 h-4" />
-                    <span>คำแนะนำวินัยการเทรด (Antigravity Guardrails)</span>
-                  </div>
-                  <p className="text-[var(--color-foreground)] leading-relaxed">
-                    {actionSuggestion ||
-                      "ยึดวินัยการคุมความเสี่ยง Stop Loss 1.5× ATR และกลไก Breakeven Lock เพื่อรักษาเงินต้น"}
-                  </p>
-                </div>
+                <ContextOnlyNote />
               </div>
             )}
 
@@ -630,7 +620,7 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                       className="text-4xl font-extrabold tabular-nums font-mono"
                       style={{ color: altPhase.themeColor }}
                     >
-                      {hasAlt ? alt : "84"}
+                      {altText}
                     </span>
                     <span className="block text-[10px] text-[var(--color-muted)]">/ 100 PTS</span>
                   </div>
@@ -646,10 +636,10 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                       className="text-lg font-bold font-mono"
                       style={{ color: altPhase.themeColor }}
                     >
-                      {hasAlt ? alt : "84"}
+                      {altText}
                     </span>
                     <span className="text-[9px] text-[var(--color-muted)] block">
-                      {altScore >= 75 ? "Alt Season Active" : "BTC Dominant"}
+                      {!hasAlt ? "ไม่มีข้อมูล" : alt >= 75 ? "Alt Season Active" : "BTC Dominant"}
                     </span>
                   </div>
 
@@ -658,7 +648,7 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                       BTC Dominance
                     </span>
                     <span className="text-lg font-bold font-mono text-[var(--color-foreground)]">
-                      {btcDom != null ? `${btcDom.toFixed(1)}%` : "59.2%"}
+                      {btcDom != null ? `${btcDom.toFixed(1)}%` : "—"}
                     </span>
                     <span className="text-[9px] text-[var(--color-muted)] block">
                       CoinGecko Macro
@@ -670,9 +660,7 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                       Total Market Cap
                     </span>
                     <span className="text-lg font-bold font-mono text-[var(--color-foreground)]">
-                      {globalMcap != null
-                        ? `$${(globalMcap / 1e12).toFixed(2)}T`
-                        : "$2.78T"}
+                      {globalMcap != null ? `$${(globalMcap / 1e12).toFixed(2)}T` : "—"}
                     </span>
                     <span className="text-[9px] text-[var(--color-muted)] block">Global USD</span>
                   </div>
@@ -686,7 +674,7 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                       <span>วัฏจักรการหมุนเวียนเม็ดเงิน (Capital Rotation Cycle)</span>
                     </div>
                     <span className="text-[10px] font-mono text-[var(--color-accent)]">
-                      Current: Phase {altPhase.phase}/4
+                      {hasAlt ? `Current: Phase ${altPhase.phase}/4` : "ยังไม่มีข้อมูล"}
                     </span>
                   </div>
 
@@ -741,37 +729,16 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
                   </div>
                 </div>
 
-                {/* Trading Doctrine for Altcoins */}
-                <div className="p-3.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)]/50 text-xs space-y-1.5">
-                  <div className="flex items-center gap-1.5 font-bold text-[var(--color-foreground)]">
-                    <Compass className="w-4 h-4 text-[var(--color-accent)]" />
-                    <span>คำแนะนำกลยุทธ์ตามกฎการเทรด (Jarvise Doctrine)</span>
-                  </div>
-                  <p className="text-[var(--color-muted)] leading-relaxed">
-                    {altScore >= 75
-                      ? "สภาวะ Altcoin Season เหมาะกับการสแกนหาจังหวะ Pullback ใกล้แนวรับ EMA20 ในกลุ่มเหรียญ High-Confidence อย่างไรก็ตาม ห้ามเปิดออเดอร์ซ้ำข้างเดิม (same_side_hold) และให้ตั้งจุดตัดขาดทุน 1.5× ATR เสมอ"
-                      : "สภาวะ Bitcoin Dominant ควรมุ่งเน้นการเทรดในคู่เหรียญหลัก (BTC/ETH) หลีกเลี่ยงการเปิด Long ไล่ราคาในเหรียญ Altcoins ที่ไม่มีสภาพคล่องเพียงพอ"}
-                  </p>
-                </div>
+                <ContextOnlyNote />
               </div>
             )}
 
             {/* Bottom Actions */}
-            <div className="mt-5 pt-3 border-t border-[var(--color-border)]/80 flex items-center gap-2">
+            <div className="mt-5 pt-3 border-t border-[var(--color-border)]/80">
               <Button
                 variant="outline"
-                size="sm"
-                onClick={scrollToApprovalQueue}
-                className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold touch-target-safe cursor-pointer"
-              >
-                <span>ไปที่ Approval Queue</span>
-                <ArrowUp className="w-3.5 h-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
                 onClick={closeDetails}
-                className="text-xs text-[var(--color-muted)] hover:text-[var(--color-foreground)] cursor-pointer"
+                className="w-full h-11 text-sm font-semibold cursor-pointer"
               >
                 ปิด
               </Button>
@@ -780,5 +747,21 @@ export function MarketContextCard({ status, news, approvals }: MarketContextCard
         </div>
       )}
     </Card>
+  );
+}
+
+/** Fear & Greed and Altseason are context: the analyzer, stops and กฎการเทรด decide trades. */
+function ContextOnlyNote() {
+  return (
+    <div className="p-3.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)]/50 text-xs space-y-1">
+      <div className="flex items-center gap-1.5 font-bold text-[var(--color-foreground)]">
+        <Compass className="w-4 h-4 text-[var(--color-accent)]" />
+        <span>บริบทตลาดเท่านั้น ไม่ใช่สัญญาณเทรด</span>
+      </div>
+      <p className="text-[var(--color-muted)] leading-relaxed">
+        การเปิด/ปิดไม้ตัดสินจาก Analyzer, จุด Stop 1.5× ATR และกฎการเทรดเท่านั้น
+        ดัชนีนี้ไม่ได้เปลี่ยนเกณฑ์ความมั่นใจหรือคำแนะนำของการ์ดใน Approval Queue
+      </p>
+    </div>
   );
 }

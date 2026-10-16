@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/pagination";
 import { ConfidenceLadder } from "@/components/ConfidenceLadder";
 import { api, type AnalysisExplainPayload, type AnalysisSummary } from "@/lib/api";
-import { outcomeCopy, parseAnalysisOutcome } from "@/lib/copy";
+import { outcomeCopy, parseAnalysisOutcome, resolveReasonLabel } from "@/lib/copy";
 import { formatDecisionStamp, formatNum, formatThesisDisplay } from "@/lib/utils";
 
 const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
@@ -397,7 +397,8 @@ export function DecisionsPage() {
 function OutcomeCell({ row }: { row: Record<string, unknown> }) {
   const outcome = parseAnalysisOutcome(row.outcome);
   const copy = outcomeCopy(outcome, String(row.action ?? ""));
-  const title = outcome?.resolve_reason || undefined;
+  // Tooltip shows owner copy too; stored reasons can carry หลักคำสอน / "doctrine".
+  const title = outcome?.resolve_reason ? resolveReasonLabel(outcome.resolve_reason) : undefined;
   return (
     <div className="min-w-[9rem]" title={title}>
       <Badge variant={copy.variant}>{copy.label}</Badge>

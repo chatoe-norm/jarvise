@@ -5,7 +5,7 @@ import {
   FALLBACK_MARKET_CAUSE,
   MarketContextService,
 } from "./marketContextService";
-import type { ApprovalRow, NewsHome } from "../lib/api";
+import type { NewsHome } from "../lib/api";
 import { semiDynamicContextSchema } from "../types/marketContext";
 
 test("MarketContextService - 5 Score Domains mapping and boundaries", () => {
@@ -49,58 +49,23 @@ test("MarketContextService - 5 Score Domains mapping and boundaries", () => {
   assert.equal(service.getDomainMapping(120).domain, "EXTREME_GREED");
 });
 
-test("MarketContextService - Static definitions and default action templates match spec", () => {
+test("MarketContextService - Static definitions match spec", () => {
   const service = new MarketContextService();
-
-  const extremeFear = service.getDomainMapping(15);
   assert.equal(
-    extremeFear.staticDefinition,
+    service.getDomainMapping(15).staticDefinition,
     "ตลาดอยู่ในภาวะกลัวจัด (Extreme Fear) สินทรัพย์โดนเทขายอย่างรุนแรงจากความตื่นตระหนก",
   );
-  assert.equal(
-    extremeFear.defaultActionTemplate,
-    "แนะนำ: ตรวจสอบสถานะพอร์ตอย่างระมัดระวัง หลีกเลี่ยงการใช้อารมณ์ Panic Sell และจับตาดูสัญญาณแนวรับสำคัญในระบบ",
-  );
+  assert.ok(service.getDomainMapping(63).staticDefinition.includes("ตลาดอยู่ในภาวะโลภ (Greed)"));
+});
 
-  const fear = service.getDomainMapping(30);
-  assert.equal(
-    fear.staticDefinition,
-    "ตลาดอยู่ในภาวะกังวล (Fear) นักลงทุนส่วนใหญ่ชะลอการซื้อขายเพื่อประเมินสถานการณ์",
-  );
-  assert.equal(
-    fear.defaultActionTemplate,
-    "แนะนำ: ป้องกันความเสี่ยงด้วยการถือเงินสด (Cash) บางส่วน และรอสัญญาณที่มีค่า Conf สูงกว่า 0.70 ในระบบก่อนพิจารณาเข้าออเดอร์",
-  );
-
-  const neutral = service.getDomainMapping(50);
-  assert.equal(
-    neutral.staticDefinition,
-    "ตลาดอยู่ในภาวะเป็นกลาง (Neutral) แรงซื้อและแรงขายมีความสมดุล ราคามักวิ่งออกข้างเพื่อสะสมพลัง",
-  );
-  assert.equal(
-    neutral.defaultActionTemplate,
-    "แนะนำ: วางแผนกลยุทธ์รับ-ต้านล่วงหน้า และติดตามการอัปเดตจากโมดูล Intelligence & News Digest เพื่อจับจังหวะการ Breakout",
-  );
-
-  const greed = service.getDomainMapping(60);
-  assert.equal(
-    greed.staticDefinition,
-    "ตลาดอยู่ในภาวะโลภ (Greed) สินทรัพย์เป็นขาขึ้นที่แข็งแกร่ง นักลงทุนเริ่มไล่ราคาจากอาการกลัวตกขบวน (FOMO)",
-  );
-  assert.equal(
-    greed.defaultActionTemplate,
-    "แนะนำ: หลีกเลี่ยงการเปิด Buy ไล่ราคาที่ยอดพอยท์ และตรวจสอบ Approval Queue ด้านบนเพื่อพิจารณา Approve คำสั่ง flat เพื่อทยอยล็อกกำไร",
-  );
-
-  const extremeGreed = service.getDomainMapping(80);
-  assert.equal(
-    extremeGreed.staticDefinition,
-    "ตลาดอยู่ในภาวะโลภจัด (Extreme Greed) ราคาพุ่งสูงเกินมูลค่าพื้นฐาน และตลาดมีความร้อนแรงเกินไป",
-  );
-  assert.equal(
-    extremeGreed.defaultActionTemplate,
-    "แนะนำ: ตลาดเสี่ยงต่อการเกิดการปรับฐานลึก (Correction) ในไม่ช้า ควรงดเปิดโพสิชันใหม่เพิ่ม และเน้นการปกป้องเงินทุนเป็นหลัก",
-  );
+test("MarketContextService - Fear & Greed carries no trade or queue advice", () => {
+  // Owner rule: F&G is market context only, never a trade signal.
+  for (const mapping of Object.values(DOMAIN_MAPPINGS)) {
+    const text = JSON.stringify(mapping);
+    for (const banned of ["แนะนำ", "Approve", "Approval Queue", "เปิด Buy", "งดเปิดโพสิชัน"]) {
+      assert.ok(!text.includes(banned), `${mapping.domain} must not contain "${banned}"`);
+    }
+  }
 });
 
 test("MarketContextService - Dynamic Market Cause extraction & Fallback handling", () => {
@@ -142,105 +107,6 @@ test("MarketContextService - Dynamic Market Cause extraction & Fallback handling
   assert.deepEqual(fallbackEmpty.bullets, [FALLBACK_MARKET_CAUSE]);
 });
 
-test("MarketContextService - Dynamic Action Suggestion from Approval Queue", () => {
-  const service = new MarketContextService();
-
-  // 1. Greed with pending flat order
-  const approvalsGreedFlat: ApprovalRow[] = [
-    {
-      id: "app-1",
-      symbol: "SOLUSDT",
-      action: "flat",
-      confidence_score: 0.75,
-    },
-  ];
-  const suggestionGreedFlat = service.resolveActionSuggestion(
-    DOMAIN_MAPPINGS.GREED,
-    approvalsGreedFlat,
-  );
-  assert.equal(suggestionGreedFlat.isDynamic, true);
-  assert.equal(suggestionGreedFlat.targetSymbol, "SOLUSDT");
-  assert.equal(suggestionGreedFlat.targetConf, 0.75);
-  assert.ok(
-    suggestionGreedFlat.suggestion.includes(
-      "ตรวจสอบ Approval Queue ด้านบนสำหรับเหรียญ SOLUSDT (Conf 0.75) เพื่อพิจารณา Approve คำสั่ง Flat ล็อกกำไร",
-    ),
-  );
-
-  // 2. Fear with high confidence candidate (>= 0.70)
-  const approvalsFearHighConf: ApprovalRow[] = [
-    {
-      id: "app-2",
-      symbol: "BTCUSDT",
-      action: "buy",
-      confidence_score: 0.78,
-    },
-  ];
-  const suggestionFearHigh = service.resolveActionSuggestion(
-    DOMAIN_MAPPINGS.FEAR,
-    approvalsFearHighConf,
-  );
-  assert.equal(suggestionFearHigh.isDynamic, true);
-  assert.equal(suggestionFearHigh.targetSymbol, "BTCUSDT");
-  assert.ok(suggestionFearHigh.suggestion.includes("ผ่านเกณฑ์ High Confidence"));
-
-  // 3. Fear with low confidence candidate (< 0.70)
-  const approvalsFearLowConf: ApprovalRow[] = [
-    {
-      id: "app-3",
-      symbol: "ETHUSDT",
-      action: "buy",
-      confidence_score: 0.58,
-    },
-  ];
-  const suggestionFearLow = service.resolveActionSuggestion(
-    DOMAIN_MAPPINGS.FEAR,
-    approvalsFearLowConf,
-  );
-  assert.equal(suggestionFearLow.isDynamic, true);
-  assert.ok(suggestionFearLow.suggestion.includes("ยังไม่ถึงเกณฑ์ 0.70"));
-
-  // 4. Neutral with candidate
-  const approvalsNeutral: ApprovalRow[] = [
-    {
-      id: "app-4",
-      symbol: "ETHUSDT",
-      action: "buy",
-      confidence_score: 0.62,
-    },
-  ];
-  const suggestionNeutral = service.resolveActionSuggestion(
-    DOMAIN_MAPPINGS.NEUTRAL,
-    approvalsNeutral,
-  );
-  assert.equal(suggestionNeutral.isDynamic, true);
-  assert.equal(suggestionNeutral.targetSymbol, "ETHUSDT");
-  assert.ok(suggestionNeutral.suggestion.includes("ETHUSDT (Conf 0.62)"));
-  assert.ok(suggestionNeutral.suggestion.includes("ติดตามการ Breakout"));
-
-  // 5. Extreme Greed with non-flat candidate
-  const approvalsExtremeGreed: ApprovalRow[] = [
-    {
-      id: "app-5",
-      symbol: "SOLUSDT",
-      action: "buy",
-      confidence_score: 0.82,
-    },
-  ];
-  const suggestionExtremeGreed = service.resolveActionSuggestion(
-    DOMAIN_MAPPINGS.EXTREME_GREED,
-    approvalsExtremeGreed,
-  );
-  assert.equal(suggestionExtremeGreed.isDynamic, true);
-  assert.ok(suggestionExtremeGreed.suggestion.includes("หลีกเลี่ยงการเปิด Buy ไล่ราคาที่ยอดพอยท์"));
-
-  // 6. Queue is empty -> returns defaultActionTemplate
-  const suggestionEmpty = service.resolveActionSuggestion(DOMAIN_MAPPINGS.GREED, []);
-  assert.equal(suggestionEmpty.isDynamic, false);
-  assert.equal(suggestionEmpty.targetSymbol, null);
-  assert.equal(suggestionEmpty.suggestion, DOMAIN_MAPPINGS.GREED.defaultActionTemplate);
-});
-
 test("MarketContextService - Compose SemiDynamicContext and Zod Schema validation", () => {
   const service = new MarketContextService();
 
@@ -252,22 +118,8 @@ test("MarketContextService - Compose SemiDynamicContext and Zod Schema validatio
     generated_at_ms: Date.now(),
   };
 
-  const approvals: ApprovalRow[] = [
-    {
-      id: "app-sol",
-      symbol: "SOLUSDT",
-      action: "flat",
-      confidence_score: 0.75,
-    },
-  ];
+  const result = service.composeSemiDynamicContext({ score: 63, news });
 
-  const result = service.composeSemiDynamicContext({
-    score: 63,
-    news,
-    approvals,
-  });
-
-  // Verify Zod parsing
   const validated = semiDynamicContextSchema.safeParse(result);
   assert.ok(validated.success, "Result must satisfy semiDynamicContextSchema");
 
@@ -275,12 +127,16 @@ test("MarketContextService - Compose SemiDynamicContext and Zod Schema validatio
   assert.equal(result.domain, "GREED");
   assert.equal(result.statusLabel, "Greed (โลภ)");
   assert.equal(result.themeColor, "#4CAF50");
-  assert.ok(result.staticDefinition.includes("ตลาดอยู่ในภาวะโลภ (Greed)"));
   assert.ok(result.dynamicMarketCause.bullets[0].includes("BTC และ SOL"));
-  assert.ok(result.systemActionSuggestion.suggestion.includes("SOLUSDT (Conf 0.75)"));
+  assert.ok(!("systemActionSuggestion" in result));
 
-  // Verify full concatenation structure: [Static_Definition] + [Dynamic_Market_Cause] + [System_Action_Suggestion]
+  // [Static_Definition] + [Dynamic_Market_Cause] only.
   assert.ok(result.fullConcatenatedMessage.startsWith(result.staticDefinition));
-  assert.ok(result.fullConcatenatedMessage.includes(result.dynamicMarketCause.bullets[0]));
-  assert.ok(result.fullConcatenatedMessage.endsWith(result.systemActionSuggestion.suggestion));
+  assert.ok(result.fullConcatenatedMessage.endsWith(result.dynamicMarketCause.bullets[0]));
+});
+
+test("MarketContextService - backend 'no news' placeholder is not shown as a market cause", () => {
+  const service = new MarketContextService();
+  const cause = service.resolveDynamicMarketCause({ ok: true, lines: ["ยังไม่มีรายงานข่าว"] });
+  assert.deepEqual(cause.bullets, [FALLBACK_MARKET_CAUSE]);
 });

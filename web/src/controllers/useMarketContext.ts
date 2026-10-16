@@ -3,16 +3,16 @@ import type { SemiDynamicContext } from "@/types/marketContext";
 import { marketContextService } from "@/services/marketContextService";
 import { marketContextRepository } from "@/repositories/marketContextRepository";
 import { useHapticFeedback } from "@/controllers/useHapticFeedback";
-import type { ApprovalRow, NewsHome } from "@/lib/api";
+import type { NewsHome } from "@/lib/api";
 
 export interface UseMarketContextProps {
+  /** undefined = dashboard not loaded yet; null = loaded, but no Fear & Greed value. */
   score?: number | null;
   news?: NewsHome | null;
-  approvals?: ApprovalRow[];
 }
 
-export function useMarketContext({ score, news, approvals }: UseMarketContextProps) {
-  // Stale-While-Revalidate: Initialize from local storage cache for <0.1s instant render
+export function useMarketContext({ score, news }: UseMarketContextProps) {
+  // Stale-While-Revalidate: a recent (TTL-bounded) cache only bridges first paint
   const [context, setContext] = useState<SemiDynamicContext | null>(() => {
     return marketContextRepository.getCachedContext();
   });
@@ -42,22 +42,23 @@ export function useMarketContext({ score, news, approvals }: UseMarketContextPro
 
   // Update & compose context whenever inputs change
   useEffect(() => {
+    if (score === null) {
+      // The server answered with no value: drop any cached label so it can't sit beside "—".
+      setContext(null);
+      return;
+    }
     if (typeof score !== "number" || !Number.isFinite(score)) {
       return;
     }
 
     try {
-      const fresh = marketContextService.composeSemiDynamicContext({
-        score,
-        news,
-        approvals,
-      });
+      const fresh = marketContextService.composeSemiDynamicContext({ score, news });
       setContext(fresh);
       marketContextRepository.saveCachedContext(fresh);
     } catch (err) {
       console.error("[useMarketContext] Failed to compose context:", err);
     }
-  }, [score, news, approvals]);
+  }, [score, news]);
 
   // Count-up animation for score
   const targetScore = typeof score === "number" && Number.isFinite(score) ? score : (context?.score ?? 0);
@@ -98,12 +99,6 @@ export function useMarketContext({ score, news, approvals }: UseMarketContextPro
 
   const [modalTab, setModalTab] = useState<"fear_greed" | "altcoin">("fear_greed");
 
-  const openDetails = useCallback(() => {
-    setModalTab("fear_greed");
-    triggerHaptic();
-    setIsOpen(true);
-  }, [triggerHaptic]);
-
   const openFearGreed = useCallback(() => {
     setModalTab("fear_greed");
     triggerHaptic();
@@ -120,13 +115,6 @@ export function useMarketContext({ score, news, approvals }: UseMarketContextPro
     setIsOpen(false);
   }, []);
 
-  const toggleDetails = useCallback(() => {
-    setIsOpen((prev) => {
-      if (!prev) triggerHaptic();
-      return !prev;
-    });
-  }, [triggerHaptic]);
-
   // Close modal on Escape key press
   useEffect(() => {
     if (!isOpen) return;
@@ -139,31 +127,15 @@ export function useMarketContext({ score, news, approvals }: UseMarketContextPro
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen]);
 
-  // Quick Action: Dismiss sheet & smooth scroll to Approval Queue
-  const scrollToApprovalQueue = useCallback(() => {
-    setIsOpen(false);
-    if (typeof document === "undefined") return;
-
-    const target = document.getElementById("approval-queue");
-    if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
-      target.focus?.();
-    }
-  }, []);
-
   return {
     context,
     displayScore,
-    targetScore,
     isOpen,
     isMobile,
     modalTab,
     setModalTab,
-    openDetails,
     openFearGreed,
     openAltcoinSeason,
     closeDetails,
-    toggleDetails,
-    scrollToApprovalQueue,
   };
 }

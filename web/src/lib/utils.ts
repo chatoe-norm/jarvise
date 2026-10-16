@@ -24,11 +24,18 @@ export function formatQty(value: unknown, digits = 8): string {
 /** Thesis column only: expand scientific EMA/RSI dumps; do not rewrite SQLite. */
 export function formatThesisDisplay(thesis: unknown): string {
   if (thesis == null || thesis === "") return "";
-  return String(thesis).replace(/(-?\d+(?:\.\d+)?)e([+-]?\d+)/gi, (raw, mant, exp) => {
-    const n = Number(`${mant}e${exp}`);
-    if (!Number.isFinite(n)) return raw;
-    return formatNum(n, Math.abs(n) >= 1000 ? 2 : 4);
-  });
+  return String(thesis)
+    .replace(/(-?\d+(?:\.\d+)?)e([+-]?\d+)/gi, (raw, mant, exp) => {
+      const n = Number(`${mant}e${exp}`);
+      if (!Number.isFinite(n)) return raw;
+      return formatNum(n, Math.abs(n) >= 1000 ? 2 : 4);
+    })
+    // Raw floats such as RSI=39.06286504269636 → 39.06 (display only; stored thesis unchanged).
+    .replace(/-?\d+\.\d{5,}/g, (raw) => {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return raw;
+      return Math.abs(n) >= 1 ? n.toFixed(2) : n.toPrecision(4);
+    });
 }
 
 export function relativeAge(ms: number | null | undefined): string {

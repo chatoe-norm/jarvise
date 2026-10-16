@@ -1,13 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Bot,
-  CheckCircle2,
-  Cpu,
-  Layers,
-  RefreshCw,
-  Scale,
-  Zap,
-} from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Cpu, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,10 +8,22 @@ import { modelRoutingService } from "@/services/modelRoutingService";
 import { syncModelRoutingAction } from "@/actions/model-routing.action";
 import { cn } from "@/lib/utils";
 
-export function ModelRoutingCard() {
+function sourceLabel(source: string | undefined): string {
+  if (!source) return "ไม่ทราบแหล่งที่มา";
+  if (source === "defaults") return "ค่าเริ่มต้นในโค้ด (ไม่พบ openclaw.json ใน container ของเว็บ)";
+  return `อ่านจาก ${source}`;
+}
+
+/** The trading-rules judge role is shown in owner copy, not as the "Doctrine" identifier. */
+function displayName(agent: AgentProfile): string {
+  return agent.role === "DOCTRINE_JUDGE" ? "Trading Rules Judge (กฎการเทรด)" : agent.name;
+}
+
+export function ModelRoutingCard({ activeModel }: { activeModel?: string | null } = {}) {
   const [matrix, setMatrix] = useState<ModelRoutingMatrix>(() => modelRoutingService.getMatrix());
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [syncFailed, setSyncFailed] = useState(false);
 
   useEffect(() => {
     void handleSync();
@@ -33,12 +37,10 @@ export function ModelRoutingCard() {
       if (res.data) {
         setMatrix(res.data);
       }
-      if (res.error) {
-        setSyncMessage(res.error);
-      } else {
-        setSyncMessage("Synchronized with OpenClaw Gateway");
-      }
+      setSyncFailed(Boolean(res.error));
+      setSyncMessage(res.error ?? sourceLabel(res.data?.source));
     } catch (err) {
+      setSyncFailed(true);
       setSyncMessage(err instanceof Error ? err.message : String(err));
     } finally {
       setSyncing(false);
@@ -59,13 +61,13 @@ export function ModelRoutingCard() {
             </div>
             <div>
               <CardTitle className="text-base font-semibold flex items-center gap-2">
-                <span>Multi-Tier Model Routing Matrix</span>
-                <Badge variant="outline" className="text-[10px] font-mono text-emerald-400 border-emerald-500/30">
-                  OpenRouter 5-Tier
+                <span>Model Routing Plan</span>
+                <Badge variant="muted" className="text-[10px] font-mono">
+                  ยังไม่เชื่อมต่อการทำงาน
                 </Badge>
               </CardTitle>
               <CardDescription className="text-xs">
-                Autonomous agent role specialization, fallback tiers, and ephemeral prompt caching.
+                แผนการกำหนดโมเดลต่อบทบาท — ยังไม่มีงานใดในระบบเรียกใช้ตารางนี้
               </CardDescription>
             </div>
           </div>
@@ -79,57 +81,31 @@ export function ModelRoutingCard() {
               className="text-xs h-8 border-[var(--color-border)] hover:bg-[var(--color-surface)] cursor-pointer"
             >
               <RefreshCw className={cn("w-3.5 h-3.5 mr-1.5", syncing && "animate-spin text-emerald-400")} />
-              <span>{syncing ? "Syncing..." : "Sync OpenClaw"}</span>
+              <span>{syncing ? "กำลังโหลด…" : "โหลดใหม่"}</span>
             </Button>
           </div>
         </div>
 
         {syncMessage && (
           <div className="mt-2 text-[11px] font-mono text-[var(--color-muted)] flex items-center gap-1.5">
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            {syncFailed ? (
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-3.5 h-3.5 text-[var(--color-muted)] shrink-0" />
+            )}
             <span>{syncMessage}</span>
           </div>
         )}
       </CardHeader>
 
       <CardContent className="space-y-4">
-        {/* Guardrail and Efficiency Highlights Banner */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-          <div className="p-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]/40 flex items-start gap-2.5">
-            <div className="p-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20 shrink-0">
-              <Zap className="w-3.5 h-3.5 text-blue-400" />
-            </div>
-            <div>
-              <span className="font-semibold text-[var(--color-foreground)] block">Ephemeral Caching</span>
-              <span className="text-[11px] text-[var(--color-muted)]">
-                Doctrine prompts use <code className="text-blue-300">cache_control: ephemeral</code> for 90% cost reduction.
-              </span>
-            </div>
-          </div>
-
-          <div className="p-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]/40 flex items-start gap-2.5">
-            <div className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 shrink-0">
-              <Layers className="w-3.5 h-3.5 text-amber-400" />
-            </div>
-            <div>
-              <span className="font-semibold text-[var(--color-foreground)] block">Claw-Compactor (300KB)</span>
-              <span className="text-[11px] text-[var(--color-muted)]">
-                Sessions exceeding 300KB auto-compact history to preserve context and limit costs.
-              </span>
-            </div>
-          </div>
-
-          <div className="p-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]/40 flex items-start gap-2.5">
-            <div className="p-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 shrink-0">
-              <Scale className="w-3.5 h-3.5 text-emerald-400" />
-            </div>
-            <div>
-              <span className="font-semibold text-[var(--color-foreground)] block">Automatic Failover</span>
-              <span className="text-[11px] text-[var(--color-muted)]">
-                Rate-limit (429) &amp; 5xx errors smoothly trigger fallback models in sequence.
-              </span>
-            </div>
-          </div>
+        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]/40 p-3 text-xs space-y-1">
+          <div className="font-semibold text-[var(--color-foreground)]">ที่ระบบใช้งานจริงตอนนี้</div>
+          <p className="text-[var(--color-muted)]">
+            Paper auto-decide (Claude รีวิวการ์ด) ใช้โมเดล{" "}
+            <code className="text-[var(--color-foreground)]">{activeModel || "—"}</code> จากการตั้งค่า auto-decide
+            ไม่ได้อ่านจากตารางด้านล่าง
+          </p>
         </div>
 
         {/* 5-Tier Agent Routing Grid */}
@@ -146,10 +122,10 @@ export function ModelRoutingCard() {
                     <span className="text-lg select-none">{agent.emoji}</span>
                     <div>
                       <span className="font-semibold text-xs text-[var(--color-foreground)] block leading-tight">
-                        {agent.name}
+                        {displayName(agent)}
                       </span>
                       <span className="text-[10px] font-mono text-[var(--color-muted)]">
-                        {agent.role}
+                        {agent.key}
                       </span>
                     </div>
                   </div>
@@ -198,7 +174,7 @@ export function ModelRoutingCard() {
               {/* Footer status */}
               <div className="mt-3 pt-2 border-t border-[var(--color-border)]/40 flex items-center justify-between text-[10px] text-[var(--color-muted)]">
                 <span className="font-mono">Cache: {agent.cacheControl}</span>
-                <span className="text-emerald-400 font-medium">Ready</span>
+                <span className="font-medium">แผน</span>
               </div>
             </div>
           ))}
