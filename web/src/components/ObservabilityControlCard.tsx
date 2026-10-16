@@ -79,7 +79,7 @@ export function ObservabilityControlCard({ onRefresh }: ObservabilityControlCard
               size="sm"
               disabled={loading}
               onClick={() => void loadPreview()}
-              className="h-8 text-xs font-mono"
+              className="h-11 sm:h-8 text-xs font-mono"
             >
               {loading ? "กำลังดึง…" : "↻ อัปเดต Gauges"}
             </Button>
@@ -89,7 +89,7 @@ export function ObservabilityControlCard({ onRefresh }: ObservabilityControlCard
               size="sm"
               disabled={persisting}
               onClick={() => void handlePersist()}
-              className="h-8 text-xs font-mono font-semibold"
+              className="h-11 sm:h-8 text-xs font-mono font-semibold"
             >
               {persisting ? "กำลังบันทึก…" : "📸 Persist Snapshot"}
             </Button>

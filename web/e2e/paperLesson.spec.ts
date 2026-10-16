@@ -58,7 +58,7 @@ test("paper page shows the live loss lesson", async ({ page }) => {
   });
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Now" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Command Control" })).toBeVisible();
   await expect(page.getByText("Equity trajectory")).toHaveCount(0);
   await expect(page.getByText("Win / loss mix")).toHaveCount(0);
   await page.getByRole("link", { name: "Paper" }).click();

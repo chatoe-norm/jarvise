@@ -158,7 +158,7 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               variant="outline"
               size="sm"
               onClick={() => applyPreset("default")}
-              className="h-7 text-xs font-mono"
+              className="h-11 sm:h-7 text-xs font-mono"
             >
               Paper Core (2 Pairs)
             </Button>
@@ -167,7 +167,7 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               variant="outline"
               size="sm"
               onClick={() => applyPreset("liquid")}
-              className="h-7 text-xs font-mono"
+              className="h-11 sm:h-7 text-xs font-mono"
             >
               Liquid 4-Pair
             </Button>
@@ -176,7 +176,7 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               variant="outline"
               size="sm"
               onClick={() => applyPreset("conservative")}
-              className="h-7 text-xs font-mono"
+              className="h-11 sm:h-7 text-xs font-mono"
             >
               Conservative Defense
             </Button>

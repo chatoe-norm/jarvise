@@ -216,12 +216,12 @@ export function AppShell({
                   </div>
                   <span className="tracking-tight">{item.label}</span>
                   {item.to === "/" && pendingCount > 0 ? (
-                    <span className="absolute top-1 right-3 rounded-full bg-[var(--color-accent)] px-1.5 py-0.2 text-[9px] font-bold text-black animate-pulse">
+                    <span className="absolute top-1 right-3 rounded-full bg-[var(--color-accent)] px-1.5 py-0.5 text-[9px] font-bold text-black animate-pulse">
                       {pendingCount}
                     </span>
                   ) : null}
                   {item.to === "/paper" && openPositionsCount > 0 ? (
-                    <span className="absolute top-1 right-3 rounded-full bg-[var(--color-ok)] px-1.5 py-0.2 text-[9px] font-bold text-black">
+                    <span className="absolute top-1 right-3 rounded-full bg-[var(--color-ok)] px-1.5 py-0.5 text-[9px] font-bold text-black">
                       {openPositionsCount}
                     </span>
                   ) : null}

@@ -17,7 +17,8 @@ const buttonVariants = cva(
       },
       size: {
         default: "h-9 px-3 py-2",
-        sm: "h-8 px-2.5 text-xs",
+        // 44px touch target on phones; compact from the sm breakpoint up.
+        sm: "h-11 px-3 text-xs sm:h-8 sm:px-2.5",
         lg: "h-10 px-4",
       },
     },

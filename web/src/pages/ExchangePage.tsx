@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type DashboardPayload, type ExchangePayload } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import { cn, formatNum, formatQty, relativeAge } from "@/lib/utils";
 
 /** Below this a priced balance is dust: shown, but not worth acting on. */
@@ -59,33 +60,6 @@ function exchangeErrorCopy(error: string | undefined): { title: string; body: st
     title: "ดึงยอดคงเหลือจาก Binance ไม่สำเร็จ",
     body: `ข้อผิดพลาด: ${error} — ตรวจ IP whitelist (76.13.218.48) และสิทธิ์อ่านของคีย์`,
   };
-}
-
-/** Clipboard API needs a secure context; the Tailscale URL is plain http. */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // fall through to the textarea path
-  }
-  const el = document.createElement("textarea");
-  el.value = text;
-  el.setAttribute("readonly", "");
-  el.style.position = "fixed";
-  el.style.opacity = "0";
-  document.body.appendChild(el);
-  el.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch {
-    ok = false;
-  }
-  document.body.removeChild(el);
-  return ok;
 }
 
 function LiveTradingGuideCard({ dailyLossCap }: { dailyLossCap: number | null }) {
@@ -188,7 +162,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
                 size="sm"
                 variant="outline"
                 onClick={() => void copyEnv()}
-                className="h-7 text-[11px] font-mono border-[var(--color-border)]"
+                className="h-11 sm:h-7 text-[11px] font-mono border-[var(--color-border)]"
               >
                 {copied ? "✓ คัดลอกแล้ว" : "📋 คัดลอก .env"}
               </Button>

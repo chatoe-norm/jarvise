@@ -16,7 +16,7 @@ import { api, type LossLesson, type MetricsPayload, type PaperPayload } from "@/
 import { buildEquityPoints } from "@/lib/equity";
 import { decisionSourceLabel } from "@/lib/copy";
 import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
-import { cn, formatNum, formatQty } from "@/lib/utils";
+import { cn, formatDecisionStamp, formatNum, formatQty } from "@/lib/utils";
 
 const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
 
@@ -464,23 +464,13 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                       stop != null && Number.isFinite(entry) && entry !== 0
                         ? (Math.abs(entry - stop) / Math.abs(entry)) * 100
                         : null;
-                    const qty = Number(p.qty);
                     const unrealized = Number(p.unrealized_pnl) || 0;
-                    const initialStop =
-                      p.initial_stop_price != null ? Number(p.initial_stop_price) : stop;
-                    const risk =
-                      initialStop != null && Number.isFinite(entry)
-                        ? Math.abs(entry - initialStop)
-                        : null;
-                    const rMultiple =
-                      risk != null && risk > 0 && Number.isFinite(qty) && qty !== 0
-                        ? unrealized / (qty * risk)
-                        : null;
                     const stopSource = String(p.stop_source ?? "").toLowerCase();
                     const symbol = String(p.symbol ?? "");
                     const side = String(p.side ?? "").toLowerCase();
 
                     const closeAdvice = evaluateCloseRecommendation(p);
+                    const rMultiple = closeAdvice.rMultiple;
 
                     return (
                       <tr key={symbol || i} className="hover:bg-[var(--color-card)]/50 transition-colors">
@@ -715,7 +705,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                             setTradePage(1);
                           }}
                           className={cn(
-                            "rounded px-2 py-0.5 font-mono text-[11px] transition-colors",
+                            "rounded min-h-11 px-3 sm:min-h-0 sm:px-2 py-0.5 font-mono text-[11px] transition-colors",
                             active
                               ? "bg-[var(--color-accent)] text-white font-medium"
                               : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]",
@@ -743,7 +733,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                             setTradePage(1);
                           }}
                           className={cn(
-                            "rounded px-2 py-0.5 text-[11px] transition-colors",
+                            "rounded min-h-11 px-3 sm:min-h-0 sm:px-2 py-0.5 text-[11px] transition-colors",
                             active
                               ? "bg-[var(--color-accent)] text-white font-medium"
                               : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]",
@@ -778,13 +768,10 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                           {paginatedTrades.map((t, idx) => {
                             const rowNo = tradeFrom + idx;
                             const pnl = Number(t.pnl_usd) || 0;
+                            // Same format as Decisions: Gregorian date, Asia/Bangkok time.
+                            const stamp = formatDecisionStamp(t.close_ts);
                             const dateStr =
-                              t.close_ts != null
-                                ? new Date(t.close_ts).toLocaleString("th-TH", {
-                                    dateStyle: "short",
-                                    timeStyle: "short",
-                                  })
-                                : "—";
+                              stamp.date === "—" ? "—" : `${stamp.date} ${stamp.time.slice(0, 5)}`;
                             return (
                               <tr
                                 key={idx}

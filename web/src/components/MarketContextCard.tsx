@@ -476,7 +476,7 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
               >
                 <Gauge className="w-3.5 h-3.5" style={{ color: themeColor }} />
                 <span>Fear &amp; Greed</span>
-                <span className="font-mono text-[10px] px-1.5 py-0.2 rounded bg-[var(--color-border)]/50">
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-border)]/50">
                   {hasFng ? displayScore : "—"}
                 </span>
               </button>
@@ -493,7 +493,7 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
               >
                 <Coins className="w-3.5 h-3.5" style={{ color: altPhase.themeColor }} />
                 <span>Altcoin Season</span>
-                <span className="font-mono text-[10px] px-1.5 py-0.2 rounded bg-[var(--color-border)]/50">
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-border)]/50">
                   {altText}
                 </span>
               </button>
@@ -566,7 +566,7 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
                               <span className="text-xs font-semibold text-[var(--color-foreground)]">
                                 {item.title}
                               </span>
-                              <span className="text-[10px] font-mono font-medium text-[var(--color-muted)] bg-[var(--color-border)]/40 px-1.5 py-0.2 rounded">
+                              <span className="text-[10px] font-mono font-medium text-[var(--color-muted)] bg-[var(--color-border)]/40 px-1.5 py-0.5 rounded">
                                 นัยสำคัญ {item.weight}
                               </span>
                             </div>

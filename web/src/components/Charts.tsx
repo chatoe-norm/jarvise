@@ -67,7 +67,9 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
           <CartesianGrid stroke="#1e2a38" strokeDasharray="3 3" />
           <XAxis
             dataKey="t"
-            interval={0}
+            // One label per trade is unreadable past ~12 points (and on phones): let Recharts thin them.
+            interval={points.length > 12 ? "preserveStartEnd" : 0}
+            minTickGap={8}
             angle={-40}
             textAnchor="end"
             height={72}
