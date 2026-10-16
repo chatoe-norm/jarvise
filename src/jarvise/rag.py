@@ -238,9 +238,14 @@ def sync_openclaw(
 
     candidates: list[Path] = []
     if src.is_dir():
-        for path in sorted(src.iterdir()):
-            if path.is_file() and path.suffix.lower() in {".md", ".txt", ".markdown"}:
-                candidates.append(path)
+        for path in sorted(src.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {".md", ".txt", ".markdown"}:
+                continue
+            if path.name.lower() in {"readme.md", "readme.txt", "readme"}:
+                continue
+            candidates.append(path)
 
     result: dict[str, Any] = {
         "ok": True,
@@ -254,7 +259,7 @@ def sync_openclaw(
 
     if dry_run:
         result["dry_run"] = True
-        result["would_copy"] = [p.name for p in candidates]
+        result["would_copy"] = [str(p.relative_to(src)).replace("\\", "/") for p in candidates]
         return result
 
     dest.mkdir(parents=True, exist_ok=True)
@@ -265,7 +270,9 @@ def sync_openclaw(
         if not body:
             skipped.append(path.name)
             continue
-        sid = slugify(path.stem)
+        rel = path.relative_to(src)
+        sid_raw = str(rel.with_suffix("")).replace("\\", "-").replace("/", "-")
+        sid = slugify(sid_raw)
         suffix = ".md" if path.suffix.lower() in {".md", ".markdown"} else ".txt"
         out = dest / f"{sid}{suffix}"
         _write_markdown(
@@ -274,7 +281,7 @@ def sync_openclaw(
             {
                 "kind": "openclaw",
                 "source": sid,
-                "origin": path.name,
+                "origin": str(rel).replace("\\", "/"),
                 "ingested_at": utc_now_iso(),
                 "paper_only": True,
                 "jarvise": "kind=openclaw paper_only=true",

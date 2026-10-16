@@ -162,6 +162,20 @@ def build_parser() -> argparse.ArgumentParser:
     rm = sub.add_parser("risk-monitor", help="MTM, stop exits, daily halt")
     rm.add_argument("--db", type=Path, default=DEFAULT_DB)
     rm.add_argument("--json", action="store_true", dest="as_json")
+
+    pm = sub.add_parser(
+        "post-mortem",
+        help="Generate OpenClaw tactical post-mortem notes from closed trades",
+    )
+    pm.add_argument("--db", type=Path, default=DEFAULT_DB)
+    pm.add_argument("--output-dir", type=Path, default=None)
+    pm.add_argument("--limit", type=int, default=20)
+    pm.add_argument("--all-trades", action="store_true", help="Analyze all closed trades, not just losses")
+    pm.add_argument("--force", action="store_true", help="Overwrite existing post-mortem notes")
+    pm.add_argument(
+        "--sync-rag", action="store_true", help="Sync to data/analytics/sources/openclaw/ for Qdrant RAG"
+    )
+    pm.add_argument("--json", action="store_true", dest="as_json")
     return p
 
 
@@ -496,6 +510,36 @@ def cmd_risk_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_post_mortem(args: argparse.Namespace) -> int:
+    from jarvise_paper.post_mortem import generate_post_mortems
+
+    conn = open_db(args.db)
+    try:
+        result = generate_post_mortems(
+            conn,
+            output_dir=args.output_dir,
+            limit=args.limit,
+            losses_only=not args.all_trades,
+            force=args.force,
+            sync_rag=args.sync_rag,
+        )
+    finally:
+        conn.close()
+
+    if args.as_json:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        print(
+            f"analyzed={result.get('total_trades_analyzed')} "
+            f"written={len(result.get('written') or [])} "
+            f"skipped={len(result.get('skipped') or [])} "
+            f"rag_synced={result.get('rag_synced')}"
+        )
+        for f in result.get("written") or []:
+            print(f"  + {f}")
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -517,6 +561,8 @@ def run(argv: list[str] | None = None) -> int:
         return cmd_backfill_stops(args)
     if args.cmd == "risk-monitor":
         return cmd_risk_monitor(args)
+    if args.cmd == "post-mortem":
+        return cmd_post_mortem(args)
     return 2
 
 

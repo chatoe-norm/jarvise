@@ -52,6 +52,8 @@ data/openclaw/*
 !data/openclaw/.gitkeep
 !data/openclaw/exports/
 !data/openclaw/exports/.gitkeep
+data/openclaw/exports/tactics/*.md
+!data/openclaw/exports/tactics/README.md
 data/analytics/sources/notebook/
 data/analytics/sources/fetch/
 data/analytics/sources/firecrawl/
