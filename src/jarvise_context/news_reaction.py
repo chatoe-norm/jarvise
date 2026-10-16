@@ -123,7 +123,10 @@ _THEME_FALLBACK_CONTEXT: dict[str, str] = {
 
 _THEME_HEADLINE_MAP: dict[str, list[tuple[tuple[str, ...], str]]] = {
     "chips_ai": [
-        (("nvidia", "gemini"), "ข่าว NVIDIA มอบงบ 250 ล้านเหรียญวิจัยความปลอดภัย AI และ Google เปิดตัว Gemini 4 Argon"),
+        (
+            ("nvidia", "gemini"),
+            "ข่าว NVIDIA มอบงบ 250 ล้านเหรียญวิจัยความปลอดภัย AI และ Google เปิดตัว Gemini 4 Argon",
+        ),
         (("nvidia",), "ข่าว NVIDIA ลงทุนด้าน AI safety และโครงสร้างพื้นฐานประมวลผล"),
         (("gemini", "google"), "Google เปิดตัวโมเดลเรือธง Gemini 4 Argon"),
         (("meta",), "Meta เผยโมเดล AI รุ่นใหม่เทียบชั้น OpenAI/Anthropic"),
@@ -153,9 +156,7 @@ def format_theme_executive_line(
     if not items:
         return None
     label = THEME_LABELS.get(theme, theme)
-    combined_text = " ".join(
-        f"{it.get('title', '')} {it.get('comment', '')}".lower() for it in items
-    )
+    combined_text = " ".join(f"{it.get('title', '')} {it.get('comment', '')}".lower() for it in items)
     headline = ""
     for keywords, mapped_text in _THEME_HEADLINE_MAP.get(theme, []):
         if any(kw in combined_text for kw in keywords):

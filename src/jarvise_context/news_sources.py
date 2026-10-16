@@ -33,7 +33,21 @@ THEME_QUERIES: tuple[tuple[str, str], ...] = (
 )
 
 _THEME_WORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("chips_ai", ("nvidia", "amd", "tsmc", "asml", "samsung", "openai", "anthropic", "microsoft", "google", "ai model")),
+    (
+        "chips_ai",
+        (
+            "nvidia",
+            "amd",
+            "tsmc",
+            "asml",
+            "samsung",
+            "openai",
+            "anthropic",
+            "microsoft",
+            "google",
+            "ai model",
+        ),
+    ),
     ("geopolitics", ("iran", "china", "india", "japan", "europe", "usa", "russia", "hormuz", "washington")),
     ("fed", ("federal reserve", "fomc", "policy rate", "fed", "cpi", "inflation", "bowman", "interest rate")),
     ("people", ("elon musk", "sam altman", "michael saylor", "saylor", "vitalik", "donald trump", "trump")),
@@ -191,7 +205,7 @@ def parse_digest_text(content: str) -> list[dict[str, Any]]:
         if not m:
             continue
         title = m.group(1).strip()
-        title = re.sub(r"\s*—\s*\d{4}-\d{2}-\d{2}.*", "", title).strip()
+        title = re.sub(r"\s*[—–-]\s*\d{4}-\d{2}-\d{2}.*", "", title).strip()
         body = m.group(2).strip()
         url = ""
         comment_lines = []
@@ -213,15 +227,17 @@ def parse_digest_text(content: str) -> list[dict[str, Any]]:
                 if w in comment.lower():
                     score += 1
             scores[theme] = score
-        best_theme = max(scores, key=scores.get)
+        best_theme = max(scores, key=lambda k: scores[k]) if scores else "digest"
         if scores[best_theme] == 0:
             best_theme = "digest"
-        items.append({
-            "theme": best_theme,
-            "title": title,
-            "url": url,
-            "comment": comment,
-        })
+        items.append(
+            {
+                "theme": best_theme,
+                "title": title,
+                "url": url,
+                "comment": comment,
+            }
+        )
     return items
 
 

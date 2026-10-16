@@ -126,4 +126,3 @@ def test_parse_digest_text_and_format_executive_lines() -> None:
     assert lines[0] == "บริบทข่าว ไม่ใช่สัญญาณ"
     assert any("ชิปและ AI" in line and "→" in line for line in lines)
     assert any("ธนาคารกลางสหรัฐ" in line and "→" in line for line in lines)
-
