@@ -50,11 +50,20 @@ from jarvise_ingest.health import BACKFILL_HINT, ingest_health
 from jarvise_ingest.universe import PAPER_CORE, PAPER_LIQUID, seed_named_universe
 from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
+from jarvise_paper.auto_decide import load_auto_decide_config
 from jarvise_paper.close import close_position
 from jarvise_paper.ledger import load_paper_ledger
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
-from jarvise_risk import evaluate_from_db, load_risk_caps
+from jarvise_risk import (
+    HARD_MAX_RISK_PER_TRADE_PCT,
+    evaluate_from_db,
+    get_paper_auto_decide_enabled,
+    load_risk_caps,
+    max_risk_per_trade_pct,
+    set_max_risk_per_trade_pct,
+    set_paper_auto_decide_enabled,
+)
 from jarvise_trade import live_trading_enabled
 from jarvise_web.outcomes import derive_outcome, empty_outcome_summary, summarize_outcomes
 from jarvise_web.schemas import ApprovalsResponse, DashboardResponse
@@ -347,6 +356,12 @@ def status_payload() -> dict[str, Any]:
         "paper": redis_get_json(PAPER_KEY),
         "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
         "paper_auto": redis_get_json(PAPER_AUTO_KEY),
+        "auto_decide_config": {
+            "enabled": get_paper_auto_decide_enabled(),
+            "max_risk_per_trade_pct": max_risk_per_trade_pct(),
+            "hard_max_risk_pct": HARD_MAX_RISK_PER_TRADE_PCT,
+            "model": load_auto_decide_config().model,
+        },
         "ingest_health": redis_get_json(INGEST_HEALTH_KEY),
         "risk_monitor": redis_get_json(RISK_MONITOR_KEY),
         "risk_caps": load_risk_caps().as_dict(),
@@ -1073,6 +1088,92 @@ async def api_universe_reset(
         conn.close()
     if wants_json(request):
         return JSONResponse({"ok": True, "preset": preset, "active_symbols": active_symbols})
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.get("/api/paper/auto-decide/config")
+async def api_paper_auto_decide_get_config(_: None = Depends(require_auth)) -> dict[str, Any]:
+    cfg = load_auto_decide_config()
+    return {
+        "ok": True,
+        "enabled": get_paper_auto_decide_enabled(),
+        "max_risk_per_trade_pct": max_risk_per_trade_pct(),
+        "hard_max_risk_pct": HARD_MAX_RISK_PER_TRADE_PCT,
+        "model": cfg.model,
+    }
+
+
+@app.post("/api/paper/auto-decide/config")
+async def api_paper_auto_decide_save_config(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
+    enabled_val: bool | None = None
+    risk_val: float | None = None
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        body = await request.json()
+        if isinstance(body, dict):
+            if "enabled" in body:
+                enabled_val = bool(body["enabled"])
+            if "max_risk_per_trade_pct" in body and body["max_risk_per_trade_pct"] is not None:
+                try:
+                    risk_val = float(body["max_risk_per_trade_pct"])
+                except (ValueError, TypeError):
+                    pass
+    else:
+        form = await request.form()
+        if "enabled" in form:
+            enabled_val = str(form["enabled"]).lower() in {"1", "true", "on"}
+        if "max_risk_per_trade_pct" in form:
+            try:
+                risk_val = float(str(form["max_risk_per_trade_pct"]))
+            except (ValueError, TypeError):
+                pass
+
+    if enabled_val is not None:
+        set_paper_auto_decide_enabled(enabled_val)
+    if risk_val is not None:
+        set_max_risk_per_trade_pct(risk_val)
+
+    data = {
+        "ok": True,
+        "enabled": get_paper_auto_decide_enabled(),
+        "max_risk_per_trade_pct": max_risk_per_trade_pct(),
+        "hard_max_risk_pct": HARD_MAX_RISK_PER_TRADE_PCT,
+    }
+    if wants_json(request):
+        return JSONResponse(data)
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.post("/api/paper/auto-decide/run")
+async def api_paper_auto_decide_run(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
+    jobs_url = os.environ.get("JARVISE_JOBS_URL") or "http://jobs:8090"
+    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    data: dict[str, Any]
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(f"{jobs_url}/jobs/paper-auto-decide", headers=headers)
+            if resp.status_code in (200, 202, 409):
+                data = resp.json()
+            else:
+                data = {"ok": False, "status_code": resp.status_code, "error": resp.text[:500]}
+    except Exception as exc:
+        try:
+            from jarvise.jobs import run_paper_auto_decide
+
+            code, payload = await asyncio.to_thread(run_paper_auto_decide)
+            data = payload
+        except Exception as local_exc:
+            data = {"ok": False, "error": f"jobs failed ({exc}); local fallback failed ({local_exc})"}
+
+    if wants_json(request):
+        return JSONResponse(data)
     return RedirectResponse("/ops", status_code=303)
 
 

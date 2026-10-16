@@ -1119,3 +1119,58 @@ def test_api_rag_sync(monkeypatch) -> None:
     assert data["ok"] is True
     assert data["profile"] == "chatoe"
     assert data["url"] == "https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
+
+
+def test_api_paper_auto_decide_config(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    client = TestClient(app)
+
+    # 1. GET config
+    resp = client.get("/api/paper/auto-decide/config")
+    assert resp.status_code == 200
+    cfg = resp.json()
+    assert cfg["ok"] is True
+    assert "enabled" in cfg
+    assert "max_risk_per_trade_pct" in cfg
+
+    # 2. POST config JSON
+    resp = client.post(
+        "/api/paper/auto-decide/config",
+        json={"enabled": True, "max_risk_per_trade_pct": 0.5},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert resp.json()["enabled"] is True
+    assert resp.json()["max_risk_per_trade_pct"] == 0.5
+
+    # 3. GET /api/status includes auto_decide_config
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    status_data = resp.json()
+    assert "auto_decide_config" in status_data
+    assert status_data["auto_decide_config"]["enabled"] is True
+    assert status_data["auto_decide_config"]["max_risk_per_trade_pct"] == 0.5
+
+    # 4. POST config Form with clamp (> 1.0 clamped to 1.0)
+    resp = client.post(
+        "/api/paper/auto-decide/config",
+        data={"enabled": "false", "max_risk_per_trade_pct": "2.5"},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert resp.json()["enabled"] is False
+    assert resp.json()["max_risk_per_trade_pct"] == 1.0
+
+
+def test_api_paper_auto_decide_run(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    monkeypatch.setattr(
+        "jarvise.jobs.run_paper_auto_decide",
+        lambda: (0, {"ok": True, "skipped": False, "approved": []}),
+    )
+    client = TestClient(app)
+    resp = client.post("/api/paper/auto-decide/run", headers={"accept": "application/json"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True

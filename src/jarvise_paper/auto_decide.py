@@ -37,6 +37,7 @@ from jarvise_risk import (
     engage_kill_switch,
     estimated_notional,
     evaluate_from_db,
+    get_paper_auto_decide_enabled,
     load_risk_caps,
 )
 from jarvise_trade import live_trading_enabled
@@ -96,7 +97,7 @@ def _fenv(name: str, default: float) -> float:
 def load_auto_decide_config() -> AutoDecideConfig:
     key = (os.environ.get("OPENROUTER_API_KEY") or "").strip() or None
     return AutoDecideConfig(
-        enabled=(os.environ.get("JARVISE_PAPER_AUTO_DECIDE") or "").strip().lower() in _TRUE,
+        enabled=get_paper_auto_decide_enabled(),
         model=(os.environ.get("JARVISE_AUTO_DECIDE_MODEL") or DEFAULT_MODEL).strip(),
         min_conf=_fenv("JARVISE_AUTO_DECIDE_MIN_CONF", 0.55),
         max_per_run=max(0, int(_fenv("JARVISE_AUTO_DECIDE_MAX_PER_RUN", 4))),

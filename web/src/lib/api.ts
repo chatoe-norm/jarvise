@@ -42,6 +42,13 @@ export type PaperAutoStatus = {
   };
 };
 
+export type AutoDecideConfigPayload = {
+  enabled: boolean;
+  max_risk_per_trade_pct: number;
+  hard_max_risk_pct?: number;
+  model?: string;
+};
+
 export type StatusPayload = {
   paper_only: boolean;
   live_trading: boolean;
@@ -52,6 +59,7 @@ export type StatusPayload = {
   paper_expire: unknown;
   ingest_health?: IngestHealthStatus | null;
   paper_auto?: PaperAutoStatus | null;
+  auto_decide_config?: AutoDecideConfigPayload | null;
   risk_caps: Record<string, unknown>;
   qdrant: Record<string, unknown>;
   fear_greed_index?: number | null;
@@ -490,6 +498,18 @@ export const api = {
       url?: string;
       at?: string;
     }>("/api/rag/sync", {
+      method: "POST",
+    }),
+  getAutoDecideConfig: () =>
+    request<{ ok: boolean } & AutoDecideConfigPayload>("/api/paper/auto-decide/config"),
+  saveAutoDecideConfig: (config: { enabled?: boolean; max_risk_per_trade_pct?: number }) =>
+    request<{ ok: boolean } & AutoDecideConfigPayload>("/api/paper/auto-decide/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    }),
+  runAutoDecide: () =>
+    request<PaperAutoStatus & { ok: boolean; error?: string }>("/api/paper/auto-decide/run", {
       method: "POST",
     }),
 };

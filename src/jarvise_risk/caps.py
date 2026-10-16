@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 KILL_SWITCH_KEY = "jarvise:kill_switch"
 KILL_SWITCH_REASON_KEY = "jarvise:kill_switch:reason"
+PAPER_AUTO_DECIDE_ENABLED_KEY = "jarvise:paper_auto_decide:enabled"
+MAX_RISK_PER_TRADE_KEY = "jarvise:risk:max_risk_per_trade_pct"
 _TRUE = frozenset({"1", "true", "on", "yes"})
 _REDIS_TIMEOUT_S = 3.0
 
@@ -74,6 +76,7 @@ class RiskCaps:
             "max_gross_notional_pct": self.max_gross_notional_pct,
             "max_symbol_notional_pct": self.max_symbol_notional_pct,
             "max_correlated_bucket_pct": self.max_correlated_bucket_pct,
+            "max_risk_per_trade_pct": max_risk_per_trade_pct(),
         }
 
 
@@ -117,10 +120,71 @@ def utc_day_bounds_ms(now_ms: int) -> tuple[int, int]:
     return start, start + day_ms
 
 
+def get_paper_auto_decide_enabled() -> bool:
+    """Returns whether paper auto-decide is active (checks Redis override then env)."""
+    url = os.environ.get("REDIS_URL")
+    if url:
+        try:
+            client = _redis_client(url)
+            val = client.get(PAPER_AUTO_DECIDE_ENABLED_KEY)
+            if val is not None and str(val).strip():
+                return str(val).strip().lower() in _TRUE
+        except Exception:
+            pass
+    raw = os.environ.get("JARVISE_PAPER_AUTO_DECIDE") or ""
+    return raw.strip().lower() in _TRUE
+
+
+def set_paper_auto_decide_enabled(enabled: bool) -> bool:
+    """Sets paper auto-decide state in Redis (and updates env). Returns True if written."""
+    os.environ["JARVISE_PAPER_AUTO_DECIDE"] = "true" if enabled else "false"
+    url = os.environ.get("REDIS_URL")
+    if not url:
+        return True
+    try:
+        client = _redis_client(url)
+        client.set(PAPER_AUTO_DECIDE_ENABLED_KEY, "1" if enabled else "0")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to set %s in Redis: %s", PAPER_AUTO_DECIDE_ENABLED_KEY, exc)
+        return False
+
+
+def set_max_risk_per_trade_pct(pct: float) -> float:
+    """Tightens or adjusts max risk per trade % in Redis up to HARD_MAX_RISK_PER_TRADE_PCT."""
+    clamped = min(HARD_MAX_RISK_PER_TRADE_PCT, max(0.0, float(pct)))
+    os.environ["JARVISE_MAX_RISK_PER_TRADE_PCT"] = str(clamped)
+    url = os.environ.get("REDIS_URL")
+    if url:
+        try:
+            client = _redis_client(url)
+            client.set(MAX_RISK_PER_TRADE_KEY, str(clamped))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to set %s in Redis: %s", MAX_RISK_PER_TRADE_KEY, exc)
+    return clamped
+
+
 def max_risk_per_trade_pct() -> float:
     """Owner may tighten below 1%; never raise the doctrine ceiling."""
-    raw = _fenv("JARVISE_MAX_RISK_PER_TRADE_PCT", HARD_MAX_RISK_PER_TRADE_PCT)
-    return min(HARD_MAX_RISK_PER_TRADE_PCT, max(0.0, float(raw)))
+    raw = None
+    url = os.environ.get("REDIS_URL")
+    if url:
+        try:
+            client = _redis_client(url)
+            v = client.get(MAX_RISK_PER_TRADE_KEY)
+            if v is not None and str(v).strip():
+                raw = v
+        except Exception:
+            pass
+    if raw is None:
+        raw = os.environ.get("JARVISE_MAX_RISK_PER_TRADE_PCT")
+    if raw is None or str(raw).strip() == "":
+        raw = HARD_MAX_RISK_PER_TRADE_PCT
+    try:
+        fval = float(raw)
+    except (ValueError, TypeError):
+        fval = HARD_MAX_RISK_PER_TRADE_PCT
+    return min(HARD_MAX_RISK_PER_TRADE_PCT, max(0.0, fval))
 
 
 def risk_at_stop_pct(
