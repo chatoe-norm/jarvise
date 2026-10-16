@@ -57,12 +57,14 @@ from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapsho
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
 from jarvise_risk import (
     HARD_MAX_RISK_PER_TRADE_PCT,
+    RISK_CAP_KEYS,
     evaluate_from_db,
     get_paper_auto_decide_enabled,
     load_risk_caps,
     max_risk_per_trade_pct,
     set_max_risk_per_trade_pct,
     set_paper_auto_decide_enabled,
+    set_risk_cap,
 )
 from jarvise_trade import live_trading_enabled
 from jarvise_web.outcomes import derive_outcome, empty_outcome_summary, summarize_outcomes
@@ -1239,6 +1241,345 @@ async def api_paper_auto_decide_run(
 
     if wants_json(request):
         return JSONResponse(data)
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.get("/api/risk/caps")
+def api_risk_caps_get(_: None = Depends(require_auth)) -> dict[str, Any]:
+    return {"ok": True, "risk_caps": load_risk_caps().as_dict()}
+
+
+@app.post("/api/risk/caps")
+async def api_risk_caps_save(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
+    updates: dict[str, Any] = {}
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        body = await request.json()
+        if isinstance(body, dict):
+            updates = body
+    else:
+        form = await request.form()
+        updates = dict(form)
+
+    for k, v in updates.items():
+        if v is None or v == "":
+            continue
+        if k in RISK_CAP_KEYS or k == "max_risk_per_trade_pct":
+            try:
+                set_risk_cap(k, float(v))
+            except (ValueError, TypeError) as exc:
+                logger.warning("Failed to parse cap %s value %r: %s", k, v, exc)
+
+    data = {"ok": True, "risk_caps": load_risk_caps().as_dict()}
+    if wants_json(request):
+        return JSONResponse(data)
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.post("/api/pipeline/run")
+async def api_pipeline_run(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
+    job_name = ""
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        body = await request.json()
+        if isinstance(body, dict):
+            job_name = str(body.get("job") or "").strip()
+    else:
+        form = await request.form()
+        job_name = str(form.get("job") or "").strip()
+
+    job_route_map = {
+        "ingest": "/jobs/ingest",
+        "rag": "/jobs/rag-refresh",
+        "paper_run": "/jobs/paper-run",
+        "paper_expire": "/jobs/paper-expire",
+        "risk_monitor": "/jobs/risk-monitor",
+        "ingest_health": "/jobs/ingest-health",
+        "paper_auto_decide": "/jobs/paper-auto-decide",
+    }
+    endpoint = job_route_map.get(job_name)
+    if not endpoint:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown pipeline job: '{job_name}'. Valid jobs: {list(job_route_map.keys())}",
+        )
+
+    jobs_url = os.environ.get("JARVISE_JOBS_URL") or "http://jobs:8090"
+    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-Jarvise-Token"] = token
+
+    data: dict[str, Any]
+    started = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            resp = await client.post(f"{jobs_url}{endpoint}", headers=headers)
+            if resp.status_code in (200, 202, 409):
+                data = resp.json()
+            else:
+                data = {"ok": False, "status_code": resp.status_code, "error": resp.text[:500]}
+    except Exception as exc:
+        try:
+            from jarvise import jobs as jmod
+
+            runners = {
+                "ingest": jmod.run_ingest,
+                "rag": jmod.run_rag_refresh,
+                "paper_run": jmod.run_paper_run,
+                "paper_expire": jmod.run_paper_expire,
+                "risk_monitor": jmod.run_risk_monitor,
+                "ingest_health": jmod.run_ingest_health,
+                "paper_auto_decide": jmod.run_paper_auto_decide,
+            }
+            runner = runners.get(job_name)
+            if runner:
+                code, payload = await asyncio.to_thread(runner)
+                data = payload
+                data["local_fallback"] = True
+            else:
+                data = {"ok": False, "error": f"No runner for job {job_name}"}
+        except Exception as local_exc:
+            data = {"ok": False, "error": f"jobs failed ({exc}); local fallback failed ({local_exc})"}
+
+    duration_s = round(time.time() - started, 2)
+    response_payload = {
+        "ok": bool(data.get("ok", False) or data.get("skipped")),
+        "job": job_name,
+        "duration_s": duration_s,
+        "result": data,
+        "executed_at": int(time.time() * 1000),
+    }
+    if wants_json(request):
+        return JSONResponse(response_payload)
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.post("/api/ingest/health/run")
+async def api_ingest_health_run(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
+    jobs_url = os.environ.get("JARVISE_JOBS_URL") or "http://jobs:8090"
+    token = os.environ.get("JARVISE_JOBS_TOKEN") or ""
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-Jarvise-Token"] = token
+    data: dict[str, Any]
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(f"{jobs_url}/jobs/ingest-health", headers=headers)
+            if resp.status_code in (200, 202, 500):
+                data = resp.json()
+            else:
+                data = {"ok": False, "status_code": resp.status_code, "error": resp.text[:500]}
+    except Exception as exc:
+        try:
+            from jarvise.jobs import run_ingest_health
+
+            code, payload = await asyncio.to_thread(run_ingest_health)
+            data = payload
+        except Exception as local_exc:
+            data = {"ok": False, "error": f"jobs failed ({exc}); local fallback failed ({local_exc})"}
+
+    if wants_json(request):
+        return JSONResponse(data)
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.post("/api/ingest/backfill")
+async def api_ingest_backfill(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
+    symbols: list[str] = []
+    timeframe = ""
+    since = ""
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        body = await request.json()
+        if isinstance(body, dict):
+            raw_syms = body.get("symbols")
+            if isinstance(raw_syms, list):
+                symbols = [str(s).strip().upper() for s in raw_syms if str(s).strip()]
+            elif isinstance(raw_syms, str) and raw_syms.strip():
+                symbols = [s.strip().upper() for s in raw_syms.split(",") if s.strip()]
+            timeframe = str(body.get("timeframe") or "").strip()
+            since = str(body.get("since") or "").strip()
+    else:
+        form = await request.form()
+        raw_syms = form.get("symbols")
+        if raw_syms:
+            symbols = [s.strip().upper() for s in str(raw_syms).split(",") if s.strip()]
+        timeframe = str(form.get("timeframe") or "").strip()
+        since = str(form.get("since") or "").strip()
+
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+
+    tf = timeframe or os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    htf = (os.environ.get("JARVISE_ANALYZE_HTF") or "1d").strip() or "1d"
+    since_date = since or "2021-01-01"
+
+    if not symbols:
+        universe_id = active_universe_id()
+        conn = open_db(path)
+        try:
+            now_ms = int(time.time() * 1000)
+            symbols = universe_as_of(conn, universe_id, now_ms)
+        finally:
+            conn.close()
+
+    if not symbols:
+        symbols = ["BTCUSDT", "ETHUSDT"]
+
+    def _do_backfill(
+        sym_list: list[str], db_p: Path, t_frame: str, htf_frame: str, since_d: str
+    ) -> list[str]:
+        from jarvise.charts import export_candle_graphs
+        from jarvise_analyze.cli import main as analyze_main
+        from jarvise_ingest.cli import main as ingest_main
+
+        synced: list[str] = []
+        for sym in sym_list:
+            ingest_main(
+                [
+                    "--symbol",
+                    sym,
+                    "--timeframe",
+                    t_frame,
+                    "--since",
+                    since_d,
+                    "--skip-derivatives",
+                    "--skip-book",
+                    "--db",
+                    str(db_p),
+                ]
+            )
+            ingest_main(
+                [
+                    "--symbol",
+                    sym,
+                    "--timeframe",
+                    htf_frame,
+                    "--since",
+                    since_d,
+                    "--skip-derivatives",
+                    "--skip-book",
+                    "--db",
+                    str(db_p),
+                ]
+            )
+            ingest_main(
+                [
+                    "--symbol",
+                    sym,
+                    "--timeframe",
+                    "1h",
+                    "--limit",
+                    "200",
+                    "--skip-derivatives",
+                    "--db",
+                    str(db_p),
+                ]
+            )
+            analyze_main(["--symbol", sym, "--timeframe", t_frame, "--db", str(db_p), "--json"])
+            synced.append(sym)
+
+        try:
+            export_candle_graphs(db_p, sym_list, ["1h", t_frame])
+        except Exception:
+            pass
+        return synced
+
+    results = await asyncio.to_thread(_do_backfill, symbols, path, tf, htf, since_date)
+    response_payload = {
+        "ok": True,
+        "synced_symbols": results,
+        "count": len(results),
+        "timeframe": tf,
+        "since": since_date,
+    }
+    if wants_json(request):
+        return JSONResponse(response_payload)
+    return RedirectResponse("/ops", status_code=303)
+
+
+@app.get("/api/observability/preview")
+def api_observability_preview(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> dict[str, Any]:
+    host = request.headers.get("host", "127.0.0.1").split(":")[0]
+    ledger, _err = load_paper_snapshot()
+    acct = ledger.get("account") or {}
+    positions = ledger.get("positions") or []
+
+    path = db_path()
+    pending_count = 0
+    if path.exists():
+        conn = open_db(path)
+        try:
+            pending_count = len(list_approvals(conn, status="pending", limit=500))
+        finally:
+            conn.close()
+
+    ks = kill_switch_state()
+    return {
+        "ok": True,
+        "gauges": {
+            "kill_switch": bool(ks.get("engaged")),
+            "kill_switch_state": ks,
+            "paper_equity": acct.get("equity", 10000.0),
+            "paper_cash": acct.get("cash", 10000.0),
+            "open_positions_count": len(positions),
+            "pending_approvals_count": pending_count,
+            "live_trading": live_trading_enabled(),
+        },
+        "job_runs": {
+            "ingest": redis_get_json(INGEST_KEY),
+            "rag": redis_get_json(RAG_KEY),
+            "paper": redis_get_json(PAPER_KEY),
+            "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
+            "paper_auto": redis_get_json(PAPER_AUTO_KEY),
+            "ingest_health": redis_get_json(INGEST_HEALTH_KEY),
+            "risk_monitor": redis_get_json(RISK_MONITOR_KEY),
+        },
+        "metrics_summary": load_metrics(),
+        "endpoints": {
+            "grafana": f"http://{host}:3000",
+            "prometheus": f"http://{host}:9090",
+            "web_metrics": "/metrics",
+        },
+    }
+
+
+@app.post("/api/observability/persist")
+async def api_observability_persist(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> Any:
+    path = db_path()
+    report: dict[str, Any] | None = None
+    if path.exists():
+        conn = open_db(path)
+        try:
+            ensure_paper_account(conn)
+            report = compute_paper_metrics(conn)
+            persist_metrics_snapshot(conn, report)
+        finally:
+            conn.close()
+    if wants_json(request):
+        return JSONResponse({"ok": True, "metrics": report})
     return RedirectResponse("/ops", status_code=303)
 
 

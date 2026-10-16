@@ -541,5 +541,91 @@ export const api = {
     request<DoctrineQueryResponse>(
       `/api/doctrine/query?${new URLSearchParams({ q, limit: String(limit) }).toString()}`,
     ),
+  getRiskCaps: () =>
+    request<{ ok: boolean; risk_caps: RiskCapsPayload }>("/api/risk/caps"),
+  saveRiskCaps: (caps: Partial<RiskCapsPayload>) =>
+    request<{ ok: boolean; risk_caps: RiskCapsPayload }>("/api/risk/caps", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(caps),
+    }),
+  runPipelineJob: (job: string) =>
+    request<PipelineRunResult>("/api/pipeline/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job }),
+    }),
+  runIngestHealth: () =>
+    request<IngestHealthStatus & { ok: boolean }>("/api/ingest/health/run", {
+      method: "POST",
+    }),
+  runIngestBackfill: (params: { symbols?: string[]; timeframe?: string; since?: string }) =>
+    request<BackfillPayload>("/api/ingest/backfill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }),
+  getObservabilityPreview: () =>
+    request<ObservabilityPreviewPayload>("/api/observability/preview"),
+  persistObservabilitySnapshot: () =>
+    request<{ ok: boolean; metrics?: unknown }>("/api/observability/persist", {
+      method: "POST",
+    }),
 };
+
+export type RiskCapsPayload = {
+  max_notional_per_order: number;
+  max_daily_loss_usd: number;
+  drawdown_lock_pct: number;
+  max_open_positions: number;
+  max_gross_notional_pct: number;
+  max_symbol_notional_pct: number;
+  max_correlated_bucket_pct: number;
+  max_risk_per_trade_pct: number;
+};
+
+export type PipelineRunResult = {
+  ok: boolean;
+  job: string;
+  duration_s: number;
+  result: Record<string, unknown>;
+  executed_at: number;
+};
+
+export type BackfillPayload = {
+  ok: boolean;
+  synced_symbols: string[];
+  count: number;
+  timeframe: string;
+  since: string;
+};
+
+export type ObservabilityPreviewPayload = {
+  ok: boolean;
+  gauges: {
+    kill_switch: boolean;
+    kill_switch_state?: Record<string, unknown>;
+    paper_equity: number;
+    paper_cash: number;
+    open_positions_count: number;
+    pending_approvals_count: number;
+    live_trading: boolean;
+  };
+  job_runs: {
+    ingest?: unknown;
+    rag?: unknown;
+    paper?: unknown;
+    paper_expire?: unknown;
+    paper_auto?: unknown;
+    ingest_health?: IngestHealthStatus | null;
+    risk_monitor?: unknown;
+  };
+  metrics_summary?: Record<string, unknown>;
+  endpoints: {
+    grafana: string;
+    prometheus: string;
+    web_metrics: string;
+  };
+};
+
 

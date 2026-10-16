@@ -8,6 +8,7 @@ from jarvise_risk.caps import (
     KILL_SWITCH_REASON_KEY,
     MAX_RISK_PER_TRADE_KEY,
     PAPER_AUTO_DECIDE_ENABLED_KEY,
+    RISK_CAP_KEYS,
     US_EQUITY,
     KillSwitchUnavailable,
     RiskCaps,
@@ -25,6 +26,7 @@ from jarvise_risk.caps import (
     risk_at_stop_pct,
     set_max_risk_per_trade_pct,
     set_paper_auto_decide_enabled,
+    set_risk_cap,
     symbol_bucket,
     utc_day_bounds_ms,
 )
@@ -49,6 +51,7 @@ __all__ = [
     "MarketSafetyConfig",
     "MarketSafetyResult",
     "PAPER_AUTO_DECIDE_ENABLED_KEY",
+    "RISK_CAP_KEYS",
     "RiskCaps",
     "US_EQUITY",
     "apply_safety_to_analysis",
@@ -70,6 +73,7 @@ __all__ = [
     "risk_at_stop_pct",
     "set_max_risk_per_trade_pct",
     "set_paper_auto_decide_enabled",
+    "set_risk_cap",
     "symbol_bucket",
     "utc_day_bounds_ms",
 ]

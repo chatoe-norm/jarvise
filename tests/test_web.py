@@ -1189,3 +1189,90 @@ def test_api_doctrine_query(monkeypatch) -> None:
     assert data["ok"] is True
     assert len(data["hits"]) == 1
     assert data["hits"][0]["text"] == "pullback rule"
+
+
+def test_api_risk_caps_get_and_save(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    client = TestClient(app)
+
+    # GET /api/risk/caps
+    resp = client.get("/api/risk/caps")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert "max_notional_per_order" in resp.json()["risk_caps"]
+
+    # POST /api/risk/caps JSON
+    resp = client.post(
+        "/api/risk/caps",
+        json={"max_notional_per_order": 2500.0, "drawdown_lock_pct": 6.0},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["risk_caps"]["max_notional_per_order"] == 2500.0
+    assert data["risk_caps"]["drawdown_lock_pct"] == 6.0
+
+
+def test_api_pipeline_run(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    monkeypatch.setattr(
+        "jarvise.jobs.run_ingest_health",
+        lambda: (0, {"ok": True, "timeframe": "4h", "symbols": {}}),
+    )
+    client = TestClient(app)
+
+    # Valid job run
+    resp = client.post(
+        "/api/pipeline/run",
+        json={"job": "ingest_health"},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["job"] == "ingest_health"
+    assert "result" in data
+
+    # Invalid job run
+    resp = client.post(
+        "/api/pipeline/run",
+        json={"job": "invalid_job"},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+def test_api_ingest_health_run(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    monkeypatch.setattr(
+        "jarvise.jobs.run_ingest_health",
+        lambda: (0, {"ok": True, "timeframe": "4h", "symbols": {}}),
+    )
+    client = TestClient(app)
+    resp = client.post("/api/ingest/health/run", headers={"accept": "application/json"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+def test_api_observability_preview_and_persist(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "obs.db"
+    conn = open_db(db)
+    ensure_paper_account(conn)
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+
+    client = TestClient(app)
+    resp = client.get("/api/observability/preview")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert "gauges" in data
+    assert "job_runs" in data
+    assert "endpoints" in data
+    assert data["endpoints"]["web_metrics"] == "/metrics"
+
+    resp2 = client.post("/api/observability/persist", headers={"accept": "application/json"})
+    assert resp2.status_code == 200
+    assert resp2.json()["ok"] is True
