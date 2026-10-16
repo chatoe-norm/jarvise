@@ -180,3 +180,19 @@ def test_rag_sync_openclaw_cli_dry_run(tmp_path: Path, monkeypatch) -> None:
     payload = json.loads(result.output)
     assert payload["dry_run"] is True
     assert payload["paper_only"] is True
+
+
+def test_sync_openclaw_subdirectories_and_excludes_readme(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_ROOT", str(tmp_path))
+    export = tmp_path / "data" / "openclaw" / "exports"
+    tactics = export / "tactics"
+    tactics.mkdir(parents=True)
+    (tactics / "README.md").write_text("# Doc\nSchema info", encoding="utf-8")
+    (tactics / "post-mortem-btc.md").write_text("# Post-Mortem BTC\nLessons learned", encoding="utf-8")
+    result = rag.sync_openclaw(dry_run=False)
+    assert result["ok"] is True
+    assert result["candidates"] == 1
+    assert len(result["written"]) == 1
+    out_file = tmp_path / "data" / "analytics" / "sources" / "openclaw" / "tactics-post-mortem-btc.md"
+    assert out_file.exists()
+    assert "Lessons learned" in out_file.read_text(encoding="utf-8")
