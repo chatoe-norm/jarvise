@@ -35,3 +35,37 @@ body {
   color: var(--color-foreground);
   -webkit-font-smoothing: antialiased;
 }
+
+@keyframes slideUp {
+  from {
+    transform: translateY(100%);
+    opacity: 0.8;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.18s ease-out forwards;
+}
+
+.touch-target-safe {
+  min-height: 48px;
+  min-width: 48px;
+}
+

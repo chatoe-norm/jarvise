@@ -81,7 +81,7 @@ export function ApprovalQueue({
   }
 
   return (
-    <Card>
+    <Card id="approval-queue">
       <CardHeader>
         <CardTitle>Approval queue</CardTitle>
         <CardDescription>
