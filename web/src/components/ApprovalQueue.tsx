@@ -102,9 +102,87 @@ export function ApprovalQueue({
   const actionable = rows.filter((r) => !isNoopFlat(r, openSymbols));
   const noop = rows.filter((r) => isNoopFlat(r, openSymbols));
 
+  function rowActions(r: ApprovalRow, card: RecommendationPayload | undefined, wide: boolean) {
+    const btn = wide ? "flex-1" : undefined;
+    return (
+      <>
+        <Button size="sm" variant="ghost" className={btn} onClick={() => void toggle(r)}>
+          {open[r.id] ? "ซ่อนคำแนะนำ" : "ดูคำแนะนำ"}
+        </Button>
+        <Button
+          size="sm"
+          className={btn}
+          // Expired cards are refused server-side; don't offer the click.
+          disabled={killSwitch || busy !== null || isExpired(r)}
+          title={isExpired(r) ? "การ์ดหมดอายุแล้ว — รอรอบสแกนถัดไป" : undefined}
+          onClick={() => act(r.id, "approve")}
+        >
+          {busy === r.id + "approve" ? "…" : approveLabel(card)}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className={btn}
+          disabled={busy !== null}
+          onClick={() => act(r.id, "reject")}
+        >
+          {busy === r.id + "reject" ? "…" : rejectLabel(card)}
+        </Button>
+      </>
+    );
+  }
+
+  function recommendationBody(r: ApprovalRow) {
+    const key = cardKey(r);
+    const card = cards[key];
+    if (card) return <RecommendationCard data={card} ohlcv={ohlcv[key]} />;
+    if (cardError[key]) {
+      return <p className="text-sm text-[var(--color-danger)]">โหลดคำแนะนำไม่สำเร็จ: {cardError[key]}</p>;
+    }
+    return <p className="text-sm text-[var(--color-muted)]">กำลังโหลดคำแนะนำ…</p>;
+  }
+
+  /** Phones: one card per candidate so Approve/Reject never need a sideways scroll. */
+  function renderCards(list: ApprovalRow[]) {
+    return (
+      <ul className="space-y-3 md:hidden">
+        {list.map((r) => (
+          <li key={r.id} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/40 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold">{r.symbol}</span>
+              <Badge variant="outline">{String(r.action || "—")}</Badge>
+            </div>
+            <dl className="mt-2 grid grid-cols-4 gap-2 text-xs">
+              <div>
+                <dt className="text-[var(--color-muted)]">TF</dt>
+                <dd>{r.timeframe}</dd>
+              </div>
+              <div>
+                <dt className="text-[var(--color-muted)]">Conf</dt>
+                <dd className="tabular-nums">{formatNum(r.confidence_score, 2)}</dd>
+              </div>
+              <div>
+                <dt className="text-[var(--color-muted)]">Size%</dt>
+                <dd className="tabular-nums">{formatNum(r.size_pct_equity, 2)}</dd>
+              </div>
+              <div>
+                <dt className="text-[var(--color-muted)]">Expires</dt>
+                <dd>{expiresIn(r.expires_at_ms)}</dd>
+              </div>
+            </dl>
+            <div className="mt-3 flex gap-2">{rowActions(r, cards[cardKey(r)], true)}</div>
+            {open[r.id] ? <div className="mt-3">{recommendationBody(r)}</div> : null}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
   function renderTable(list: ApprovalRow[]) {
     return (
-      <div className="overflow-x-auto -mx-1 sm:mx-0">
+      <>
+      {renderCards(list)}
+      <div className="hidden md:block overflow-x-auto -mx-1 sm:mx-0">
         <table className="w-full min-w-[620px] text-left text-sm">
           <thead className="text-[var(--color-muted)]">
             <tr className="border-b border-[var(--color-border)]">
@@ -132,42 +210,13 @@ export function ApprovalQueue({
                   <td className="py-3 pr-3 tabular-nums">{formatNum(r.size_pct_equity, 2)}</td>
                   <td className="py-3 pr-3 text-[var(--color-muted)]">{expiresIn(r.expires_at_ms)}</td>
                   <td className="py-3">
-                    <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="ghost" onClick={() => void toggle(r)}>
-                        {open[r.id] ? "ซ่อนคำแนะนำ" : "ดูคำแนะนำ"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        // Expired cards are refused server-side; don't offer the click.
-                        disabled={killSwitch || busy !== null || isExpired(r)}
-                        title={isExpired(r) ? "การ์ดหมดอายุแล้ว — รอรอบสแกนถัดไป" : undefined}
-                        onClick={() => act(r.id, "approve")}
-                      >
-                        {busy === r.id + "approve" ? "…" : approveLabel(card)}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy !== null}
-                        onClick={() => act(r.id, "reject")}
-                      >
-                        {busy === r.id + "reject" ? "…" : rejectLabel(card)}
-                      </Button>
-                    </div>
+                    <div className="flex flex-wrap gap-2">{rowActions(r, card, false)}</div>
                   </td>
                 </tr>,
                 open[r.id] ? (
                   <tr key={r.id + ":card"} className="border-b border-[var(--color-border)]/60">
                     <td colSpan={7} className="pb-4 pt-1">
-                      {card ? (
-                        <RecommendationCard data={card} ohlcv={ohlcv[key]} />
-                      ) : cardError[key] ? (
-                        <p className="text-sm text-[var(--color-danger)]">
-                          โหลดคำแนะนำไม่สำเร็จ: {cardError[key]}
-                        </p>
-                      ) : (
-                        <p className="text-sm text-[var(--color-muted)]">กำลังโหลดคำแนะนำ…</p>
-                      )}
+                      {recommendationBody(r)}
                     </td>
                   </tr>
                 ) : null,
@@ -176,6 +225,7 @@ export function ApprovalQueue({
           </tbody>
         </table>
       </div>
+      </>
     );
   }
 

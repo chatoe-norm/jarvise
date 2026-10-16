@@ -69,3 +69,32 @@ body {
   min-width: 48px;
 }
 
+
+@keyframes scaleIn {
+  from {
+    transform: scale(0.96);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Desktop modal entrance (MarketContextCard). Was referenced but never defined. */
+.animate-scale-in {
+  animation: scaleIn 0.18s ease-out forwards;
+}
+
+/* Bottom nav sits above the iOS home indicator (viewport-fit=cover). */
+.safe-area-bottom {
+  padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-slide-up,
+  .animate-fade-in,
+  .animate-scale-in {
+    animation: none;
+  }
+}

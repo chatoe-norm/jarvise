@@ -107,7 +107,7 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
               size="sm"
               disabled={checking || backfilling}
               onClick={() => void handleRunHealthCheck()}
-              className="h-8 text-xs font-mono font-medium"
+              className="h-11 sm:h-8 text-xs font-mono font-medium"
             >
               {checking ? "กำลังตรวจสอบ…" : "⚡ Run Health Check Now"}
             </Button>

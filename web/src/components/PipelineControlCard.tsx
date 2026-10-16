@@ -153,7 +153,7 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
             variant="outline"
             size="sm"
             onClick={() => onRefresh?.()}
-            className="h-8 text-xs font-mono"
+            className="h-11 sm:h-8 text-xs font-mono"
           >
             ↻ ซิงค์สถานะ Job
           </Button>
@@ -237,7 +237,7 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
                     size="sm"
                     disabled={isRunning || runningJob !== null}
                     onClick={() => void handleRunJob(job.key)}
-                    className="h-8 text-xs font-mono font-semibold min-w-[100px]"
+                    className="h-11 sm:h-8 text-xs font-mono font-semibold min-w-[100px]"
                   >
                     {isRunning ? "กำลังรัน…" : "▶ Run Now"}
                   </Button>

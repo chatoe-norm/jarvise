@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type CryptoSuitability, type UniversePayload } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 
 export const POPULAR_CRYPTO_OPTIONS = [
@@ -454,7 +455,7 @@ export function CryptoUniverseCard() {
 
         {/* Section 3: Sorting, Search & Filter Controls */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[var(--color-card)]/20 p-3 rounded-lg border border-[var(--color-border)]">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
             <input
               type="text"
               placeholder="ค้นหา Symbol / Regime…"
@@ -515,12 +516,12 @@ export function CryptoUniverseCard() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <span className="text-xs text-[var(--color-muted)] whitespace-nowrap">เรียงตาม:</span>
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value)}
-              className="rounded-md border border-[var(--color-border)] bg-[#101722] px-2.5 py-1 text-xs text-[var(--color-foreground)] focus:outline-none focus:border-sky-500 font-medium cursor-pointer"
+              className="min-w-0 max-w-full flex-1 md:flex-none rounded-md border border-[var(--color-border)] bg-[#101722] px-2.5 py-1 text-xs text-[var(--color-foreground)] focus:outline-none focus:border-sky-500 font-medium cursor-pointer"
             >
               <option value="suitability_desc">🌟 โดดเด่น / เหมาะเทรดที่สุด (Trade Suitability)</option>
               <option value="confidence_desc">🎯 คะแนนความมั่นใจ (Confidence Score: สูง ➔ ต่ำ)</option>
@@ -567,11 +568,13 @@ export function CryptoUniverseCard() {
               <button
                 type="button"
                 onClick={() => {
-                  if (data.backfill_hint) {
-                    void navigator.clipboard.writeText(data.backfill_hint);
+                  const hint = data.backfill_hint;
+                  if (!hint) return;
+                  void copyText(hint).then((ok) => {
+                    if (!ok) return;
                     setCopiedHint(true);
                     setTimeout(() => setCopiedHint(false), 2000);
-                  }
+                  });
                 }}
                 className="text-[11px] text-sky-400 hover:text-sky-300 font-mono transition-colors"
               >
@@ -780,7 +783,7 @@ function CryptoAssetCard({
             disabled={busy || syncing}
             onClick={onRemove}
             className={cn(
-              "h-7 text-xs font-mono transition-colors",
+              "h-11 sm:h-7 text-xs font-mono transition-colors",
               isConfirmingRemove
                 ? "bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 border border-rose-500/50"
                 : "text-slate-400 hover:text-rose-400 hover:bg-rose-500/10",
@@ -795,7 +798,7 @@ function CryptoAssetCard({
             size="sm"
             disabled={busy || syncing}
             onClick={onAdd}
-            className="h-7 text-xs font-mono border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+            className="h-11 sm:h-7 text-xs font-mono border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
           >
             + เพิ่มเข้า Universe
           </Button>

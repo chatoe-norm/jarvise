@@ -142,18 +142,8 @@ function ActivePositionsCard({
                 const stopSource = String(p.stop_source || "");
                 const entry = Number(p.entry_price);
                 const stop = p.stop_price != null ? Number(p.stop_price) : null;
-                const qty = Number(p.qty);
-                const initialStop =
-                  p.initial_stop_price != null ? Number(p.initial_stop_price) : stop;
-                const risk =
-                  initialStop != null && Number.isFinite(entry)
-                    ? Math.abs(entry - initialStop)
-                    : null;
-                const rMultiple =
-                  risk != null && risk > 0 && Number.isFinite(qty) && qty !== 0
-                    ? uPnl / (qty * risk)
-                    : null;
                 const closeAdvice = evaluateCloseRecommendation(p);
+                const rMultiple = closeAdvice.rMultiple;
 
                 return (
                   <tr key={i} className="hover:bg-[var(--color-card)]/50 transition-colors">

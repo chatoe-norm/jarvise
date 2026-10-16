@@ -78,7 +78,7 @@ export function ModelRoutingCard({ activeModel }: { activeModel?: string | null 
               size="sm"
               disabled={syncing}
               onClick={() => void handleSync()}
-              className="text-xs h-8 border-[var(--color-border)] hover:bg-[var(--color-surface)] cursor-pointer"
+              className="text-xs h-11 sm:h-8 border-[var(--color-border)] hover:bg-[var(--color-surface)] cursor-pointer"
             >
               <RefreshCw className={cn("w-3.5 h-3.5 mr-1.5", syncing && "animate-spin text-emerald-400")} />
               <span>{syncing ? "กำลังโหลด…" : "โหลดใหม่"}</span>

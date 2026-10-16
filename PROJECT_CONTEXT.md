@@ -1,7 +1,7 @@
 # PROJECT_CONTEXT.md — Jarvise
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
-**Generated:** 2026-09-25; **status refreshed:** 2026-10-07 (~14:00 ICT).
+**Generated:** 2026-09-25; **status refreshed:** 2026-10-17 (handoff sync; table rows below dated 2026-10-07 unless noted — see §6 for PRs #138–#165).
 **Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** on `main`. Runtime cut over to Hostinger KVM **`1811101`** (Tailscale `100.89.171.36`). Live kill-switch flatten ([PR #111](https://github.com/chatoe-norm/jarvise/pull/111)) **dormant** while `JARVISE_LIVE_TRADING=false`. Opt-in `paper_liquid` ([PR #112](https://github.com/chatoe-norm/jarvise/pull/112)); VPS ingest BTC/ETH/SOL/BNB. OpenClaw **repo + host** pin `2026.9.8` ([PR #114](https://github.com/chatoe-norm/jarvise/pull/114); host env bumped 2026-10-07). Docs cutover SoT ([PR #115](https://github.com/chatoe-norm/jarvise/pull/115)) Deploy green on `srv1811101`. **Coverage:** intelligence + paper autotrade + Approve→live *door* — **not** P5. **Doctrine MVP:** still waiting on ~10+ closed `auto_*`. **Next:** sample paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
@@ -19,13 +19,16 @@
 | Equity paper | Universe `paper_equity` (SPY/QQQ) via Stooq 1d; paper-only; no broker live. |
 | VPS schedules | n8n active: ingest ~15m, rag ~6h, **paper-run 4h**, **paper-expire 1h**, **risk-monitor 15m**, pending digest / auto-decide as configured. Live-reconcile **not** imported (flag off). |
 | Next | Prove auto-decide EV via closed `auto_*`; optional checklist live enable; stabilize before P5. Host reboot still pending owner OK (`REBOOT_REQUIRED` after 2026-10-07 apt). |
-| Paper EV sampling | VPS `JARVISE_ANALYZE_MTF=false`. Closed `auto_*` **n=0** as of 2026-10-07. Cap on VPS **4** (repo default 2). Restore MTF/`MIN_EV` after N≈10. Live stays false. |
+| Paper EV sampling | **2026-10-17 (live audit):** closed `auto_claude` **n=10** (gate ~8 reached), EV **−0.65**/trade, win rate 20%; soft EV gate **blocking** auto-decide as designed. Ledger 18 closed, equity $9,986.59. Floors/formula unchanged. Cap on VPS **4** (repo default 2). Live stays false. |
+| Universe (VPS, 2026-10-17) | Ingest health covers **7** symbols (BTC/ETH/SOL/BNB + ADA/DOGE/XRP added via Ops Universe) under `paper_liquid`. Owner to confirm intended. |
+| Open ops (2026-10-17 audit) | Exchange `/api/exchange` → `error: auth` (keys configured on web but fail to load — check key/secret format or key-file mount). News digest: 4/5 categories fail (JSONDecodeError / server disconnected), last digest ~15h old. |
 | Risk | Per-order + portfolio book caps (open/gross/symbol/bucket) + market safety; timeout → FLAT (paper). |
 | Obs | `GET /metrics` (web + jobs); compose profile `obs` optional on VPS (Prometheus `:9090` + Grafana `:3000`, Tailscale-bound, 256m). |
 | P4-C | Implemented: Approve → caps → `jarvise_trade` MARKET POST → `live_orders`; no paper mirror when live. |
 | OpenClaw | Repo + VPS `OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.8` (healthy; Control UI `:18789`). Compose defaults **3g / 2.0 CPU / `NODE_OPTIONS=2048`**, `stop_grace_period: 90s`. Small team `chief`+researcher/writer/reviewer (paper-only). |
 | Host | KVM `1811101` / Tailscale `100.89.171.36` / runner `srv1811101`. Ubuntu 24.04 apt upgraded 2026-10-07 (Docker **29.8.2** / Compose **v5.6.0**). Co-tenant LearningYard. Former `1269762` = T4Trip only (Jarvise fully wiped). |
 | VPS | healthz `{"ok":true,"paper_only":true}` (checked 2026-10-07). Last **green** Deploy: `#115` on `srv1811101`. Live flag stays false. |
+| Since 2026-10-07 (#138–#165) | Profit lock + two-stage breakeven & outcome memory (#138/#144); dashboard UI/UX + mobile PWA (#145/#147/#148); OpenClaw guardrails/skills (#146); dynamic Altseason + de-duplicated F&G modal (#162/#163); tactical post-mortem generator + recursive RAG sync (#164); multi-tier OpenRouter model routing + semi-dynamic Market Context PWA (#165). OpenClaw compose defaults now **4g / 2.0 CPU / `NODE_OPTIONS=3072`**. Details: `docs/handoff/2026-10-17-claude-handoff.md`. |
 
 ---
 
@@ -384,6 +387,10 @@ P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (ETF fl
 - **2026-10-06** — OpenClaw image pin `2026.9.8` (PR [#114](https://github.com/chatoe-norm/jarvise/pull/114)) merged to `main`; VPS Deploy run 100 **failed** (self-hosted logs 404). healthz still `paper_only:true`; OpenClaw UI `:18789` HTTP 200. Host `OPENCLAW_IMAGE` not bumped by `fdpy`. Closed `auto_*` still n=0. Live stays false.
 - **2026-10-07** — Full-stack cutover to Hostinger KVM `1811101` (`76.13.218.48`, Tailscale `100.89.171.36`). Backup/restore from `srv1269762`; self-hosted runner `srv1811101` (label `jarvise`); old Jarvise compose drained then **fully wiped** on `1269762` (`/opt/jarvise`, volumes, cron, orphan `/opt/actions-runner`; T4Trip + its OpenClaw image kept). Docs SoT cutover (PR [#115](https://github.com/chatoe-norm/jarvise/pull/115)) Deploy green. Host `OPENCLAW_IMAGE` → `2026.9.8`; OpenClaw resources **3g / 2.0 / 2048**. Ubuntu 24.04 apt upgrade (Docker 29.8.2 / Compose v5.6.0); **reboot still pending** owner OK. Live stays false; closed `auto_*` still n=0.
 
+- **2026-10-08–17** — Replay IS/OOS ([#129](https://github.com/chatoe-norm/jarvise/pull/129)); Paper loss lesson ([#130](https://github.com/chatoe-norm/jarvise/pull/130)); candle SVG export (#132); Paper charts (#136/#137); profit lock (#138); news context (#141/#142); positions 30s polling (#143); two-stage breakeven + outcome memory (#144); dashboard UI/UX (#145); OpenClaw guardrails (#146); mobile/PWA (#147/#148).
+- **2026-10-16–17** — Dynamic Altseason + F&G modal (#162/#163); `jarvise paper post-mortem` + `rag sync-openclaw` recursive tactics (#164); OpenRouter 5-tier model routing (`GET /api/openclaw/model-routing`, Ops "AI Models" tab), `claw-compactor` skill, semi-dynamic Market Context PWA (#165). Handoff doc added. Live stays false; closed `auto_*` gate (~8) unchanged.
+- **2026-10-17** — Command Dashboard audit (all 5 pages, live GET walkthrough). [PR #166](https://github.com/chatoe-norm/jarvise/pull/166) safety: approve/reject report real refusals (409), risk caps reject 0/negatives, jobs proxy sends `X-Jarvise-Token`, confirm dialogs on state-changing Ops actions, error boundary, service worker v2 (network-first shell). [PR #167](https://github.com/chatoe-norm/jarvise/pull/167) honest data: no fake Market Context fallbacks, F&G/Altseason trade advice removed (context only), 30s dashboard polling, exit labels match stored reasons, `loss_lesson.by_exit.manual`, owner copy remaps "doctrine", Ops risk-monitor panel, real n8n schedules, model-routing card labelled as an unwired plan, Exchange shows real errors. PR C: mobile tap targets/stacked approval cards, dead alias files removed, `tsx` dev dep. Deferred: universe remove/reset re-seeding, backfill exit codes, bundle code-split.
+
 Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature has landed via spec/plan first.
 
 ---
@@ -405,6 +412,8 @@ Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature 
 - `docs/superpowers/specs/2026-09-23-p4-manual-approval-paper-slice-design.md` + plans — **P4-B shipped**
 - `docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md` + plans — **shipped** (paper-run / paper-expire jobs + n8n)
 - `docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md` + `plans/2026-10-01-p4c-live-submit.md` — **P4-C shipped gated off**
+- `docs/handoff/2026-10-17-claude-handoff.md` — latest development handover (PRs #162–#165, architecture, quality gates)
+- `docs/research/antigravity-sync-plan.md` — model-routing + Market Context blueprint (shipped in #165)
 - `docs/exchange/binance-for-jarvise.md` — allowed vs forbidden exchange capabilities
 - `docs/exchange/eterna-for-jarvise.md` — Eterna research overlay + VenueClient stub status (T2.5)
 - `docs/ux-ui/shadcn-for-jarvise.md` — shadcn → Command Dashboard SPA (`web/`)

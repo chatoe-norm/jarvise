@@ -179,7 +179,7 @@ export function DecisionsPage() {
                     setPage(1);
                     void load(target, timeframe, 1, pageSize);
                   }}
-                  className={`rounded px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                  className={`rounded min-h-11 px-3 sm:min-h-0 sm:px-2 py-0.5 font-mono text-[11px] transition-colors ${
                     active
                       ? "bg-[var(--color-accent)] text-white font-medium"
                       : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]"
@@ -202,7 +202,7 @@ export function DecisionsPage() {
                     setPage(1);
                     void load(symbol, target, 1, pageSize);
                   }}
-                  className={`rounded px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                  className={`rounded min-h-11 px-3 sm:min-h-0 sm:px-2 py-0.5 font-mono text-[11px] transition-colors ${
                     active
                       ? "bg-[var(--color-accent)] text-white font-medium"
                       : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]"
@@ -234,20 +234,20 @@ export function DecisionsPage() {
           {rows.length > 0 ? (
             <>
               <div className="overflow-x-auto -mx-1 sm:mx-0">
-                <table className="w-full min-w-[760px] text-left text-sm">
+                <table className="w-full md:min-w-[760px] text-left text-sm">
                   <thead className="text-[var(--color-muted)]">
                     <tr className="border-b border-[var(--color-border)]">
-                      <th className="py-2 pr-2">No</th>
+                      <th className="hidden md:table-cell py-2 pr-2">No</th>
                       <th className="py-2 pr-2">Date</th>
-                      <th className="py-2 pr-2">Time</th>
+                      <th className="hidden md:table-cell py-2 pr-2">Time</th>
                       <th className="py-2 pr-2">Symbol</th>
-                      <th className="py-2 pr-2">TF</th>
-                      <th className="py-2 pr-2">Regime</th>
+                      <th className="hidden md:table-cell py-2 pr-2">TF</th>
+                      <th className="hidden md:table-cell py-2 pr-2">Regime</th>
                       <th className="py-2 pr-2">Action</th>
                       <th className="py-2 pr-2">Outcome</th>
                       <th className="py-2 pr-2">Conf</th>
-                      <th className="py-2 pr-2">Size%</th>
-                      <th className="py-2">Thesis</th>
+                      <th className="hidden md:table-cell py-2 pr-2">Size%</th>
+                      <th className="hidden md:table-cell py-2">Thesis</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -262,20 +262,20 @@ export function DecisionsPage() {
                       return (
                         <Fragment key={rowKey}>
                           <tr className="border-b border-[var(--color-border)]/60 align-top">
-                            <td className="py-2 pr-2 tabular-nums text-[var(--color-muted)]">
+                            <td className="hidden md:table-cell py-2 pr-2 tabular-nums text-[var(--color-muted)]">
                               {from + i}
                             </td>
                             <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
                               {stamp.date}
                             </td>
-                            <td className="py-2 pr-2 tabular-nums whitespace-nowrap">
+                            <td className="hidden md:table-cell py-2 pr-2 tabular-nums whitespace-nowrap">
                               {stamp.time}
                             </td>
                             <td className="py-2 pr-2 font-medium">
                               {String(r.symbol ?? "")}
                             </td>
-                            <td className="py-2 pr-2">{String(r.timeframe ?? "")}</td>
-                            <td className="py-2 pr-2">
+                            <td className="hidden md:table-cell py-2 pr-2">{String(r.timeframe ?? "")}</td>
+                            <td className="hidden md:table-cell py-2 pr-2">
                               {(() => {
                                 const reg = String(r.regime_state ?? "—");
                                 const variant = reg === "trend_up" ? "ok" : reg === "trend_down" ? "danger" : "muted";
@@ -307,10 +307,10 @@ export function DecisionsPage() {
                                 formatNum(r.confidence_score)
                               )}
                             </td>
-                            <td className="py-2 pr-2 tabular-nums">
+                            <td className="hidden md:table-cell py-2 pr-2 tabular-nums">
                               {formatNum(r.size_pct_equity)}
                             </td>
-                            <td className="py-2 max-w-md text-[var(--color-muted)]">
+                            <td className="hidden md:table-cell py-2 max-w-md text-[var(--color-muted)]">
                               {formatThesisDisplay(r.thesis)}
                             </td>
                           </tr>

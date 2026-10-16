@@ -84,32 +84,27 @@ Jarvise enforces a **Strict Layered Architecture**. Never invoke database querie
 ```
 web/src/
 ├── actions/                         # Server Actions & Controller Dispatchers
-│   ├── model-routing.action.ts      # Fetch & sync model matrix with UI revalidation
-│   └── market-context.action.ts     # Recompute 3-part context with UI revalidation
+│   └── model-routing.action.ts      # Fetch & sync model matrix with UI revalidation
 ├── controllers/                     # React Hooks / State Controllers
-│   ├── useMarketContext.ts          # SWR, animation, modal tabs, and quick actions
+│   ├── useMarketContext.ts          # SWR (30 min TTL), animation, modal tabs
 │   └── useHapticFeedback.ts         # Safe mobile vibration trigger
 ├── services/                        # Business Logic & Pure Computations
 │   ├── modelRoutingService.ts       # Fallback chains, compaction limits, token cost
-│   ├── openrouter-gateway.service.ts# Re-export gateway alias
-│   ├── marketContextService.ts      # Domain mapping, 3-part concatenation, Zod parse
-│   └── market-context.service.ts    # Re-export service alias
+│   └── marketContextService.ts      # Domain mapping, definition + market cause, Zod parse
 ├── repositories/                    # Data Access & Caching Layer
 │   ├── modelRoutingRepository.ts    # LocalStorage cache & execution log store
-│   ├── ai-usage-log.repository.ts   # Re-export repository alias
-│   ├── marketContextRepository.ts   # News bullet extraction, approval prioritization
-│   └── market-context.repository.ts # Re-export repository alias
-├── types/ & schemas/                # Zod Schemas & TypeScript Contracts
+│   └── marketContextRepository.ts   # News bullet extraction, context cache
+├── types/                           # Zod Schemas & TypeScript Contracts
 │   ├── modelRouting.ts              # AgentRole, AgentProfile, Matrix, ExecutionLog
-│   ├── marketContext.ts             # ScoreDomain, DomainScoreMapping, SemiDynamicContext
-│   ├── model-router.schema.ts       # Re-export schema
-│   └── market-context.schema.ts     # Re-export schema
+│   └── marketContext.ts             # ScoreDomain, DomainScoreMapping, SemiDynamicContext
 └── components/                      # UI Presentation Components
-    ├── MarketContextCard.tsx        # Responsive Market Context Card
-    ├── SentimentDetailOverlay.tsx   # Centered desktop dialog & mobile bottom sheet
-    ├── ModelRoutingCard.tsx         # Multi-tier matrix card on Ops page
+    ├── MarketContextCard.tsx        # Market Context card + centered dialog / mobile sheet
+    ├── ModelRoutingCard.tsx         # Model routing plan card on Ops (not wired to any job)
+    ├── RiskMonitorCard.tsx          # Paper risk monitor panel on Ops
     └── ...
 ```
+
+> **2026-10-17 audit (PR #166–#168):** the one-line re-export aliases and the unused `SentimentDetailOverlay.tsx` / `market-context.action.ts` were removed. Fear & Greed / Altseason no longer produce trade suggestions (context only), and the model routing matrix is display-only until a job reads it.
 
 ### Python Backend & OpenClaw
 
