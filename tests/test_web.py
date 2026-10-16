@@ -1060,3 +1060,62 @@ def test_pwa_static_assets(tmp_path: Path, monkeypatch) -> None:
     i512 = client.get("/icon-512.png")
     assert i512.status_code == 200
     assert "image/png" in i512.headers["content-type"]
+
+
+def test_api_universe_endpoints(monkeypatch, tmp_path: Path) -> None:
+    from jarvise_ingest.universe import seed_named_universe
+
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "universe.db"
+    conn = open_db(db)
+    seed_named_universe(conn, "paper_liquid")
+    conn.close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    client = TestClient(app)
+
+    # GET /api/universe
+    resp = client.get("/api/universe")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert "BTCUSDT" in data["active_symbols"]
+
+    # POST /api/universe/remove
+    resp = client.post(
+        "/api/universe/remove",
+        data={"symbol": "BNBUSDT"},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert "BNBUSDT" not in resp.json()["active_symbols"]
+
+    # POST /api/universe/sync with mocked _sync_market_symbols
+    monkeypatch.setattr("jarvise_web.app._sync_market_symbols", lambda syms, p, tf, htf: syms)
+    resp = client.post(
+        "/api/universe/sync",
+        data={"symbol": "BTCUSDT"},
+        headers={"accept": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert resp.json()["synced_symbols"] == ["BTCUSDT"]
+
+
+def test_api_rag_sync(monkeypatch) -> None:
+    _stub_control_deps(monkeypatch)
+    monkeypatch.setattr(
+        "jarvise.rag.sync_notebook",
+        lambda **kwargs: {"ok": True, "files": ["doc1.md"]},
+    )
+    monkeypatch.setattr(
+        "jarvise.rag.index_sources",
+        lambda **kwargs: {"ok": True, "indexed": 10},
+    )
+    monkeypatch.setattr("jarvise.rag.publish_redis_status", lambda key, payload: None)
+    client = TestClient(app)
+    resp = client.post("/api/rag/sync", headers={"accept": "application/json"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["profile"] == "chatoe"
+    assert data["url"] == "https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"

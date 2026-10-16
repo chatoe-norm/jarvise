@@ -18,7 +18,7 @@ from urllib.parse import parse_qs
 
 from jarvise.charts import export_candle_graphs
 from jarvise.rag import doctrine_snippets, publish_redis_status
-from jarvise_ingest.db import count_indicator_ready, count_market, list_approvals, open_db
+from jarvise_ingest.db import count_indicator_ready, count_market, list_approvals, open_db, universe_as_of
 from jarvise_ingest.health import ingest_health
 from jarvise_ingest.indicators import warm_from
 from jarvise_notify import (
@@ -277,6 +277,31 @@ def _export_ingest_charts(symbols: str, timeframes: list[str]) -> dict[str, Any]
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
 
 
+def resolve_active_ingest_symbols() -> str:
+    env_raw = os.environ.get("JARVISE_INGEST_SYMBOLS") or "BTCUSDT,ETHUSDT"
+    env_syms = [s.strip().upper() for s in env_raw.split(",") if s.strip()]
+    db_syms: list[str] = []
+    path = _analytics_db_path()
+    universe_id = os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_liquid"
+    if path.exists():
+        try:
+            conn = open_db(path)
+            try:
+                now_ms = int(time.time() * 1000)
+                db_syms = universe_as_of(conn, universe_id, now_ms)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+    combined = list(env_syms)
+    for s in db_syms:
+        if s not in combined:
+            combined.append(s)
+    if not combined:
+        combined = ["BTCUSDT", "ETHUSDT"]
+    return ",".join(combined)
+
+
 def run_ingest() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
@@ -285,7 +310,7 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
     with single_flight("ingest") as acquired:
         if not acquired:
             return 3, _running("ingest")
-        symbols = os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")
+        symbols = resolve_active_ingest_symbols()
         paper_tf = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
         # 1h microstructure + paper TF + 1d HTF for analyzer MTF confirm (T2.3).
         timeframes = ["1h"]
@@ -416,9 +441,7 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
     raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
     path = Path(raw)
     timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
-    symbols = [
-        s for s in (os.environ.get("JARVISE_INGEST_SYMBOLS", "BTCUSDT,ETHUSDT")).split(",") if s.strip()
-    ]
+    symbols = [s for s in resolve_active_ingest_symbols().split(",") if s.strip()]
     max_age = _fenv("JARVISE_INGEST_HEALTH_MAX_AGE_MIN", 60.0)
     if not path.exists():
         payload: dict[str, Any] = {

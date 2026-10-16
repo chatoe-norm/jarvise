@@ -471,4 +471,25 @@ export const api = {
         body: new URLSearchParams({ preset }),
       },
     ),
+  syncUniverse: (symbol?: string) =>
+    request<{ ok: boolean; synced_symbols: string[]; count: number; timeframe: string }>(
+      "/api/universe/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(symbol ? { symbol } : {}),
+      },
+    ),
+  syncRag: () =>
+    request<{
+      ok: boolean;
+      notebook?: unknown;
+      index?: unknown;
+      profile?: string;
+      notebook_id?: string;
+      url?: string;
+      at?: string;
+    }>("/api/rag/sync", {
+      method: "POST",
+    }),
 };
