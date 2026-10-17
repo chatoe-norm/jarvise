@@ -162,6 +162,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--mtf",
+        action="store_true",
+        help=(
+            "With --replay: confirm each bar with the latest closed 1d candle "
+            "that has ema_200. Default off. Does not read JARVISE_ANALYZE_MTF."
+        ),
+    )
+    p.add_argument(
         "--paper-policy",
         choices=["naive", "rules"],
         default="naive",
@@ -241,6 +249,12 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.mtf and not args.replay:
+        print(
+            "Error: --mtf requires --replay.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
     if args.stops != "off" and not args.apply_paper:
         print(
             "Error: --stops requires --apply-paper.\n  " + REPLAY_EXAMPLE,
@@ -293,6 +307,7 @@ def run(argv: list[str] | None = None) -> int:
                     dry_run=args.dry_run,
                     paper_policy=args.paper_policy,
                     stops=args.stops,
+                    mtf=args.mtf,
                 )
                 if args.apply_paper and args.paper_policy == "rules":
                     report["note"] += (
@@ -315,6 +330,7 @@ def run(argv: list[str] | None = None) -> int:
                     dry_run=args.dry_run,
                     paper_policy=args.paper_policy,
                     stops=args.stops,
+                    mtf=args.mtf,
                 )
                 if args.apply_paper and args.paper_policy == "rules":
                     report["note"] = (

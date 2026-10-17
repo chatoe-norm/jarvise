@@ -188,3 +188,85 @@ def test_replay_trail_closes_when_later_bar_hits(tmp_path: Path, monkeypatch) ->
     )
     assert fills == 1
     assert get_paper_position(conn, "SOLUSDT") is None
+
+
+def _replay_long(conn, *, entry_ts: int) -> None:
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "SOLUSDT",
+            "side": "long",
+            "qty": 1.0,
+            "entry_price": 100.0,
+            "entry_ts": entry_ts,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "stop_price": 90.0,
+            "stop_source": "analysis",
+            "initial_stop_price": 90.0,
+            "stop_moved_ts": None,
+        },
+    )
+
+
+def _bar(ts: int, tf: str, *, high: float, low: float, close: float) -> dict:
+    return {
+        "symbol": "SOLUSDT",
+        "timestamp": ts,
+        "timeframe": tf,
+        "open": close,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": 1.0,
+    }
+
+
+def test_replay_stop_ignores_entry_bar_extremes(tmp_path: Path, monkeypatch) -> None:
+    """The fill is at the entry bar's close; its earlier low and high are not after entry."""
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    conn = open_db(tmp_path / "entry-bar.db")
+    ensure_paper_account(conn)
+    _replay_long(conn, entry_ts=1_000)
+    upsert_market_technicals(conn, [_bar(1_000, "4h", high=115.0, low=85.0, close=100.0)])
+    conn.commit()
+    for mode in ("fixed", "trail"):
+        bar = {"symbol": "SOLUSDT", "timestamp": 1_000, "timeframe": "4h", "close": 100.0}
+        assert apply_replay_stop(conn, bar, mode=mode) == 0
+    pos = get_paper_position(conn, "SOLUSDT")
+    assert pos is not None and pos["stop_price"] == 90.0
+
+
+def test_replay_stop_ignores_other_timeframes(tmp_path: Path, monkeypatch) -> None:
+    """A 1d bar opening after entry spans past the 4h bar being replayed."""
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    conn = open_db(tmp_path / "other-tf.db")
+    ensure_paper_account(conn)
+    _replay_long(conn, entry_ts=1_000)
+    upsert_market_technicals(
+        conn,
+        [
+            _bar(2_000, "4h", high=103.0, low=97.0, close=101.0),
+            _bar(1_500, "1d", high=130.0, low=60.0, close=101.0),
+            _bar(1_800, "1h", high=130.0, low=60.0, close=101.0),
+        ],
+    )
+    conn.commit()
+    bar = {"symbol": "SOLUSDT", "timestamp": 2_000, "timeframe": "4h", "close": 101.0}
+    assert apply_replay_stop(conn, bar, mode="trail") == 0
+    pos = get_paper_position(conn, "SOLUSDT")
+    assert pos is not None and pos["stop_price"] == 90.0
+
+
+def test_replay_old_stop_checked_before_trail_moves(tmp_path: Path, monkeypatch) -> None:
+    """One bar reaching 1R and dipping back cannot both raise the stop and hit it."""
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    conn = open_db(tmp_path / "order.db")
+    ensure_paper_account(conn)
+    _replay_long(conn, entry_ts=1_000)
+    upsert_market_technicals(conn, [_bar(2_000, "4h", high=112.0, low=99.0, close=105.0)])
+    conn.commit()
+    bar = {"symbol": "SOLUSDT", "timestamp": 2_000, "timeframe": "4h", "close": 105.0}
+    assert apply_replay_stop(conn, bar, mode="trail") == 0
+    pos = get_paper_position(conn, "SOLUSDT")
+    assert pos is not None and pos["stop_price"] == 102.0 and pos["stop_source"] == "trail"

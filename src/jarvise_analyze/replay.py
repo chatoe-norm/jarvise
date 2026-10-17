@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_snapshot
+from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_mtf, analyze_snapshot
 from jarvise_ingest.db import (
     get_paper_position,
     load_candles_in_range,
-    range_since_entry,
     reset_paper_ledger,
     set_position_stop,
     upsert_analysis_output,
 )
+from jarvise_ingest.timeframes import INTERVAL_MS
 from jarvise_paper.auto_decide import flat_exit_needed, same_side_already_open
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.metrics import compute_paper_metrics
@@ -27,6 +27,35 @@ FROZEN_STRATEGY_NOTE = (
     "Frozen strategy. In-sample and out-of-sample are separate holdouts. "
     "Do not keep the window with the better EV. Do not suggest a confidence floor."
 )
+REPLAY_HTF = "1d"
+
+
+def closed_htf_candle(
+    htf_bars: list[dict[str, Any]],
+    ltf_ts: int,
+    *,
+    htf_ms: int,
+) -> dict[str, Any] | None:
+    """Latest HTF bar that has closed by ``ltf_ts``.
+
+    Timestamps are open times. The bar is known only once ``open + htf_ms``
+    has passed, and only when ``ema_200`` is already stored.
+    """
+    lo = 0
+    hi = len(htf_bars)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if int(htf_bars[mid]["timestamp"]) + htf_ms <= int(ltf_ts):
+            lo = mid + 1
+        else:
+            hi = mid
+    idx = lo - 1
+    if idx < 0:
+        return None
+    bar = htf_bars[idx]
+    if bar.get("ema_200") is None:
+        return None
+    return bar
 
 
 def replay_range(
@@ -41,12 +70,18 @@ def replay_range(
     dry_run: bool = False,
     paper_policy: PaperPolicy = "naive",
     stops: StopMode = "off",
+    mtf: bool = False,
 ) -> dict[str, Any]:
     """Walk closed candles in range; upsert analysis; optionally paper-fill.
 
     ``paper_policy="rules"`` matches auto-decide *code* gates (no Claude): same-side
     hold, opposite-side defer (does not flip), FLAT closes an open position.
     Does not change ``apply_signal`` behavior for the live paper path.
+
+    ``mtf=True`` confirms each LTF bar with the latest closed ``1d`` candle that
+    already has ``ema_200``. The flag does not read ``JARVISE_ANALYZE_MTF``.
+    A daily bar is visible only after its open time plus one day, so the same
+    day's daily candle cannot leak into earlier LTF bars.
     """
     if paper_policy not in PAPER_POLICIES:
         raise ValueError(f"paper_policy must be one of {PAPER_POLICIES}")
@@ -62,8 +97,18 @@ def replay_range(
     by_symbol: dict[str, int] = {}
     policy_counts = {"hold": 0, "defer": 0, "fill_bars": 0, "flat_exit": 0, "skip": 0}
     action_counts = {"long": 0, "short": 0, "flat": 0}
+    mtf_reasons: dict[str, int] = {}
+    htf_joined = 0
+    htf_ms = INTERVAL_MS[REPLAY_HTF]
 
     for sym in symbols:
+        htf_bars: list[dict[str, Any]] = []
+        if mtf:
+            htf_bars = [
+                bar
+                for bar in load_candles_in_range(conn, sym, REPLAY_HTF, since_ms=0, until_ms=until_ms)
+                if bar.get("ema_200") is not None
+            ]
         candles = load_candles_in_range(conn, sym, timeframe, since_ms=since_ms, until_ms=until_ms)
         if not candles:
             errors.append(f"{sym} {timeframe}: no stored candles in range")
@@ -72,7 +117,16 @@ def replay_range(
         for candle in candles:
             bars += 1
             by_symbol[sym] += 1
-            result = analyze_snapshot(candle, confidence_threshold=confidence_threshold)
+            if mtf:
+                htf = closed_htf_candle(htf_bars, int(candle["timestamp"]), htf_ms=htf_ms)
+                if htf is not None:
+                    htf_joined += 1
+                result = analyze_mtf(candle, htf, confidence_threshold=confidence_threshold)
+                reason = str(result.get("mtf_reason") or "")
+                if reason:
+                    mtf_reasons[reason] = mtf_reasons.get(reason, 0) + 1
+            else:
+                result = analyze_snapshot(candle, confidence_threshold=confidence_threshold)
             action = str(result.get("action") or "").lower()
             if action in action_counts:
                 action_counts[action] += 1
@@ -114,6 +168,7 @@ def replay_range(
         "apply_paper": apply_paper,
         "paper_policy": paper_policy,
         "stops": stops,
+        "mtf": bool(mtf),
         "timeframe": timeframe,
         "since_ms": int(since_ms),
         "until_ms": int(until_ms),
@@ -126,6 +181,9 @@ def replay_range(
         "action_counts": action_counts,
         "sample": analyses[:3],
     }
+    if mtf:
+        out["mtf_reasons"] = mtf_reasons
+        out["htf_joined"] = htf_joined
     if apply_paper and paper_policy == "rules":
         out["policy_counts"] = policy_counts
     return out
@@ -144,6 +202,7 @@ def replay_is_oos(
     dry_run: bool = False,
     paper_policy: PaperPolicy = "naive",
     stops: StopMode = "off",
+    mtf: bool = False,
 ) -> dict[str, Any]:
     """Score one frozen strategy on two chronological windows.
 
@@ -165,6 +224,7 @@ def replay_is_oos(
         dry_run=dry_run,
         paper_policy=paper_policy,
         stops=stops,
+        mtf=mtf,
     )
     out_of_sample = replay_range(
         conn,
@@ -177,6 +237,7 @@ def replay_is_oos(
         dry_run=dry_run,
         paper_policy=paper_policy,
         stops=stops,
+        mtf=mtf,
     )
     return {
         "ok": bool(in_sample.get("ok")) and bool(out_of_sample.get("ok")),
@@ -187,6 +248,7 @@ def replay_is_oos(
         "apply_paper": apply_paper,
         "paper_policy": paper_policy,
         "stops": stops,
+        "mtf": bool(mtf),
         "timeframe": timeframe,
         "since_ms": int(since_ms),
         "oos_since_ms": int(oos_since_ms),
@@ -197,12 +259,41 @@ def replay_is_oos(
     }
 
 
+def bar_range_after(
+    conn: Any,
+    symbol: str,
+    timeframe: str,
+    *,
+    after_ts: int,
+    until_ms: int,
+) -> tuple[float | None, float | None]:
+    """Low/high of ``timeframe`` bars that open after ``after_ts`` up to ``until_ms``.
+
+    Replay fills at the close of the bar that opens at ``after_ts``, so that
+    bar's own high and low happened before the fill and are excluded. Other
+    timeframes are excluded too: a ``1d`` bar that opens after the fill spans up
+    to a day past the bar being replayed.
+    """
+    row = conn.execute(
+        """
+        SELECT MIN(low), MAX(high) FROM market_technicals
+        WHERE symbol=? AND timeframe=? AND timestamp > ? AND timestamp <= ?
+        """,
+        (symbol.upper(), timeframe, int(after_ts), int(until_ms)),
+    ).fetchone()
+    if row is None:
+        return None, None
+    lo, hi = row[0], row[1]
+    return (None if lo is None else float(lo), None if hi is None else float(hi))
+
+
 def apply_replay_stop(conn: Any, candle: dict[str, Any], *, mode: str) -> int:
     """Close one open paper position if this bar hits its stop. Returns fill count.
 
     ``fixed`` keeps the entry stop. ``trail`` tightens it by 1R from the best
-    price since entry before the hit check. Extremes before a trail move do not
-    count as a hit.
+    price since entry. Each bar is first checked against the stop it started
+    with. A stop moved by this bar's extreme can then be hit only by this bar's
+    close, because the order of high and low inside one bar is unknown.
     """
     if mode not in {"fixed", "trail"}:
         return 0
@@ -213,8 +304,15 @@ def apply_replay_stop(conn: Any, candle: dict[str, Any], *, mode: str) -> int:
     if pos is None or pos.get("stop_price") is None or pos.get("entry_ts") is None:
         return 0
     ts = int(candle["timestamp"])
-    if mode == "trail":
-        low, high = range_since_entry(conn, symbol, entry_ts=int(pos["entry_ts"]), until_ms=ts)
+    timeframe = str(candle.get("timeframe") or "4h")
+    close = float(candle["close"])
+    raw_since = pos.get("stop_moved_ts")
+    if raw_since is None:
+        raw_since = pos["entry_ts"]
+    bar_low, bar_high = bar_range_after(conn, symbol, timeframe, after_ts=int(raw_since), until_ms=ts)
+    hit = evaluate_stop(pos, mid=close, low_since_entry=bar_low, high_since_entry=bar_high)
+    if hit is None and mode == "trail":
+        low, high = bar_range_after(conn, symbol, timeframe, after_ts=int(pos["entry_ts"]), until_ms=ts)
         new_stop = trail_stop(pos, best_low=low, best_high=high)
         if new_stop is not None:
             set_position_stop(
@@ -227,18 +325,7 @@ def apply_replay_stop(conn: Any, candle: dict[str, Any], *, mode: str) -> int:
             pos = get_paper_position(conn, symbol)
             if pos is None:
                 return 0
-    raw_since = pos.get("stop_moved_ts")
-    if raw_since is None:
-        raw_since = pos.get("entry_ts")
-    if raw_since is None:
-        return 0
-    bar_low, bar_high = range_since_entry(conn, symbol, entry_ts=int(raw_since), until_ms=ts)
-    hit = evaluate_stop(
-        pos,
-        mid=float(candle["close"]),
-        low_since_entry=bar_low,
-        high_since_entry=bar_high,
-    )
+            hit = evaluate_stop(pos, mid=close, low_since_entry=None, high_since_entry=None)
     if hit is None:
         return 0
     prefix = "trail" if str(pos.get("stop_source") or "") == "trail" else "stop"
