@@ -103,6 +103,27 @@ Replay นี้เป็นนโยบาย `rules` ไม่มี Claude �
 - ความไวเท่านั้น ห้ามเลือกช่องที่ EV สวยสุด: MTF on/off × stops `{fixed, trail, trail --no-breakeven}` × exit `{confidence, regime}`
 - รันครั้งเดียว หลังเห็นตัวเลขไม่เพิ่มตัวแปร เกณฑ์ หรือรันซ้ำ แม้ช่องตัดสินจะผ่าน ก็ไม่เปลี่ยนจุดออกของ production, env บน VPS, `JARVISE_ANALYZE_MTF`, EV gate, หรือพื้น 0.55/0.70
 
+## 2.4 ผลกริดที่รันครั้งเดียว
+
+รันตามข้อ 2.3 ครั้งเดียวบนสำเนาของ `jarvise-vps-ledger-ro.db` ช่อง confidence คู่ fixed และ trail ตรงกับตารางข้อ 2.1
+
+| ช่อง | IS ไม้ | IS EV | OOS ไม้ | OOS EV |
+| --- | ---: | ---: | ---: | ---: |
+| MTF off, fixed, confidence | 396 | −0.457 | 347 | −0.435 |
+| MTF off, fixed, regime | 90 | −0.438 | 75 | 0.629 |
+| MTF off, trail, confidence | 691 | −0.773 | 598 | −0.660 |
+| MTF off, trail, regime | 590 | −1.141 | 499 | −0.888 |
+| MTF off, trail no-breakeven, confidence | 554 | −0.782 | 475 | −0.591 |
+| MTF off, trail no-breakeven, regime | 416 | −1.232 | 361 | −0.952 |
+| MTF on, fixed, confidence | 248 | −0.321 | 241 | −0.306 |
+| MTF on, fixed, regime | 53 | −0.666 | 42 | 1.496 |
+| MTF on, trail, confidence | 423 | −0.613 | 411 | −0.625 |
+| MTF on, trail, regime | 359 | −1.039 | 333 | −0.815 |
+| MTF on, trail no-breakeven, confidence | 338 | −0.651 | 325 | −0.504 |
+| MTF on, trail no-breakeven, regime | 251 | −1.169 | 236 | −0.778 |
+
+ช่องตัดสิน `--mtf --stops fixed --exit regime` **ไม่ผ่าน** ไม้ปิดเกิน 8 ทั้งสองหน้าต่าง และ OOS EV เป็น 1.496 แต่ IS EV เป็น −0.666 ซึ่งต่ำกว่า 0 กติกาต้องการทั้งสองหน้าต่างไม่ติดลบ ไม่เลือกช่องความไวที่มี OOS เป็นบวก (MTF off, fixed, regime ก็เป็นแบบนั้น) ไม่เปลี่ยนจุดออกของ production
+
 ## 3. สิ่งที่ยังไม่เปลี่ยน
 
 ไม่เปิด `JARVISE_ANALYZE_MTF` ไม่ลด `max_risk_per_trade_pct` ไม่เพิ่ม cooldown และไม่แตะ `JARVISE_AUTO_DECIDE_MIN_EV` เกตเดิมยังนับไม้เก่าในหน้าต่าง 30 วัน การพิจารณาปลดเกตในอนาคตใช้เฉพาะไม้ `auto_*` ที่ปิดหลังการเปลี่ยน env จำนวนอย่างน้อย 8 และไม่เกินเกณฑ์ปฏิบัติการประมาณ 10 โดย EV ของชุดนั้นต้องไม่ต่ำกว่า 0
