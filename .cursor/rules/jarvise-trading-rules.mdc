@@ -20,7 +20,7 @@ Capital preservation comes before trade frequency. These rules point at the Pyth
 - Risk at the stop stays at or below 1% of equity (`max_risk_per_trade_pct`, ceiling `HARD_MAX_RISK_PER_TRADE_PCT`).
 - Stops stay at least `1.5 × ATR` (`ATR_STOP_MULT`).
 - Correlation is the notional bucket cap (`symbol_bucket`, `max_correlated_bucket_pct`). Do not add a ban on holding BTC and ETH together.
-- Keep the current universe. Do not add fiat pairs or cross pairs such as `ETH/BTC`.
+- Keep the current universe: the VPS active list, read with `jarvise universe show`. Agents never add or remove symbols. Do not add fiat pairs or cross pairs such as `ETH/BTC`.
 
 ## Execution
 

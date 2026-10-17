@@ -14,6 +14,7 @@ from jarvise import config as store
 from jarvise.charts import analytics_db_path, export_candle_graphs
 from jarvise_exchange.cli import exchange_app
 from jarvise_ingest.db_cli import db_app
+from jarvise_ingest.universe_cli import universe_app
 from jarvise_trade.cli import trade_app
 
 ROOT_EPILOG = """Examples:
@@ -27,6 +28,7 @@ ROOT_EPILOG = """Examples:
   jarvise exchange sync-balances --json
   jarvise trade reconcile --dry-run --json
   jarvise db status --json
+  jarvise universe show --json
   jarvise db prune --older-than 180d --dry-run --json
   jarvise charts export --symbol BTCUSDT --timeframe 4h --output json
 """
@@ -97,6 +99,7 @@ app.add_typer(rag_app, name="rag")
 app.add_typer(exchange_app, name="exchange")
 app.add_typer(trade_app, name="trade")
 app.add_typer(db_app, name="db")
+app.add_typer(universe_app, name="universe")
 
 charts_app = typer.Typer(
     name="charts",
