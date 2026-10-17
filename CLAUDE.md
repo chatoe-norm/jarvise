@@ -39,6 +39,7 @@ A task that touches a locked area goes in a separate prompt marked "owner approv
 - Look for features in-sample only. Run out-of-sample only for a frozen rule that already passed in-sample. If nothing passes, say so and stop searching.
 - Work on a copy of `data/analytics/jarvise-vps-ledger-ro.db`. Never write the original or the VPS ledger. Scratch scripts go in the session scratchpad, not the repo.
 - Check the measuring tool before trusting a result. PR #179 found replay stops reading bars from after the fill.
+- Research symbol lists come from `jarvise universe show` on the VPS at pre-registration time.
 
 ## Context economy
 
