@@ -174,11 +174,19 @@ After NotebookLM auth works, enable **both**:
 1. **n8n** workflow `Jarvise RAG refresh` (every 6h → `POST http://jobs:8090/jobs/rag-refresh`)
 2. **Host cron** calling [`infra/n8n/jarvise-rag-index.sh`](../../infra/n8n/jarvise-rag-index.sh) (wrapper → `run-rag-refresh.sh`) as a fallback if n8n is down — pick one primary to avoid double-refresh; prefer n8n, keep cron commented unless needed.
 
-Import workflows once inside the n8n container:
+Import workflows once inside the n8n container. Jobs calls need `X-Jarvise-Token`. The committed files keep `__JARVISE_JOBS_TOKEN__`. Render from the env value, then import the rendered copies. Do not import `jarvise-live-reconcile.json` while live trading is off. Deploy does not edit `/opt/jarvise/.env` and does not remove `mcp.servers.jarvise-redis` from the VPS `data/openclaw/openclaw.json`; that removal is an owner step after the container is recreated with both compose files.
 
 ```bash
-docker exec jarvise-n8n-1 n8n import:workflow --separate --input=/workflows
+# set JARVISE_JOBS_TOKEN in /opt/jarvise/.env first (owner only; agents do not edit that file)
+cd /opt/jarvise && set -a && . ./.env && set +a
+bash infra/docker/render-n8n-jobs-workflows.sh
+# the script prints docker cp / import / publish lines and skips live-reconcile
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d openclaw
 ```
+
+News ingest is separate: `infra/docker/seed-openclaw-ingest-agent.sh` renders `__OPENCLAW_HOOK_TOKEN__`.
+
+A bulk import of `/workflows` loads the unrendered placeholders. Use the render script above.
 
 Activate ingest + RAG + **paper run** + **paper expire** in the n8n UI (`http://$TAILSCALE_IP:5678/`), or:
 

@@ -4,6 +4,8 @@
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
 # Requires Docker Compose v2.24+ (!override). Redis/Qdrant: internal network only.
+# openclaw stays on openclaw_net from docker-compose.yml. This file only rebinds
+# the Control UI to Tailscale. Recreate with both files so the bind is not lost.
 
 services:
   redis:
