@@ -17,6 +17,7 @@ from jarvise_ingest.db import (
     load_candles_in_range,
     open_db,
     upsert_market_technicals,
+    upsert_paper_position,
     write_indicators,
 )
 from jarvise_ingest.series import recompute_indicators
@@ -357,6 +358,113 @@ def test_oos_since_outside_range_rejected(tmp_path: Path, capsys) -> None:
 def test_oos_since_requires_replay(capsys) -> None:
     assert run(["--symbol", "BTCUSDT", "--oos-since", "2024-06-01"]) == 2
     assert "--replay" in capsys.readouterr().err
+
+
+def _open_long(conn) -> None:
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "qty": 1.0,
+            "entry_price": 100.0,
+            "entry_ts": 1,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "stop_price": 90.0,
+            "stop_source": "analysis",
+            "initial_stop_price": 90.0,
+        },
+    )
+
+
+def test_default_exit_still_closes_on_flat(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "flat.db")
+    _open_long(conn)
+    row = {"symbol": "BTCUSDT", "action": "flat", "regime_state": "trend_up"}
+    assert _rules_disposition(conn, row) == "flat_exit"
+    assert _rules_disposition(conn, row, exit_mode="confidence") == "flat_exit"
+    conn.close()
+
+
+def test_regime_exit_waits_for_regime_mismatch(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "regime.db")
+    _open_long(conn)
+    matched = {"symbol": "BTCUSDT", "action": "flat", "regime_state": "trend_up"}
+    assert _rules_disposition(conn, matched, exit_mode="regime") == "skip"
+    mismatched = {"symbol": "BTCUSDT", "action": "flat", "regime_state": "range"}
+    assert _rules_disposition(conn, mismatched, exit_mode="regime") == "flat_exit"
+    opposite = {"symbol": "BTCUSDT", "action": "short", "regime_state": "trend_down"}
+    assert _rules_disposition(conn, opposite, exit_mode="regime") == "defer"
+    same = {"symbol": "BTCUSDT", "action": "long", "regime_state": "trend_up"}
+    assert _rules_disposition(conn, same, exit_mode="regime") == "hold"
+    conn.close()
+
+
+def test_default_replay_report_matches_explicit_confidence(tmp_path: Path) -> None:
+    src = tmp_path / "src.db"
+    _seed_trend(src, n=40)
+    since_ms = 1_600_000_000_000
+    until_ms = 1_600_000_000_000 + 39 * 14_400_000
+    shutil.copy(src, tmp_path / "left.db")
+    shutil.copy(src, tmp_path / "right.db")
+    left = open_db(tmp_path / "left.db")
+    right = open_db(tmp_path / "right.db")
+    kwargs = {
+        "symbols": ["BTCUSDT"],
+        "timeframe": "4h",
+        "since_ms": since_ms,
+        "until_ms": until_ms,
+        "apply_paper": True,
+        "paper_policy": "rules",
+    }
+    default = replay_range(left, **kwargs)
+    explicit = replay_range(right, exit_mode="confidence", no_breakeven=False, **kwargs)
+    left.close()
+    right.close()
+    assert default["exit"] == "confidence"
+    assert default["no_breakeven"] is False
+    assert default["fills"] == explicit["fills"]
+    assert default["policy_counts"] == explicit["policy_counts"]
+    assert default["action_counts"] == explicit["action_counts"]
+
+
+def test_exit_regime_requires_replay_apply_paper(capsys) -> None:
+    code = run(
+        [
+            "--symbol",
+            "BTCUSDT",
+            "--replay",
+            "--since",
+            "2020-01-01",
+            "--exit",
+            "regime",
+            "--db",
+            "nope.db",
+        ]
+    )
+    assert code == 2
+    assert "--exit" in capsys.readouterr().err
+
+
+def test_no_breakeven_requires_trail(capsys) -> None:
+    code = run(
+        [
+            "--symbol",
+            "BTCUSDT",
+            "--replay",
+            "--since",
+            "2020-01-01",
+            "--apply-paper",
+            "--stops",
+            "fixed",
+            "--no-breakeven",
+            "--db",
+            "nope.db",
+        ]
+    )
+    assert code == 2
+    assert "--no-breakeven" in capsys.readouterr().err
 
 
 def test_mtf_flag_requires_replay(capsys) -> None:

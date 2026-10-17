@@ -125,6 +125,47 @@ def test_profit_lock_then_old_high_does_not_stop(tmp_path: Path, monkeypatch) ->
     assert get_paper_position(conn, "ETHUSDT") is not None
 
 
+def test_replay_trail_still_locks_breakeven_by_default(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    conn = open_db(tmp_path / "be.db")
+    ensure_paper_account(conn)
+    _replay_long(conn, entry_ts=1_000)
+    upsert_market_technicals(conn, [_bar(2_000, "4h", high=106.0, low=99.0, close=105.0)])
+    conn.commit()
+    assert (
+        apply_replay_stop(
+            conn,
+            {"symbol": "SOLUSDT", "timestamp": 2_000, "timeframe": "4h", "close": 105.0},
+            mode="trail",
+        )
+        == 0
+    )
+    pos = get_paper_position(conn, "SOLUSDT")
+    assert pos is not None
+    assert pos["stop_price"] == 100.2
+
+
+def test_replay_no_breakeven_keeps_the_entry_stop_before_one_r(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
+    conn = open_db(tmp_path / "nobe.db")
+    ensure_paper_account(conn)
+    _replay_long(conn, entry_ts=1_000)
+    upsert_market_technicals(conn, [_bar(2_000, "4h", high=106.0, low=99.0, close=105.0)])
+    conn.commit()
+    assert (
+        apply_replay_stop(
+            conn,
+            {"symbol": "SOLUSDT", "timestamp": 2_000, "timeframe": "4h", "close": 105.0},
+            mode="trail",
+            no_breakeven=True,
+        )
+        == 0
+    )
+    pos = get_paper_position(conn, "SOLUSDT")
+    assert pos is not None
+    assert pos["stop_price"] == 90.0
+
+
 def test_replay_trail_closes_when_later_bar_hits(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("JARVISE_MARKET_SAFETY", "0")
     conn = open_db(tmp_path / "replay-stop.db")

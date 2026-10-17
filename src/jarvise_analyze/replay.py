@@ -23,6 +23,8 @@ PaperPolicy = Literal["naive", "rules"]
 PAPER_POLICIES: tuple[str, ...] = ("naive", "rules")
 StopMode = Literal["off", "fixed", "trail"]
 STOP_MODES: tuple[str, ...] = ("off", "fixed", "trail")
+ExitMode = Literal["confidence", "regime"]
+EXIT_MODES: tuple[str, ...] = ("confidence", "regime")
 FROZEN_STRATEGY_NOTE = (
     "Frozen strategy. In-sample and out-of-sample are separate holdouts. "
     "Do not keep the window with the better EV. Do not suggest a confidence floor."
@@ -71,6 +73,8 @@ def replay_range(
     paper_policy: PaperPolicy = "naive",
     stops: StopMode = "off",
     mtf: bool = False,
+    exit_mode: ExitMode = "confidence",
+    no_breakeven: bool = False,
 ) -> dict[str, Any]:
     """Walk closed candles in range; upsert analysis; optionally paper-fill.
 
@@ -87,6 +91,10 @@ def replay_range(
         raise ValueError(f"paper_policy must be one of {PAPER_POLICIES}")
     if stops not in STOP_MODES:
         raise ValueError(f"stops must be one of {STOP_MODES}")
+    if exit_mode not in EXIT_MODES:
+        raise ValueError(f"exit_mode must be one of {EXIT_MODES}")
+    if no_breakeven and stops != "trail":
+        raise ValueError("no_breakeven requires stops='trail'")
     if apply_paper and not dry_run:
         reset_paper_ledger(conn)
 
@@ -137,7 +145,7 @@ def replay_range(
                 continue
             skip_fill = False
             if paper_policy == "rules":
-                disposition = _rules_disposition(conn, result)
+                disposition = _rules_disposition(conn, result, exit_mode=exit_mode)
                 policy_counts[disposition] = policy_counts.get(disposition, 0) + 1
                 skip_fill = disposition in {"hold", "defer", "skip"}
             if not skip_fill:
@@ -150,7 +158,12 @@ def replay_range(
                 )
                 fills_total += len(applied.get("fills") or [])
             if stops != "off":
-                fills_total += apply_replay_stop(conn, {**candle, "symbol": sym}, mode=stops)
+                fills_total += apply_replay_stop(
+                    conn,
+                    {**candle, "symbol": sym},
+                    mode=stops,
+                    no_breakeven=no_breakeven,
+                )
 
     metrics = None
     if apply_paper and not dry_run:
@@ -169,6 +182,8 @@ def replay_range(
         "paper_policy": paper_policy,
         "stops": stops,
         "mtf": bool(mtf),
+        "exit": exit_mode,
+        "no_breakeven": bool(no_breakeven),
         "timeframe": timeframe,
         "since_ms": int(since_ms),
         "until_ms": int(until_ms),
@@ -203,6 +218,8 @@ def replay_is_oos(
     paper_policy: PaperPolicy = "naive",
     stops: StopMode = "off",
     mtf: bool = False,
+    exit_mode: ExitMode = "confidence",
+    no_breakeven: bool = False,
 ) -> dict[str, Any]:
     """Score one frozen strategy on two chronological windows.
 
@@ -225,6 +242,8 @@ def replay_is_oos(
         paper_policy=paper_policy,
         stops=stops,
         mtf=mtf,
+        exit_mode=exit_mode,
+        no_breakeven=no_breakeven,
     )
     out_of_sample = replay_range(
         conn,
@@ -238,6 +257,8 @@ def replay_is_oos(
         paper_policy=paper_policy,
         stops=stops,
         mtf=mtf,
+        exit_mode=exit_mode,
+        no_breakeven=no_breakeven,
     )
     return {
         "ok": bool(in_sample.get("ok")) and bool(out_of_sample.get("ok")),
@@ -249,6 +270,8 @@ def replay_is_oos(
         "paper_policy": paper_policy,
         "stops": stops,
         "mtf": bool(mtf),
+        "exit": exit_mode,
+        "no_breakeven": bool(no_breakeven),
         "timeframe": timeframe,
         "since_ms": int(since_ms),
         "oos_since_ms": int(oos_since_ms),
@@ -287,7 +310,13 @@ def bar_range_after(
     return (None if lo is None else float(lo), None if hi is None else float(hi))
 
 
-def apply_replay_stop(conn: Any, candle: dict[str, Any], *, mode: str) -> int:
+def apply_replay_stop(
+    conn: Any,
+    candle: dict[str, Any],
+    *,
+    mode: str,
+    no_breakeven: bool = False,
+) -> int:
     """Close one open paper position if this bar hits its stop. Returns fill count.
 
     ``fixed`` keeps the entry stop. ``trail`` tightens it by 1R from the best
@@ -313,7 +342,10 @@ def apply_replay_stop(conn: Any, candle: dict[str, Any], *, mode: str) -> int:
     hit = evaluate_stop(pos, mid=close, low_since_entry=bar_low, high_since_entry=bar_high)
     if hit is None and mode == "trail":
         low, high = bar_range_after(conn, symbol, timeframe, after_ts=int(pos["entry_ts"]), until_ms=ts)
-        new_stop = trail_stop(pos, best_low=low, best_high=high)
+        if no_breakeven:
+            new_stop = trail_stop(pos, best_low=low, best_high=high, breakeven_r=None)
+        else:
+            new_stop = trail_stop(pos, best_low=low, best_high=high)
         if new_stop is not None:
             set_position_stop(
                 conn,
@@ -348,8 +380,20 @@ def apply_replay_stop(conn: Any, candle: dict[str, Any], *, mode: str) -> int:
     return len(applied.get("fills") or [])
 
 
-def _rules_disposition(conn: Any, result: dict[str, Any]) -> str:
-    """Return hold / defer / flat_exit / fill_bars / skip. Never mutates the ledger."""
+def _regime_matches_side(side: str, regime: str) -> bool:
+    if side == "long":
+        return regime == "trend_up"
+    if side == "short":
+        return regime == "trend_down"
+    return False
+
+
+def _rules_disposition(conn: Any, result: dict[str, Any], *, exit_mode: ExitMode = "confidence") -> str:
+    """Return hold / defer / flat_exit / fill_bars / skip. Never mutates the ledger.
+
+    ``regime`` closes an open position only when ``regime_state`` no longer
+    matches the position side. Same-side hold and opposite-side defer stay.
+    """
     action = str(result.get("action") or "").lower()
     if same_side_already_open(conn, result):
         return "hold"
@@ -359,6 +403,14 @@ def _rules_disposition(conn: Any, result: dict[str, Any]) -> str:
         if pos_side and pos_side != action:
             return "defer"
     if action == "flat":
+        if exit_mode == "regime":
+            if pos is None:
+                return "skip"
+            side = str(pos.get("side") or "").lower()
+            regime = str(result.get("regime_state") or "")
+            if _regime_matches_side(side, regime):
+                return "skip"
+            return "flat_exit"
         if flat_exit_needed(conn, result):
             return "flat_exit"
         return "skip"
