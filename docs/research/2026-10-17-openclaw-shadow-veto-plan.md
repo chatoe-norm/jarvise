@@ -94,3 +94,26 @@ OpenClaw เพิ่มความระวังได้อย่างเ�
 ไฟล์: `src/jarvise_paper/shadow_veto.py`, `src/jarvise_paper/shadow_outcome.py`, migration ใน `db.py` (คำตัดสินกับผลลัพธ์ หรือ JSONL), จุดใน `jobs.py` พร้อมล็อกเที่ยวเดียวและ 409 เมื่อ kill switch ทำงาน, `infra/n8n/workflows/jarvise-shadow-veto.json` (timeout ต้องไม่ต่ำกว่า timeout ของเอเจนต์ และถูกครอบโดย `tests/test_n8n_workflows.py`), CLI `jarvise paper shadow-veto run|score --json`, ชิป Shadow บนหน้า Decisions เป็นทางเลือก OpenClaw ที่เจ้าของใส่เอง ไม่ให้ deploy ทำอัตโนมัติ: เอเจนต์ `veto` ที่ `identity` เป็นอ็อบเจกต์, ปิดเครื่องมือ, `hooks.allowedAgentIds` เพิ่ม `veto`, สกิล `jarvise-shadow-veto/SKILL.md` พร้อมสัญญา JSON
 
 การทดสอบ: brief ไม่มีความลับและไม่มีฟิลด์ขนาดหรือทิศทางที่จะส่งคำสั่ง, การแปลที่เข้มงวด (อย่างอื่นเป็น `abstain`), ตัวให้คะแนนตรงกับ fill ของ replay `rules` บนหน้าต่าง fixture, ตัวประเมินเกณฑ์ผ่านบนข้อมูลสังเคราะห์, กราฟการเรียกของ `run_auto_decide` ไม่เปลี่ยนในโหมด shadow การย้อนกลับ: ปิดเวิร์กโฟลว์ n8n และเอา `veto` ออกจาก `allowedAgentIds` ตารางคงอยู่
+
+## C. Pre-registration (2026-10-18, before any run)
+
+Owner override of sections B1–B2: verdicts are Python → OpenRouter, model `anthropic/claude-sonnet-5.5`, `PROMPT_VERSION=v1`. OpenClaw contributes only the newest news-digest filename and sha256. The scored sample is a counterfactual track in `paper_shadow_track` / `paper_shadow_verdicts`, not `approval_queue`. This section is frozen before the first `jarvise paper shadow-veto run`.
+
+- The window starts at the first on-time verdict whose value is `veto` or `no_objection`. The model id and `PROMPT_VERSION` are frozen. Any change of either restarts the count at zero.
+- The sample is resolved track entries with an on-time verdict of `veto` or `no_objection`. `abstain` is reported and not scored. `timing=late` is excluded.
+- The window ends at 40 scored entries, or 60 days from the first scored verdict, with one 30-day extension allowed. Then stop.
+- Pass only if all of these hold: `n_no_objection >= 20`, `n_veto >= 10`, mean net R of `no_objection` `>= 0`, mean net R of `veto` `<=` mean net R of `no_objection` minus `0.25`, and the veto rate `<= 60%`.
+- Dollar figures use `pnl_ref_usd = net_r * 100` (1% of a fixed $10,000, no compounding). Win rate is reported and does not decide.
+- A pass earns a confirmatory window of the same size. It does not wire the veto into `auto_decide`.
+
+### Measurement details fixed before the first run
+
+The pass rule above is unchanged. These details were fixed before any `shadow-veto run`:
+
+1. The shadow cron is `15 0,4,8,12,16,20 * * *` in Asia/Bangkok, 15 minutes after each paper-run hour (`:00:54`).
+2. One action per bar: any `flat` row makes the bar flat; otherwise the `approval_queue` analysis; otherwise the highest `rowid`.
+3. The digest is the newest file whose mtime is at or before the entry bar close (`entry_ts + bar`).
+4. Stop exits apply the same slip as entries and flat exits (`hit.fill_mid` through the fill helper).
+5. The jobs handler timeout is 300 seconds. The n8n HTTP timeout is 360000 ms.
+6. `window_closed` is true at 40 scored entries or 60 days. A 30-day extension sets `extension_requires_owner` and is not applied automatically.
+7. `SHADOW_START_MS` is `1792303200000` (`2026-10-18T06:00:00Z`). The track does not open, and does not write a late verdict, before that bar.

@@ -30,6 +30,7 @@ from jarvise_notify import (
 from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
 from jarvise_paper.risk_monitor import run_risk_monitor as paper_risk_monitor
+from jarvise_paper.shadow_veto import digest_dir, run_shadow
 from jarvise_risk import kill_switch_state
 from jarvise_trade import live_risk_tick, live_trading_enabled, reconcile_live_orders
 
@@ -41,6 +42,7 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     "rag": 900.0,
     # Four GDELT queries, 8 s apart, with rate-limit backoff: a few minutes at worst.
     "news_reaction": 420.0,
+    "shadow_veto": 300.0,
 }
 # Single-flight lock TTLs (seconds): a crashed holder frees the lock automatically.
 JOB_LOCK_TTL_S: dict[str, int] = {
@@ -52,6 +54,7 @@ JOB_LOCK_TTL_S: dict[str, int] = {
     "paper_pending_digest": 120,
     "paper_auto_decide": 900,
     "live_reconcile": 300,
+    "shadow_veto": 300,
 }
 TIMEOUT_EXIT_CODE = 124
 
@@ -372,6 +375,47 @@ def run_rag_refresh() -> tuple[int, dict[str, Any]]:
         return _finish_cli_payload("rag", proc, "jarvise:rag:last")
 
 
+def run_shadow_veto() -> tuple[int, dict[str, Any]]:
+    """Update the counterfactual track and request on-time verdicts. Does not fill or approve."""
+    if kill_switch_engaged():
+        payload = _skipped()
+        _publish_best_effort("jarvise:shadow_veto:last", payload)
+        return 3, payload
+    with single_flight("shadow_veto") as acquired:
+        if not acquired:
+            return 3, _running("shadow_veto")
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        now = int(time.time() * 1000)
+        if not path.exists():
+            payload = {
+                "ok": False,
+                "skipped": True,
+                "reason": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
+            _publish_best_effort("jarvise:shadow_veto:last", payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            payload = run_shadow(
+                conn,
+                now_ms=now,
+                directory=digest_dir(),
+                kill_switch_check=kill_switch_engaged,
+            )
+        except Exception as exc:  # noqa: BLE001 — publish the failure instead of hanging the lock
+            payload = {"ok": False, "paper_only": True, "error": f"{type(exc).__name__}: {exc}", "at_ms": now}
+        finally:
+            conn.close()
+        payload["at_ms"] = now
+        _publish_best_effort("jarvise:shadow_veto:last", payload)
+        if payload.get("skipped"):
+            return 3, payload
+        return (0 if payload.get("ok") else 1), payload
+
+
 def run_news_reaction() -> tuple[int, dict[str, Any]]:
     """Refresh the Home news context (GDELT watchlist + OpenClaw digests).
 
@@ -654,6 +698,7 @@ ROUTES = {
     ("POST", "/jobs/live-reconcile"): "live_reconcile",
     ("POST", "/jobs/risk-monitor"): "risk_monitor",
     ("POST", "/jobs/news-reaction"): "news_reaction",
+    ("POST", "/jobs/shadow-veto"): "shadow_veto",
 }
 
 
@@ -714,6 +759,7 @@ class JobHandler(BaseHTTPRequestHandler):
             "live_reconcile": run_live_reconcile,
             "risk_monitor": run_risk_monitor,
             "news_reaction": run_news_reaction,
+            "shadow_veto": run_shadow_veto,
         }
         runner = runners.get(action or "")
         if runner is None or action is None:

@@ -193,6 +193,7 @@ services:
       - JARVISE_HTTP_RETRIES=${JARVISE_HTTP_RETRIES:-3}
       - JARVISE_JOBS_TOKEN=${JARVISE_JOBS_TOKEN:-}
       - JOBS_PORT=8090
+      - JARVISE_SHADOW_DIGEST_DIR=/digests
       - JARVISE_DB=${JARVISE_DB:-/app/data/analytics/jarvise.db}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
@@ -203,6 +204,7 @@ services:
       - JARVISE_LIVE_EQUITY_USD=${JARVISE_LIVE_EQUITY_USD:-}
     volumes:
       - ./data:/app/data
+      - ./data/openclaw/workspace-ingest/digests:/digests:ro
       - ./config:/app/config:ro
       - ./secrets:/opt/jarvise/secrets:ro
       - ${NLM_HOME:-./data/nlm}:/home/jarvise/.nlm

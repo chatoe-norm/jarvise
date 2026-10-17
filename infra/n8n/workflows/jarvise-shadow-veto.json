@@ -1,0 +1,74 @@
+{
+  "id": "jrvsShadowVeto4h1",
+  "name": "Jarvise shadow veto",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "15 0,4,8,12,16,20 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-shadow-veto",
+      "name": "15m after each 4h close",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/shadow-veto",
+        "options": {
+          "timeout": 360000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
+        }
+      },
+      "id": "http-shadow-veto",
+      "name": "POST shadow veto",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Counterfactual track plus OpenRouter veto log. Does not approve, fill, or change auto-decide. Returns 409 when the kill switch is engaged."
+    }
+  ],
+  "connections": {
+    "15m after each 4h close": {
+      "main": [
+        [
+          {
+            "node": "POST shadow veto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Bangkok"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "Render __JARVISE_JOBS_TOKEN__ with infra/docker/render-n8n-jobs-workflows.sh before import. Do not commit a real token. Do not import while this stage is still under review."
+    }
+  },
+  "pinData": {},
+  "active": false
+}

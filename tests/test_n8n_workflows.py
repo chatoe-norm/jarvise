@@ -63,6 +63,15 @@ def test_jobs_workflows_send_token_placeholder() -> None:
             callers.append(path.name)
     assert len(callers) >= 9
     assert "jarvise-live-reconcile.json" in callers
+    assert "jarvise-shadow-veto.json" in callers
+    shadow = json.loads((WORKFLOWS / "jarvise-shadow-veto.json").read_text(encoding="utf-8"))
+    assert shadow["id"] == "jrvsShadowVeto4h1"
+    shadow_timeout = next(
+        node["parameters"]["options"]["timeout"]
+        for node in shadow["nodes"]
+        if node.get("type") == "n8n-nodes-base.httpRequest"
+    )
+    assert shadow_timeout >= 360000
     script = (ROOT / "infra" / "docker" / "render-n8n-jobs-workflows.sh").read_text(encoding="utf-8")
     assert "JARVISE_JOBS_TOKEN" in script
     assert "jarvise-live-reconcile.json" in script
@@ -96,3 +105,22 @@ def test_hook_agent_http_timeout_covers_timeout_seconds() -> None:
             )
             checked += 1
     assert checked >= 1
+
+
+def test_shadow_veto_cron_follows_paper_run_slots() -> None:
+    """Paper-run fires at 00,04,08,12,16,20 Asia/Bangkok :00:54. Shadow is 10-30 min later."""
+    shadow = json.loads((WORKFLOWS / "jarvise-shadow-veto.json").read_text(encoding="utf-8"))
+    assert shadow["settings"]["timezone"] == "Asia/Bangkok"
+    expression = next(
+        item["expression"]
+        for node in shadow["nodes"]
+        if node.get("type") == "n8n-nodes-base.scheduleTrigger"
+        for item in node["parameters"]["rule"]["interval"]
+        if item.get("field") == "cronExpression"
+    )
+    minute_s, hour_s, _dom, _month, _dow = expression.split()
+    assert minute_s == "15"
+    hours = [int(part) for part in hour_s.split(",")]
+    assert hours == [0, 4, 8, 12, 16, 20]
+    gap_s = (15 * 60) - 54
+    assert 10 * 60 <= gap_s <= 30 * 60
