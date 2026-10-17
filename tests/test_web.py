@@ -1090,7 +1090,10 @@ def test_api_universe_endpoints(monkeypatch, tmp_path: Path) -> None:
     assert "BNBUSDT" not in resp.json()["active_symbols"]
 
     # POST /api/universe/sync with mocked _sync_market_symbols
-    monkeypatch.setattr("jarvise_web.app._sync_market_symbols", lambda syms, p, tf, htf: syms)
+    monkeypatch.setattr(
+        "jarvise_web.app._sync_market_symbols",
+        lambda syms, p, tf, htf: {"synced": list(syms), "warnings": [], "failed": []},
+    )
     resp = client.post(
         "/api/universe/sync",
         data={"symbol": "BTCUSDT"},
@@ -1347,3 +1350,75 @@ def test_api_openclaw_model_routing(monkeypatch) -> None:
     assert "DOCTRINE_JUDGE" in data["agents"]
     assert data["agents"]["DOCTRINE_JUDGE"]["primaryModel"] == "anthropic/claude-sonnet-5"
     assert data["agents"]["CONTEXT_DIGEST"]["primaryModel"] == "google/gemini-3.8-flash"
+
+
+def test_universe_sync_reports_failed_symbols(monkeypatch, tmp_path: Path) -> None:
+    _stub_control_deps(monkeypatch)
+    db = tmp_path / "sync.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    monkeypatch.setattr(
+        "jarvise_web.app._sync_market_symbols",
+        lambda syms, p, tf, htf: {
+            "synced": [],
+            "warnings": [],
+            "failed": [{"symbol": "FOOUSDT", "step": "ingest 4h", "exit_code": 2}],
+        },
+    )
+    client = TestClient(app)
+    resp = client.post(
+        "/api/universe/sync", data={"symbol": "FOOUSDT"}, headers={"accept": "application/json"}
+    )
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["count"] == 0
+    assert body["failed"][0]["symbol"] == "FOOUSDT"
+
+
+def test_run_symbol_sync_classifies_steps(tmp_path: Path) -> None:
+    from jarvise_web.app import _run_symbol_sync
+
+    db = tmp_path / "steps.db"
+    conn = open_db(db)
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "BTCUSDT",
+                "timeframe": "4h",
+                "timestamp": 1_700_000_000_000,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1.0,
+            }
+        ],
+    )
+    conn.close()
+
+    report: dict = {"synced": [], "warnings": [], "failed": []}
+    # Exit 1 (provider warning) still counts as synced when candles exist.
+    _run_symbol_sync(
+        "BTCUSDT", [("ingest 4h", lambda a: 1, []), ("analyze", lambda a: 0, [])], db, "4h", report
+    )
+    assert report["synced"] == ["BTCUSDT"]
+    assert report["warnings"] == [{"symbol": "BTCUSDT", "step": "ingest 4h", "exit_code": 1}]
+
+    # Exit 2 stops the symbol and is a failure.
+    _run_symbol_sync(
+        "ETHUSDT", [("ingest 4h", lambda a: 2, []), ("analyze", lambda a: 0, [])], db, "4h", report
+    )
+    assert report["failed"][-1] == {"symbol": "ETHUSDT", "step": "ingest 4h", "exit_code": 2}
+
+    # Clean exits but no candles stored is still a failure.
+    _run_symbol_sync("SOLUSDT", [("ingest 4h", lambda a: 0, [])], db, "4h", report)
+    assert report["failed"][-1]["symbol"] == "SOLUSDT"
+    assert report["failed"][-1]["error"] == "no candles stored"
+
+    def boom(_a):
+        raise RuntimeError("binance down")
+
+    _run_symbol_sync("XRPUSDT", [("ingest 4h", boom, [])], db, "4h", report)
+    assert report["failed"][-1]["error"].startswith("RuntimeError: binance down")
+    assert "SOLUSDT" not in report["synced"] and "XRPUSDT" not in report["synced"]

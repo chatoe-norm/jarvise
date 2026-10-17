@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { describeIssues } from "@/lib/syncIssues";
 import { api, type BackfillPayload, type IngestHealthStatus } from "@/lib/api";
 import { relativeAge } from "@/lib/utils";
 
@@ -56,16 +57,23 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
         timeframe: selectedTf,
         since: sinceDate,
       });
+      setBackfillResult(res);
       if (res.ok) {
-        setBackfillResult(res);
         setFeedback({
           type: "ok",
-          msg: `Backfill สำเร็จเรียบร้อย: ซิงค์ ${res.count} เหรียญ (${res.synced_symbols.join(", ")}) ย้อนหลังตั้งแต่ ${res.since}`,
+          msg: `Backfill สำเร็จ: ${res.count} เหรียญ (${res.synced_symbols.join(", ")}) ย้อนหลังตั้งแต่ ${res.since}${
+            res.warnings?.length ? ` · คำเตือน ${res.warnings.length} (${describeIssues(res.warnings)})` : ""
+          }`,
         });
-        onRefresh?.();
       } else {
-        setFeedback({ type: "err", msg: "การ Backfill ไม่สำเร็จ กรุณาตรวจสอบ logs" });
+        setFeedback({
+          type: "err",
+          msg: `Backfill ไม่สำเร็จ ${res.failed?.length ?? 0} เหรียญ: ${describeIssues(res.failed ?? [])}${
+            res.count ? ` · สำเร็จ ${res.count} (${res.synced_symbols.join(", ")})` : ""
+          }`,
+        });
       }
+      onRefresh?.();
     } catch (err) {
       setFeedback({ type: "err", msg: err instanceof Error ? err.message : String(err) });
     } finally {

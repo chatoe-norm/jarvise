@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type CryptoSuitability, type UniversePayload } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { describeIssues } from "@/lib/syncIssues";
 import { cn } from "@/lib/utils";
 
 export const POPULAR_CRYPTO_OPTIONS = [
@@ -52,6 +53,7 @@ export function CryptoUniverseCard() {
   const [ragSyncResult, setRagSyncResult] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [copiedHint, setCopiedHint] = useState(false);
+  const [actionResult, setActionResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const { confirm, dialog } = useConfirm();
 
   // Sorting & Filtering State
@@ -97,7 +99,12 @@ export function CryptoUniverseCard() {
     setActionBusy(true);
     setError(null);
     try {
-      await api.addUniverseSymbol(target);
+      const res = await api.addUniverseSymbol(target);
+      setActionResult(
+        res.sync_failed?.length
+          ? { ok: false, msg: `เพิ่ม ${target} แล้ว แต่ดึงข้อมูลไม่สำเร็จ: ${describeIssues(res.sync_failed)}` }
+          : { ok: true, msg: `เพิ่ม ${target} และดึงข้อมูลเรียบร้อย` },
+      );
       setSelectedOption("");
       setCustomSymbol("");
       await loadUniverse();
@@ -132,7 +139,7 @@ export function CryptoUniverseCard() {
   async function handleReset(preset: "paper_core" | "paper_liquid") {
     const ok = await confirm({
       title: `รีเซ็ต Universe เป็น ${preset}?`,
-      body: "การสแกนสัญญาณรอบถัดไปจะใช้รายการคู่เหรียญตาม preset นี้",
+      body: `คู่ที่ไม่อยู่ใน ${preset} จะถูกนำออกจาก Universe ตั้งแต่ตอนนี้ (ประวัติย้อนหลังยังเก็บไว้ให้ replay) และคู่ใน preset ที่ขาดอยู่จะถูกเพิ่มกลับ`,
       confirmLabel: "รีเซ็ต",
       tone: "danger",
     });
@@ -140,7 +147,14 @@ export function CryptoUniverseCard() {
     setActionBusy(true);
     setError(null);
     try {
-      await api.resetUniverse(preset);
+      const res = await api.resetUniverse(preset);
+      const parts: string[] = [];
+      if (res.removed?.length) parts.push(`นำออก ${res.removed.join(", ")}`);
+      if (res.added?.length) parts.push(`เพิ่ม ${res.added.join(", ")}`);
+      setActionResult({
+        ok: true,
+        msg: parts.length ? `รีเซ็ตเป็น ${preset}: ${parts.join(" · ")}` : `Universe ตรงกับ ${preset} อยู่แล้ว`,
+      });
       await loadUniverse();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -165,7 +179,12 @@ export function CryptoUniverseCard() {
     }
     setError(null);
     try {
-      await api.syncUniverse(sym);
+      const res = await api.syncUniverse(sym);
+      setActionResult(
+        res.failed?.length
+          ? { ok: false, msg: `ซิงค์สำเร็จ ${res.count} คู่ ไม่สำเร็จ ${res.failed.length}: ${describeIssues(res.failed)}` }
+          : { ok: true, msg: `ซิงค์สำเร็จ ${res.count} คู่${res.warnings?.length ? ` (มีคำเตือน ${res.warnings.length})` : ""}` },
+      );
       await loadUniverse();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -325,6 +344,11 @@ export function CryptoUniverseCard() {
 
       <CardContent className="space-y-5">
         {error ? <p className="text-xs text-[var(--color-danger)] font-mono">{error}</p> : null}
+        {actionResult ? (
+          <p className={cn("text-xs font-mono", actionResult.ok ? "text-emerald-300" : "text-amber-300")}>
+            {actionResult.msg}
+          </p>
+        ) : null}
 
         {/* Section 1: Trading rules (NotebookLM) sync card */}
         <div className="rounded-lg border border-sky-500/30 bg-gradient-to-r from-sky-950/30 via-[#101722] to-indigo-950/30 p-4 space-y-3">

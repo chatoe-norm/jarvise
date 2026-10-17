@@ -498,7 +498,13 @@ export const api = {
     }),
   universe: () => request<UniversePayload>("/api/universe"),
   addUniverseSymbol: (symbol: string, assetClass = "crypto") =>
-    request<{ ok: boolean; symbol: string; universe_id: string; active_symbols: string[] }>(
+    request<{
+      ok: boolean;
+      symbol: string;
+      universe_id: string;
+      active_symbols: string[];
+      sync_failed?: SyncIssue[];
+    }>(
       "/api/universe/add",
       {
         method: "POST",
@@ -516,7 +522,14 @@ export const api = {
       },
     ),
   resetUniverse: (preset: "paper_core" | "paper_liquid") =>
-    request<{ ok: boolean; preset: string; active_symbols: string[] }>(
+    request<{
+      ok: boolean;
+      preset: string;
+      universe_id?: string;
+      active_symbols: string[];
+      removed?: string[];
+      added?: string[];
+    }>(
       "/api/universe/reset",
       {
         method: "POST",
@@ -525,7 +538,14 @@ export const api = {
       },
     ),
   syncUniverse: (symbol?: string) =>
-    request<{ ok: boolean; synced_symbols: string[]; count: number; timeframe: string }>(
+    request<{
+      ok: boolean;
+      synced_symbols: string[];
+      count: number;
+      failed?: SyncIssue[];
+      warnings?: SyncIssue[];
+      timeframe: string;
+    }>(
       "/api/universe/sync",
       {
         method: "POST",
@@ -615,10 +635,15 @@ export type PipelineRunResult = {
   executed_at: number;
 };
 
+/** One symbol that did not sync (step + exit code or error). */
+export type SyncIssue = { symbol: string; step: string; exit_code?: number; error?: string };
+
 export type BackfillPayload = {
   ok: boolean;
   synced_symbols: string[];
   count: number;
+  failed?: SyncIssue[];
+  warnings?: SyncIssue[];
   timeframe: string;
   since: string;
 };

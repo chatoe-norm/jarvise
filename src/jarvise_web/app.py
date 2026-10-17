@@ -46,10 +46,11 @@ from jarvise_ingest.db import (
     load_recent_ohlcv,
     open_db,
     remove_universe_symbol,
+    reset_universe_members,
     universe_as_of,
 )
 from jarvise_ingest.health import BACKFILL_HINT, ingest_health
-from jarvise_ingest.universe import PAPER_CORE, PAPER_LIQUID, seed_named_universe
+from jarvise_ingest.universe import PAPER_CORE, PAPER_LIQUID, preset_members, seed_named_universe
 from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.auto_decide import load_auto_decide_config
@@ -820,7 +821,7 @@ def api_dashboard(_: None = Depends(require_auth)) -> dict[str, Any]:
 
 
 def active_universe_id() -> str:
-    return os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_liquid"
+    return os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_core"
 
 
 @app.get("/api/universe")
@@ -881,111 +882,93 @@ def api_universe(_: None = Depends(require_auth)) -> dict[str, Any]:
         conn.close()
 
 
-def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: str) -> list[str]:
+SyncReport = dict[str, list[Any]]
+
+
+def _ingest_argv(sym: str, timeframe: str, path: Path, *, since: str | None, skip_book: bool) -> list[str]:
+    argv = ["--symbol", sym, "--timeframe", timeframe]
+    argv += ["--since", since] if since else ["--limit", "200"]
+    argv += ["--skip-derivatives"]
+    if skip_book:
+        argv += ["--skip-book"]
+    return argv + ["--db", str(path)]
+
+
+def _run_symbol_sync(
+    sym: str,
+    steps: list[tuple[str, Any, list[str]]],
+    path: Path,
+    timeframe: str,
+    report: SyncReport,
+) -> None:
+    """Run one symbol's ingest/analyze steps and file it under synced / warnings / failed.
+
+    ingest exits 1 on any provider error (macro, book) even when candles were written, so
+    exit 1 is a warning. An exception, exit 2 (bad arguments) or no candles afterwards is a
+    failure: the owner must not be told a backfill succeeded when it didn't.
+    """
+    from jarvise_ingest.db import count_market, open_db
+
+    for label, fn, argv in steps:
+        try:
+            code = fn(argv)
+        except Exception as exc:  # noqa: BLE001
+            report["failed"].append(
+                {"symbol": sym, "step": label, "error": f"{type(exc).__name__}: {exc}"[:300]}
+            )
+            return
+        if code == 1:
+            report["warnings"].append({"symbol": sym, "step": label, "exit_code": 1})
+        elif code not in (0, None):
+            report["failed"].append({"symbol": sym, "step": label, "exit_code": code})
+            return
+    conn = open_db(path)
+    try:
+        candles = count_market(conn, sym, timeframe)
+    finally:
+        conn.close()
+    if candles <= 0:
+        report["failed"].append({"symbol": sym, "step": f"ingest {timeframe}", "error": "no candles stored"})
+        return
+    report["synced"].append(sym)
+
+
+def _sync_market_symbols(symbols: list[str], path: Path, timeframe: str, htf: str) -> SyncReport:
     from jarvise.charts import export_candle_graphs
     from jarvise_analyze.cli import main as analyze_main
     from jarvise_ingest.cli import main as ingest_main
     from jarvise_ingest.db import count_market, open_db
 
-    results: list[str] = []
-    c = open_db(path)
-    try:
-        for sym in symbols:
-            cnt = count_market(c, sym, timeframe)
-            if cnt < 200:
-                ingest_main(
-                    [
-                        "--symbol",
-                        sym,
-                        "--timeframe",
-                        timeframe,
-                        "--since",
-                        "2021-01-01",
-                        "--skip-derivatives",
-                        "--skip-book",
-                        "--db",
-                        str(path),
-                    ]
-                )
-                ingest_main(
-                    [
-                        "--symbol",
-                        sym,
-                        "--timeframe",
-                        htf,
-                        "--since",
-                        "2021-01-01",
-                        "--skip-derivatives",
-                        "--skip-book",
-                        "--db",
-                        str(path),
-                    ]
-                )
-                ingest_main(
-                    [
-                        "--symbol",
-                        sym,
-                        "--timeframe",
-                        "1h",
-                        "--limit",
-                        "200",
-                        "--skip-derivatives",
-                        "--db",
-                        str(path),
-                    ]
-                )
-            else:
-                ingest_main(
-                    [
-                        "--symbol",
-                        sym,
-                        "--timeframe",
-                        timeframe,
-                        "--limit",
-                        "200",
-                        "--skip-derivatives",
-                        "--db",
-                        str(path),
-                    ]
-                )
-                ingest_main(
-                    [
-                        "--symbol",
-                        sym,
-                        "--timeframe",
-                        "1h",
-                        "--limit",
-                        "200",
-                        "--skip-derivatives",
-                        "--db",
-                        str(path),
-                    ]
-                )
-                ingest_main(
-                    [
-                        "--symbol",
-                        sym,
-                        "--timeframe",
-                        htf,
-                        "--limit",
-                        "200",
-                        "--skip-derivatives",
-                        "--skip-book",
-                        "--db",
-                        str(path),
-                    ]
-                )
-            analyze_main(["--symbol", sym, "--timeframe", timeframe, "--db", str(path), "--json"])
-            results.append(sym)
-    finally:
-        c.close()
+    report: SyncReport = {"synced": [], "warnings": [], "failed": []}
+    for sym in symbols:
+        c = open_db(path)
+        try:
+            # Under 200 bars: full history from 2021 so EMA200 warm-up is complete.
+            since = "2021-01-01" if count_market(c, sym, timeframe) < 200 else None
+        finally:
+            c.close()
+        steps: list[tuple[str, Any, list[str]]] = [
+            (
+                f"ingest {timeframe}",
+                ingest_main,
+                _ingest_argv(sym, timeframe, path, since=since, skip_book=since is not None),
+            ),
+            (f"ingest {htf}", ingest_main, _ingest_argv(sym, htf, path, since=since, skip_book=True)),
+            ("ingest 1h", ingest_main, _ingest_argv(sym, "1h", path, since=None, skip_book=False)),
+            (
+                "analyze",
+                analyze_main,
+                ["--symbol", sym, "--timeframe", timeframe, "--db", str(path), "--json"],
+            ),
+        ]
+        _run_symbol_sync(sym, steps, path, timeframe, report)
 
     try:
         export_candle_graphs(path, symbols, ["1h", timeframe])
     except Exception:
         pass
 
-    return results
+    return report
 
 
 @app.post("/api/universe/add")
@@ -1013,14 +996,24 @@ async def api_universe_add(
         conn.close()
 
     # Automatically backfill and analyze the newly added coin so data is immediately complete
+    sync: SyncReport = {"synced": [], "warnings": [], "failed": []}
     try:
-        await asyncio.to_thread(_sync_market_symbols, [sym], path, timeframe, htf)
+        sync = await asyncio.to_thread(_sync_market_symbols, [sym], path, timeframe, htf)
     except Exception as exc:
         logger.warning("on-demand sync for %s soft-failed: %s", sym, exc)
+        sync["failed"].append({"symbol": sym, "step": "sync", "error": type(exc).__name__})
 
     if wants_json(request):
+        # The symbol is in the universe either way; sync_failed says its data is not ready yet.
         return JSONResponse(
-            {"ok": True, "symbol": sym, "universe_id": universe_id, "active_symbols": active_symbols}
+            {
+                "ok": True,
+                "symbol": sym,
+                "universe_id": universe_id,
+                "active_symbols": active_symbols,
+                "sync_failed": sync["failed"],
+                "sync_warnings": sync["warnings"],
+            }
         )
     return RedirectResponse("/ops", status_code=303)
 
@@ -1050,14 +1043,16 @@ async def api_universe_sync(
     else:
         target_syms = active_syms or ["BTCUSDT", "ETHUSDT"]
 
-    results = await asyncio.to_thread(_sync_market_symbols, target_syms, path, timeframe, htf)
+    report = await asyncio.to_thread(_sync_market_symbols, target_syms, path, timeframe, htf)
 
     if wants_json(request):
         return JSONResponse(
             {
-                "ok": True,
-                "synced_symbols": results,
-                "count": len(results),
+                "ok": not report["failed"],
+                "synced_symbols": report["synced"],
+                "count": len(report["synced"]),
+                "failed": report["failed"],
+                "warnings": report["warnings"],
                 "timeframe": timeframe,
             }
         )
@@ -1189,15 +1184,29 @@ async def api_universe_reset(
     path = db_path()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Database not found")
+    universe_id = active_universe_id()
     conn = open_db(path)
     try:
-        seed_named_universe(conn, preset)
+        # Reset the universe the jobs actually trade, not the preset's own universe id.
+        seed_named_universe(conn, universe_id)
         now_ms = int(time.time() * 1000)
-        active_symbols = universe_as_of(conn, preset, now_ms)
+        changes = reset_universe_members(
+            conn, universe_id=universe_id, members=preset_members(preset), now_ms=now_ms
+        )
+        active_symbols = universe_as_of(conn, universe_id, now_ms)
     finally:
         conn.close()
     if wants_json(request):
-        return JSONResponse({"ok": True, "preset": preset, "active_symbols": active_symbols})
+        return JSONResponse(
+            {
+                "ok": True,
+                "preset": preset,
+                "universe_id": universe_id,
+                "active_symbols": active_symbols,
+                "removed": changes["removed"],
+                "added": changes["added"],
+            }
+        )
     return RedirectResponse("/ops", status_code=303)
 
 
@@ -1498,68 +1507,46 @@ async def api_ingest_backfill(
 
     def _do_backfill(
         sym_list: list[str], db_p: Path, t_frame: str, htf_frame: str, since_d: str
-    ) -> list[str]:
+    ) -> SyncReport:
         from jarvise.charts import export_candle_graphs
         from jarvise_analyze.cli import main as analyze_main
         from jarvise_ingest.cli import main as ingest_main
 
-        synced: list[str] = []
+        report: SyncReport = {"synced": [], "warnings": [], "failed": []}
         for sym in sym_list:
-            ingest_main(
-                [
-                    "--symbol",
-                    sym,
-                    "--timeframe",
-                    t_frame,
-                    "--since",
-                    since_d,
-                    "--skip-derivatives",
-                    "--skip-book",
-                    "--db",
-                    str(db_p),
-                ]
-            )
-            ingest_main(
-                [
-                    "--symbol",
-                    sym,
-                    "--timeframe",
-                    htf_frame,
-                    "--since",
-                    since_d,
-                    "--skip-derivatives",
-                    "--skip-book",
-                    "--db",
-                    str(db_p),
-                ]
-            )
-            ingest_main(
-                [
-                    "--symbol",
-                    sym,
-                    "--timeframe",
-                    "1h",
-                    "--limit",
-                    "200",
-                    "--skip-derivatives",
-                    "--db",
-                    str(db_p),
-                ]
-            )
-            analyze_main(["--symbol", sym, "--timeframe", t_frame, "--db", str(db_p), "--json"])
-            synced.append(sym)
+            steps: list[tuple[str, Any, list[str]]] = [
+                (
+                    f"ingest {t_frame}",
+                    ingest_main,
+                    _ingest_argv(sym, t_frame, db_p, since=since_d, skip_book=True),
+                ),
+                (
+                    f"ingest {htf_frame}",
+                    ingest_main,
+                    _ingest_argv(sym, htf_frame, db_p, since=since_d, skip_book=True),
+                ),
+                ("ingest 1h", ingest_main, _ingest_argv(sym, "1h", db_p, since=None, skip_book=False)),
+                (
+                    "analyze",
+                    analyze_main,
+                    ["--symbol", sym, "--timeframe", t_frame, "--db", str(db_p), "--json"],
+                ),
+            ]
+            _run_symbol_sync(sym, steps, db_p, t_frame, report)
 
         try:
             export_candle_graphs(db_p, sym_list, ["1h", t_frame])
         except Exception:
             pass
-        return synced
+        return report
 
-    results = await asyncio.to_thread(_do_backfill, symbols, path, tf, htf, since_date)
+    report = await asyncio.to_thread(_do_backfill, symbols, path, tf, htf, since_date)
     response_payload = {
-        "ok": True,
-        "synced_symbols": results,
-        "count": len(results),
+        "ok": not report["failed"],
+        "synced_symbols": report["synced"],
+        "count": len(report["synced"]),
+        "failed": report["failed"],
+        "warnings": report["warnings"],
         "timeframe": tf,
         "since": since_date,
     }
