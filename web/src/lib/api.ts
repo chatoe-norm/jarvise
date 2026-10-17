@@ -388,6 +388,8 @@ export type NewsHome = {
     comment?: string;
   }> | null;
   errors?: string[];
+  /** Theme -> "gdelt" | "google_news" (fallback when GDELT throttles). */
+  headline_sources?: Record<string, string>;
   generated_at_ms?: number | null;
   window_years?: number | null;
 };

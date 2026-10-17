@@ -9,7 +9,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,14 +25,28 @@ from jarvise_ingest.db import load_candle_series
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 MAX_RECORDS = 75
 WINDOW_YEARS = 3
+# GDELT allows one request every 5 seconds per IP. Back-to-back theme queries got 429s and
+# dropped connections, and a rate-limit reply is plain text, not JSON.
+GDELT_REQUEST_GAP_S = 8.0
+GDELT_RATE_LIMIT_BACKOFF_S = 20.0
+GDELT_RATE_LIMIT_RETRIES = 2
+GDELT_USER_AGENT = "jarvise-news/1.0 (paper research; GET only)"
 
+# Fallback when GDELT refuses (it throttles some hosts, the VPS included): free, keyless,
+# GET-only RSS. Headlines are context only, same as GDELT.
+GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
+GOOGLE_NEWS_WINDOW = "when:7d"
+GOOGLE_NEWS_MAX_BYTES = 2_000_000
+GOOGLE_NEWS_MAX_ITEMS = MAX_RECORDS
+
+# GDELT rejects OR'd terms unless they are wrapped in parentheses (HTTP 200, plain-text error).
 THEME_QUERIES: tuple[tuple[str, str], ...] = (
-    ("chips_ai", "NVIDIA OR AMD OR TSMC OR ASML OR OpenAI OR Anthropic"),
-    ("geopolitics", "Iran OR China OR India OR Japan OR Europe"),
-    ("fed", '"Federal Reserve" OR FOMC'),
+    ("chips_ai", "(NVIDIA OR AMD OR TSMC OR ASML OR OpenAI OR Anthropic)"),
+    ("geopolitics", "(Iran OR China OR India OR Japan OR Europe)"),
+    ("fed", '("Federal Reserve" OR FOMC)'),
     (
         "people",
-        '"Elon Musk" OR "Sam Altman" OR "Michael Saylor" OR "Vitalik Buterin"',
+        '("Elon Musk" OR "Sam Altman" OR "Michael Saylor" OR "Vitalik Buterin")',
     ),
 )
 
@@ -101,6 +119,7 @@ def news_home_view(report: dict[str, Any] | None) -> dict[str, Any]:
         "digest_note": report.get("digest_note"),
         "digest_items": report.get("digest_items") or [],
         "errors": [str(err) for err in (report.get("errors") or [])],
+        "headline_sources": report.get("headline_sources") or {},
         "generated_at_ms": report.get("generated_at_ms"),
         "window_years": report.get("window_years"),
     }
@@ -135,56 +154,185 @@ def read_digests(directory: Path) -> tuple[list[dict[str, Any]], str | None]:
     return events, None
 
 
+class GdeltError(Exception):
+    """GDELT answered, but not with JSON articles (rate limit or query error text)."""
+
+
+def _is_rate_limited(response: httpx.Response) -> bool:
+    return response.status_code == 429 or response.text.lstrip().startswith("Please limit requests")
+
+
+def _gdelt_get(
+    http: httpx.Client,
+    params: dict[str, str],
+    sleep: Callable[[float], None],
+) -> dict[str, Any]:
+    """One theme query: back off and retry on rate-limit replies; plain-text bodies become GdeltError."""
+    response = http.get(GDELT_DOC_URL, params=params, headers={"User-Agent": GDELT_USER_AGENT})
+    for _ in range(GDELT_RATE_LIMIT_RETRIES):
+        if not _is_rate_limited(response):
+            break
+        sleep(GDELT_RATE_LIMIT_BACKOFF_S)
+        response = http.get(GDELT_DOC_URL, params=params, headers={"User-Agent": GDELT_USER_AGENT})
+    if _is_rate_limited(response):
+        raise GdeltError("rate limited (one request per 5 s)")
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        text = " ".join(response.text.split())[:120]
+        raise GdeltError(f"non-JSON reply: {text or 'empty body'}") from exc
+    if not isinstance(payload, dict):
+        raise GdeltError("unexpected JSON shape")
+    return payload
+
+
+def _gdelt_window(moment: datetime, years: int) -> tuple[str, str]:
+    start = (moment - timedelta(days=365 * years)).strftime("%Y%m%d%H%M%S")
+    return start, moment.strftime("%Y%m%d%H%M%S")
+
+
+def _fetch_gdelt_theme(
+    http: httpx.Client,
+    theme: str,
+    query: str,
+    window: tuple[str, str],
+    sleep: Callable[[float], None],
+) -> list[dict[str, Any]]:
+    payload = _gdelt_get(
+        http,
+        {
+            "query": query,
+            "mode": "artlist",
+            "maxrecords": str(MAX_RECORDS),
+            "format": "json",
+            "startdatetime": window[0],
+            "enddatetime": window[1],
+            "sort": "datedesc",
+        },
+        sleep,
+    )
+    events: list[dict[str, Any]] = []
+    for article in payload.get("articles") or []:
+        day = _article_day(str(article.get("seendate") or ""))
+        if day is None:
+            continue
+        events.append(
+            {
+                "day": day,
+                "theme": theme,
+                "source": "gdelt",
+                "title": str(article.get("title") or "")[:180],
+            }
+        )
+    return events
+
+
 def fetch_gdelt(
     *,
     now: datetime | None = None,
     client: httpx.Client | None = None,
     years: int = WINDOW_YEARS,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """GET a capped headline sample per watchlist theme. One failure does not stop the rest."""
-    moment = now or datetime.now(tz=UTC)
-    start = (moment - timedelta(days=365 * years)).strftime("%Y%m%d%H%M%S")
-    end = moment.strftime("%Y%m%d%H%M%S")
+    window = _gdelt_window(now or datetime.now(tz=UTC), years)
     owns_client = client is None
     http = client or httpx.Client(timeout=20.0)
     events: list[dict[str, Any]] = []
     errors: list[str] = []
     try:
-        for theme, query in THEME_QUERIES:
+        for index, (theme, query) in enumerate(THEME_QUERIES):
+            if index:
+                sleep(GDELT_REQUEST_GAP_S)
             try:
-                response = http.get(
-                    GDELT_DOC_URL,
-                    params={
-                        "query": query,
-                        "mode": "artlist",
-                        "maxrecords": str(MAX_RECORDS),
-                        "format": "json",
-                        "startdatetime": start,
-                        "enddatetime": end,
-                        "sort": "datedesc",
-                    },
-                )
-                response.raise_for_status()
-                payload = response.json()
+                events.extend(_fetch_gdelt_theme(http, theme, query, window, sleep))
             except Exception as exc:  # noqa: BLE001 — one theme must not blank the study
                 errors.append(f"{theme}: {type(exc).__name__}: {exc}")
-                continue
-            for article in payload.get("articles") or []:
-                day = _article_day(str(article.get("seendate") or ""))
-                if day is None:
-                    continue
-                events.append(
-                    {
-                        "day": day,
-                        "theme": theme,
-                        "source": "gdelt",
-                        "title": str(article.get("title") or "")[:180],
-                    }
-                )
     finally:
         if owns_client:
             http.close()
     return events, errors
+
+
+def _rss_day(pub_date: str) -> str | None:
+    try:
+        when = parsedate_to_datetime(pub_date)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.astimezone(UTC).strftime("%Y-%m-%d")
+
+
+def fetch_google_news_theme(http: httpx.Client, theme: str, query: str) -> list[dict[str, Any]]:
+    """Google News RSS search for one theme. Raises on HTTP errors or unreadable XML."""
+    response = http.get(
+        GOOGLE_NEWS_RSS_URL,
+        params={"q": f"{query} {GOOGLE_NEWS_WINDOW}", "hl": "en-US", "gl": "US", "ceid": "US:en"},
+        headers={"User-Agent": GDELT_USER_AGENT},
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+    body = response.content
+    if len(body) > GOOGLE_NEWS_MAX_BYTES:
+        raise ValueError(f"RSS body too large ({len(body)} bytes)")
+    root = ET.fromstring(body)
+    events: list[dict[str, Any]] = []
+    for item in root.iter("item"):
+        day = _rss_day(item.findtext("pubDate") or "")
+        title = (item.findtext("title") or "").strip()
+        if day is None or not title:
+            continue
+        events.append({"day": day, "theme": theme, "source": "google_news", "title": title[:180]})
+        if len(events) >= GOOGLE_NEWS_MAX_ITEMS:
+            break
+    return events
+
+
+def fetch_headlines(
+    *,
+    now: datetime | None = None,
+    client: httpx.Client | None = None,
+    years: int = WINDOW_YEARS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+    """Watchlist headlines per theme: GDELT first, Google News RSS when GDELT refuses.
+
+    Once GDELT rate-limits, the rest of the run skips it (a throttled host stays throttled
+    for minutes) and goes straight to the fallback. A theme is an error only when every
+    source failed. Returns (events, errors, source used per theme).
+    """
+    window = _gdelt_window(now or datetime.now(tz=UTC), years)
+    owns_client = client is None
+    http = client or httpx.Client(timeout=20.0)
+    events: list[dict[str, Any]] = []
+    errors: list[str] = []
+    sources: dict[str, str] = {}
+    gdelt_blocked = False
+    try:
+        for index, (theme, query) in enumerate(THEME_QUERIES):
+            gdelt_error = "skipped (rate limited earlier in this run)"
+            if not gdelt_blocked:
+                if index:
+                    sleep(GDELT_REQUEST_GAP_S)
+                try:
+                    events.extend(_fetch_gdelt_theme(http, theme, query, window, sleep))
+                    sources[theme] = "gdelt"
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    gdelt_error = f"{type(exc).__name__}: {exc}"
+                    if isinstance(exc, GdeltError) and "rate limited" in str(exc):
+                        gdelt_blocked = True
+            try:
+                events.extend(fetch_google_news_theme(http, theme, query))
+                sources[theme] = "google_news"
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{theme}: gdelt {gdelt_error}; google_news {type(exc).__name__}: {exc}")
+    finally:
+        if owns_client:
+            http.close()
+    return events, errors, sources
 
 
 def load_daily_candles(conn: Any, symbol: str) -> list[dict[str, Any]]:
@@ -306,12 +454,13 @@ def run_news_reaction(
     report_path: Path | None = None,
     client: httpx.Client | None = None,
     now: datetime | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     moment = now or datetime.now(tz=UTC)
     folder = digest_dir if digest_dir is not None else default_digest_dir()
     digest_events, digest_note = read_digests(folder)
     digest_items = parse_digest_items_from_dir(folder)
-    gdelt_events, errors = fetch_gdelt(now=moment, client=client)
+    gdelt_events, errors, headline_sources = fetch_headlines(now=moment, client=client, sleep=sleep)
     candles: dict[str, list[dict[str, Any]]] = {}
     if conn is None:
         errors.append("missing_db")
@@ -331,6 +480,7 @@ def run_news_reaction(
         now_ms=int(moment.timestamp() * 1000),
         digest_items=digest_items,
     )
+    report["headline_sources"] = headline_sources
     write_report(report_path or default_report_path(), report)
     return report
 
