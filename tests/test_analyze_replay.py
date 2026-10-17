@@ -5,15 +5,22 @@ import shutil
 from pathlib import Path
 
 from jarvise_analyze.cli import DEFAULT_DB, run
-from jarvise_analyze.replay import _rules_disposition, replay_is_oos, replay_range
+from jarvise_analyze.replay import (
+    _rules_disposition,
+    closed_htf_candle,
+    replay_is_oos,
+    replay_range,
+)
 from jarvise_ingest.db import (
     get_paper_position,
     list_paper_orders,
     load_candles_in_range,
     open_db,
     upsert_market_technicals,
+    write_indicators,
 )
 from jarvise_ingest.series import recompute_indicators
+from jarvise_ingest.timeframes import INTERVAL_MS
 
 
 def _seed_trend(db: Path, *, n: int = 700) -> None:
@@ -350,3 +357,84 @@ def test_oos_since_outside_range_rejected(tmp_path: Path, capsys) -> None:
 def test_oos_since_requires_replay(capsys) -> None:
     assert run(["--symbol", "BTCUSDT", "--oos-since", "2024-06-01"]) == 2
     assert "--replay" in capsys.readouterr().err
+
+
+def test_mtf_flag_requires_replay(capsys) -> None:
+    assert run(["--symbol", "BTCUSDT", "--mtf"]) == 2
+    assert "--replay" in capsys.readouterr().err
+
+
+def test_closed_htf_candle_waits_until_daily_close() -> None:
+    day = 1_700_000_000_000
+    daily = {"timestamp": day, "ema_200": 90.0, "close": 100.0}
+    assert closed_htf_candle([daily], day, htf_ms=INTERVAL_MS["1d"]) is None
+    assert closed_htf_candle([daily], day + INTERVAL_MS["1d"], htf_ms=INTERVAL_MS["1d"]) == daily
+
+
+def test_replay_mtf_does_not_use_same_day_daily(tmp_path: Path) -> None:
+    db = tmp_path / "mtf.db"
+    conn = open_db(db)
+    day = 1_700_000_000_000
+    day_ms = INTERVAL_MS["1d"]
+    bars = [
+        ("4h", day, 100.0),
+        ("4h", day + day_ms, 110.0),
+        ("1d", day, 100.0),
+    ]
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": ts,
+                "timeframe": tf,
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 10.0,
+            }
+            for tf, ts, close in bars
+        ],
+    )
+    write_indicators(
+        conn,
+        [
+            {
+                "symbol": "BTCUSDT",
+                "timeframe": tf,
+                "timestamp": ts,
+                "atr_14": 1.0,
+                "rsi_14": 55.0,
+                "ema_20": close + 1.0,
+                "ema_200": close - 10.0,
+            }
+            for tf, ts, close in bars
+        ],
+    )
+    early = replay_range(
+        conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=day,
+        until_ms=day,
+        dry_run=True,
+        mtf=True,
+    )
+    later = replay_range(
+        conn,
+        symbols=["BTCUSDT"],
+        timeframe="4h",
+        since_ms=day + day_ms,
+        until_ms=day + day_ms,
+        dry_run=True,
+        mtf=True,
+    )
+    conn.close()
+    assert early["mtf"] is True
+    assert early["htf_joined"] == 0
+    assert early["action_counts"]["flat"] == 1
+    assert early["mtf_reasons"].get("htf_missing") == 1
+    assert later["htf_joined"] == 1
+    assert later["action_counts"]["long"] == 1
+    assert later["mtf_reasons"].get("htf_confirm") == 1

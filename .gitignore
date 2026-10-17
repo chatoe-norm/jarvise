@@ -82,6 +82,7 @@ htmlcov/
 data/.cache/
 
 # Test results and temporary files
+tmp/
 web/test-results/
 .cursor/hooks/
 *.db.bak
