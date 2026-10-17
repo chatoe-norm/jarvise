@@ -170,6 +170,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--exit",
+        choices=["confidence", "regime"],
+        default="confidence",
+        help=(
+            "With --replay --apply-paper and --paper-policy rules: "
+            "confidence closes on FLAT (default). "
+            "regime closes only when regime_state no longer matches the open side."
+        ),
+    )
+    p.add_argument(
+        "--no-breakeven",
+        action="store_true",
+        help=(
+            "With --replay --apply-paper --stops trail: skip the 0.5R breakeven lock "
+            "and keep only the 1R trail. Does not read an environment variable."
+        ),
+    )
+    p.add_argument(
         "--paper-policy",
         choices=["naive", "rules"],
         default="naive",
@@ -255,6 +273,18 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.exit != "confidence" and not (args.replay and args.apply_paper):
+        print(
+            "Error: --exit regime requires --replay and --apply-paper.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
+    if args.no_breakeven and not (args.replay and args.apply_paper and args.stops == "trail"):
+        print(
+            "Error: --no-breakeven requires --replay, --apply-paper, and --stops trail.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
     if args.stops != "off" and not args.apply_paper:
         print(
             "Error: --stops requires --apply-paper.\n  " + REPLAY_EXAMPLE,
@@ -308,6 +338,8 @@ def run(argv: list[str] | None = None) -> int:
                     paper_policy=args.paper_policy,
                     stops=args.stops,
                     mtf=args.mtf,
+                    exit_mode=args.exit,
+                    no_breakeven=args.no_breakeven,
                 )
                 if args.apply_paper and args.paper_policy == "rules":
                     report["note"] += (
@@ -331,6 +363,8 @@ def run(argv: list[str] | None = None) -> int:
                     paper_policy=args.paper_policy,
                     stops=args.stops,
                     mtf=args.mtf,
+                    exit_mode=args.exit,
+                    no_breakeven=args.no_breakeven,
                 )
                 if args.apply_paper and args.paper_policy == "rules":
                     report["note"] = (
