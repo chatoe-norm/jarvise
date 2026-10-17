@@ -158,7 +158,7 @@ Replay นี้เป็นนโยบาย `rules` ไม่มี Claude �
 
 ## 3. Daily long-only signal study (owner unlock 2026-10-17)
 
-ลงทะเบียนก่อนรัน ยังไม่มีผล เจ้าของเปิดให้ใช้สูตรสัญญาณใหม่ได้เฉพาะใน replay ผ่าน `--strategy` `trend_long` (H1) และ `donchian_long` (H2) `analyze_snapshot`, `auto_decide`, paper engine, stop, `profit_lock`, env บน VPS, พื้น 0.55/0.70, `same_side_hold` และ universe ไม่เปลี่ยน
+ลงทะเบียนก่อนรัน แล้วรันครบหนึ่งครั้งบนสำเนาของ `jarvise-vps-ledger-ro.db` เจ้าของเปิดให้ใช้สูตรสัญญาณใหม่ได้เฉพาะใน replay ผ่าน `--strategy` `trend_long` (H1) และ `donchian_long` (H2) `analyze_snapshot`, `auto_decide`, paper engine, stop, `profit_lock`, env บน VPS, พื้น 0.55/0.70, `same_side_hold` และ universe ไม่เปลี่ยน
 
 สาเหตุ: สัญญาณ 4h มี gross R ต่อไม้ใกล้ศูนย์ และจ่าย fee+slip ราว 0.12R ต่อรอบ (ข้อ 2.2) ด่านเข้า, MTF และจุดออกไม่ผ่าน (ข้อ 2.2–2.5) สมมติฐานนี้เล็งต้นทุนต่อ R บนแท่งรายวัน และความจริงของสปอตที่ถือได้ฝั่ง long
 
@@ -173,6 +173,37 @@ Replay นี้เป็นนโยบาย `rules` ไม่มี Claude �
 - อ้างอิงเท่านั้น ห้ามเลือกแม้ EV จะเป็นบวก: `--strategy current` บนชุด `1d` เดียวกัน, H1 และ H2 คู่ `--stops trail`, และผลตอบแทน buy-and-hold ถ่วงน้ำหนักเท่ากันต่อหน้าต่าง (ราคาปิดแท่งแรกถึงแท่งสุดท้ายของแต่ละสัญลักษณ์ เฉลี่ยเท่ากัน ไม่หักค่าธรรมเนียม)
 - รายงานต่อช่องต่อหน้าต่าง: n, EV, win rate, mean R, gross R, fee R, slip R, max drawdown R ของไม้คือ PnL หารด้วย `qty × 1.5 × ATR` ตอนเข้า ตามข้อ 2.2 mean R คือค่าเฉลี่ย R สุทธิ gross R คือ R ก่อน fee และ slip (slip อยู่ในราคา fill แล้ว ไม่หักซ้ำ) fee R และ slip R คือค่าเฉลี่ยของสองขา max drawdown คือ `max_drawdown_pct` จาก `compute_paper_metrics`
 - ถ้าไม่มีช่องไหนผ่าน การศึกษาจบ ไม่เพิ่มพารามิเตอร์ timeframe สัญลักษณ์ หรือหน้าต่าง ถ้าทั้งสองช่องผ่าน ให้รายงานทั้งคู่และไม่เลือกช่องใดช่องหนึ่ง
+
+รันตามกติกาด้านบนครั้งเดียว ไม่มีรันซ้ำ EV เป็นดอลลาร์ต่องานปิด win rate เป็นสัดส่วนของไม้ที่ตัดสินได้ R เป็นค่าเฉลี่ยต่อไม้ปิด max drawdown เป็น `max_drawdown_pct`
+
+| ช่อง | หน้าต่าง | n | EV | win | mean R | gross R | fee R | slip R | max DD |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| H1 trend_long fixed | W0 | 90 | 0.234 | 26.7% | 0.047 | 0.094 | 0.032 | 0.016 | 1.95% |
+| H1 trend_long fixed | W1 | 212 | −2.181 | 22.6% | −0.159 | −0.123 | 0.024 | 0.012 | 4.78% |
+| H1 trend_long fixed | W2 | 77 | −1.865 | 26.0% | −0.151 | −0.104 | 0.031 | 0.016 | 2.12% |
+| H2 donchian_long fixed | W0 | 50 | −2.991 | 24.0% | −0.356 | −0.305 | 0.034 | 0.017 | 2.21% |
+| H2 donchian_long fixed | W1 | 63 | 10.493 | 30.2% | 1.664 | 1.710 | 0.031 | 0.015 | 1.86% |
+| H2 donchian_long fixed | W2 | 60 | −2.175 | 28.3% | −0.210 | −0.158 | 0.035 | 0.017 | 2.69% |
+
+อ้างอิงเท่านั้น ไม่ได้ใช้ตัดสิน
+
+| ช่อง | หน้าต่าง | n | EV | win | mean R | gross R | fee R | slip R | max DD |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| current fixed | W0 | 170 | −0.010 | 28.2% | 0.010 | 0.054 | 0.030 | 0.015 | 2.75% |
+| current fixed | W1 | 272 | −2.264 | 22.8% | −0.201 | −0.164 | 0.024 | 0.012 | 6.16% |
+| current fixed | W2 | 191 | −0.121 | 30.4% | 0.030 | 0.075 | 0.030 | 0.015 | 1.60% |
+| H1 trend_long trail | W0 | 159 | −0.869 | 25.8% | −0.089 | −0.043 | 0.031 | 0.015 | 2.82% |
+| H1 trend_long trail | W1 | 341 | −2.583 | 20.5% | −0.254 | −0.217 | 0.025 | 0.012 | 8.81% |
+| H1 trend_long trail | W2 | 134 | −2.077 | 26.9% | −0.214 | −0.168 | 0.031 | 0.016 | 3.39% |
+| H2 donchian_long trail | W0 | 88 | −1.635 | 31.8% | −0.192 | −0.143 | 0.033 | 0.016 | 2.24% |
+| H2 donchian_long trail | W1 | 109 | −2.083 | 30.3% | −0.234 | −0.190 | 0.029 | 0.014 | 2.41% |
+| H2 donchian_long trail | W2 | 86 | −1.186 | 31.4% | −0.106 | −0.052 | 0.036 | 0.018 | 2.13% |
+
+Buy-and-hold ถ่วงน้ำหนักเท่ากัน ไม่หักค่าธรรมเนียม: W0 +0.581, W1 +0.893, W2 −0.266
+
+Replay walks one symbol at a time on a shared ledger, so later symbols are sized from an equity that already includes earlier symbols' PnL. This scales dollar EV but does not change its sign or R. max_drawdown_pct is from that sequential order and is not a chronological portfolio drawdown.
+
+H1 `--strategy trend_long` **ไม่ผ่าน** ไม้ปิดเกิน 8 ทุกหน้าต่าง และ W0 EV เป็น 0.234 แต่ W1 EV −2.181 และ W2 EV −1.865 ต่ำกว่า 0 H2 `--strategy donchian_long` **ไม่ผ่าน** ไม้ปิดเกิน 8 ทุกหน้าต่าง และ W1 EV เป็น 10.493 แต่ W0 EV −2.991 และ W2 EV −2.175 ต่ำกว่า 0 ไม่มีช่องตัดสินที่ผ่านทุกหน้าต่าง จึงไม่เลือกช่องใด และไม่เลือกช่องอ้างอิง การศึกษาจบตามกติกา ไม่เพิ่มพารามิเตอร์ timeframe สัญลักษณ์ หรือหน้าต่าง ไม่เปลี่ยนจุดเข้าของ production
 
 ## 4. สิ่งที่ยังไม่เปลี่ยน
 
