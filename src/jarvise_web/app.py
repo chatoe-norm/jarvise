@@ -55,6 +55,7 @@ from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.auto_decide import load_auto_decide_config
 from jarvise_paper.close import close_position
+from jarvise_paper.feedback import auto_ev_gate_status, reset_ev_gate_latch
 from jarvise_paper.ledger import load_paper_ledger
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
@@ -361,11 +362,13 @@ def status_payload() -> dict[str, Any]:
     live = live_trading_enabled()
     ks = kill_switch_state()
     macro = None
+    gate = None
     path = db_path()
     if path.exists():
         conn = open_db(path)
         try:
             macro = latest_macro_sentiment(conn)
+            gate = auto_ev_gate_status(conn)
         finally:
             conn.close()
     return {
@@ -379,6 +382,7 @@ def status_payload() -> dict[str, Any]:
         "paper": redis_get_json(PAPER_KEY),
         "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
         "paper_auto": redis_get_json(PAPER_AUTO_KEY),
+        "auto_ev_gate": gate,
         "auto_decide_config": {
             "enabled": get_paper_auto_decide_enabled(),
             "max_risk_per_trade_pct": max_risk_per_trade_pct(),
@@ -721,6 +725,32 @@ def api_paper(_: None = Depends(require_auth)) -> dict[str, Any]:
 @app.get("/api/paper/metrics")
 def api_paper_metrics(_: None = Depends(require_auth)) -> dict[str, Any]:
     return load_metrics()
+
+
+@app.post("/api/paper/ev-gate/reset")
+async def api_paper_ev_gate_reset(
+    request: Request,
+    _: None = Depends(require_auth),
+) -> dict[str, Any]:
+    """Clear the EV-gate latch. The body must include confirm=true."""
+    confirmed = False
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        body = await request.json()
+        if isinstance(body, dict):
+            confirmed = body.get("confirm") is True
+    if not confirmed:
+        raise HTTPException(status_code=400, detail="confirm=true is required")
+    path = db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+    conn = open_db(path)
+    try:
+        result = reset_ev_gate_latch(conn)
+        gate = auto_ev_gate_status(conn)
+    finally:
+        conn.close()
+    return {"ok": True, **result, "auto_ev_gate": gate}
 
 
 @app.get("/api/approvals", response_model=ApprovalsResponse)

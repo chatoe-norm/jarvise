@@ -414,6 +414,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         {(activeTab === "auto_decide" || activeTab === "all") && (
           <PaperAutoDecideCard
             auto={status?.paper_auto}
+            gate={status?.auto_ev_gate}
             initialConfig={status?.auto_decide_config}
             onRefresh={() => void load()}
           />

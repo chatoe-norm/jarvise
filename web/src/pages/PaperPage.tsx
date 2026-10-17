@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/pagination";
 import { api, type LossLesson, type MetricsPayload, type PaperPayload } from "@/lib/api";
 import { buildEquityPoints } from "@/lib/equity";
-import { decisionSourceLabel } from "@/lib/copy";
+import { decisionSourceLabel, evGateOwnerCopy } from "@/lib/copy";
 import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
 import { cn, formatDecisionStamp, formatNum, formatQty } from "@/lib/utils";
 
@@ -350,18 +350,16 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                     </tbody>
                   </table>
                 </div>
-                {gate?.enabled ? (
-                  <p className="text-xs text-[var(--color-muted)]">
-                    Soft EV gate:{" "}
-                    {gate.blocked
-                      ? `blocking auto-decide (EV ${formatNum(gate.ev)} < ${formatNum(gate.min_ev)}, N=${gate.n})`
-                      : `armed (min EV ${formatNum(gate.min_ev)}, need N≥${gate.min_n}; now N=${gate.n}, EV ${formatNum(gate.ev)})`}
-                  </p>
-                ) : (
-                  <p className="text-xs text-[var(--color-muted)]">
-                    Soft EV gate off — set <code>JARVISE_AUTO_DECIDE_MIN_EV</code> to enable.
-                  </p>
-                )}
+                {(() => {
+                  const copy = evGateOwnerCopy(gate);
+                  return (
+                    <p className="text-xs text-[var(--color-muted)]">
+                      <span className="font-medium text-[var(--color-foreground)]">{copy.title}</span>
+                      {" — "}
+                      {copy.detail}
+                    </p>
+                  );
+                })()}
               </>
             );
           })()}

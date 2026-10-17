@@ -278,6 +278,17 @@ CREATE TABLE IF NOT EXISTS paper_auto_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at
     ON paper_auto_runs (at_ms DESC);
+
+-- Owner latch for the auto EV gate. A thin sample must not clear latched=1.
+CREATE TABLE IF NOT EXISTS paper_ev_gate_latch (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    latched INTEGER NOT NULL DEFAULT 0,
+    latched_at_ms INTEGER,
+    reason TEXT,
+    sample_n INTEGER,
+    sample_ev REAL,
+    cleared_at_ms INTEGER
+);
 """
 
 _DERIV_METRIC_KEYS = (
@@ -482,6 +493,23 @@ def _migrate_decision_feedback(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at ON paper_auto_runs (at_ms DESC)")
 
 
+def _migrate_ev_gate_latch(conn: sqlite3.Connection) -> None:
+    """Singleton latch so a thin 30-day sample cannot release a blocked EV gate."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_ev_gate_latch (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            latched INTEGER NOT NULL DEFAULT 0,
+            latched_at_ms INTEGER,
+            reason TEXT,
+            sample_n INTEGER,
+            sample_ev REAL,
+            cleared_at_ms INTEGER
+        )
+        """
+    )
+
+
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, name: str, typ: str) -> None:
     cols = _table_columns(conn, table)
     if not cols or name in cols:
@@ -544,6 +572,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (7, "decision_feedback", _migrate_decision_feedback, True),
     (8, "stop_and_marks", _migrate_stop_and_marks, True),
     (9, "indicator_context", _migrate_indicator_context, True),
+    (10, "ev_gate_latch", _migrate_ev_gate_latch, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
