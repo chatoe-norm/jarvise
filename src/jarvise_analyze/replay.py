@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from jarvise_analyze.engine import CONFIDENCE_THRESHOLD, analyze_mtf, analyze_snapshot
+from jarvise_analyze.strategies import STRATEGY_NAMES, StrategyName, decide
 from jarvise_ingest.db import (
     get_paper_position,
     load_candles_in_range,
@@ -75,6 +76,7 @@ def replay_range(
     mtf: bool = False,
     exit_mode: ExitMode = "confidence",
     no_breakeven: bool = False,
+    strategy: StrategyName = "current",
 ) -> dict[str, Any]:
     """Walk closed candles in range; upsert analysis; optionally paper-fill.
 
@@ -95,6 +97,14 @@ def replay_range(
         raise ValueError(f"exit_mode must be one of {EXIT_MODES}")
     if no_breakeven and stops != "trail":
         raise ValueError("no_breakeven requires stops='trail'")
+    if strategy not in STRATEGY_NAMES:
+        raise ValueError(f"strategy must be one of {STRATEGY_NAMES}")
+    if strategy != "current" and mtf:
+        raise ValueError("a non-default strategy does not combine with mtf")
+    if strategy != "current" and paper_policy != "rules":
+        raise ValueError("a non-default strategy requires paper_policy='rules'")
+    if strategy != "current" and confidence_threshold != CONFIDENCE_THRESHOLD:
+        raise ValueError("a non-default strategy keeps the production confidence floor")
     if apply_paper and not dry_run:
         reset_paper_ledger(conn)
 
@@ -117,15 +127,24 @@ def replay_range(
                 for bar in load_candles_in_range(conn, sym, REPLAY_HTF, since_ms=0, until_ms=until_ms)
                 if bar.get("ema_200") is not None
             ]
-        candles = load_candles_in_range(conn, sym, timeframe, since_ms=since_ms, until_ms=until_ms)
-        if not candles:
+        if strategy == "current":
+            candles = load_candles_in_range(conn, sym, timeframe, since_ms=since_ms, until_ms=until_ms)
+        else:
+            # Prior bars fill the 20-bar channel. They are context only.
+            candles = load_candles_in_range(conn, sym, timeframe, since_ms=0, until_ms=until_ms)
+        if not any(int(bar["timestamp"]) >= int(since_ms) for bar in candles):
             errors.append(f"{sym} {timeframe}: no stored candles in range")
             continue
         by_symbol[sym] = 0
-        for candle in candles:
+        for index, candle in enumerate(candles):
+            if int(candle["timestamp"]) < int(since_ms):
+                continue
             bars += 1
             by_symbol[sym] += 1
-            if mtf:
+            if strategy != "current":
+                position_side = _open_position_side(conn, sym) if apply_paper and not dry_run else None
+                result = decide(strategy, candles[: index + 1], position_side)
+            elif mtf:
                 htf = closed_htf_candle(htf_bars, int(candle["timestamp"]), htf_ms=htf_ms)
                 if htf is not None:
                     htf_joined += 1
@@ -185,6 +204,7 @@ def replay_range(
         "mtf": bool(mtf),
         "exit": exit_mode,
         "no_breakeven": bool(no_breakeven),
+        "strategy": strategy,
         "timeframe": timeframe,
         "since_ms": int(since_ms),
         "until_ms": int(until_ms),
@@ -221,6 +241,7 @@ def replay_is_oos(
     mtf: bool = False,
     exit_mode: ExitMode = "confidence",
     no_breakeven: bool = False,
+    strategy: StrategyName = "current",
 ) -> dict[str, Any]:
     """Score one frozen strategy on two chronological windows.
 
@@ -245,6 +266,7 @@ def replay_is_oos(
         mtf=mtf,
         exit_mode=exit_mode,
         no_breakeven=no_breakeven,
+        strategy=strategy,
     )
     out_of_sample = replay_range(
         conn,
@@ -260,6 +282,7 @@ def replay_is_oos(
         mtf=mtf,
         exit_mode=exit_mode,
         no_breakeven=no_breakeven,
+        strategy=strategy,
     )
     return {
         "ok": bool(in_sample.get("ok")) and bool(out_of_sample.get("ok")),
@@ -273,6 +296,7 @@ def replay_is_oos(
         "mtf": bool(mtf),
         "exit": exit_mode,
         "no_breakeven": bool(no_breakeven),
+        "strategy": strategy,
         "timeframe": timeframe,
         "since_ms": int(since_ms),
         "oos_since_ms": int(oos_since_ms),
@@ -379,6 +403,14 @@ def apply_replay_stop(
         exit_reason="stop_hit",
     )
     return len(applied.get("fills") or [])
+
+
+def _open_position_side(conn: Any, symbol: str) -> str | None:
+    pos = get_paper_position(conn, symbol)
+    if pos is None:
+        return None
+    side = str(pos.get("side") or "").lower()
+    return side or None
 
 
 def _regime_matches_side(side: str, regime: str) -> bool:
