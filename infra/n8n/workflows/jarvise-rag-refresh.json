@@ -16,7 +16,10 @@
       "name": "Every 6h",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [0, 0]
+      "position": [
+        0,
+        0
+      ]
     },
     {
       "parameters": {
@@ -24,19 +27,39 @@
         "url": "http://jobs:8090/jobs/rag-refresh",
         "options": {
           "timeout": 600000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
         }
       },
       "id": "http-rag",
       "name": "POST rag refresh",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [280, 0],
+      "position": [
+        280,
+        0
+      ],
       "notes": "NotebookLM + fetch + Firecrawl + openclaw into Qdrant. Respects kill switch. No order placement. Requires nlm profile chatoe under data/nlm (NOTEBOOKLM_MCP_CLI_PATH)."
     }
   ],
   "connections": {
     "Every 6h": {
-      "main": [[{ "node": "POST rag refresh", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "POST rag refresh",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
@@ -46,7 +69,8 @@
     "templateCredsSetupCompleted": false,
     "jarvise": {
       "paper_only": true,
-      "no_order_placement": true
+      "no_order_placement": true,
+      "import": "Render __JARVISE_JOBS_TOKEN__ with infra/docker/render-n8n-jobs-workflows.sh before import. Do not commit a real token."
     }
   },
   "active": true

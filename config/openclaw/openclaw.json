@@ -180,17 +180,6 @@
         "COLLECTION_NAME": "jarvise_doctrine",
         "JARVISE_PAPER_ONLY": "true"
       }
-    },
-    "jarvise-redis": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-redis",
-        "redis://redis:6379"
-      ],
-      "env": {
-        "JARVISE_PAPER_ONLY": "true"
-      }
     }
   }
 }

@@ -29,7 +29,9 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.19.1
     restart: unless-stopped
-    networks: [jarvise_net]
+    # jarvise_net for jobs/web; openclaw_net so the OpenClaw Qdrant MCP can read
+    # without a path to Redis, jobs, or web.
+    networks: [jarvise_net, openclaw_net]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     mem_limit: 1g
@@ -50,7 +52,8 @@ services:
   n8n:
     image: n8nio/n8n:2.40.0
     restart: unless-stopped
-    networks: [jarvise_net]
+    # jarvise_net reaches jobs; openclaw_net reaches the OpenClaw hook only.
+    networks: [jarvise_net, openclaw_net]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 768m
     cpus: 1.0
@@ -218,7 +221,8 @@ services:
   openclaw:
     image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.8}
     restart: unless-stopped
-    networks: [jarvise_net]
+    # Not on jarvise_net: exec cannot open a socket to Redis, jobs, or web.
+    networks: [openclaw_net]
     security_opt: ["no-new-privileges:true"]
     # Control UI OOMs on the default V8 heap at 1g (gateway RSS passes ~800MiB while
     # sessions load, then the page stays on "gateway not reachable"). 4g / 2.0 / 3072
@@ -238,7 +242,6 @@ services:
       - OPENCLAW_PAPER_ONLY=true
       - JARVISE_PAPER_ONLY=true
       - QDRANT_URL=http://qdrant:6333
-      - REDIS_URL=redis://redis:6379/0
       - OPENCLAW_GATEWAY_BIND=lan
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
       - NODE_OPTIONS=--max-old-space-size=3072
@@ -247,8 +250,6 @@ services:
       - ./config/openclaw:/config:ro
       - ./plugins/jarvise-openclaw:/plugins/jarvise-openclaw:ro
     depends_on:
-      redis:
-        condition: service_healthy
       qdrant:
         condition: service_healthy
     healthcheck:
@@ -380,6 +381,8 @@ services:
 
 networks:
   jarvise_net:
+    driver: bridge
+  openclaw_net:
     driver: bridge
 
 volumes:

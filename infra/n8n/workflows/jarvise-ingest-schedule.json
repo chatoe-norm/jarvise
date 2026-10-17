@@ -16,7 +16,10 @@
       "name": "Every 15m",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [0, 0]
+      "position": [
+        0,
+        0
+      ]
     },
     {
       "parameters": {
@@ -24,19 +27,39 @@
         "url": "http://jobs:8090/jobs/ingest",
         "options": {
           "timeout": 120000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
         }
       },
       "id": "http-ingest",
       "name": "POST paper ingest",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [260, 0],
+      "position": [
+        260,
+        0
+      ],
       "notes": "Internal jobs service. GET-only paper ingest. No order placement. Jobs writes jarvise:ingest:last."
     }
   ],
   "connections": {
     "Every 15m": {
-      "main": [[{ "node": "POST paper ingest", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "POST paper ingest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
@@ -47,7 +70,7 @@
     "jarvise": {
       "paper_only": true,
       "no_order_placement": true,
-      "import": "n8n UI → Workflows → Import from File → infra/n8n/workflows/jarvise-ingest-schedule.json"
+      "import": "n8n UI \u2192 Workflows \u2192 Import from File \u2192 infra/n8n/workflows/jarvise-ingest-schedule.json Render __JARVISE_JOBS_TOKEN__ with infra/docker/render-n8n-jobs-workflows.sh before import. Do not commit a real token."
     }
   },
   "pinData": {},

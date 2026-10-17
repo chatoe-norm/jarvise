@@ -17,7 +17,10 @@
       "name": "Every 4h",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [0, 0]
+      "position": [
+        0,
+        0
+      ]
     },
     {
       "parameters": {
@@ -25,13 +28,25 @@
         "url": "http://jobs:8090/jobs/paper-run",
         "options": {
           "timeout": 120000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
         }
       },
       "id": "http-paper-run",
       "name": "POST paper run",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [260, 0],
+      "position": [
+        260,
+        0
+      ],
       "notes": "Enqueue-only paper candidates (no --auto-fill, no exchange orders). Jobs writes jarvise:paper:last. Approve still required on Home unless auto-decide is enabled."
     },
     {
@@ -40,22 +55,50 @@
         "url": "http://jobs:8090/jobs/paper-auto-decide",
         "options": {
           "timeout": 360000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
         }
       },
       "id": "http-paper-auto-decide",
       "name": "POST paper auto-decide",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [520, 0],
-      "notes": "Second-layer Claude review (OpenRouter inside jobs). No-op unless JARVISE_PAPER_AUTO_DECIDE=true on jobs. Paper only; refuses when live trading is on. Writes jarvise:paper_auto:last. Only runs when paper-run returned 2xx. Returns 409 (execution shows as failed) when JARVISE_LIVE_TRADING=true or the kill switch is engaged — intentional visibility, no retry needed."
+      "position": [
+        520,
+        0
+      ],
+      "notes": "Second-layer Claude review (OpenRouter inside jobs). No-op unless JARVISE_PAPER_AUTO_DECIDE=true on jobs. Paper only; refuses when live trading is on. Writes jarvise:paper_auto:last. Only runs when paper-run returned 2xx. Returns 409 (execution shows as failed) when JARVISE_LIVE_TRADING=true or the kill switch is engaged \u2014 intentional visibility, no retry needed."
     }
   ],
   "connections": {
     "Every 4h": {
-      "main": [[{ "node": "POST paper run", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "POST paper run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "POST paper run": {
-      "main": [[{ "node": "POST paper auto-decide", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "POST paper auto-decide",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
@@ -66,7 +109,7 @@
     "jarvise": {
       "paper_only": true,
       "no_order_placement": true,
-      "import": "n8n UI → Workflows → Import from File → infra/n8n/workflows/jarvise-paper-run.json"
+      "import": "n8n UI \u2192 Workflows \u2192 Import from File \u2192 infra/n8n/workflows/jarvise-paper-run.json Render __JARVISE_JOBS_TOKEN__ with infra/docker/render-n8n-jobs-workflows.sh before import. Do not commit a real token."
     }
   },
   "pinData": {},
