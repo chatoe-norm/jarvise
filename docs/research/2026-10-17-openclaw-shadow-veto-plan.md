@@ -105,3 +105,15 @@ Owner override of sections B1–B2: verdicts are Python → OpenRouter, model `a
 - Pass only if all of these hold: `n_no_objection >= 20`, `n_veto >= 10`, mean net R of `no_objection` `>= 0`, mean net R of `veto` `<=` mean net R of `no_objection` minus `0.25`, and the veto rate `<= 60%`.
 - Dollar figures use `pnl_ref_usd = net_r * 100` (1% of a fixed $10,000, no compounding). Win rate is reported and does not decide.
 - A pass earns a confirmatory window of the same size. It does not wire the veto into `auto_decide`.
+
+### Measurement details fixed before the first run
+
+The pass rule above is unchanged. These details were fixed before any `shadow-veto run`:
+
+1. The shadow cron is `15 0,4,8,12,16,20 * * *` in Asia/Bangkok, 15 minutes after each paper-run hour (`:00:54`).
+2. One action per bar: any `flat` row makes the bar flat; otherwise the `approval_queue` analysis; otherwise the highest `rowid`.
+3. The digest is the newest file whose mtime is at or before the entry bar close (`entry_ts + bar`).
+4. Stop exits apply the same slip as entries and flat exits (`hit.fill_mid` through the fill helper).
+5. The jobs handler timeout is 300 seconds. The n8n HTTP timeout is 360000 ms.
+6. `window_closed` is true at 40 scored entries or 60 days. A 30-day extension sets `extension_requires_owner` and is not applied automatically.
+7. `SHADOW_START_MS` is `1792303200000` (`2026-10-18T06:00:00Z`). The track does not open, and does not write a late verdict, before that bar.

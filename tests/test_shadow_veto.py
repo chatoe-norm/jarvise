@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from jarvise.jobs import JOB_TIMEOUTS_S, run_shadow_veto
 from jarvise_analyze.replay import bar_range_after
 from jarvise_ingest.db import open_db
-from jarvise_paper.shadow_track import BAR_MS, build_track, sync_track
+from jarvise_paper.shadow_track import BAR_MS, SHADOW_START_MS, _fill, build_track, sync_track
 from jarvise_paper.shadow_veto import (
     brief_is_safe,
     build_veto_brief,
+    newest_digest,
     parse_verdict,
     request_verdicts,
     run_shadow,
@@ -19,7 +21,7 @@ from jarvise_paper.shadow_veto import (
 from jarvise_paper.stops import evaluate_stop
 
 BAR = BAR_MS["4h"]
-T0 = 1_700_000_000_000
+T0 = SHADOW_START_MS
 
 
 def _db(tmp_path: Path):
@@ -129,7 +131,7 @@ def test_stop_matches_evaluate_stop(tmp_path: Path) -> None:
     )
     assert hit is not None
     assert rows[0]["exit_reason"] == "stop"
-    assert rows[0]["exit_px"] == hit.fill_mid
+    assert rows[0]["exit_px"] == _fill(hit.fill_mid, side="sell", spread=None)
     assert rows[0]["resolved_at"] == T0 + BAR
     conn.close()
 
@@ -249,6 +251,10 @@ def test_score_pass_and_fail() -> None:
     good = score_records(passing, now_ms=1_000)
     assert good["passed"] is True
     assert good["win_rate_decides"] is False
+    assert good["extension_requires_owner"] is True
+    day = 86_400_000
+    assert score_records(passing, now_ms=1_000 + 59 * day)["window_closed"] is False
+    assert score_records(passing, now_ms=1_000 + 60 * day)["window_closed"] is True
     failing = [row("no_objection", 0.1, i) for i in range(20)] + [row("veto", 0.0, i) for i in range(10)]
     bad = score_records(failing, now_ms=1_000)
     assert bad["passed"] is False
@@ -274,5 +280,64 @@ def test_run_shadow_does_not_call_model_for_late_history(tmp_path: Path, monkeyp
     )
     assert payload["called"] == 0
     assert payload["late"] == 1
-    assert JOB_TIMEOUTS_S["shadow_veto"] == 180.0
+    assert JOB_TIMEOUTS_S["shadow_veto"] == 300.0
+    conn.close()
+
+
+def test_conflicting_rows_fail_closed(tmp_path: Path) -> None:
+    conn = _db(tmp_path)
+    _member(conn)
+    _candle(conn, T0, close=100, high=101, low=99)
+    _analysis(conn, T0, "short", invalidation=110, analysis_id="short-row")
+    _analysis(conn, T0, "flat", invalidation=None, analysis_id="flat-row")
+    assert build_track(conn, as_of_ms=T0 + BAR, timeframe="4h", universe_id="paper_core") == []
+    conn.close()
+
+
+def test_directional_conflict_uses_queue_then_rowid(tmp_path: Path) -> None:
+    conn = _db(tmp_path)
+    _member(conn)
+    _candle(conn, T0, close=100, high=101, low=99)
+    _analysis(conn, T0, "long", invalidation=90, analysis_id="lower-rowid")
+    _analysis(conn, T0, "long", invalidation=80, analysis_id="higher-rowid")
+    bare = build_track(conn, as_of_ms=T0 + BAR, timeframe="4h", universe_id="paper_core")
+    assert bare[0]["analysis_id"] == "higher-rowid"
+    conn.execute(
+        """
+        INSERT INTO approval_queue (
+            id, created_at_ms, expires_at_ms, symbol, timeframe, analysis_id, action,
+            regime_state, confidence_score, invalidation_price, status
+        ) VALUES ('q1', ?, ?, 'BTCUSDT', '4h', 'lower-rowid', 'long', 'trend_up', 0.75, 90, 'rejected')
+        """,
+        (T0, T0 + BAR),
+    )
+    conn.commit()
+    queued = build_track(conn, as_of_ms=T0 + BAR, timeframe="4h", universe_id="paper_core")
+    assert queued[0]["analysis_id"] == "lower-rowid"
+    conn.close()
+
+
+def test_digest_mtime_not_after_bar_close(tmp_path: Path) -> None:
+    directory = tmp_path / "digests"
+    directory.mkdir()
+    early = directory / "2026-10-18-06.md"
+    late = directory / "2026-10-18-99.md"
+    early.write_text("before close", encoding="utf-8")
+    late.write_text("after close", encoding="utf-8")
+    close_s = (T0 + BAR) / 1000.0
+    os.utime(early, (close_s - 10, close_s - 10))
+    os.utime(late, (close_s + 10, close_s + 10))
+    name, _digest_hash, text = newest_digest(directory, as_of_ms=T0 + BAR)
+    assert name == "2026-10-18-06.md"
+    assert text == "before close"
+
+
+def test_entries_before_start_are_not_tracked(tmp_path: Path) -> None:
+    conn = _db(tmp_path)
+    _member(conn)
+    earlier = SHADOW_START_MS - BAR
+    _candle(conn, earlier, close=100, high=101, low=99)
+    _analysis(conn, earlier, "long", analysis_id="too-early")
+    rows = build_track(conn, as_of_ms=SHADOW_START_MS, timeframe="4h", universe_id="paper_core")
+    assert rows == []
     conn.close()

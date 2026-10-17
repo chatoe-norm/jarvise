@@ -25,7 +25,7 @@ MODEL = "anthropic/claude-sonnet-5.5"
 PROMPT_VERSION = "v1"
 MAX_CALLS = 6
 DIGEST_CHARS = 1500
-JOB_TIMEOUT_S = 180
+JOB_TIMEOUT_S = 300
 VERDICTS = frozenset({"veto", "no_objection", "abstain"})
 CATEGORIES = frozenset(
     {
@@ -73,14 +73,19 @@ def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def newest_digest(directory: Path) -> tuple[str | None, str | None, str]:
-    """Return filename, sha256 of the file, and at most 1,500 characters. Never persists the text."""
+def newest_digest(directory: Path, *, as_of_ms: int) -> tuple[str | None, str | None, str]:
+    """Newest digest whose mtime is at or before ``as_of_ms``. Never persists the text."""
     if not directory.is_dir():
         return None, None, ""
-    files = [path for path in directory.iterdir() if path.is_file() and path.suffix == ".md"]
+    cutoff = int(as_of_ms) / 1000.0
+    files = [
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix == ".md" and path.stat().st_mtime <= cutoff
+    ]
     if not files:
         return None, None, ""
-    latest = max(files, key=lambda path: path.name)
+    latest = max(files, key=lambda path: (path.stat().st_mtime, path.name))
     raw = latest.read_bytes()
     text = raw.decode("utf-8", errors="replace")
     clipped = text[-DIGEST_CHARS:]
@@ -339,21 +344,27 @@ def request_verdicts(
     have = _existing_verdicts(conn)
     pending = [row for row in entries if str(row["analysis_id"]) not in have]
     pending.sort(key=lambda row: int(row["entry_ts"]))
-    name, digest_hash, text = newest_digest(directory)
     late = 0
     called = 0
     stored = 0
     errors = 0
     on_time_rows: list[dict[str, Any]] = []
     for entry in pending:
+        close_ms = int(entry["entry_ts"]) + bar_ms(timeframe)
+        name, digest_hash, text = newest_digest(directory, as_of_ms=close_ms)
         if not on_time(int(entry["entry_ts"]), now_ms, timeframe=timeframe):
             _insert_verdict(conn, _late_row(entry, created_at=now_ms, name=name, digest_hash=digest_hash))
             late += 1
             stored += 1
             continue
+        entry["_digest_name"] = name
+        entry["_digest_sha256"] = digest_hash
+        entry["_digest_text"] = text
         on_time_rows.append(entry)
     for entry in on_time_rows[:max_calls]:
-        brief = build_veto_brief(conn, entry, digest_text=text, timeframe=timeframe)
+        brief = build_veto_brief(
+            conn, entry, digest_text=str(entry.get("_digest_text") or ""), timeframe=timeframe
+        )
         started = time.monotonic()
         try:
             raw = chat(_prompt(brief), model=MODEL, timeout_s=30.0)
@@ -374,8 +385,8 @@ def request_verdicts(
                 "reason_th": parsed["reason"],
                 "inputs_cited_json": json.dumps(parsed["inputs_cited"], ensure_ascii=False),
                 "brief_sha256": _sha256(canonical),
-                "digest_name": name,
-                "digest_sha256": digest_hash,
+                "digest_name": entry.get("_digest_name"),
+                "digest_sha256": entry.get("_digest_sha256"),
                 "model": MODEL,
                 "prompt_version": PROMPT_VERSION,
                 "latency_ms": latency,
@@ -430,7 +441,7 @@ def score_records(records: list[dict[str, Any]], *, now_ms: int) -> dict[str, An
     )
     first = min((int(row["created_at"]) for row in scored if row.get("created_at") is not None), default=None)
     elapsed_days = None if first is None else (int(now_ms) - first) / 86_400_000
-    window_closed = n >= 40 or (elapsed_days is not None and elapsed_days >= WINDOW_DAYS + EXTENSION_DAYS)
+    window_closed = n >= 40 or (elapsed_days is not None and elapsed_days >= WINDOW_DAYS)
     return {
         "ok": True,
         "passed": passed,
@@ -450,6 +461,7 @@ def score_records(records: list[dict[str, Any]], *, now_ms: int) -> dict[str, An
         "window_start_ms": first,
         "elapsed_days": elapsed_days,
         "window_closed": window_closed,
+        "extension_requires_owner": True,
         "extension_days": EXTENSION_DAYS,
         "confirmatory_window_only": True,
         "paper_only": True,

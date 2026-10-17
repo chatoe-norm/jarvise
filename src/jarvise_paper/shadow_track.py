@@ -1,7 +1,8 @@
 """Counterfactual paper track. One position per symbol, independent of verdicts.
 
 The walk is a pure function of stored analysis rows and closed candles up to
-``as_of_ms``. It does not read verdicts, the approval queue, or the paper ledger.
+``as_of_ms``. It does not read verdicts or the paper ledger. ``approval_queue``
+is read only to pick which analysis row represents a bar.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ FEE_BPS = 10.0
 SLIP_BPS = 5.0
 MAX_BARS = 30
 REF_USD_PER_R = 100.0
+# 2026-10-18T06:00:00Z. Entries before this bar are not tracked.
+SHADOW_START_MS = 1_792_303_200_000
 BAR_MS = {
     "1m": 60_000,
     "5m": 300_000,
@@ -83,18 +86,40 @@ def _analyses(
 ) -> dict[int, dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT analysis_id, timestamp, symbol, timeframe, regime_state, confidence_score,
+        SELECT rowid, analysis_id, timestamp, symbol, timeframe, regime_state, confidence_score,
                action, invalidation_price
         FROM analysis_output
         WHERE symbol=? AND timeframe=? AND timestamp + ? <= ?
-        ORDER BY timestamp
+        ORDER BY timestamp, rowid
         """,
         (symbol, timeframe, int(width), int(as_of_ms)),
     ).fetchall()
-    out: dict[int, dict[str, Any]] = {}
+    queued = {
+        str(row["analysis_id"])
+        for row in conn.execute(
+            """
+            SELECT analysis_id FROM approval_queue
+            WHERE symbol=? AND timeframe=? AND analysis_id IS NOT NULL
+            """,
+            (symbol, timeframe),
+        )
+        if row["analysis_id"] is not None
+    }
+    grouped: dict[int, list[dict[str, Any]]] = {}
     for row in rows:
-        out[int(row["timestamp"])] = dict(row)
-    return out
+        grouped.setdefault(int(row["timestamp"]), []).append(dict(row))
+    return {ts: _choose_analysis(group, queued) for ts, group in grouped.items()}
+
+
+def _choose_analysis(rows: list[dict[str, Any]], queued: set[str]) -> dict[str, Any]:
+    """Flat wins. Otherwise the queued analysis. Otherwise the highest rowid."""
+    flats = [row for row in rows if str(row.get("action") or "").lower() == "flat"]
+    if flats:
+        return max(flats, key=lambda row: int(row["rowid"]))
+    cited = [row for row in rows if str(row["analysis_id"]) in queued]
+    if cited:
+        return max(cited, key=lambda row: int(row["rowid"]))
+    return max(rows, key=lambda row: int(row["rowid"]))
 
 
 def _symbols(conn: Any, universe_id: str, as_of_ms: int) -> list[str]:
@@ -199,7 +224,8 @@ def build_track(
                 exit_px: float | None = None
                 if hit is not None:
                     exit_reason = "stop"
-                    exit_px = float(hit.fill_mid)
+                    exit_side = "sell" if position["side"] == "long" else "buy"
+                    exit_px = _fill(float(hit.fill_mid), side=exit_side, spread=_spread_at(conn, symbol, ts))
                 elif analysis is not None and str(analysis["action"]).lower() in {
                     "flat",
                     _opposite(str(position["side"])),
@@ -220,7 +246,12 @@ def build_track(
                     )
                     position = None
                     continue
-            if position is None and analysis is not None and _member(conn, universe, symbol, ts, membership):
+            if (
+                position is None
+                and analysis is not None
+                and int(analysis["timestamp"]) >= SHADOW_START_MS
+                and _member(conn, universe, symbol, ts, membership)
+            ):
                 opened = _try_open(conn, analysis, close=float(close))
                 if opened is not None:
                     position = opened

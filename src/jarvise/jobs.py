@@ -42,7 +42,7 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     "rag": 900.0,
     # Four GDELT queries, 8 s apart, with rate-limit backoff: a few minutes at worst.
     "news_reaction": 420.0,
-    "shadow_veto": 180.0,
+    "shadow_veto": 300.0,
 }
 # Single-flight lock TTLs (seconds): a crashed holder frees the lock automatically.
 JOB_LOCK_TTL_S: dict[str, int] = {

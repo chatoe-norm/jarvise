@@ -8,7 +8,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "15 3,7,11,15,19,23 * * *"
+              "expression": "15 0,4,8,12,16,20 * * *"
             }
           ]
         }
@@ -24,7 +24,7 @@
         "method": "POST",
         "url": "http://jobs:8090/jobs/shadow-veto",
         "options": {
-          "timeout": 180000
+          "timeout": 360000
         },
         "sendHeaders": true,
         "headerParameters": {
