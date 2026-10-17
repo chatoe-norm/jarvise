@@ -282,7 +282,7 @@ def resolve_active_ingest_symbols() -> str:
     env_syms = [s.strip().upper() for s in env_raw.split(",") if s.strip()]
     db_syms: list[str] = []
     path = _analytics_db_path()
-    universe_id = os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_liquid"
+    universe_id = os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_core"
     if path.exists():
         try:
             conn = open_db(path)

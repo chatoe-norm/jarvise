@@ -5,10 +5,11 @@ bias. Membership is versioned by listed_at / delisted_at so a walk-forward can
 ask which symbols were eligible at a decision time.
 """
 
+import time
 from pathlib import Path
 
 from jarvise_ingest.db import open_db, record_membership, universe_as_of
-from jarvise_ingest.universe import PAPER_CORE, seed_paper_core
+from jarvise_ingest.universe import PAPER_CORE, seed_named_universe, seed_paper_core
 
 
 def test_universe_as_of_excludes_not_yet_listed(tmp_path: Path):
@@ -117,10 +118,69 @@ def test_universe_add_remove_and_list_memberships(tmp_path: Path) -> None:
     known = list_all_known_symbols(conn)
     assert "ADAUSDT" in known
 
-    # Remove ADAUSDT
+    # Remove ADAUSDT: the interval is closed, not deleted (point-in-time history).
     assert remove_universe_symbol(conn, universe_id="paper_liquid", symbol="ADAUSDT") is True
-    items_after = list_universe_memberships(conn, universe_id="paper_liquid")
-    symbols_after = [item["symbol"] for item in items_after]
-    assert "ADAUSDT" not in symbols_after
-    assert "XRPUSDT" in symbols_after
+    now_ms = int(time.time() * 1000) + 1
+    assert "ADAUSDT" not in universe_as_of(conn, "paper_liquid", now_ms)
+    assert "XRPUSDT" in universe_as_of(conn, "paper_liquid", now_ms)
+    ada = [m for m in list_universe_memberships(conn, universe_id="paper_liquid") if m["symbol"] == "ADAUSDT"]
+    assert len(ada) == 1 and ada[0]["delisted_at"] is not None
+    conn.close()
+
+
+def test_universe_remove_survives_reseed_and_keeps_history(tmp_path: Path) -> None:
+    """Seeding on every read used to re-insert a removed preset symbol."""
+    from jarvise_ingest.db import remove_universe_symbol
+
+    conn = open_db(tmp_path / "t.db")
+    seed_named_universe(conn, "paper_liquid")
+    removed_at = 1_800_000_000_000
+    assert remove_universe_symbol(conn, universe_id="paper_liquid", symbol="BNBUSDT", now_ms=removed_at)
+    seed_named_universe(conn, "paper_liquid")  # what GET /api/universe does
+    assert "BNBUSDT" not in universe_as_of(conn, "paper_liquid", removed_at + 1)
+    # A replay before the removal still sees BNB as a member.
+    assert "BNBUSDT" in universe_as_of(conn, "paper_liquid", removed_at - 1)
+    conn.close()
+
+
+def test_universe_readd_opens_new_interval_from_now(tmp_path: Path) -> None:
+    from jarvise_ingest.db import add_universe_symbol, remove_universe_symbol
+
+    conn = open_db(tmp_path / "t.db")
+    seed_named_universe(conn, "paper_liquid")
+    t_remove, t_readd = 1_800_000_000_000, 1_800_000_500_000
+    remove_universe_symbol(conn, universe_id="paper_liquid", symbol="SOLUSDT", now_ms=t_remove)
+    assert add_universe_symbol(conn, universe_id="paper_liquid", symbol="SOLUSDT", now_ms=t_readd)
+    assert "SOLUSDT" not in universe_as_of(conn, "paper_liquid", (t_remove + t_readd) // 2)
+    assert "SOLUSDT" in universe_as_of(conn, "paper_liquid", t_readd)
+    # Adding an already-active symbol is a no-op.
+    assert add_universe_symbol(conn, universe_id="paper_liquid", symbol="SOLUSDT", now_ms=t_readd + 10)
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM universe_membership WHERE universe_id='paper_liquid' AND symbol='SOLUSDT'"
+    ).fetchone()[0]
+    assert rows == 2
+    conn.close()
+
+
+def test_reset_universe_members_closes_extras_and_reopens_preset(tmp_path: Path) -> None:
+    from jarvise_ingest.db import add_universe_symbol, reset_universe_members
+    from jarvise_ingest.universe import preset_members
+
+    conn = open_db(tmp_path / "t.db")
+    seed_named_universe(conn, "paper_liquid")
+    add_universe_symbol(conn, universe_id="paper_liquid", symbol="ADAUSDT", now_ms=1_800_000_000_000)
+    t1 = 1_800_000_100_000
+    changes = reset_universe_members(
+        conn, universe_id="paper_liquid", members=preset_members("paper_core"), now_ms=t1
+    )
+    assert sorted(changes["removed"]) == ["ADAUSDT", "BNBUSDT", "SOLUSDT"]
+    assert changes["added"] == []
+    assert universe_as_of(conn, "paper_liquid", t1) == ["BTCUSDT", "ETHUSDT"]
+
+    t2 = t1 + 1000
+    changes = reset_universe_members(
+        conn, universe_id="paper_liquid", members=preset_members("paper_liquid"), now_ms=t2
+    )
+    assert sorted(changes["added"]) == ["BNBUSDT", "SOLUSDT"]
+    assert universe_as_of(conn, "paper_liquid", t2) == ["BNBUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT"]
     conn.close()

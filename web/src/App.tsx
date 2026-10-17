@@ -1,12 +1,21 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { api, type DashboardPayload } from "@/lib/api";
-import { DecisionsPage } from "@/pages/DecisionsPage";
-import { ExchangePage } from "@/pages/ExchangePage";
 import { HomePage } from "@/pages/HomePage";
-import { OpsPage } from "@/pages/OpsPage";
-import { PaperPage } from "@/pages/PaperPage";
+
+// Home (the approval queue) ships in the first bundle; the other pages, and Recharts with
+// them, load on first visit.
+const PaperPage = lazy(() => import("@/pages/PaperPage").then((m) => ({ default: m.PaperPage })));
+const DecisionsPage = lazy(() => import("@/pages/DecisionsPage").then((m) => ({ default: m.DecisionsPage })));
+const ExchangePage = lazy(() => import("@/pages/ExchangePage").then((m) => ({ default: m.ExchangePage })));
+const OpsPage = lazy(() => import("@/pages/OpsPage").then((m) => ({ default: m.OpsPage })));
+
+function PageLoad({ children }: { children: ReactNode }) {
+  return (
+    <Suspense fallback={<p className="text-sm text-[var(--color-muted)]">กำลังโหลดหน้า…</p>}>{children}</Suspense>
+  );
+}
 
 const DASHBOARD_POLL_MS = 30_000;
 
@@ -67,10 +76,10 @@ export default function App() {
             />
           }
         />
-        <Route path="/paper" element={<PaperPage onPositionsChanged={() => void refresh()} />} />
-        <Route path="/decisions" element={<DecisionsPage />} />
-        <Route path="/exchange" element={<ExchangePage dashboard={dash} />} />
-        <Route path="/ops" element={<OpsPage onStatusChange={() => void refresh()} />} />
+        <Route path="/paper" element={<PageLoad><PaperPage onPositionsChanged={() => void refresh()} /></PageLoad>} />
+        <Route path="/decisions" element={<PageLoad><DecisionsPage /></PageLoad>} />
+        <Route path="/exchange" element={<PageLoad><ExchangePage dashboard={dash} /></PageLoad>} />
+        <Route path="/ops" element={<PageLoad><OpsPage onStatusChange={() => void refresh()} /></PageLoad>} />
         <Route path="/analytics" element={<Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

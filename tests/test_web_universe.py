@@ -65,6 +65,16 @@ def test_api_universe_add_and_remove(client):
     assert "ADAUSDT" not in rem_resp.json()["active_symbols"]
 
 
+def test_api_universe_removed_preset_symbol_stays_removed(client):
+    """GET /api/universe re-seeds the preset; a removed member must not come back."""
+    rem = client.post(
+        "/api/universe/remove", data={"symbol": "BNBUSDT"}, headers={"accept": "application/json"}
+    )
+    assert "BNBUSDT" not in rem.json()["active_symbols"]
+    again = client.get("/api/universe").json()
+    assert "BNBUSDT" not in again["active_symbols"]
+
+
 def test_api_universe_reset(client):
     resp = client.post(
         "/api/universe/reset",
@@ -72,5 +82,10 @@ def test_api_universe_reset(client):
         headers={"accept": "application/json"},
     )
     assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert set(resp.json()["active_symbols"]) == {"BTCUSDT", "ETHUSDT"}
+    body = resp.json()
+    assert body["ok"] is True
+    # The active universe (paper_liquid) is reset, not the preset's own universe id.
+    assert body["universe_id"] == "paper_liquid"
+    assert set(body["active_symbols"]) == {"BTCUSDT", "ETHUSDT"}
+    assert sorted(body["removed"]) == ["BNBUSDT", "SOLUSDT"]
+    assert set(client.get("/api/universe").json()["active_symbols"]) == {"BTCUSDT", "ETHUSDT"}

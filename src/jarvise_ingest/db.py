@@ -1709,6 +1709,18 @@ def list_universe_memberships(
     ]
 
 
+def _open_membership(conn: sqlite3.Connection, universe_id: str, symbol: str, now_ms: int) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM universe_membership
+        WHERE universe_id=? AND symbol=? AND listed_at <= ?
+          AND (delisted_at IS NULL OR delisted_at > ?)
+        """,
+        (universe_id, symbol, now_ms, now_ms),
+    ).fetchone()
+    return row is not None
+
+
 def add_universe_symbol(
     conn: sqlite3.Connection,
     *,
@@ -1716,22 +1728,35 @@ def add_universe_symbol(
     symbol: str,
     asset_class: str = "crypto",
     listed_at: int = 1_609_459_200_000,
+    now_ms: int | None = None,
 ) -> bool:
-    """Add or re-activate a symbol in a universe."""
+    """Add a symbol to a universe without rewriting its point-in-time history.
+
+    First membership ever: one interval from `listed_at` (the conservative lower bound the
+    named universes use). Re-adding after a removal: a new interval from now, so replays
+    over the gap still see the symbol as out of the universe. Already active: no-op.
+    """
     sym = symbol.strip().upper()
     if not sym:
         return False
-    # Clear any previous entry for this exact pair in the universe to avoid duplication/stale delisted
-    conn.execute(
-        "DELETE FROM universe_membership WHERE universe_id=? AND symbol=?",
-        (universe_id, sym),
+    ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    if _open_membership(conn, universe_id, sym, ts):
+        return True
+    has_history = (
+        conn.execute(
+            "SELECT 1 FROM universe_membership WHERE universe_id=? AND symbol=?",
+            (universe_id, sym),
+        ).fetchone()
+        is not None
     )
+    start = ts if has_history else min(listed_at, ts)
     conn.execute(
         """
-        INSERT INTO universe_membership (universe_id, symbol, asset_class, listed_at, delisted_at)
+        INSERT OR IGNORE INTO universe_membership
+            (universe_id, symbol, asset_class, listed_at, delisted_at)
         VALUES (?, ?, ?, ?, NULL)
         """,
-        (universe_id, sym, asset_class, listed_at),
+        (universe_id, sym, asset_class, start),
     )
     conn.commit()
     return True
@@ -1742,17 +1767,53 @@ def remove_universe_symbol(
     *,
     universe_id: str,
     symbol: str,
+    now_ms: int | None = None,
 ) -> bool:
-    """Remove a symbol from a universe."""
+    """Close the symbol's open membership at now (delisted_at), keeping history.
+
+    Hard-deleting rows rewrote point-in-time history and let seeding re-insert the
+    interval on the next read, so the symbol came straight back.
+    """
     sym = symbol.strip().upper()
     if not sym:
         return False
+    ts = int(now_ms if now_ms is not None else time.time() * 1000)
     cur = conn.execute(
-        "DELETE FROM universe_membership WHERE universe_id=? AND symbol=?",
-        (universe_id, sym),
+        """
+        UPDATE universe_membership SET delisted_at=?
+        WHERE universe_id=? AND symbol=? AND listed_at <= ?
+          AND (delisted_at IS NULL OR delisted_at > ?)
+        """,
+        (ts, universe_id, sym, ts, ts),
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def reset_universe_members(
+    conn: sqlite3.Connection,
+    *,
+    universe_id: str,
+    members: list[tuple[str, str]],
+    now_ms: int | None = None,
+) -> dict[str, list[str]]:
+    """Make `members` the active set of `universe_id` from now on.
+
+    Active symbols not in `members` are closed (delisted_at=now); missing members are
+    added via add_universe_symbol. History is never deleted.
+    """
+    ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    wanted = {sym.upper(): asset_class for sym, asset_class in members}
+    removed: list[str] = []
+    added: list[str] = []
+    for sym in universe_as_of(conn, universe_id, ts):
+        if sym not in wanted and remove_universe_symbol(conn, universe_id=universe_id, symbol=sym, now_ms=ts):
+            removed.append(sym)
+    for sym, asset_class in wanted.items():
+        if not _open_membership(conn, universe_id, sym, ts):
+            add_universe_symbol(conn, universe_id=universe_id, symbol=sym, asset_class=asset_class, now_ms=ts)
+            added.append(sym)
+    return {"removed": removed, "added": added}
 
 
 def list_all_known_symbols(conn: sqlite3.Connection) -> list[str]:

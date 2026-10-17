@@ -91,3 +91,14 @@ def seed_named_universe(conn: sqlite3.Connection, universe_id: str) -> int:
     if universe_id == PAPER_EQUITY:
         return seed_paper_equity(conn)
     return 0
+
+
+def preset_members(preset: str) -> list[tuple[str, str]]:
+    """(symbol, asset_class) pairs for a named preset; [] for unknown ids."""
+    if preset == PAPER_CORE:
+        return list(_PAPER_CORE_MEMBERS)
+    if preset == PAPER_LIQUID:
+        return list(_PAPER_LIQUID_MEMBERS)
+    if preset == PAPER_EQUITY:
+        return list(_PAPER_EQUITY_MEMBERS)
+    return []
