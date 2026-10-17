@@ -144,6 +144,7 @@ def replay_range(
             if not (apply_paper and not dry_run):
                 continue
             skip_fill = False
+            disposition = ""
             if paper_policy == "rules":
                 disposition = _rules_disposition(conn, result, exit_mode=exit_mode)
                 policy_counts[disposition] = policy_counts.get(disposition, 0) + 1
@@ -151,7 +152,7 @@ def replay_range(
             if not skip_fill:
                 applied = apply_signal(
                     conn,
-                    analysis=result,
+                    analysis=_analysis_for_fill(result, disposition=disposition, exit_mode=exit_mode),
                     mid_price=float(candle["close"]),
                     timeframe=timeframe,
                     now_ms=int(candle["timestamp"]),
@@ -388,29 +389,42 @@ def _regime_matches_side(side: str, regime: str) -> bool:
     return False
 
 
+def _analysis_for_fill(result: dict[str, Any], *, disposition: str, exit_mode: str) -> dict[str, Any]:
+    """Regime flat-exit closes only. An opposite signal must not flip on the same bar."""
+    action = str(result.get("action") or "").lower()
+    if exit_mode == "regime" and disposition == "flat_exit" and action != "flat":
+        return {**result, "action": "flat", "size_pct_equity": 0.0, "invalidation_price": None}
+    return result
+
+
 def _rules_disposition(conn: Any, result: dict[str, Any], *, exit_mode: ExitMode = "confidence") -> str:
     """Return hold / defer / flat_exit / fill_bars / skip. Never mutates the ledger.
 
-    ``regime`` closes an open position only when ``regime_state`` no longer
-    matches the position side. Same-side hold and opposite-side defer stay.
+    ``regime`` closes an open position when ``regime_state`` no longer matches
+    the position side, including when the bar's action is the opposite side.
+    That close does not flip. A matching regime keeps same-side hold, flat skip,
+    and opposite defer. ``confidence`` is unchanged.
     """
     action = str(result.get("action") or "").lower()
+    pos = get_paper_position(conn, str(result.get("symbol") or ""))
+    if exit_mode == "regime" and pos is not None:
+        side = str(pos.get("side") or "").lower()
+        regime = str(result.get("regime_state") or "")
+        if not _regime_matches_side(side, regime):
+            return "flat_exit"
+        if same_side_already_open(conn, result):
+            return "hold"
+        if action == "flat":
+            return "skip"
+        if action in {"long", "short"} and side != action:
+            return "defer"
     if same_side_already_open(conn, result):
         return "hold"
-    pos = get_paper_position(conn, str(result.get("symbol") or ""))
     if pos is not None and action in {"long", "short"}:
         pos_side = str(pos.get("side") or "").lower()
         if pos_side and pos_side != action:
             return "defer"
     if action == "flat":
-        if exit_mode == "regime":
-            if pos is None:
-                return "skip"
-            side = str(pos.get("side") or "").lower()
-            regime = str(result.get("regime_state") or "")
-            if _regime_matches_side(side, regime):
-                return "skip"
-            return "flat_exit"
         if flat_exit_needed(conn, result):
             return "flat_exit"
         return "skip"

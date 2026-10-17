@@ -6,6 +6,7 @@ from pathlib import Path
 
 from jarvise_analyze.cli import DEFAULT_DB, run
 from jarvise_analyze.replay import (
+    _analysis_for_fill,
     _rules_disposition,
     closed_htf_candle,
     replay_is_oos,
@@ -395,9 +396,38 @@ def test_regime_exit_waits_for_regime_mismatch(tmp_path: Path) -> None:
     mismatched = {"symbol": "BTCUSDT", "action": "flat", "regime_state": "range"}
     assert _rules_disposition(conn, mismatched, exit_mode="regime") == "flat_exit"
     opposite = {"symbol": "BTCUSDT", "action": "short", "regime_state": "trend_down"}
-    assert _rules_disposition(conn, opposite, exit_mode="regime") == "defer"
+    assert _rules_disposition(conn, opposite, exit_mode="regime") == "flat_exit"
+    assert _rules_disposition(conn, opposite, exit_mode="confidence") == "defer"
     same = {"symbol": "BTCUSDT", "action": "long", "regime_state": "trend_up"}
     assert _rules_disposition(conn, same, exit_mode="regime") == "hold"
+    filled = _analysis_for_fill(opposite, disposition="flat_exit", exit_mode="regime")
+    assert filled["action"] == "flat"
+    assert _analysis_for_fill(opposite, disposition="defer", exit_mode="confidence") is opposite
+    conn.close()
+
+
+def test_regime_exit_short_mirror(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "short.db")
+    upsert_paper_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "side": "short",
+            "qty": 1.0,
+            "entry_price": 100.0,
+            "entry_ts": 1,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "stop_price": 110.0,
+            "stop_source": "analysis",
+            "initial_stop_price": 110.0,
+        },
+    )
+    opposite = {"symbol": "BTCUSDT", "action": "long", "regime_state": "trend_up"}
+    assert _rules_disposition(conn, opposite, exit_mode="regime") == "flat_exit"
+    assert _rules_disposition(conn, opposite, exit_mode="confidence") == "defer"
+    matched = {"symbol": "BTCUSDT", "action": "flat", "regime_state": "trend_down"}
+    assert _rules_disposition(conn, matched, exit_mode="regime") == "skip"
     conn.close()
 
 
