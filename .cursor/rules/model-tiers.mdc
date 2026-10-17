@@ -1,0 +1,62 @@
+---
+description: Pick the cheapest model tier that fits the task; escalate and de-escalate on clear triggers
+alwaysApply: true
+---
+
+# Model tiers (cost × quality)
+
+The owner picks the chat model and its settings. You cannot switch them. At the start of a task, state the tier and settings in one line, for example `Tier 1b — Grok 4.7, High, 256K`. If the session model or effort is above what the task needs, say so in one line and carry on. If it is below, stop and ask before going further.
+
+Owner rule (AGENTS.md): Grok implements. Claude only reviews, synthesizes, writes Thai prose, or takes the hardest tasks. Never use GPT, Codex, or Opus unless the owner asks. Auto stays off, because it can route to those models.
+
+| Tier | Model and settings | Use for | Not for |
+| --- | --- | --- | --- |
+| T0 Fast | Composer 2.5 | Lookups, "where is X", explaining a function, renames, lint/format fixes, doc typos, commit messages, `fdpy`/`wdpy` waits, reading CI logs | Trading-layer changes beyond a typo |
+| T1a Follow | Grok 4.7, Medium, 256K | Running a Claude handoff prompt step by step, mechanical edits with a written plan, re-running checks | Choices the prompt does not settle |
+| T1b Build (default) | Grok 4.7, High, 256K | Features and fixes with a known cause, tests, `web/` UI, compose/env, n8n workflow files, refactors inside one module | Locked-area changes without an approved plan |
+| T1c Debug | Grok 4.7, Extra High, 256K | One attempt at a bug with an unknown cause, with a stated hypothesis | A second attempt. Escalate to T3 instead |
+| T2 Judge | Claude Sonnet 5.5, High | Plan for a locked area, review of a trading-layer diff before merge, Thai owner copy, research-note synthesis | Typing large diffs, CI waits |
+| T3 Deep | Claude Fable 5.1, Extra High, or Claude Code (`CLAUDE.md`) | Root cause after T1 failed twice, cross-module safety design (stops, live path, kill switch), replay pre-registration and audits | Routine work. Ask the owner before using it |
+
+Picker options:
+
+- **Fast** stays off on every model. Turn it on only when the owner asks for speed over cost.
+- **Context 500K** (Grok 4.7) only when one task needs more files than 256K holds. Prefer a narrower @-mention first.
+- **Effort Low** is not used. A T0 task goes to Composer 2.5 instead.
+
+Not in any tier: Claude Opus 5.5, GPT-5.6 Sol, Codex 5.3, Gemini 4 Argon, Muse Wonder. If a newer version replaces a tier model, use it in the same tier.
+
+## Jarvise task map
+
+- `fdpy`, `wdpy`, CI watch, Deploy and healthz check: **T0**.
+- Ingest or news provider fix, compose/env parity, n8n file: **T1b**.
+- `web/` page or component: **T1b**. Thai owner-copy pass (กฎการเทรด, `ownerReasonCopy`): **T2**, short.
+- `jarvise_analyze`, `jarvise_paper`, `jarvise_risk`, `jarvise_trade`: plan in **T2**, implement in **T1a** (plan written) or **T1b**, review the diff in **T2**.
+- Replay or strategy research: decision rule and audit in **T3** or Claude Code, runs and tables in **T1a**, verdict in **T2**.
+- Bug with an unknown cause: one **T1c** attempt with a stated hypothesis, then **T3**.
+- Dependabot minor bump: **T0**. Major bump (for example zod 3 → 4): **T1b**.
+
+## Escalate when
+
+- The same error survives two attempts.
+- The change touches a locked area: floors 0.55/0.70, analyzer formula, 1.5× ATR stop, `flat_exit`, `same_side_hold`, profit lock, live path, kill switch, universe.
+- The diff spans more than three modules, or the result goes to the owner as a decision.
+
+## De-escalate when
+
+- The plan is approved and the remaining steps are mechanical.
+- Only CI, Deploy, or a re-run of checks is left.
+
+## Token hygiene (every tier)
+
+- One chat per task. Start a new chat with the handoff prompt instead of continuing a long one.
+- @-mention exact files. Avoid @codebase or whole folders unless you are exploring.
+- Grep, then read the needed range. Do not re-read a file you just edited.
+- Tail logs (`gh run view --log-failed`, `| Select-Object -Last 40`) instead of dumping full output.
+- Max Mode or 500K context only when a task needs more than 256K holds. Switch back afterwards.
+- Parallel workers, Cloud Agents, and the Explore subagent run T0 or T1a only (Composer 2.5, or Grok 4.7 at Medium). Never fan out T2 or T3.
+- While iterating, run the touched test files. Run the full suite once before the PR.
+
+## Handoff to Claude Code
+
+For a T3 audit, give Claude Code a short prompt with the goal, the files, the DB copy path (`data/analytics/jarvise-vps-ledger-ro.db`), and the decision needed. Claude returns findings and a Cursor prompt in the `CLAUDE.md` format, which you run in T1a.

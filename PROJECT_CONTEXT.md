@@ -232,7 +232,7 @@ jarvise/
 │   ├── ci.yml                        # pytest on ubuntu-latest (PRs + main)
 │   └── deploy.yml                    # self-hosted VPS runner after green CI on main
 ├── .cursor/
-│   ├── rules/prefer-auto-composer.mdc
+│   ├── rules/model-tiers.mdc         # T0–T3 model choice by task
 │   └── skills/
 │       ├── jarvise-notebook/SKILL.md         # query Gemini Notebook doctrine first
 │       └── jarvise-binance-intel/SKILL.md    # read-only Binance Web3 intel (no keys, no orders)
@@ -402,7 +402,7 @@ Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature 
 - **Runtime:** Hostinger KVM `srv1811101` (Ubuntu 24.04, 4 vCPU, 16 GB, public `76.13.218.48`), stack at `/opt/jarvise`, private ingress via Tailscale `100.89.171.36`; UIs: web `:8080`, n8n `:5678`, OpenClaw `:18789`, jobs `:8090` (Docker network only). Co-tenant LearningYard on same host; former `srv1269762` / `100.93.110.48` is T4Trip-only after Jarvise full wipe.
 - **Accounts/tooling:** GitHub `chatoe-norm/jarvise` (push via SSH host `github.com-chatoe-norm`; `gh` account `chatoe-norm`); NotebookLM `nlm` profile `chatoe`, notebook alias `jarvise` (`14e11c63-…`); OpenRouter model `openrouter/auto`.
 - **Local dev:** Python 3.12 venv; `pip install -e '.[dev]'`; `python -m pytest`; Windows uses `.venv\Scripts\jarvise`.
-- **Model/cost preference:** Auto/Composer by default; escalate only when asked or when they fail.
+- **Model/cost preference:** Grok implements; Claude reviews or takes the hardest tasks. Tiers T0–T3 in `.cursor/rules/model-tiers.mdc`; Claude Code role in `CLAUDE.md`.
 - **Guardrail checklist (roadmap §6):** ladder never skipped; live/autonomy flags default off; kill-switch respected everywhere; caps before any live submit; secrets only in env; ingest stays GET-only; doctrine consulted before trade calls; crypto first, worldwide orientation.
 
 ## 8. Key documents
