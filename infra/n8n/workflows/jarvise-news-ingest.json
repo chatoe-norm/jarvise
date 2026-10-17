@@ -41,7 +41,7 @@
         "specifyBody": "json",
         "jsonBody": "{\"message\":\"Run one news digest now. Follow AGENTS.md and WATCHLIST.md in this workspace. Write /home/node/.openclaw/workspace-ingest/digests/YYYY-MM-DD-HH.md. At most 8 items on chips, AI labs, the named people, geopolitics, or the Federal Reserve. Each item needs a primary URL and a time. Paper context for BTC/ETH only. End with: Not a trade signal. Do not write /home/node/.openclaw/exports/. Do not place orders. Do not change trading rules.\",\"name\":\"n8n news-ingest\",\"agentId\":\"ingest\",\"sessionMode\":\"isolated\",\"deliver\":false,\"timeoutSeconds\":600}",
         "options": {
-          "timeout": 30000
+          "timeout": 660000
         }
       },
       "id": "http-openclaw-ingest",
