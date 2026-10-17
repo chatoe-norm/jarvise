@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ownerReasonCopy, resolveReasonLabel } from "./copy.ts";
+import { evGateOwnerCopy, ownerReasonCopy, resolveReasonLabel } from "./copy.ts";
 import { formatThesisDisplay } from "./utils.ts";
 
 describe("ownerReasonCopy", () => {
@@ -12,6 +12,24 @@ describe("ownerReasonCopy", () => {
   it("leaves identifiers like doctrine_query untouched", () => {
     assert.equal(ownerReasonCopy("doctrine_query timeout"), "doctrine_query timeout");
     assert.equal(ownerReasonCopy("jarvise_doctrine empty"), "jarvise_doctrine empty");
+  });
+});
+
+describe("evGateOwnerCopy", () => {
+  it("names the latch, the reason, and when it started", () => {
+    const copy = evGateOwnerCopy({
+      enabled: true,
+      blocked: true,
+      latched: true,
+      latched_at_ms: Date.parse("2026-10-17T12:00:00Z"),
+      latch_reason: "auto_ev_gate",
+      n: 3,
+      ev: -0.4,
+    });
+    assert.equal(copy.title, "เกต EV ล็อกตามกฎการเทรด");
+    assert.match(copy.detail, /ล็อกตั้งแต่ /);
+    assert.match(copy.detail, /EV ของไม้ auto/);
+    assert.match(copy.detail, /N=3/);
   });
 });
 

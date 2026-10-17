@@ -1,6 +1,6 @@
 /** Owner-facing wording. Stored Claude reasons may still say หลักคำสอน or "doctrine". */
 
-import type { AnalysisOutcome, AnalysisOutcomeKind } from "@/lib/api";
+import type { AnalysisOutcome, AnalysisOutcomeKind, EvGateStatus } from "@/lib/api";
 
 export type OutcomeBadgeVariant = "default" | "ok" | "danger" | "outline" | "muted";
 
@@ -14,6 +14,35 @@ export function ownerReasonCopy(reason: string | null | undefined): string {
   if (reason == null || reason === "") return "—";
   // Whole word only: identifiers such as doctrine_query / jarvise_doctrine stay as written.
   return reason.replaceAll("หลักคำสอน", "กฎการเทรด").replace(/\bdoctrines?\b/gi, "กฎการเทรด");
+}
+
+/** Paper and Ops copy for the auto EV latch. A thin sample does not clear a latch. */
+export function evGateOwnerCopy(gate: EvGateStatus | null | undefined): { title: string; detail: string } {
+  if (!gate || (!gate.enabled && !gate.latched)) {
+    return {
+      title: "เกต EV ยังไม่เปิด",
+      detail: "ตั้งค่าเกณฑ์ EV เพื่อเปิดเกตตามกฎการเทรด",
+    };
+  }
+  const since =
+    gate.latched_at_ms != null
+      ? new Date(gate.latched_at_ms).toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })
+      : null;
+  const why = resolveReasonLabel(gate.latch_reason || gate.reason || "auto_ev_gate");
+  const sample = `ตอนนี้ N=${gate.n ?? 0}, EV ${gate.ev ?? "—"}`;
+  if (gate.latched) {
+    return {
+      title: "เกต EV ล็อกตามกฎการเทรด",
+      detail: `ล็อกตั้งแต่ ${since ?? "—"} — ${why} (${sample})`,
+    };
+  }
+  if (gate.blocked) {
+    return { title: "เกต EV กำลังบล็อกตามกฎการเทรด", detail: `${why} (${sample})` };
+  }
+  return {
+    title: "เกต EV ยังไม่ล็อก",
+    detail: `ต้องมีไม้ auto อย่างน้อย ${gate.min_n ?? "—"} ไม้ และ EV ต่ำกว่า ${gate.min_ev ?? "—"} จึงจะล็อก (${sample})`,
+  };
 }
 
 /** Fixed auto-decide / approval codes (auto_decide.py, approval.py) → owner copy. */

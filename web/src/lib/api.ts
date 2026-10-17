@@ -1,6 +1,19 @@
 import { errorMessage } from "@/lib/errors";
 import { dashboardSchema, paperSchema, statusSchema } from "@/lib/schemas";
 
+export type EvGateStatus = {
+  enabled?: boolean;
+  blocked?: boolean;
+  latched?: boolean;
+  latched_at_ms?: number | null;
+  latch_reason?: string | null;
+  min_ev?: number | null;
+  min_n?: number;
+  n?: number;
+  ev?: number | null;
+  reason?: string | null;
+};
+
 export type IngestHealthStatus = {
   ok: boolean;
   timeframe: string;
@@ -32,15 +45,7 @@ export type PaperAutoStatus = {
   duration_s?: number;
   at_ms?: number;
   telegram_sent?: boolean;
-  auto_ev_gate?: {
-    enabled?: boolean;
-    blocked?: boolean;
-    min_ev?: number | null;
-    min_n?: number;
-    n?: number;
-    ev?: number | null;
-    reason?: string | null;
-  };
+  auto_ev_gate?: EvGateStatus;
 };
 
 export type AutoDecideConfigPayload = {
@@ -92,6 +97,7 @@ export type StatusPayload = {
   paper_expire: unknown;
   ingest_health?: IngestHealthStatus | null;
   paper_auto?: PaperAutoStatus | null;
+  auto_ev_gate?: EvGateStatus | null;
   auto_decide_config?: AutoDecideConfigPayload | null;
   risk_caps: Record<string, unknown>;
   qdrant?: QdrantStatus | Record<string, unknown>;
@@ -269,15 +275,7 @@ export type MetricsPayload = {
   unmatched_orders?: number;
   by_decision_source?: Record<string, SourceMetrics>;
   by_decision_source_30d?: Record<string, SourceMetrics>;
-  auto_ev_gate?: {
-    enabled?: boolean;
-    blocked?: boolean;
-    min_ev?: number | null;
-    min_n?: number;
-    n?: number;
-    ev?: number | null;
-    reason?: string | null;
-  };
+  auto_ev_gate?: EvGateStatus;
   loss_lesson?: LossLesson;
   error?: string;
 };
@@ -580,6 +578,12 @@ export const api = {
   runAutoDecide: () =>
     request<PaperAutoStatus & { ok: boolean; error?: string }>("/api/paper/auto-decide/run", {
       method: "POST",
+    }),
+  resetEvGate: () =>
+    request<{ ok: boolean; latched: boolean; auto_ev_gate?: EvGateStatus }>("/api/paper/ev-gate/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true }),
     }),
   queryDoctrine: (q: string, limit: number = 3) =>
     request<DoctrineQueryResponse>(

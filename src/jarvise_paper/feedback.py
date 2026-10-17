@@ -126,6 +126,68 @@ def load_auto_ev_gate_config() -> tuple[float | None, int]:
         return None, min_n
 
 
+def read_ev_gate_latch(conn: Any) -> dict[str, Any] | None:
+    """Return the active latch, or None when the owner has not blocked the gate yet."""
+    row = conn.execute(
+        "SELECT latched, latched_at_ms, reason FROM paper_ev_gate_latch WHERE id = 1"
+    ).fetchone()
+    if row is None or not int(row[0]):
+        return None
+    return {
+        "latched": True,
+        "latched_at_ms": int(row[1]) if row[1] is not None else None,
+        "reason": row[2],
+    }
+
+
+def latch_ev_gate(
+    conn: Any,
+    *,
+    at_ms: int,
+    reason: str,
+    n: int,
+    ev: float | None,
+) -> None:
+    """Persist the first block. A later call does not move the timestamp."""
+    if read_ev_gate_latch(conn) is not None:
+        return
+    conn.execute(
+        """
+        INSERT INTO paper_ev_gate_latch (
+            id, latched, latched_at_ms, reason, sample_n, sample_ev, cleared_at_ms
+        )
+        VALUES (1, 1, ?, ?, ?, ?, NULL)
+        ON CONFLICT(id) DO UPDATE SET
+            latched = 1,
+            latched_at_ms = excluded.latched_at_ms,
+            reason = excluded.reason,
+            sample_n = excluded.sample_n,
+            sample_ev = excluded.sample_ev,
+            cleared_at_ms = NULL
+        WHERE paper_ev_gate_latch.latched = 0
+        """,
+        (int(at_ms), reason, int(n), ev),
+    )
+    conn.commit()
+
+
+def reset_ev_gate_latch(conn: Any, *, at_ms: int | None = None) -> dict[str, Any]:
+    """Clear the latch. Callers must already have an explicit owner confirm."""
+    ts = int(at_ms if at_ms is not None else time.time() * 1000)
+    conn.execute(
+        """
+        INSERT INTO paper_ev_gate_latch (id, latched, cleared_at_ms)
+        VALUES (1, 0, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            latched = 0,
+            cleared_at_ms = excluded.cleared_at_ms
+        """,
+        (ts,),
+    )
+    conn.commit()
+    return {"ok": True, "latched": False, "cleared_at_ms": ts}
+
+
 def auto_ev_gate_status(
     conn: Any,
     *,
@@ -133,7 +195,12 @@ def auto_ev_gate_status(
     min_ev: float | None = None,
     min_n: int | None = None,
 ) -> dict[str, Any]:
-    """Fail-closed soft gate: block auto-decide when 30d auto EV is below min_ev."""
+    """Block auto-decide when 30-day auto EV is below min_ev and the sample is large enough.
+
+    The first block writes a SQLite latch with a timestamp and reason. A later sample
+    with fewer than min_n trades does not release that latch, and a thin sample does
+    not block before the first latch. The owner clears it with the CLI or the Ops button.
+    """
     cfg_ev, cfg_n = load_auto_ev_gate_config()
     threshold = cfg_ev if min_ev is None else min_ev
     need_n = cfg_n if min_n is None else max(1, int(min_n))
@@ -141,6 +208,9 @@ def auto_ev_gate_status(
     base: dict[str, Any] = {
         "enabled": threshold is not None,
         "blocked": False,
+        "latched": False,
+        "latched_at_ms": None,
+        "latch_reason": None,
         "min_ev": threshold,
         "min_n": need_n,
         "n": 0,
@@ -148,18 +218,26 @@ def auto_ev_gate_status(
         "window_ms": WINDOW_30D_MS,
         "reason": None,
     }
-    if threshold is None:
+    latch = read_ev_gate_latch(conn)
+    if threshold is None and latch is None:
         return base
-    by_src = metrics_by_decision_source(conn, since_ms=ts - WINDOW_30D_MS)
-    auto = by_src.get("auto") or _bucket_stats([])
-    n = int(auto["closed_trades"])
-    ev = auto["expected_value_ev"]
-    base["n"] = n
-    base["ev"] = ev
-    if n < need_n:
-        return base
-    if ev is not None and float(ev) < float(threshold):
+    if threshold is not None:
+        by_src = metrics_by_decision_source(conn, since_ms=ts - WINDOW_30D_MS)
+        auto = by_src.get("auto") or _bucket_stats([])
+        n = int(auto["closed_trades"])
+        ev = auto["expected_value_ev"]
+        base["n"] = n
+        base["ev"] = ev
+        sample_blocks = n >= need_n and ev is not None and float(ev) < float(threshold)
+        if sample_blocks:
+            latch_ev_gate(conn, at_ms=ts, reason="auto_ev_gate", n=n, ev=float(ev))
+            latch = read_ev_gate_latch(conn)
+    if latch is not None:
         base["blocked"] = True
+        base["latched"] = True
+        base["enabled"] = True
+        base["latched_at_ms"] = latch["latched_at_ms"]
+        base["latch_reason"] = latch["reason"]
         base["reason"] = "auto_ev_gate"
     return base
 

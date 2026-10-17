@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jarvise_analyze.engine import ATR_STOP_MULT, CONFIDENCE_THRESHOLD
 from jarvise_ingest.db import (
     SCHEMA_VERSION,
     ensure_paper_account,
@@ -13,14 +14,24 @@ from jarvise_ingest.db import (
     upsert_market_technicals,
 )
 from jarvise_paper.approval import approve_approval, enqueue_approval
-from jarvise_paper.auto_decide import AutoDecideConfig, run_auto_decide
+from jarvise_paper.auto_decide import (
+    NO_DOCTRINE_MIN_CONF,
+    SAME_SIDE_HOLD,
+    AutoDecideConfig,
+    run_auto_decide,
+)
+from jarvise_paper.cli import run
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.feedback import (
+    WINDOW_30D_MS,
     auto_ev_gate_status,
     decision_source_from_reason,
     metrics_by_decision_source,
+    read_ev_gate_latch,
+    reset_ev_gate_latch,
 )
 from jarvise_paper.metrics import compute_paper_metrics
+from jarvise_risk.caps import KILL_SWITCH_KEY
 
 
 def _seed_candle(conn, symbol: str, timeframe: str, close: float, ts: int = 1_700_000_000_000) -> None:
@@ -262,4 +273,116 @@ def test_auto_ev_gate_blocks_when_negative(tmp_path: Path, monkeypatch) -> None:
 def test_metrics_by_source_empty(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "e.db")
     assert metrics_by_decision_source(conn) == {}
+    conn.close()
+
+
+def _seed_auto_round_trips(conn, n: int, *, now: int, exit_price: float, start: int = 0) -> None:
+    for i in range(n):
+        k = start + i
+        insert_paper_order(
+            conn,
+            {
+                "order_id": f"o{k}",
+                "ts": now - 1_000 + i,
+                "symbol": "BTCUSDT",
+                "timeframe": "4h",
+                "side": "buy",
+                "qty": 1.0,
+                "price": 100.0,
+                "fee_usd": 0.0,
+                "fee_bps": 0.0,
+                "slip_bps": 0.0,
+                "analysis_id": f"a{i}",
+                "reason": "open_long",
+                "approval_id": f"ap{i}",
+                "decision_source": "auto_claude",
+            },
+        )
+        insert_paper_order(
+            conn,
+            {
+                "order_id": f"c{k}",
+                "ts": now - 500 + i,
+                "symbol": "BTCUSDT",
+                "timeframe": "4h",
+                "side": "sell",
+                "qty": 1.0,
+                "price": exit_price,
+                "fee_usd": 0.0,
+                "fee_bps": 0.0,
+                "slip_bps": 0.0,
+                "analysis_id": f"b{i}",
+                "reason": "close_long",
+                "approval_id": f"ap{i}",
+                "decision_source": "auto_claude",
+            },
+        )
+    conn.commit()
+    compute_paper_metrics(conn, now_ms=now)
+
+
+def test_ev_gate_latch_survives_thin_sample_until_reset(tmp_path: Path, monkeypatch) -> None:
+    calls = {"kill": 0}
+
+    def _no_kill(**_kwargs: object) -> bool:
+        calls["kill"] += 1
+        return False
+
+    monkeypatch.setattr("jarvise_risk.caps.engage_kill_switch", _no_kill)
+    monkeypatch.setenv("JARVISE_AUTO_DECIDE_MIN_EV", "0")
+    monkeypatch.setenv("JARVISE_AUTO_DECIDE_MIN_EV_N", "5")
+    conn = open_db(tmp_path / "latch.db")
+    ensure_paper_account(conn)
+    now = 10_000_000
+    _seed_auto_round_trips(conn, 2, now=now, exit_price=90.0)
+    thin = auto_ev_gate_status(conn, now_ms=now)
+    assert thin["blocked"] is False
+    assert thin["latched"] is False
+
+    _seed_auto_round_trips(conn, 10, now=now, exit_price=90.0, start=100)
+    blocked = auto_ev_gate_status(conn, now_ms=now)
+    assert blocked["blocked"] is True
+    assert blocked["latched"] is True
+    assert blocked["latched_at_ms"] == now
+    assert blocked["latch_reason"] == "auto_ev_gate"
+
+    later = now + WINDOW_30D_MS + 1
+    aged = auto_ev_gate_status(conn, now_ms=later)
+    assert aged["n"] < 5
+    assert aged["blocked"] is True
+    assert aged["latched"] is True
+    assert aged["latched_at_ms"] == now
+
+    db = tmp_path / "latch.db"
+    assert run(["ev-gate", "reset", "--db", str(db)]) == 2
+    still = auto_ev_gate_status(conn, now_ms=later)
+    assert still["latched"] is True
+
+    assert run(["ev-gate", "reset", "--confirm", "--db", str(db), "--json"]) == 0
+    cleared = auto_ev_gate_status(conn, now_ms=later)
+    assert cleared["latched"] is False
+    assert cleared["blocked"] is False
+    assert calls["kill"] == 0
+    assert KILL_SWITCH_KEY == "jarvise:kill_switch"
+    assert CONFIDENCE_THRESHOLD == 0.55
+    assert NO_DOCTRINE_MIN_CONF == 0.70
+    assert ATR_STOP_MULT == 1.5
+    assert SAME_SIDE_HOLD == "auto:rule:same_side_hold"
+    conn.close()
+
+
+def test_ev_gate_reset_clears_latch_while_sample_still_negative(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_AUTO_DECIDE_MIN_EV", "0")
+    monkeypatch.setenv("JARVISE_AUTO_DECIDE_MIN_EV_N", "5")
+    conn = open_db(tmp_path / "reset.db")
+    ensure_paper_account(conn)
+    now = 20_000_000
+    _seed_auto_round_trips(conn, 6, now=now, exit_price=90.0)
+    assert auto_ev_gate_status(conn, now_ms=now)["latched"] is True
+    reset_ev_gate_latch(conn, at_ms=now + 1)
+    assert read_ev_gate_latch(conn) is None
+    # The sample still fails, so the next evaluation latches again.
+    again = auto_ev_gate_status(conn, now_ms=now)
+    assert again["blocked"] is True
+    assert again["latched"] is True
     conn.close()

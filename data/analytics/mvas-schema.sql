@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 9).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 10).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -265,3 +265,14 @@ CREATE TABLE IF NOT EXISTS paper_auto_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_paper_auto_runs_at
     ON paper_auto_runs (at_ms DESC);
+
+-- Owner latch for the auto EV gate. A thin sample must not clear latched=1.
+CREATE TABLE IF NOT EXISTS paper_ev_gate_latch (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    latched INTEGER NOT NULL DEFAULT 0,
+    latched_at_ms INTEGER,
+    reason TEXT,
+    sample_n INTEGER,
+    sample_ev REAL,
+    cleared_at_ms INTEGER
+);

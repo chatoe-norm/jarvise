@@ -23,7 +23,7 @@ Size, stops, and halts already live in Python. Use those functions. Do not raise
 - [`src/jarvise_paper/stops.py`](../../../src/jarvise_paper/stops.py)
   - `evaluate_stop`, `run_stop_monitor`, `remaining_stop`
   - Stop distance uses `ATR_STOP_MULT` (`1.5`) from `jarvise_analyze.engine`.
-- Expectancy gate: `auto_ev_gate_status` in [`src/jarvise_paper/feedback.py`](../../../src/jarvise_paper/feedback.py), driven by `JARVISE_AUTO_DECIDE_MIN_EV` and `JARVISE_AUTO_DECIDE_MIN_EV_N`. It is env, not a new table.
+- Expectancy gate: `auto_ev_gate_status` in [`src/jarvise_paper/feedback.py`](../../../src/jarvise_paper/feedback.py), driven by `JARVISE_AUTO_DECIDE_MIN_EV` and `JARVISE_AUTO_DECIDE_MIN_EV_N`. The first block latches in `paper_ev_gate_latch` until `jarvise paper ev-gate reset --confirm`. A thin sample does not release it.
 
 ## Do not
 

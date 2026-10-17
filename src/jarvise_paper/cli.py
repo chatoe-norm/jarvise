@@ -41,6 +41,7 @@ from jarvise_paper.approval import (
     reject_approval,
 )
 from jarvise_paper.engine import apply_signal
+from jarvise_paper.feedback import auto_ev_gate_status, reset_ev_gate_latch
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.risk_monitor import run_risk_monitor
 from jarvise_paper.stops import backfill_stops
@@ -176,6 +177,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--sync-rag", action="store_true", help="Sync to data/analytics/sources/openclaw/ for Qdrant RAG"
     )
     pm.add_argument("--json", action="store_true", dest="as_json")
+
+    eg = sub.add_parser("ev-gate", help="Owner control for the auto EV gate latch")
+    eg_sub = eg.add_subparsers(dest="ev_gate_cmd", required=True)
+    rst = eg_sub.add_parser(
+        "reset",
+        help="Clear the EV-gate latch after an explicit confirm",
+    )
+    rst.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required. Without this flag the latch stays.",
+    )
+    rst.add_argument("--db", type=Path, default=DEFAULT_DB)
+    rst.add_argument("--json", action="store_true", dest="as_json")
     return p
 
 
@@ -540,6 +555,30 @@ def cmd_post_mortem(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ev_gate(args: argparse.Namespace) -> int:
+    if args.ev_gate_cmd != "reset":
+        return 2
+    if not args.confirm:
+        payload = {"ok": False, "error": "pass --confirm to clear the EV-gate latch"}
+        if args.as_json:
+            print(json.dumps(payload, separators=(",", ":")))
+        else:
+            print("Refusing to clear the EV-gate latch without --confirm")
+        return 2
+    conn = open_db(args.db)
+    try:
+        result = reset_ev_gate_latch(conn)
+        gate = auto_ev_gate_status(conn)
+    finally:
+        conn.close()
+    payload = {**result, "auto_ev_gate": gate}
+    if args.as_json:
+        print(json.dumps(payload, separators=(",", ":")))
+    else:
+        print(f"latched={gate.get('latched')} blocked={gate.get('blocked')}")
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -563,6 +602,8 @@ def run(argv: list[str] | None = None) -> int:
         return cmd_risk_monitor(args)
     if args.cmd == "post-mortem":
         return cmd_post_mortem(args)
+    if args.cmd == "ev-gate":
+        return cmd_ev_gate(args)
     return 2
 
 

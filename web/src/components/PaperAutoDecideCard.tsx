@@ -3,17 +3,18 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { api, type AutoDecideConfigPayload, type PaperAutoStatus } from "@/lib/api";
-import { resolveReasonLabel } from "@/lib/copy";
+import { api, type AutoDecideConfigPayload, type EvGateStatus, type PaperAutoStatus } from "@/lib/api";
+import { evGateOwnerCopy, resolveReasonLabel } from "@/lib/copy";
 import { cn, relativeAge } from "@/lib/utils";
 
 interface PaperAutoDecideCardProps {
   auto: PaperAutoStatus | null | undefined;
+  gate?: EvGateStatus | null;
   initialConfig?: AutoDecideConfigPayload | null;
   onRefresh?: () => void;
 }
 
-export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAutoDecideCardProps) {
+export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: PaperAutoDecideCardProps) {
   // Config state
   const [enabled, setEnabled] = useState<boolean>(initialConfig?.enabled ?? false);
   const [riskPct, setRiskPct] = useState<string>(
@@ -129,6 +130,30 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
     }
   }
 
+  async function handleResetLatch() {
+    const ok = await confirm({
+      title: "ปลดล็อกเกต EV?",
+      body: "เกตจะกลับไปตรวจตัวอย่าง 30 วันตามกฎการเทรด ตัวอย่างที่บางจะไม่ปลดล็อกเอง และจะล็อกใหม่เมื่อ EV ต่ำกว่าเกณฑ์อีกครั้ง",
+      confirmLabel: "ปลดล็อก",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      await api.resetEvGate();
+      setMessage({ text: "ปลดล็อกเกต EV แล้ว", type: "ok" });
+      onRefresh?.();
+    } catch (err) {
+      setMessage({
+        text: `ปลดล็อกไม่สำเร็จ: ${err instanceof Error ? err.message : String(err)}`,
+        type: "err",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const counts = auto
     ? [
         ["อนุมัติ (Approved)", auto.approved?.length ?? 0, "text-emerald-400"],
@@ -171,7 +196,6 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
       </CardHeader>
 
       <CardContent className="space-y-5 text-sm pt-2">
-        {/* Feedback Message */}
         {message ? (
           <div
             className={cn(
@@ -190,6 +214,27 @@ export function PaperAutoDecideCard({ auto, initialConfig, onRefresh }: PaperAut
             </button>
           </div>
         ) : null}
+
+        {(() => {
+          const copy = evGateOwnerCopy(gate);
+          return (
+            <div className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs space-y-2">
+              <div className="font-medium text-[var(--color-foreground)]">{copy.title}</div>
+              <p className="text-[var(--color-muted)]">{copy.detail}</p>
+              {gate?.latched ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={saving}
+                  onClick={() => void handleResetLatch()}
+                  className="h-8 text-xs"
+                >
+                  ปลดล็อกเกต EV
+                </Button>
+              ) : null}
+            </div>
+          );
+        })()}
 
         {/* Mode Selector Toggle Cards */}
         <div className="grid gap-3 sm:grid-cols-2">
