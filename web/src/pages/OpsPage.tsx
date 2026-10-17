@@ -232,10 +232,10 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       {/* Top Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-[var(--color-foreground)]">
+          <h1 className="text-xl font-bold tracking-tight text-(--color-foreground)">
             Network Operations Center (NOC)
           </h1>
-          <p className="text-sm text-[var(--color-muted)]">
+          <p className="text-sm text-(--color-muted)">
             Infrastructure health, market safety kill-switch, telemetry, and pipeline schedulers.
           </p>
         </div>
@@ -244,17 +244,17 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           size="sm"
           disabled={refreshing}
           onClick={() => void load()}
-          className="border-[var(--color-border)] text-xs font-mono h-11 sm:h-8"
+          className="border-border text-xs font-mono h-11 sm:h-8"
         >
           {refreshing ? "Polling…" : "↻ Refresh Telemetry"}
         </Button>
       </div>
 
       {dialog}
-      {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}
+      {error ? <p className="text-sm text-danger">{error}</p> : null}
 
       {/* Emergency Market Safety Kill-Switch Compact Header */}
-      <Card className="border-[var(--color-border)] bg-[var(--color-card)]/40">
+      <Card className="border-border bg-card/40">
         <CardContent className="p-3.5 sm:p-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -267,14 +267,14 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                       ? "border-amber-500/50 bg-amber-500/15 text-amber-400"
                       : killMode === "clear"
                         ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-400"
-                        : "border-[var(--color-border)] text-[var(--color-muted)]",
+                        : "border-border text-(--color-muted)",
                 )}
               >
                 <Shield className="h-5 w-5" />
               </div>
               <div className="space-y-0.5">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-[var(--color-foreground)]">
+                  <span className="text-sm font-semibold text-(--color-foreground)">
                     Market Safety Kill-Switch
                   </span>
                   <Badge
@@ -290,7 +290,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                           : "กำลังโหลด…"}
                   </Badge>
                 </div>
-                <div className="text-xs text-[var(--color-muted)] font-mono">
+                <div className="text-xs text-(--color-muted) font-mono">
                   {killMode === "engaged" ? (
                     <span className="text-rose-400">Circuit Breaker: {ksState?.reason || "Safety Triggered"}</span>
                   ) : killMode === "unknown" ? (
@@ -331,7 +331,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       </Card>
 
       {/* Tablet & Desktop Tab Menu Bar */}
-      <div className="rounded-xl border border-[var(--color-border)] bg-[#0d121a]/90 p-1.5 shadow-sm backdrop-blur-md">
+      <div className="rounded-xl border border-border bg-[#0d121a]/90 p-1.5 shadow-sm backdrop-blur-md">
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 sm:flex-wrap">
           {tabs.map((t) => {
             const isActive = activeTab === t.id;
@@ -344,16 +344,16 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                 className={cn(
                   "group relative flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-all duration-150 cursor-pointer",
                   isActive
-                    ? "bg-[#18202c] text-[var(--color-foreground)] shadow-sm border border-[var(--color-border)] font-semibold"
-                    : "text-[var(--color-muted)] hover:bg-[var(--color-card)]/50 hover:text-[var(--color-foreground)] border border-transparent",
+                    ? "bg-[#18202c] text-(--color-foreground) shadow-sm border border-border font-semibold"
+                    : "text-(--color-muted) hover:bg-card/50 hover:text-(--color-foreground) border border-transparent",
                 )}
               >
                 <Icon
                   className={cn(
                     "h-3.5 w-3.5 shrink-0 transition-colors",
                     isActive
-                      ? "text-[var(--color-accent)]"
-                      : "text-[var(--color-muted)] group-hover:text-[var(--color-foreground)]",
+                      ? "text-(--color-accent)"
+                      : "text-(--color-muted) group-hover:text-(--color-foreground)",
                   )}
                 />
                 <span>{t.label}</span>
@@ -372,7 +372,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                   <span
                     className={cn(
                       "absolute -bottom-1.5 left-1/2 h-0.5 w-6 -translate-x-1/2 rounded-full",
-                      t.indicatorColor || "bg-[var(--color-accent)]",
+                      t.indicatorColor || "bg-(--color-accent)",
                     )}
                   />
                 )}
