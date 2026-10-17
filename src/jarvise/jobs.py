@@ -678,11 +678,13 @@ class JobHandler(BaseHTTPRequestHandler):
             return False
 
     def _dispatch(self) -> None:
-        if not self._authorized():
-            self._send(401, {"ok": False, "error": "unauthorized"})
-            return
         path = self.path.split("?", 1)[0]
         action = ROUTES.get((self.command, path))
+        # Compose probes GET /healthz with no header. The jobs token still gates
+        # metrics, doctrine, and every POST.
+        if action != "health" and not self._authorized():
+            self._send(401, {"ok": False, "error": "unauthorized"})
+            return
         if action == "health":
             self._send(200, {"ok": True, "paper_only": True})
             return

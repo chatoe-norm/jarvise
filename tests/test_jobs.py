@@ -171,6 +171,16 @@ def test_jobs_healthz() -> None:
     assert payload["paper_only"] is True
 
 
+def test_jobs_healthz_open_when_token_set(monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_JOBS_TOKEN", "secret")
+    handler = _Handler()
+    handler.command = "GET"
+    handler.path = "/healthz"
+    handler.headers = {}
+    handler._dispatch()
+    assert handler._status == 200
+
+
 def test_jobs_token_required(monkeypatch) -> None:
     monkeypatch.setenv("JARVISE_JOBS_TOKEN", "secret")
     handler = _Handler()
