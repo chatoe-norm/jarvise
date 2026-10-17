@@ -602,3 +602,37 @@ def test_paper_auto_decide_redis_failure_fails_closed(monkeypatch) -> None:
     )
     code, body = run_paper_auto_decide()
     assert code == 3 and body["skipped"] is True and body["reason"] == "kill_switch unreadable"
+
+
+def test_news_reaction_runs_cli_and_ignores_kill_switch(monkeypatch) -> None:
+    """Research-only job: it refreshes Home news context even with the kill switch on."""
+    from jarvise.jobs import run_news_reaction
+
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: True)
+    captured: list[list[str]] = []
+    published: list[str] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = '{"ok": true, "errors": [], "headline_sources": {"fed": "google_news"}}'
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr("jarvise.jobs.subprocess.run", fake_run)
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda key, payload: published.append(key))
+    code, body = run_news_reaction()
+    assert code == 0
+    assert captured[0][-4:] == ["context", "news-reaction", "--output", "json"]
+    assert body["headline_sources"] == {"fed": "google_news"}
+    assert published == ["jarvise:news:last"]
+
+
+def test_news_reaction_route(monkeypatch) -> None:
+    monkeypatch.setattr("jarvise.jobs.run_news_reaction", lambda: (0, {"ok": True, "paper_only": True}))
+    handler = _Handler()
+    handler.path = "/jobs/news-reaction"
+    handler._dispatch()
+    assert handler._status == 200

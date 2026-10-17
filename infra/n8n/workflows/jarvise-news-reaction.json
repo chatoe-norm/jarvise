@@ -1,0 +1,57 @@
+{
+  "id": "jrvsNewsReact0749",
+  "name": "Jarvise news reaction",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 7,19 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-news-reaction",
+      "name": "07:30 and 19:30 ICT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/news-reaction",
+        "options": {
+          "timeout": 480000
+        }
+      },
+      "id": "http-news-reaction",
+      "name": "POST news reaction",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Refreshes the Home news context 30 min after the OpenClaw digest run: GDELT watchlist headlines (Google News RSS fallback when GDELT throttles) plus saved digests, compared with next daily closes. Writes data/analytics/news-reaction/latest.json. Context only: never a trade signal, never touches approvals, the ledger or doctrine."
+    }
+  ],
+  "connections": {
+    "07:30 and 19:30 ICT": {
+      "main": [[{ "node": "POST news reaction", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Bangkok"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "n8n import:workflow --input=infra/n8n/workflows/jarvise-news-reaction.json, then publish:workflow --id=jrvsNewsReact0749 and restart n8n"
+    }
+  },
+  "pinData": {},
+  "active": false
+}

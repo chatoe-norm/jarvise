@@ -307,6 +307,11 @@ function NewsCard({ news }: { news: NewsHome | null | undefined }) {
         {news?.digest_note ? (
           <p className="text-xs text-[var(--color-muted)] italic pt-1">{news.digest_note}</p>
         ) : null}
+        {Object.values(news?.headline_sources ?? {}).includes("google_news") ? (
+          <p className="text-xs text-[var(--color-muted)] pt-1">
+            หัวข้อข่าวบางหมวดมาจาก Google News เพราะ GDELT จำกัดการเรียกข้อมูลในรอบนี้
+          </p>
+        ) : null}
         {news?.errors && news.errors.length > 0 ? (
           <p className="text-xs text-amber-400 pt-1">
             ดึงข่าวไม่สำเร็จ {news.errors.length} หมวด (

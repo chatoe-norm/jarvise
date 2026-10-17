@@ -39,6 +39,8 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     "paper_run": 300.0,
     "paper_expire": 120.0,
     "rag": 900.0,
+    # Four GDELT queries, 8 s apart, with rate-limit backoff: a few minutes at worst.
+    "news_reaction": 420.0,
 }
 # Single-flight lock TTLs (seconds): a crashed holder frees the lock automatically.
 JOB_LOCK_TTL_S: dict[str, int] = {
@@ -46,6 +48,7 @@ JOB_LOCK_TTL_S: dict[str, int] = {
     "paper_run": 600,
     "paper_expire": 300,
     "rag": 1200,
+    "news_reaction": 600,
     "paper_pending_digest": 120,
     "paper_auto_decide": 900,
     "live_reconcile": 300,
@@ -369,6 +372,21 @@ def run_rag_refresh() -> tuple[int, dict[str, Any]]:
         return _finish_cli_payload("rag", proc, "jarvise:rag:last")
 
 
+def run_news_reaction() -> tuple[int, dict[str, Any]]:
+    """Refresh the Home news context (GDELT watchlist + OpenClaw digests).
+
+    Research only: reads headlines and stored daily candles, writes the report beside the
+    analytics DB. It never touches approvals, the ledger or doctrine, so it runs even while
+    the kill switch is engaged.
+    """
+    with single_flight("news_reaction") as acquired:
+        if not acquired:
+            return 3, _running("news_reaction")
+        cmd = [sys.executable, "-m", "jarvise", "context", "news-reaction", "--output", "json"]
+        proc = _run_cmd("news_reaction", cmd)
+        return _finish_cli_payload("news_reaction", proc, "jarvise:news:last")
+
+
 def run_paper_run() -> tuple[int, dict[str, Any]]:
     if kill_switch_engaged():
         payload = _skipped()
@@ -635,6 +653,7 @@ ROUTES = {
     ("POST", "/jobs/paper-auto-decide"): "paper_auto_decide",
     ("POST", "/jobs/live-reconcile"): "live_reconcile",
     ("POST", "/jobs/risk-monitor"): "risk_monitor",
+    ("POST", "/jobs/news-reaction"): "news_reaction",
 }
 
 
@@ -692,6 +711,7 @@ class JobHandler(BaseHTTPRequestHandler):
             "paper_auto_decide": run_paper_auto_decide,
             "live_reconcile": run_live_reconcile,
             "risk_monitor": run_risk_monitor,
+            "news_reaction": run_news_reaction,
         }
         runner = runners.get(action or "")
         if runner is None or action is None:

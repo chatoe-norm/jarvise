@@ -5,7 +5,15 @@ from datetime import UTC, datetime
 import httpx
 
 from jarvise_context.news_reaction import summarize_reactions
-from jarvise_context.news_sources import fetch_gdelt, read_digests
+from jarvise_context.news_sources import (
+    GDELT_RATE_LIMIT_BACKOFF_S,
+    GDELT_RATE_LIMIT_RETRIES,
+    GDELT_REQUEST_GAP_S,
+    fetch_gdelt,
+    fetch_headlines,
+    read_digests,
+    run_news_reaction,
+)
 
 
 def _ms(day: str) -> int:
@@ -84,6 +92,7 @@ def test_gdelt_failure_keeps_other_themes() -> None:
         events, errors = fetch_gdelt(
             now=datetime(2024, 6, 1, tzinfo=UTC),
             client=client,
+            sleep=lambda _s: None,
         )
     assert any(err.startswith("fed:") for err in errors)
     assert {event["theme"] for event in events} == {"chips_ai", "geopolitics", "people"}
@@ -126,3 +135,153 @@ def test_parse_digest_text_and_format_executive_lines() -> None:
     assert lines[0] == "บริบทข่าว ไม่ใช่สัญญาณ"
     assert any("ชิปและ AI" in line and "→" in line for line in lines)
     assert any("ธนาคารกลางสหรัฐ" in line and "→" in line for line in lines)
+
+
+def _article_response() -> httpx.Response:
+    return httpx.Response(
+        200, json={"articles": [{"seendate": "20261016T120000Z", "title": "Fed holds rates"}]}
+    )
+
+
+def test_gdelt_queries_are_parenthesized_and_paced() -> None:
+    """GDELT rejects bare OR queries and allows one request every 5 s."""
+    seen: list[str] = []
+    waits: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params["query"])
+        return _article_response()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        events, errors = fetch_gdelt(
+            now=datetime(2026, 10, 17, tzinfo=UTC), client=client, sleep=waits.append
+        )
+    assert errors == []
+    assert len(seen) == 4
+    assert all(q.startswith("(") and q.endswith(")") for q in seen)
+    assert waits == [GDELT_REQUEST_GAP_S] * 3
+    assert {e["theme"] for e in events} == {"chips_ai", "geopolitics", "fed", "people"}
+
+
+def test_gdelt_rate_limit_is_retried_then_succeeds() -> None:
+    calls = {"n": 0}
+    waits: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, text="Please limit requests to one every 5 seconds")
+        return _article_response()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        events, errors = fetch_gdelt(
+            now=datetime(2026, 10, 17, tzinfo=UTC), client=client, sleep=waits.append
+        )
+    assert errors == []
+    assert GDELT_RATE_LIMIT_BACKOFF_S in waits
+    assert len(events) == 4
+
+
+def test_gdelt_plain_text_and_persistent_rate_limit_are_clear_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        query = request.url.params["query"]
+        if "FOMC" in query:
+            # What GDELT returns for a malformed query: HTTP 200, plain text.
+            return httpx.Response(200, text="Queries containing OR'd terms must be surrounded by ().")
+        if "Musk" in query:
+            return httpx.Response(200, text="Please limit requests to one every 5 seconds or contact ...")
+        return _article_response()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        events, errors = fetch_gdelt(
+            now=datetime(2026, 10, 17, tzinfo=UTC), client=client, sleep=lambda _s: None
+        )
+    by_theme = {e.split(":", 1)[0]: e for e in errors}
+    assert "non-JSON reply: Queries containing OR'd terms" in by_theme["fed"]
+    assert "rate limited" in by_theme["people"]
+    assert "JSONDecodeError" not in " ".join(errors)
+    assert {e["theme"] for e in events} == {"chips_ai", "geopolitics"}
+
+
+_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>q</title>
+<item><title>Fed signals patience - Reuters</title><pubDate>Fri, 16 Oct 2026 14:05:00 GMT</pubDate></item>
+<item><title>No date item</title></item>
+<item><title>FOMC minutes - CNBC</title><pubDate>Thu, 15 Oct 2026 23:30:00 GMT</pubDate></item>
+</channel></rss>"""
+
+
+def _host(request: httpx.Request) -> str:
+    return request.url.host
+
+
+def test_headlines_fall_back_to_google_news_when_gdelt_is_rate_limited() -> None:
+    gdelt_calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _host(request) == "api.gdeltproject.org":
+            gdelt_calls["n"] += 1
+            return httpx.Response(429, text="Please limit requests to one every 5 seconds")
+        return httpx.Response(200, text=_RSS, headers={"content-type": "application/xml"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        events, errors, sources = fetch_headlines(
+            now=datetime(2026, 10, 17, tzinfo=UTC), client=client, sleep=lambda _s: None
+        )
+    assert errors == []
+    assert sources == {t: "google_news" for t in ("chips_ai", "geopolitics", "fed", "people")}
+    # GDELT tried once for the first theme (plus its retries), then skipped for the rest.
+    assert gdelt_calls["n"] == 1 + GDELT_RATE_LIMIT_RETRIES
+    days = {e["day"] for e in events}
+    assert days == {"2026-10-16", "2026-10-15"}
+    assert {e["source"] for e in events} == {"google_news"}
+
+
+def test_headlines_prefer_gdelt_when_it_answers() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert _host(request) == "api.gdeltproject.org", "fallback must not run when GDELT works"
+        return _article_response()
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        _events, errors, sources = fetch_headlines(
+            now=datetime(2026, 10, 17, tzinfo=UTC), client=client, sleep=lambda _s: None
+        )
+    assert errors == []
+    assert set(sources.values()) == {"gdelt"}
+
+
+def test_headlines_error_only_when_every_source_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _host(request) == "api.gdeltproject.org":
+            return httpx.Response(200, text="Queries containing OR'd terms must be surrounded by ().")
+        return httpx.Response(503, text="unavailable")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        events, errors, sources = fetch_headlines(
+            now=datetime(2026, 10, 17, tzinfo=UTC), client=client, sleep=lambda _s: None
+        )
+    assert events == [] and sources == {}
+    assert len(errors) == 4
+    assert all("gdelt GdeltError: non-JSON reply" in e and "google_news HTTPStatusError" in e for e in errors)
+
+
+def test_run_news_reaction_records_headline_sources(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _host(request) == "api.gdeltproject.org":
+            return httpx.Response(429, text="Please limit requests to one every 5 seconds")
+        return httpx.Response(200, text=_RSS)
+
+    report_path = tmp_path / "latest.json"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        report = run_news_reaction(
+            None,
+            digest_dir=tmp_path / "digests",
+            report_path=report_path,
+            client=client,
+            now=datetime(2026, 10, 17, tzinfo=UTC),
+            sleep=lambda _s: None,
+        )
+    assert report["headline_sources"]["fed"] == "google_news"
+    # Only the missing local DB is an error; no headline theme failed.
+    assert report["errors"] == ["missing_db"]
+    assert report_path.exists()
