@@ -165,21 +165,21 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
     : [];
 
   return (
-    <Card className="border-[var(--color-border)] shadow-sm">
+    <Card className="border-border shadow-sm">
       {dialog}
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <span className="text-lg">🤖</span>
-              <CardTitle className="text-base font-bold text-[var(--color-foreground)]">
+              <CardTitle className="text-base font-bold text-(--color-foreground)">
                 Paper Auto-Decide &amp; Risk Control
               </CardTitle>
               <Badge variant={enabled ? "ok" : "muted"}>
                 {enabled ? "⚡ AI Autotrade (ON)" : "🛡️ User Trade + Guardrail (OFF)"}
               </Badge>
             </div>
-            <CardDescription className="text-xs text-[var(--color-muted)]">
+            <CardDescription className="text-xs text-(--color-muted)">
               ควบคุมระบบตัดสินใจอัตโนมัติ (Claude Sonnet 5.5) และกำหนดเพดานความเสี่ยงเงินทุนต่อไม้ (Paper Engine Only)
             </CardDescription>
           </div>
@@ -188,7 +188,7 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
             variant="outline"
             disabled={running}
             onClick={() => void handleRunNow()}
-            className="border-[var(--color-border)] text-xs font-mono h-8"
+            className="border-border text-xs font-mono h-8"
           >
             {running ? "กำลังรัน…" : "⚡ รัน Auto-Decide ตอนนี้"}
           </Button>
@@ -218,9 +218,9 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
         {(() => {
           const copy = evGateOwnerCopy(gate);
           return (
-            <div className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs space-y-2">
-              <div className="font-medium text-[var(--color-foreground)]">{copy.title}</div>
-              <p className="text-[var(--color-muted)]">{copy.detail}</p>
+            <div className="rounded-lg border border-border px-3 py-2 text-xs space-y-2">
+              <div className="font-medium text-(--color-foreground)">{copy.title}</div>
+              <p className="text-(--color-muted)">{copy.detail}</p>
               {gate?.latched ? (
                 <Button
                   size="sm"
@@ -254,14 +254,14 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
               "relative flex flex-col justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200",
               enabled
                 ? "border-emerald-500 bg-emerald-950/20 shadow-md ring-1 ring-emerald-500/40"
-                : "border-[var(--color-border)] bg-[var(--color-card)]/40 hover:border-slate-600 hover:bg-[var(--color-card)]/70 opacity-75 hover:opacity-100",
+                : "border-border bg-card/40 hover:border-slate-600 hover:bg-card/70 opacity-75 hover:opacity-100",
             )}
           >
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="text-base">⚡</span>
-                  <span className="font-semibold text-sm text-[var(--color-foreground)]">
+                  <span className="font-semibold text-sm text-(--color-foreground)">
                     On — AI Autotrade &amp; ปิดไม้อัตโนมัติ
                   </span>
                 </div>
@@ -274,7 +274,7 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
                   {enabled ? <div className="h-1.5 w-1.5 rounded-full bg-black" /> : null}
                 </div>
               </div>
-              <p className="text-xs text-[var(--color-muted)] leading-relaxed">
+              <p className="text-xs text-(--color-muted) leading-relaxed">
                 เปิดระบบ AI สแกนสัญญาณและอนุมัติเปิดไม้จำลองอัตโนมัติ (<code className="text-emerald-400">auto:claude:approve</code>)
                 พร้อมสั่งปิดไม้ทันทีเมื่อมีสัญญาณ FLAT (<code className="text-emerald-400">auto:rule:flat_exit</code>)
                 หรือถึงจุด Stop / Profit Lock โดยไม่ต้องรอผู้ใช้กด
@@ -302,14 +302,14 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
               "relative flex flex-col justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200",
               !enabled
                 ? "border-amber-500 bg-amber-950/20 shadow-md ring-1 ring-amber-500/40"
-                : "border-[var(--color-border)] bg-[var(--color-card)]/40 hover:border-slate-600 hover:bg-[var(--color-card)]/70 opacity-75 hover:opacity-100",
+                : "border-border bg-card/40 hover:border-slate-600 hover:bg-card/70 opacity-75 hover:opacity-100",
             )}
           >
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="text-base">🛡️</span>
-                  <span className="font-semibold text-sm text-[var(--color-foreground)]">
+                  <span className="font-semibold text-sm text-(--color-foreground)">
                     Off — User Trade / ปิดไม้เอง (AI Guardrail Active)
                   </span>
                 </div>
@@ -322,7 +322,7 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
                   {!enabled ? <div className="h-1.5 w-1.5 rounded-full bg-black" /> : null}
                 </div>
               </div>
-              <p className="text-xs text-[var(--color-muted)] leading-relaxed">
+              <p className="text-xs text-(--color-muted) leading-relaxed">
                 ผู้ใช้เป็นผู้ตัดสินใจเปิดและปิดไม้เองด้วยมือ แต่ <strong className="text-amber-300">AI Risk Monitor จะคอยตรวจสอบความปลอดภัยตลอดเวลา</strong>:
                 ช่วยตัดขาดทุน (<code className="text-amber-300">cut loss / stop_hit</code>) อัตโนมัติทันทีหากลืมทำ,
                 ขยับจุดล็อคกำไร (Profit Lock), และตัดไฟฉุกเฉินหากขาดทุนเกินเพดาน
@@ -336,14 +336,14 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
         </div>
 
         {/* Risk Percentage Input Field */}
-        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)]/30 p-4 space-y-3">
+        <div className="rounded-xl border border-border bg-card/30 p-4 space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <label className="text-xs font-semibold text-[var(--color-foreground)] flex items-center gap-1.5">
+              <label className="text-xs font-semibold text-(--color-foreground) flex items-center gap-1.5">
                 <span>🎯</span>
                 <span>หาก On Autotrade สามารถเสียได้กี่ % ของทุน (Max Capital Risk % per Trade)</span>
               </label>
-              <p className="text-xs text-[var(--color-muted)] mt-0.5">
+              <p className="text-xs text-(--color-muted) mt-0.5">
                 คำนวณขนาดไม้ (Position Size) และระยะ Stop Loss ให้จำกัดการขาดทุนสูงสุดไม่เกินค่าที่ระบุ
               </p>
             </div>
@@ -356,10 +356,10 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
                   max="1.0"
                   value={riskPct}
                   onChange={(e) => setRiskPct(e.target.value)}
-                  className="w-full rounded-md border border-[var(--color-border)] bg-[#121923] px-3 py-1.5 pr-7 text-sm font-mono text-[var(--color-foreground)] focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  className="w-full rounded-md border border-border bg-[#121923] px-3 py-1.5 pr-7 text-sm font-mono text-(--color-foreground) focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                   placeholder="1.0"
                 />
-                <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs font-mono text-[var(--color-muted)]">
+                <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs font-mono text-(--color-muted)">
                   %
                 </span>
               </div>
@@ -376,9 +376,9 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
           </div>
 
           {/* Quick Preset Buttons & Safety Note */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[var(--color-border)]/50">
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-border/50">
             <div className="flex items-center gap-1.5">
-              <span className="text-[11px] text-[var(--color-muted)]">ค่าแนะนำ:</span>
+              <span className="text-[11px] text-(--color-muted)">ค่าแนะนำ:</span>
               {[0.25, 0.5, 0.75, 1.0].map((val) => (
                 <button
                   key={val}
@@ -391,14 +391,14 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
                     "rounded px-2 py-0.5 text-[11px] font-mono border transition-colors",
                     parseFloat(riskPct) === val
                       ? "border-emerald-500 bg-emerald-950/40 text-emerald-300 font-bold"
-                      : "border-[var(--color-border)] bg-[var(--color-card)]/50 text-[var(--color-muted)] hover:text-[var(--color-foreground)] hover:border-slate-500",
+                      : "border-border bg-card/50 text-(--color-muted) hover:text-(--color-foreground) hover:border-slate-500",
                   )}
                 >
                   {val.toFixed(2)}%
                 </button>
               ))}
             </div>
-            <div className="text-[11px] text-[var(--color-muted)] flex items-center gap-1">
+            <div className="text-[11px] text-(--color-muted) flex items-center gap-1">
               <span>🛡️</span>
               <span>เพดานความปลอดภัยตามกฎการเทรด: จำกัดสูงสุดไม่เกิน <strong>1.0%</strong> เพื่อรักษาเงินทุน</span>
             </div>
@@ -408,22 +408,22 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
         {/* Telemetry and Recent Auto-Decide Runs */}
         <div className="space-y-3 pt-2">
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span className="font-semibold text-[var(--color-foreground)]">สถิติรอบการตรวจสอบล่าสุด (Last Run Telemetry)</span>
+            <span className="font-semibold text-(--color-foreground)">สถิติรอบการตรวจสอบล่าสุด (Last Run Telemetry)</span>
             {auto ? (
-              <span className="text-[var(--color-muted)] font-mono">
+              <span className="text-(--color-muted) font-mono">
                 Model: {auto.model || model} · ตรวจสอบเมื่อ {relativeAge(auto.at_ms)}
               </span>
             ) : null}
           </div>
 
           {!auto ? (
-            <p className="text-xs text-[var(--color-muted)] italic">ยังไม่มีประวัติการรัน Auto-Decide บันทึกในระบบ</p>
+            <p className="text-xs text-(--color-muted) italic">ยังไม่มีประวัติการรัน Auto-Decide บันทึกในระบบ</p>
           ) : auto.skipped ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/30 p-3">
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card/30 p-3">
               <Badge variant={auto.reason === "auto_decide_disabled" ? "muted" : "danger"}>
                 {auto.reason === "auto_decide_disabled" ? "ปิดใช้งาน (Off)" : "ข้าม (Skipped)"}
               </Badge>
-              <span className="text-xs text-[var(--color-muted)] font-mono">
+              <span className="text-xs text-(--color-muted) font-mono">
                 เหตุผล: {resolveReasonLabel(auto.reason)}
               </span>
             </div>
@@ -434,9 +434,9 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
                 {counts.map(([label, n, colorClass]) => (
                   <div
                     key={String(label)}
-                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/40 p-2.5 text-center"
+                    className="rounded-lg border border-border bg-card/40 p-2.5 text-center"
                   >
-                    <div className="text-[11px] text-[var(--color-muted)] truncate">{label}</div>
+                    <div className="text-[11px] text-(--color-muted) truncate">{label}</div>
                     <div className={cn("text-lg font-bold font-mono tabular-nums mt-0.5", colorClass)}>{n}</div>
                   </div>
                 ))}
@@ -444,15 +444,15 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
 
               {/* Deferred List */}
               {auto.deferred?.length ? (
-                <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/20 p-3 space-y-2">
-                  <div className="text-xs font-medium text-[var(--color-muted)]">
+                <div className="rounded-lg border border-border bg-card/20 p-3 space-y-2">
+                  <div className="text-xs font-medium text-(--color-muted)">
                     รายการที่เลื่อนการตัดสินใจ ({auto.deferred.length} รายการ):
                   </div>
                   <ul className="space-y-1.5 text-xs font-mono">
                     {auto.deferred.slice(0, 5).map((d) => (
                       <li key={d.id} className="flex items-center justify-between text-slate-300">
                         <span className="font-bold text-amber-400">{d.symbol}</span>
-                        <span className="text-[var(--color-muted)] text-[11px]">{resolveReasonLabel(d.reason)}</span>
+                        <span className="text-(--color-muted) text-[11px]">{resolveReasonLabel(d.reason)}</span>
                       </li>
                     ))}
                   </ul>

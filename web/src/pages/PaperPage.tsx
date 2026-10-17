@@ -62,7 +62,7 @@ export function exitKind(reason: string | undefined, pnlUsd: number): ExitKind {
 }
 
 function exitReasonBadge(reason: string | undefined, pnlUsd: number) {
-  if (!reason) return <span className="text-[var(--color-muted)] text-xs font-mono">—</span>;
+  if (!reason) return <span className="text-(--color-muted) text-xs font-mono">—</span>;
   switch (exitKind(reason, pnlUsd)) {
     case "stop_loss":
       return (
@@ -90,7 +90,7 @@ function exitReasonBadge(reason: string | undefined, pnlUsd: number) {
       );
     default:
       return (
-        <Badge variant="outline" className="border-[var(--color-border)] text-[var(--color-muted)] text-[10px] font-mono">
+        <Badge variant="outline" className="border-border text-(--color-muted) text-[10px] font-mono">
           {reason}
         </Badge>
       );
@@ -229,7 +229,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Paper ledger</h1>
-          <p className="text-sm text-[var(--color-muted)]">
+          <p className="text-sm text-(--color-muted)">
             Simulated portfolio — no exchange orders from this page.
           </p>
         </div>
@@ -239,19 +239,19 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
       </div>
 
       {dialog}
-      {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}
+      {error ? <p className="text-sm text-danger">{error}</p> : null}
       {pollError ? (
         <p className="rounded-md border border-amber-500/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-300">
           อัปเดตล่าสุดไม่สำเร็จ ({pollError}){paper ? " — ข้อมูลด้านล่างอาจไม่ใช่ล่าสุด" : ""}
         </p>
       ) : null}
       {metrics && metrics.ok === false ? (
-        <p className="text-sm text-[var(--color-danger)]">
+        <p className="text-sm text-danger">
           คำนวณ metrics ไม่สำเร็จ: {String((metrics as { error?: unknown }).error ?? "unknown error")}
         </p>
       ) : null}
       {!paper && !pollError ? (
-        <p className="text-sm text-[var(--color-muted)]">กำลังโหลดสมุด paper…</p>
+        <p className="text-sm text-(--color-muted)">กำลังโหลดสมุด paper…</p>
       ) : null}
 
       <KpiStrip
@@ -310,7 +310,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
             const keys = visibleSourceKeys(src);
             if (keys.length === 0) {
               return (
-                <p className="text-[var(--color-muted)]">
+                <p className="text-(--color-muted)">
                   No attributed closed trades yet. Approve fills stamp{" "}
                   <code>decision_source</code> for later EV splits.
                 </p>
@@ -321,8 +321,8 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
               <>
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-sm">
-                    <thead className="text-[var(--color-muted)]">
-                      <tr className="border-b border-[var(--color-border)]">
+                    <thead className="text-(--color-muted)">
+                      <tr className="border-b border-border">
                         <th className="py-2 pr-3">Source</th>
                         <th className="py-2 pr-3">N</th>
                         <th className="py-2 pr-3">EV</th>
@@ -333,7 +333,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                       {keys.map((k) => {
                         const row = src[k];
                         return (
-                          <tr key={k} className="border-b border-[var(--color-border)]/60">
+                          <tr key={k} className="border-b border-border/60">
                             <td className="py-2 pr-3 font-medium">{decisionSourceLabel(k)}</td>
                             <td className="py-2 pr-3 tabular-nums">{row?.closed_trades ?? 0}</td>
                             <td className="py-2 pr-3 tabular-nums">
@@ -353,8 +353,8 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                 {(() => {
                   const copy = evGateOwnerCopy(gate);
                   return (
-                    <p className="text-xs text-[var(--color-muted)]">
-                      <span className="font-medium text-[var(--color-foreground)]">{copy.title}</span>
+                    <p className="text-xs text-(--color-muted)">
+                      <span className="font-medium text-(--color-foreground)">{copy.title}</span>
                       {" — "}
                       {copy.detail}
                     </p>
@@ -392,7 +392,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
             </p>
             <p>{worstSymbol(metrics.loss_lesson)}</p>
             <p>{floorLine(metrics.loss_lesson)}</p>
-            <p className="text-[var(--color-muted)]">
+            <p className="text-(--color-muted)">
               รีเพลย์ 2026-10-14 ของกฎชุดเดิมติดลบทั้งช่วงในตัวอย่างและนอกตัวอย่าง
               หน้านี้ไม่ใช่เหตุให้เปลี่ยนสูตร
             </p>
@@ -400,7 +400,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
         </Card>
       ) : null}
 
-      <Card className="border-[var(--color-border)]">
+      <Card className="border-border">
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
@@ -411,14 +411,14 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
             </div>
             {positions.length > 0 ? (
               <div className="flex items-center gap-3 text-xs">
-                <span className="text-[var(--color-muted)]">
+                <span className="text-(--color-muted)">
                   Total uPnL:{" "}
                   <span
                     className={cn(
                       "font-mono font-medium",
                       positions.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0) >= 0
-                        ? "text-[var(--color-ok)]"
-                        : "text-[var(--color-danger)]",
+                        ? "text-ok"
+                        : "text-danger",
                     )}
                   >
                     {positions.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0) >= 0
@@ -435,13 +435,13 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
         </CardHeader>
         <CardContent>
           {positions.length === 0 ? (
-            <p className="text-sm text-[var(--color-muted)]">
+            <p className="text-sm text-(--color-muted)">
               No open paper positions. Run <code>jarvise paper run</code> then Approve.
             </p>
           ) : (
             <div className="overflow-x-auto -mx-1 sm:mx-0">
-              <table className="w-full min-w-[700px] text-left text-sm">
-                <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs">
+              <table className="w-full min-w-175 text-left text-sm">
+                <thead className="text-(--color-muted) border-b border-border text-xs">
                   <tr>
                     <th className="py-2.5 pr-3 font-medium">Symbol</th>
                     <th className="py-2.5 pr-3 font-medium">Side</th>
@@ -454,7 +454,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                     <th className="py-2.5 text-right font-medium">Action</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[var(--color-border)]/50">
+                <tbody className="divide-y divide-border/50">
                   {positions.map((p, i) => {
                     const entry = Number(p.entry_price);
                     const stop = p.stop_price != null ? Number(p.stop_price) : null;
@@ -471,14 +471,14 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                     const rMultiple = closeAdvice.rMultiple;
 
                     return (
-                      <tr key={symbol || i} className="hover:bg-[var(--color-card)]/50 transition-colors">
+                      <tr key={symbol || i} className="hover:bg-card/50 transition-colors">
                             <td className="py-3 pr-3 font-semibold">{symbol}</td>
                             <td className="py-3 pr-3">
                               <span
                                 className={cn(
                                   "inline-block rounded px-1.5 py-0.5 text-xs font-mono uppercase font-semibold",
                                   side === "long"
-                                    ? "bg-[var(--color-ok)]/15 text-[var(--color-ok)]"
+                                    ? "bg-ok/15 text-ok"
                                     : "bg-rose-500/15 text-rose-400",
                                 )}
                               >
@@ -511,15 +511,15 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                                 )}
                               </div>
                             </td>
-                            <td className="py-3 pr-3 tabular-nums font-mono text-xs text-[var(--color-muted)]">
+                            <td className="py-3 pr-3 tabular-nums font-mono text-xs text-(--color-muted)">
                               {dist != null ? `${formatNum(dist)}%` : "—"}
                             </td>
                             <td className="py-3 pr-3 tabular-nums font-mono text-xs font-medium">
                               <span
                                 className={
                                   unrealized >= 0
-                                    ? "text-[var(--color-ok)]"
-                                    : "text-[var(--color-danger)]"
+                                    ? "text-ok"
+                                    : "text-danger"
                                 }
                               >
                                 {unrealized >= 0 ? "+" : ""}
@@ -533,21 +533,21 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                                     className={cn(
                                       "font-medium",
                                       rMultiple >= 0
-                                        ? "text-[var(--color-ok)]"
-                                        : "text-[var(--color-danger)]",
+                                        ? "text-ok"
+                                        : "text-danger",
                                     )}
                                   >
                                     {rMultiple >= 0 ? "+" : ""}
                                     {formatNum(rMultiple)}R
                                   </span>
-                                  <div className="h-1.5 w-16 rounded-full bg-[var(--color-border)] overflow-hidden">
+                                  <div className="h-1.5 w-16 rounded-full bg-border overflow-hidden">
                                     <div
                                       className={cn(
                                         "h-full rounded-full transition-all",
                                         rMultiple >= 1.0
-                                          ? "bg-[var(--color-accent)]"
+                                          ? "bg-(--color-accent)"
                                           : rMultiple >= 0.5
-                                            ? "bg-[var(--color-ok)]"
+                                            ? "bg-ok"
                                             : rMultiple > 0
                                               ? "bg-amber-400"
                                               : "bg-rose-500",
@@ -605,7 +605,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
           </Card>
 
           {metrics?.trades && metrics.trades.length > 0 ? (
-            <Card className="border-[var(--color-border)]">
+            <Card className="border-border">
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <div>
@@ -619,7 +619,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
               </CardHeader>
               <CardContent className="space-y-4">
                 {/* Filter Controls matching DecisionsPage style */}
-                <div className="p-3 rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-card)]/40 space-y-3">
+                <div className="p-3 rounded-lg border border-border/60 bg-card/40 space-y-3">
                   <form
                     className="flex flex-wrap items-end gap-3"
                     onSubmit={(e) => {
@@ -627,10 +627,10 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                       setTradePage(1);
                     }}
                   >
-                    <label className="text-xs text-[var(--color-muted)]">
+                    <label className="text-xs text-(--color-muted)">
                       Symbol
                       <input
-                        className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)] font-mono"
+                        className="mt-1 block rounded-md border border-border bg-[#161d27] px-2 py-1.5 text-sm text-(--color-foreground) font-mono"
                         value={filterSymbol}
                         onChange={(e) => {
                           setFilterSymbol(e.target.value);
@@ -639,10 +639,10 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                         placeholder="BTCUSDT"
                       />
                     </label>
-                    <label className="text-xs text-[var(--color-muted)]">
+                    <label className="text-xs text-(--color-muted)">
                       Outcome
                       <select
-                        className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)]"
+                        className="mt-1 block rounded-md border border-border bg-[#161d27] px-2 py-1.5 text-sm text-(--color-foreground)"
                         value={filterOutcome}
                         onChange={(e) => {
                           setFilterOutcome(e.target.value as "ALL" | "WIN" | "LOSS" | "SCRATCH");
@@ -655,10 +655,10 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                         <option value="SCRATCH">Scratch (0 PnL)</option>
                       </select>
                     </label>
-                    <label className="text-xs text-[var(--color-muted)]">
+                    <label className="text-xs text-(--color-muted)">
                       Exit Reason
                       <select
-                        className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)]"
+                        className="mt-1 block rounded-md border border-border bg-[#161d27] px-2 py-1.5 text-sm text-(--color-foreground)"
                         value={filterExitReason}
                         onChange={(e) => {
                           setFilterExitReason(e.target.value);
@@ -688,7 +688,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                   </form>
 
                   {/* Quick Filter Chips */}
-                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[var(--color-border)]/50 text-xs text-[var(--color-muted)]">
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-border/50 text-xs text-(--color-muted)">
                     <span>Quick:</span>
                     {["ALL", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"].map((sym) => {
                       const active =
@@ -705,8 +705,8 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                           className={cn(
                             "rounded min-h-11 px-3 sm:min-h-0 sm:px-2 py-0.5 font-mono text-[11px] transition-colors",
                             active
-                              ? "bg-[var(--color-accent)] text-white font-medium"
-                              : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]",
+                              ? "bg-(--color-accent) text-white font-medium"
+                              : "bg-[#161d27] hover:bg-border text-(--color-foreground)",
                           )}
                         >
                           {sym}
@@ -733,8 +733,8 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                           className={cn(
                             "rounded min-h-11 px-3 sm:min-h-0 sm:px-2 py-0.5 text-[11px] transition-colors",
                             active
-                              ? "bg-[var(--color-accent)] text-white font-medium"
-                              : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]",
+                              ? "bg-(--color-accent) text-white font-medium"
+                              : "bg-[#161d27] hover:bg-border text-(--color-foreground)",
                           )}
                         >
                           {item.label}
@@ -745,14 +745,14 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                 </div>
 
                 {paginatedTrades.length === 0 ? (
-                  <div className="py-8 text-center text-sm text-[var(--color-muted)]">
+                  <div className="py-8 text-center text-sm text-(--color-muted)">
                     ไม่พบประวัติการเทรดที่ตรงกับเงื่อนไขการค้นหา
                   </div>
                 ) : (
                   <>
                     <div className="overflow-x-auto -mx-1 sm:mx-0">
-                      <table className="w-full min-w-[620px] text-left text-sm">
-                        <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs sticky top-0 bg-[var(--color-card)] z-10">
+                      <table className="w-full min-w-155 text-left text-sm">
+                        <thead className="text-(--color-muted) border-b border-border text-xs sticky top-0 bg-card z-10">
                           <tr>
                             <th className="py-2.5 pr-2 w-12">No</th>
                             <th className="py-2.5 pr-3">Closed Date</th>
@@ -762,7 +762,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                             <th className="py-2.5 text-right">Outcome</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-[var(--color-border)]/50">
+                        <tbody className="divide-y divide-border/50">
                           {paginatedTrades.map((t, idx) => {
                             const rowNo = tradeFrom + idx;
                             const pnl = Number(t.pnl_usd) || 0;
@@ -773,12 +773,12 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                             return (
                               <tr
                                 key={idx}
-                                className="hover:bg-[var(--color-card)]/50 transition-colors"
+                                className="hover:bg-card/50 transition-colors"
                               >
-                                <td className="py-2.5 pr-2 text-xs font-mono text-[var(--color-muted)]">
+                                <td className="py-2.5 pr-2 text-xs font-mono text-(--color-muted)">
                                   {rowNo}
                                 </td>
-                                <td className="py-2.5 pr-3 text-xs text-[var(--color-muted)] font-mono">
+                                <td className="py-2.5 pr-3 text-xs text-(--color-muted) font-mono">
                                   {dateStr}
                                 </td>
                                 <td className="py-2.5 pr-3 font-medium font-mono text-xs">
@@ -791,10 +791,10 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                                   <span
                                     className={
                                       pnl > 0
-                                        ? "text-[var(--color-ok)]"
+                                        ? "text-ok"
                                         : pnl < 0
-                                          ? "text-[var(--color-danger)]"
-                                          : "text-[var(--color-muted)]"
+                                          ? "text-danger"
+                                          : "text-(--color-muted)"
                                     }
                                   >
                                     {pnl > 0 ? "+" : ""}
@@ -817,18 +817,18 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                     </div>
 
                     {/* Pagination Controls */}
-                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[var(--color-border)]/50">
-                      <p className="text-xs text-[var(--color-muted)]">
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border/50">
+                      <p className="text-xs text-(--color-muted)">
                         Showing {tradeFrom}–{tradeTo} of {totalTradesCount}
                         {totalTradesCount !== metrics.trades.length
                           ? ` (filtered from ${metrics.trades.length})`
                           : ""}
                       </p>
                       <div className="flex flex-wrap items-center gap-3">
-                        <label className="flex items-center gap-2 text-xs text-[var(--color-muted)]">
+                        <label className="flex items-center gap-2 text-xs text-(--color-muted)">
                           Rows
                           <select
-                            className="rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)]"
+                            className="rounded-md border border-border bg-[#161d27] px-2 py-1.5 text-sm text-(--color-foreground)"
                             value={tradePageSize}
                             onChange={(e) => {
                               setTradePageSize(Number(e.target.value));
@@ -851,7 +851,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                               />
                             </PaginationItem>
                             <PaginationItem>
-                              <span className="px-2 text-xs text-[var(--color-muted)]">
+                              <span className="px-2 text-xs text-(--color-muted)">
                                 Page {safeTradePage} / {tradePageCount}
                               </span>
                             </PaginationItem>
