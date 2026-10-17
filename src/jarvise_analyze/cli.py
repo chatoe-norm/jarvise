@@ -18,6 +18,7 @@ from jarvise_analyze.engine import (
     mtf_enabled,
 )
 from jarvise_analyze.replay import replay_is_oos, replay_range
+from jarvise_analyze.strategies import STRATEGY_NAMES
 from jarvise_ingest.db import (
     load_latest_candle,
     open_db,
@@ -196,6 +197,16 @@ def build_parser() -> argparse.ArgumentParser:
             "rules = same-side hold, opposite defer, FLAT closes (no Claude)"
         ),
     )
+    p.add_argument(
+        "--strategy",
+        choices=list(STRATEGY_NAMES),
+        default="current",
+        help=(
+            "With --replay: current calls analyze_snapshot (default). "
+            "trend_long and donchian_long are research-only, require "
+            "--paper-policy rules, and do not combine with --mtf."
+        ),
+    )
     return p
 
 
@@ -297,6 +308,24 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.strategy != "current" and not args.replay:
+        print(
+            "Error: --strategy requires --replay.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
+    if args.strategy != "current" and args.mtf:
+        print(
+            "Error: --strategy does not combine with --mtf.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
+    if args.strategy != "current" and args.paper_policy != "rules":
+        print(
+            "Error: --strategy requires --paper-policy rules.\n  " + REPLAY_EXAMPLE,
+            file=sys.stderr,
+        )
+        return 2
 
     started = time.perf_counter()
     conn = open_db(args.db)
@@ -340,6 +369,7 @@ def run(argv: list[str] | None = None) -> int:
                     mtf=args.mtf,
                     exit_mode=args.exit,
                     no_breakeven=args.no_breakeven,
+                    strategy=args.strategy,
                 )
                 if args.apply_paper and args.paper_policy == "rules":
                     report["note"] += (
@@ -365,6 +395,7 @@ def run(argv: list[str] | None = None) -> int:
                     mtf=args.mtf,
                     exit_mode=args.exit,
                     no_breakeven=args.no_breakeven,
+                    strategy=args.strategy,
                 )
                 if args.apply_paper and args.paper_policy == "rules":
                     report["note"] = (
