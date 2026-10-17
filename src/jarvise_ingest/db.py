@@ -289,6 +289,41 @@ CREATE TABLE IF NOT EXISTS paper_ev_gate_latch (
     sample_ev REAL,
     cleared_at_ms INTEGER
 );
+
+-- Shadow veto decision log. Ingest, the analyzer, RAG, and auto_decide do not read these.
+CREATE TABLE IF NOT EXISTS paper_shadow_track (
+    analysis_id TEXT NOT NULL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry_ts INTEGER NOT NULL,
+    entry_px REAL NOT NULL,
+    invalidation REAL NOT NULL,
+    exit_ts INTEGER,
+    exit_px REAL,
+    exit_reason TEXT,
+    gross_r REAL,
+    net_r REAL,
+    pnl_ref_usd REAL,
+    bars_held INTEGER,
+    resolved_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS paper_shadow_verdicts (
+    analysis_id TEXT NOT NULL PRIMARY KEY,
+    verdict TEXT NOT NULL,
+    reason_category TEXT NOT NULL,
+    reason_th TEXT NOT NULL,
+    inputs_cited_json TEXT NOT NULL,
+    brief_sha256 TEXT,
+    digest_name TEXT,
+    digest_sha256 TEXT,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    timing TEXT NOT NULL,
+    FOREIGN KEY (analysis_id) REFERENCES paper_shadow_track(analysis_id)
+);
 """
 
 _DERIV_METRIC_KEYS = (
@@ -510,6 +545,50 @@ def _migrate_ev_gate_latch(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_shadow_veto(conn: sqlite3.Connection) -> None:
+    """Decision log for the counterfactual shadow track. Not market truth."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_shadow_track (
+            analysis_id TEXT NOT NULL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_ts INTEGER NOT NULL,
+            entry_px REAL NOT NULL,
+            invalidation REAL NOT NULL,
+            exit_ts INTEGER,
+            exit_px REAL,
+            exit_reason TEXT,
+            gross_r REAL,
+            net_r REAL,
+            pnl_ref_usd REAL,
+            bars_held INTEGER,
+            resolved_at INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_shadow_verdicts (
+            analysis_id TEXT NOT NULL PRIMARY KEY,
+            verdict TEXT NOT NULL,
+            reason_category TEXT NOT NULL,
+            reason_th TEXT NOT NULL,
+            inputs_cited_json TEXT NOT NULL,
+            brief_sha256 TEXT,
+            digest_name TEXT,
+            digest_sha256 TEXT,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            timing TEXT NOT NULL,
+            FOREIGN KEY (analysis_id) REFERENCES paper_shadow_track(analysis_id)
+        )
+        """
+    )
+
+
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, name: str, typ: str) -> None:
     cols = _table_columns(conn, table)
     if not cols or name in cols:
@@ -573,6 +652,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (8, "stop_and_marks", _migrate_stop_and_marks, True),
     (9, "indicator_context", _migrate_indicator_context, True),
     (10, "ev_gate_latch", _migrate_ev_gate_latch, True),
+    (11, "shadow_veto", _migrate_shadow_veto, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

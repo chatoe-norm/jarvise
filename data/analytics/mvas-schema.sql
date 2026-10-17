@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 10).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 11).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -275,4 +275,39 @@ CREATE TABLE IF NOT EXISTS paper_ev_gate_latch (
     sample_n INTEGER,
     sample_ev REAL,
     cleared_at_ms INTEGER
+);
+
+-- Shadow veto decision log. Not read by ingest, the analyzer, RAG, or auto_decide.
+CREATE TABLE IF NOT EXISTS paper_shadow_track (
+    analysis_id TEXT NOT NULL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry_ts INTEGER NOT NULL,
+    entry_px REAL NOT NULL,
+    invalidation REAL NOT NULL,
+    exit_ts INTEGER,
+    exit_px REAL,
+    exit_reason TEXT,
+    gross_r REAL,
+    net_r REAL,
+    pnl_ref_usd REAL,
+    bars_held INTEGER,
+    resolved_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS paper_shadow_verdicts (
+    analysis_id TEXT NOT NULL PRIMARY KEY,
+    verdict TEXT NOT NULL,
+    reason_category TEXT NOT NULL,
+    reason_th TEXT NOT NULL,
+    inputs_cited_json TEXT NOT NULL,
+    brief_sha256 TEXT,
+    digest_name TEXT,
+    digest_sha256 TEXT,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    timing TEXT NOT NULL,
+    FOREIGN KEY (analysis_id) REFERENCES paper_shadow_track(analysis_id)
 );

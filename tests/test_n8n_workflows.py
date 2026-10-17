@@ -63,6 +63,15 @@ def test_jobs_workflows_send_token_placeholder() -> None:
             callers.append(path.name)
     assert len(callers) >= 9
     assert "jarvise-live-reconcile.json" in callers
+    assert "jarvise-shadow-veto.json" in callers
+    shadow = json.loads((WORKFLOWS / "jarvise-shadow-veto.json").read_text(encoding="utf-8"))
+    assert shadow["id"] == "jrvsShadowVeto4h1"
+    shadow_timeout = next(
+        node["parameters"]["options"]["timeout"]
+        for node in shadow["nodes"]
+        if node.get("type") == "n8n-nodes-base.httpRequest"
+    )
+    assert shadow_timeout >= 180000
     script = (ROOT / "infra" / "docker" / "render-n8n-jobs-workflows.sh").read_text(encoding="utf-8")
     assert "JARVISE_JOBS_TOKEN" in script
     assert "jarvise-live-reconcile.json" in script

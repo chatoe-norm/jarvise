@@ -44,8 +44,9 @@ from jarvise_paper.engine import apply_signal
 from jarvise_paper.feedback import auto_ev_gate_status, reset_ev_gate_latch
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.risk_monitor import run_risk_monitor
+from jarvise_paper.shadow_veto import run_shadow, score_shadow
 from jarvise_paper.stops import backfill_stops
-from jarvise_risk import apply_safety_to_analysis, evaluate_from_db, read_kill_switch
+from jarvise_risk import apply_safety_to_analysis, evaluate_from_db, kill_switch_state, read_kill_switch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = REPO_ROOT / "data" / "analytics" / "jarvise.db"
@@ -191,6 +192,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rst.add_argument("--db", type=Path, default=DEFAULT_DB)
     rst.add_argument("--json", action="store_true", dest="as_json")
+
+    sv = sub.add_parser("shadow-veto", help="Counterfactual shadow track and veto log")
+    sv_sub = sv.add_subparsers(dest="shadow_cmd", required=True)
+    sv_run = sv_sub.add_parser("run", help="Update the track and request on-time verdicts")
+    sv_run.add_argument("--db", type=Path, default=DEFAULT_DB)
+    sv_run.add_argument("--json", action="store_true", dest="as_json")
+    sv_score = sv_sub.add_parser("score", help="Score the pre-registered pass rule")
+    sv_score.add_argument("--db", type=Path, default=DEFAULT_DB)
+    sv_score.add_argument("--json", action="store_true", dest="as_json")
     return p
 
 
@@ -579,6 +589,34 @@ def cmd_ev_gate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _kill_switch_engaged() -> bool:
+    return bool(kill_switch_state(strict=True)["engaged"])
+
+
+def cmd_shadow_veto(args: argparse.Namespace) -> int:
+    conn = open_db(args.db)
+    try:
+        if args.shadow_cmd == "run":
+            payload = run_shadow(conn, kill_switch_check=_kill_switch_engaged)
+            code = 3 if payload.get("skipped") else (0 if payload.get("ok") else 1)
+        elif args.shadow_cmd == "score":
+            payload = score_shadow(conn)
+            code = 0 if payload.get("ok") else 1
+        else:
+            return 2
+    finally:
+        conn.close()
+    if args.as_json:
+        print(json.dumps(payload, default=str))
+    else:
+        print(
+            json.dumps(
+                {k: payload.get(k) for k in ("ok", "passed", "track_rows", "called", "late")}, default=str
+            )
+        )
+    return code
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -604,6 +642,8 @@ def run(argv: list[str] | None = None) -> int:
         return cmd_post_mortem(args)
     if args.cmd == "ev-gate":
         return cmd_ev_gate(args)
+    if args.cmd == "shadow-veto":
+        return cmd_shadow_veto(args)
     return 2
 
 
