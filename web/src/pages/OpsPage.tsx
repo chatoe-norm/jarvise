@@ -20,12 +20,12 @@ import { PipelineControlCard, PIPELINE_JOBS } from "@/components/PipelineControl
 import { QdrantTradingRulesCard } from "@/components/QdrantTradingRulesCard";
 import { RiskCapsControlCard } from "@/components/RiskCapsControlCard";
 import { RiskMonitorCard } from "@/components/RiskMonitorCard";
+import { OPS_ALL_GROUPS, defaultOpsTab, type OpsTabId } from "@/lib/opsTabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type StatusPayload } from "@/lib/api";
-import { defaultOpsTab, type OpsTabId } from "@/lib/opsTabs";
 import { cn, formatDecisionStamp } from "@/lib/utils";
 
 interface OpsTab {
@@ -228,83 +228,16 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       {dialog}
       {error ? <p className="text-sm text-danger">{error}</p> : null}
 
-      {/* Emergency Market Safety Kill-Switch Compact Header */}
-      <Card className="border-border bg-card/40">
-        <CardContent className="p-3.5 sm:p-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div
-                className={cn(
-                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
-                  killMode === "engaged"
-                    ? "border-rose-500/50 bg-rose-500/15 text-rose-400 animate-pulse"
-                    : killMode === "unknown"
-                      ? "border-amber-500/50 bg-amber-500/15 text-amber-400"
-                      : killMode === "clear"
-                        ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-400"
-                        : "border-border text-(--color-muted)",
-                )}
-              >
-                <Shield className="h-5 w-5" />
-              </div>
-              <div className="space-y-0.5">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-(--color-foreground)">
-                    Market Safety Kill-Switch
-                  </span>
-                  <Badge
-                    variant={killMode === "engaged" ? "danger" : killMode === "clear" ? "ok" : "outline"}
-                    className="text-[10px] py-0 px-1.5"
-                  >
-                    {killMode === "engaged"
-                      ? "ENGAGED"
-                      : killMode === "unknown"
-                        ? "ไม่ทราบสถานะ"
-                        : killMode === "clear"
-                          ? "CLEAR · NORMAL"
-                          : "กำลังโหลด…"}
-                  </Badge>
-                </div>
-                <div className="text-xs text-(--color-muted) font-mono">
-                  {killMode === "engaged" ? (
-                    <span className="text-rose-400">Circuit Breaker: {ksState?.reason || "Safety Triggered"}</span>
-                  ) : killMode === "unknown" ? (
-                    <span className="text-amber-400">
-                      อ่านสถานะจาก Redis ไม่ได้ ({ksState?.error || "redis"}) · การอนุมัติถูกบล็อกไว้ก่อน (fail-closed)
-                    </span>
-                  ) : killMode === "clear" ? (
-                    <span className="text-emerald-400/90">
-                      All fail-closed guardrails active · Automated paper schedules permitted
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3 w-full sm:w-auto">
-              <Button
-                variant="danger"
-                size="sm"
-                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
-                disabled={busy || killMode === "engaged" || killMode === "loading"}
-                onClick={() => void setKill("on")}
-              >
-                Engage Kill-Switch
-              </Button>
-              <Button
-                variant="ok"
-                size="sm"
-                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
-                disabled={busy || killMode !== "engaged"}
-                onClick={() => void setKill("off")}
-              >
-                Clear &amp; Resume
-              </Button>
-            </div>
-          </div>
-          <OwnerDecisionLog rows={status?.owner_decisions} />
-        </CardContent>
-      </Card>
+      {activeTab !== "all" ? (
+        <KillSwitchBar
+          killMode={killMode}
+          reason={ksState?.reason}
+          error={ksState?.error}
+          busy={busy}
+          onKill={(state) => void setKill(state)}
+          decisions={status?.owner_decisions}
+        />
+      ) : null}
 
       {/* Tablet & Desktop Tab Menu Bar */}
       <div className="rounded-xl border border-border bg-[#0d121a]/90 p-1.5 shadow-sm backdrop-blur-md">
@@ -358,30 +291,90 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         </div>
       </div>
 
-      {/* Tab Panels */}
       <div className="space-y-6">
-        {(activeTab === "risk" || activeTab === "all") && (
+        {activeTab === "all"
+          ? OPS_ALL_GROUPS.map((group) => (
+              <section key={group.id} className="space-y-4">
+                <h2 className="text-sm font-semibold tracking-wide text-(--color-muted)">{group.label}</h2>
+                {group.id === "safety" ? (
+                  <>
+                    <KillSwitchBar
+                      killMode={killMode}
+                      reason={ksState?.reason}
+                      error={ksState?.error}
+                      busy={busy}
+                      onKill={(state) => void setKill(state)}
+                      decisions={status?.owner_decisions}
+                    />
+                    <RiskMonitorCard
+                      monitor={status?.risk_monitor}
+                      maxAgeMin={status?.freshness?.risk_monitor_stale_after_min}
+                    />
+                    <RiskCapsControlCard initialCaps={status?.risk_caps} onRefresh={() => void load()} />
+                  </>
+                ) : null}
+                {group.id === "automation" ? (
+                  <>
+                    <PaperAutoDecideCard
+                      auto={status?.paper_auto}
+                      gate={status?.auto_ev_gate}
+                      initialConfig={status?.auto_decide_config}
+                      onRefresh={() => void load()}
+                    />
+                    <PipelineControlCard
+                      statusPayload={status as unknown as Record<string, unknown>}
+                      onRefresh={() => void load()}
+                    />
+                  </>
+                ) : null}
+                {group.id === "data" ? (
+                  <>
+                    <IngestHealthControlCard
+                      health={status?.ingest_health}
+                      rules={status?.rules}
+                      freshness={status?.freshness}
+                      onRefresh={() => void load()}
+                    />
+                    <CryptoUniverseCard />
+                  </>
+                ) : null}
+                {group.id === "intelligence" ? (
+                  <>
+                    <QdrantTradingRulesCard
+                      qdrant={status?.qdrant}
+                      ragStatus={status?.rag}
+                      onRefresh={() => void load()}
+                    />
+                    <ModelRoutingCard activeModel={status?.auto_decide_config?.model} />
+                    <ObservabilityControlCard onRefresh={() => void load()} />
+                  </>
+                ) : null}
+              </section>
+            ))
+          : null}
+
+        {activeTab === "risk" && (
           <RiskMonitorCard
             monitor={status?.risk_monitor}
             maxAgeMin={status?.freshness?.risk_monitor_stale_after_min}
           />
         )}
 
-        {(activeTab === "risk" || activeTab === "all") && (
+        {activeTab === "risk" && (
           <RiskCapsControlCard
             initialCaps={status?.risk_caps}
             onRefresh={() => void load()}
           />
         )}
 
-        {(activeTab === "pipeline" || activeTab === "all") && (
+        {activeTab === "pipeline" && (
           <PipelineControlCard
             statusPayload={status as unknown as Record<string, unknown>}
             onRefresh={() => void load()}
           />
         )}
 
-        {(activeTab === "health" || activeTab === "all") && (
+        {activeTab === "health" && (
           <IngestHealthControlCard
             health={status?.ingest_health}
             rules={status?.rules}
@@ -390,11 +383,11 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           />
         )}
 
-        {(activeTab === "universe" || activeTab === "all") && (
+        {activeTab === "universe" && (
           <CryptoUniverseCard />
         )}
 
-        {(activeTab === "auto_decide" || activeTab === "all") && (
+        {activeTab === "auto_decide" && (
           <PaperAutoDecideCard
             auto={status?.paper_auto}
             gate={status?.auto_ev_gate}
@@ -403,11 +396,11 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           />
         )}
 
-        {(activeTab === "models" || activeTab === "auto_decide" || activeTab === "all") && (
+        {(activeTab === "models" || activeTab === "auto_decide") && (
           <ModelRoutingCard activeModel={status?.auto_decide_config?.model} />
         )}
 
-        {(activeTab === "rules" || activeTab === "all") && (
+        {activeTab === "rules" && (
           <QdrantTradingRulesCard
             qdrant={status?.qdrant}
             ragStatus={status?.rag}
@@ -415,13 +408,107 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           />
         )}
 
-        {(activeTab === "observability" || activeTab === "all") && (
+        {activeTab === "observability" && (
           <ObservabilityControlCard
             onRefresh={() => void load()}
           />
         )}
       </div>
     </div>
+  );
+}
+
+function KillSwitchBar({
+  killMode,
+  reason,
+  error,
+  busy,
+  onKill,
+  decisions,
+}: {
+  killMode: "loading" | "unknown" | "engaged" | "clear";
+  reason?: string | null;
+  error?: string | null;
+  busy: boolean;
+  onKill: (state: "on" | "off") => void;
+  decisions: StatusPayload["owner_decisions"];
+}) {
+  return (
+    <Card className="border-border bg-card/40">
+      <CardContent className="p-3.5 sm:p-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div
+              className={cn(
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
+                killMode === "engaged"
+                  ? "border-rose-500/50 bg-rose-500/15 text-rose-400 animate-pulse"
+                  : killMode === "unknown"
+                    ? "border-amber-500/50 bg-amber-500/15 text-amber-400"
+                    : killMode === "clear"
+                      ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-400"
+                      : "border-border text-(--color-muted)",
+              )}
+            >
+              <Shield className="h-5 w-5" />
+            </div>
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-(--color-foreground)">
+                  Market Safety Kill-Switch
+                </span>
+                <Badge
+                  variant={killMode === "engaged" ? "danger" : killMode === "clear" ? "ok" : "outline"}
+                  className="text-[10px] py-0 px-1.5"
+                >
+                  {killMode === "engaged"
+                    ? "ENGAGED"
+                    : killMode === "unknown"
+                      ? "ไม่ทราบสถานะ"
+                      : killMode === "clear"
+                        ? "CLEAR · NORMAL"
+                        : "กำลังโหลด…"}
+                </Badge>
+              </div>
+              <div className="text-xs text-(--color-muted) font-mono">
+                {killMode === "engaged" ? (
+                  <span className="text-rose-400">Circuit Breaker: {reason || "Safety Triggered"}</span>
+                ) : killMode === "unknown" ? (
+                  <span className="text-amber-400">
+                    อ่านสถานะจาก Redis ไม่ได้ ({error || "redis"}) · การอนุมัติถูกบล็อกไว้ก่อน (fail-closed)
+                  </span>
+                ) : killMode === "clear" ? (
+                  <span className="text-emerald-400/90">
+                    All fail-closed guardrails active · Automated paper schedules permitted
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 w-full sm:w-auto">
+            <Button
+              variant="danger"
+              size="sm"
+              className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+              disabled={busy || killMode === "engaged" || killMode === "loading"}
+              onClick={() => onKill("on")}
+            >
+              Engage Kill-Switch
+            </Button>
+            <Button
+              variant="ok"
+              size="sm"
+              className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+              disabled={busy || killMode !== "engaged"}
+              onClick={() => onKill("off")}
+            >
+              Clear &amp; Resume
+            </Button>
+          </div>
+        </div>
+        <OwnerDecisionLog rows={decisions} />
+      </CardContent>
+    </Card>
   );
 }
 

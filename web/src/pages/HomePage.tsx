@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApprovalQueue } from "@/components/ApprovalQueue";
+import { InfoTip } from "@/components/InfoTip";
 import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -128,12 +129,53 @@ function ActivePositionsCard({
             </Link>
           </div>
         </div>
-        <CardDescription>
-          Live simulated positions protected by {ruleText(rules?.atr_stop_mult, "× ATR")} stop, {ruleText(rules?.breakeven_r, "R")} Breakeven lock, and {ruleText(rules?.trail_distance_r, "R")} Trail
-        </CardDescription>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--color-muted)]">
+          <span>Stop {ruleText(rules?.atr_stop_mult, "× ATR")}</span>
+          <span>BE {ruleText(rules?.breakeven_r, "R")}</span>
+          <span>Trail {ruleText(rules?.trail_distance_r, "R")}</span>
+          <InfoTip
+            label="จุดคุ้มครองของโพสิชัน"
+            text={`Live simulated positions protected by ${ruleText(rules?.atr_stop_mult, "× ATR")} stop, ${ruleText(rules?.breakeven_r, "R")} Breakeven lock, and ${ruleText(rules?.trail_distance_r, "R")} Trail`}
+          />
+        </div>
       </CardHeader>
       <CardContent>
-        <div className="overflow-x-auto -mx-1 sm:mx-0">
+        <ul className="space-y-3 sm:hidden">
+          {positions.map((p, i) => {
+            const side = String(p.side || "").toLowerCase();
+            const uPnl = Number(p.unrealized_pnl) || 0;
+            const closeAdvice = evaluateCloseRecommendation(p);
+            const rMultiple = closeAdvice.rMultiple;
+            return (
+              <li key={i} className="rounded-lg border border-[var(--color-border)] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium">{String(p.symbol || "")}</span>
+                  <span className="rounded px-1.5 py-0.5 text-xs font-mono uppercase">{side}</span>
+                </div>
+                <dl className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                  <div>
+                    <dt className="text-[var(--color-muted)]">uPnL</dt>
+                    <dd className="font-mono tabular-nums">
+                      {uPnl >= 0 ? "+" : ""}
+                      {formatNum(uPnl)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[var(--color-muted)]">R</dt>
+                    <dd className="font-mono tabular-nums">
+                      {rMultiple != null ? `${rMultiple >= 0 ? "+" : ""}${formatNum(rMultiple)}R` : "—"}
+                    </dd>
+                  </div>
+                </dl>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className="text-xs">{closeAdvice.label}</span>
+                  <InfoTip label="คำแนะนำปิดไม้" text={closeAdvice.tooltip} />
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+        <div className="hidden overflow-x-auto sm:block -mx-1 sm:mx-0">
           <table className="w-full min-w-[560px] text-left text-sm">
             <thead className="text-[var(--color-muted)] border-b border-[var(--color-border)] text-xs">
               <tr>
@@ -219,15 +261,17 @@ function ActivePositionsCard({
                       )}
                     </td>
                     <td className="py-2.5 font-mono text-xs tabular-nums text-right">
-                      <span
-                        className={cn(
-                          "inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded border",
-                          closeAdvice.btnClass,
-                        )}
-                        title={closeAdvice.tooltip}
-                      >
-                        <span className={cn("w-2 h-2 rounded-full", closeAdvice.dotClass)} />
-                        {closeAdvice.label}
+                      <span className="inline-flex items-center justify-end gap-1">
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded border",
+                            closeAdvice.btnClass,
+                          )}
+                        >
+                          <span className={cn("w-2 h-2 rounded-full", closeAdvice.dotClass)} />
+                          {closeAdvice.label}
+                        </span>
+                        <InfoTip label="คำแนะนำปิดไม้" text={closeAdvice.tooltip} />
                       </span>
                     </td>
                   </tr>
@@ -484,16 +528,25 @@ export function HomePage({
         killSwitch={data.status.kill_switch}
         openSymbols={openSymbols}
         onChanged={onRefresh}
+        emptyExtra={
+          queueEmpty ? (
+            <LastAutoDecideCard
+              auto={data.status.paper_auto}
+              enabled={data.status.auto_decide_config?.enabled}
+              latched={data.status.auto_ev_gate?.latched}
+              paperTimeframe={data.status.rules?.paper_timeframe}
+            />
+          ) : null
+        }
       />
 
-      {queueEmpty ? (
-        <LastAutoDecideCard
-          auto={data.status.paper_auto}
-          enabled={data.status.auto_decide_config?.enabled}
-          latched={data.status.auto_ev_gate?.latched}
-          paperTimeframe={data.status.rules?.paper_timeframe}
-        />
-      ) : null}
+      <ActivePositionsCard
+        positions={positions}
+        autoDecideEnabled={data.status.auto_decide_config?.enabled === true}
+        rules={data.status.rules}
+      />
+
+      <QueueJump pendingCount={queueEmpty ? 0 : data.approvals.length} />
 
       <KpiStrip
         items={[
@@ -511,14 +564,6 @@ export function HomePage({
           },
         ]}
       />
-
-      <ActivePositionsCard
-        positions={positions}
-        autoDecideEnabled={data.status.auto_decide_config?.enabled === true}
-        rules={data.status.rules}
-      />
-
-      <QueueJump pendingCount={queueEmpty ? 0 : data.approvals.length} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <MarketContextCard

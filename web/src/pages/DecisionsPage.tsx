@@ -10,6 +10,7 @@ import {
   PaginationPrevious,
 } from "@/components/ui/pagination";
 import { ConfidenceLadder } from "@/components/ConfidenceLadder";
+import { InfoTip } from "@/components/InfoTip";
 import { api, type AnalysisExplainPayload, type AnalysisSummary } from "@/lib/api";
 import { outcomeCopy, parseAnalysisOutcome, resolveReasonLabel } from "@/lib/copy";
 import { paperTimeframeLabel } from "@/lib/dashboardRules";
@@ -237,7 +238,62 @@ export function DecisionsPage() {
           ) : null}
           {rows.length > 0 ? (
             <>
-              <div className="overflow-x-auto -mx-1 sm:mx-0">
+              <ul className="space-y-3 sm:hidden">
+                {rows.map((r, i) => {
+                  const stamp = formatDecisionStamp(r.timestamp);
+                  const analysisId =
+                    r.analysis_id != null && r.analysis_id !== "" ? String(r.analysis_id) : "";
+                  const isOpen = Boolean(analysisId && expanded[analysisId]);
+                  const act = String(r.action ?? "—");
+                  return (
+                    <li key={analysisId || String(i)} className="rounded-lg border border-[var(--color-border)] p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{String(r.symbol ?? "")}</span>
+                        <Badge variant={act === "long" ? "ok" : act === "short" ? "danger" : "outline"}>
+                          {act.toUpperCase()}
+                        </Badge>
+                      </div>
+                      <dl className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <dt className="text-[var(--color-muted)]">Conf</dt>
+                          <dd className="font-mono tabular-nums">{formatNum(r.confidence_score)}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-[var(--color-muted)]">Date</dt>
+                          <dd className="tabular-nums">{stamp.date}</dd>
+                        </div>
+                      </dl>
+                      <div className="mt-2">
+                        <OutcomeCell row={r} />
+                      </div>
+                      {analysisId ? (
+                        <button
+                          type="button"
+                          className="mt-2 text-xs underline decoration-dotted"
+                          aria-expanded={isOpen}
+                          onClick={() => void toggleExplain(analysisId)}
+                        >
+                          {isOpen ? "ซ่อนบันได" : "ดูบันไดความมั่นใจ"}
+                        </button>
+                      ) : null}
+                      {isOpen ? (
+                        <div className="mt-2">
+                          {explainLoading[analysisId] ? (
+                            <p className="text-xs text-[var(--color-muted)]">Loading confidence ladder…</p>
+                          ) : null}
+                          {explainError[analysisId] ? (
+                            <p className="text-xs text-[var(--color-danger)]">{explainError[analysisId]}</p>
+                          ) : null}
+                          {explains[analysisId] ? (
+                            <ConfidenceLadder breakdown={explains[analysisId].breakdown} />
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+              <div className="hidden overflow-x-auto sm:block -mx-1 sm:mx-0">
                 <table className="w-full md:min-w-[760px] text-left text-sm">
                   <thead className="text-[var(--color-muted)]">
                     <tr className="border-b border-[var(--color-border)]">
@@ -402,13 +458,16 @@ function OutcomeCell({ row }: { row: Record<string, unknown> }) {
   const outcome = parseAnalysisOutcome(row.outcome);
   const copy = outcomeCopy(outcome, String(row.action ?? ""));
   // Tooltip shows owner copy too; stored reasons can carry หลักคำสอน / "doctrine".
-  const title = outcome?.resolve_reason ? resolveReasonLabel(outcome.resolve_reason) : undefined;
+  const title = outcome?.resolve_reason ? resolveReasonLabel(outcome.resolve_reason) : "";
   return (
-    <div className="min-w-[9rem]" title={title}>
-      <Badge variant={copy.variant}>{copy.label}</Badge>
-      {copy.detail ? (
-        <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">{copy.detail}</div>
-      ) : null}
+    <div className="flex items-start gap-1">
+      <div>
+        <Badge variant={copy.variant}>{copy.label}</Badge>
+        {copy.detail ? (
+          <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">{copy.detail}</div>
+        ) : null}
+      </div>
+      {title ? <InfoTip label="เหตุผล" text={title} /> : null}
     </div>
   );
 }

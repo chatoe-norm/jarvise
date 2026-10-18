@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { defaultOpsTab } from "./opsTabs.ts";
+import { OPS_ALL_GROUPS, defaultOpsTab } from "./opsTabs.ts";
 
 describe("defaultOpsTab", () => {
   it("lets a valid hash beat the mobile default", () => {
@@ -17,5 +17,14 @@ describe("defaultOpsTab", () => {
   it("opens Risk on desktop when the hash is missing or unknown", () => {
     assert.equal(defaultOpsTab("", false), "risk");
     assert.equal(defaultOpsTab("#nope", false), "risk");
+  });
+});
+
+describe("OPS_ALL_GROUPS", () => {
+  it("keeps View All in Safety, Automation, Data, Intelligence order", () => {
+    assert.deepEqual(
+      OPS_ALL_GROUPS.map((group) => group.id),
+      ["safety", "automation", "data", "intelligence"],
+    );
   });
 });

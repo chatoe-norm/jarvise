@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { InfoTip } from "@/components/InfoTip";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type PipelineRunResult } from "@/lib/api";
 import { paperTimeframeLabel, ruleText, ageIsStale, type DashboardRules, type DashboardFreshness } from "@/lib/dashboardRules";
@@ -241,8 +242,8 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
                         · รันล่าสุด {relativeAge(parsed.ageMs)}
                       </span>
                     ) : null}
+                    <InfoTip label={job.title} text={jobBlurb(job, rules)} />
                   </div>
-                  <div className="text-xs text-[var(--color-muted)]">{jobBlurb(job, rules)}</div>
                   {parsed.detail && (
                     <div className="text-[11px] font-mono text-[var(--color-muted)]/80 bg-[#11161f] px-2 py-0.5 rounded border border-[var(--color-border)]/40 inline-block">
                       {parsed.detail}
@@ -276,7 +277,7 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
             onClick={() => setRawOpen((v) => !v)}
             className="text-xs font-mono text-[var(--color-muted)]"
           >
-            {rawOpen ? "ซ่อน Raw Jobs Payload" : "ดู Raw Jobs Payload JSON"}
+            {rawOpen ? "ซ่อน log" : "log"}
           </Button>
         </div>
 

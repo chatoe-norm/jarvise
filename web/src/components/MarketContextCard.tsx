@@ -12,6 +12,7 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { InfoTip } from "@/components/InfoTip";
 import type { NewsHome, StatusPayload } from "@/lib/api";
 import { useMarketContext } from "@/controllers/useMarketContext";
 import { ruleText } from "@/lib/dashboardRules";
@@ -178,8 +179,12 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
         <div className="flex items-center justify-between">
           <div>
             <CardTitle className="text-base font-semibold">Market Context</CardTitle>
-            <CardDescription>
-              Macro sentiment &amp; dominance context (บริบทตลาด ไม่ใช่สัญญาณเปิดออเดอร์)
+            <CardDescription className="inline-flex items-center gap-1">
+              บริบทตลาด ไม่ใช่สัญญาณเปิดออเดอร์
+              <InfoTip
+                label="Fear & Greed ไม่ใช่สัญญาณ"
+                text={`การเปิด/ปิดไม้ตัดสินจาก Analyzer, จุด Stop ${ruleText(status.rules?.atr_stop_mult, "× ATR")} และกฎการเทรดเท่านั้น ดัชนีนี้ไม่ได้เปลี่ยนเกณฑ์ความมั่นใจหรือคำแนะนำของการ์ดใน Approval Queue`}
+              />
             </CardDescription>
           </div>
           <Badge variant="outline" className="text-[11px] font-mono">
@@ -270,6 +275,13 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
               {altText}
             </span>
           </div>
+        </div>
+        <div className="mt-2 flex items-center gap-1 text-[11px] font-medium text-[var(--color-foreground)] md:hidden">
+          <span>ไม่ใช่สัญญาณเทรด</span>
+          <InfoTip
+            label="Fear & Greed ไม่ใช่สัญญาณ"
+            text={`การเปิด/ปิดไม้ตัดสินจาก Analyzer, จุด Stop ${ruleText(status.rules?.atr_stop_mult, "× ATR")} และกฎการเทรดเท่านั้น ดัชนีนี้ไม่ได้เปลี่ยนเกณฑ์ความมั่นใจหรือคำแนะนำของการ์ดใน Approval Queue`}
+          />
         </div>
 
         {/* DESKTOP / TABLET GRID VIEW */}
@@ -741,14 +753,14 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
 function ContextOnlyNote({ atr }: { atr?: number | null }) {
   return (
     <div className="p-3.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)]/50 text-xs space-y-1">
-      <div className="flex items-center gap-1.5 font-bold text-[var(--color-foreground)]">
-        <Compass className="w-4 h-4 text-[var(--color-accent)]" />
+      <div className="flex items-start gap-1.5 font-bold text-[var(--color-foreground)]">
+        <Compass className="mt-0.5 w-4 h-4 shrink-0 text-[var(--color-accent)]" />
         <span>บริบทตลาดเท่านั้น ไม่ใช่สัญญาณเทรด</span>
+        <InfoTip
+          label="Fear & Greed ไม่ใช่สัญญาณ"
+          text={`การเปิด/ปิดไม้ตัดสินจาก Analyzer, จุด Stop ${ruleText(atr, "× ATR")} และกฎการเทรดเท่านั้น ดัชนีนี้ไม่ได้เปลี่ยนเกณฑ์ความมั่นใจหรือคำแนะนำของการ์ดใน Approval Queue`}
+        />
       </div>
-      <p className="text-[var(--color-muted)] leading-relaxed">
-        การเปิด/ปิดไม้ตัดสินจาก Analyzer, จุด Stop {ruleText(atr, "× ATR")} และกฎการเทรดเท่านั้น
-        ดัชนีนี้ไม่ได้เปลี่ยนเกณฑ์ความมั่นใจหรือคำแนะนำของการ์ดใน Approval Queue
-      </p>
     </div>
   );
 }
