@@ -136,12 +136,13 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
       body: "เกตจะกลับไปตรวจตัวอย่าง 30 วันตามกฎการเทรด ตัวอย่างที่บางจะไม่ปลดล็อกเอง และจะล็อกใหม่เมื่อ EV ต่ำกว่าเกณฑ์อีกครั้ง",
       confirmLabel: "ปลดล็อก",
       tone: "danger",
+      reasonLabel: "เหตุผลที่ปลดล็อก (บันทึกไว้)",
     });
-    if (!ok) return;
+    if (typeof ok !== "string") return;
     setSaving(true);
     setMessage(null);
     try {
-      await api.resetEvGate();
+      await api.resetEvGate(ok);
       setMessage({ text: "ปลดล็อกเกต EV แล้ว", type: "ok" });
       onRefresh?.();
     } catch (err) {

@@ -190,6 +190,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Required. Without this flag the latch stays.",
     )
+    rst.add_argument(
+        "--reason",
+        default="",
+        help="Required written review, at least 10 characters.",
+    )
     rst.add_argument("--db", type=Path, default=DEFAULT_DB)
     rst.add_argument("--json", action="store_true", dest="as_json")
 
@@ -577,7 +582,15 @@ def cmd_ev_gate(args: argparse.Namespace) -> int:
         return 2
     conn = open_db(args.db)
     try:
-        result = reset_ev_gate_latch(conn)
+        try:
+            result = reset_ev_gate_latch(conn, reason=str(args.reason or ""))
+        except ValueError as exc:
+            payload = {"ok": False, "error": str(exc)}
+            if args.as_json:
+                print(json.dumps(payload, separators=(",", ":")))
+            else:
+                print(str(exc))
+            return 2
         gate = auto_ev_gate_status(conn)
     finally:
         conn.close()

@@ -25,7 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type StatusPayload } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, formatDecisionStamp } from "@/lib/utils";
 
 type OpsTabId =
   | "risk"
@@ -113,12 +113,13 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
             title: "ปลด Kill-Switch และกลับมาทำงาน?",
             body: "ตรวจสอบสาเหตุที่ทำให้ระบบหยุดก่อน ตารางงาน paper อัตโนมัติจะกลับมาทำงานทันที",
             confirmLabel: "ปลดล็อก",
+            reasonLabel: "เหตุผลที่ปลดล็อก (บันทึกไว้)",
           },
     );
     if (!ok) return;
     setBusy(true);
     try {
-      await api.killSwitch(state);
+      await api.killSwitch(state, typeof ok === "string" ? ok : undefined);
       await load();
       onStatusChange?.();
     } catch (err) {
@@ -327,6 +328,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
               </Button>
             </div>
           </div>
+          <OwnerDecisionLog rows={status?.owner_decisions} />
         </CardContent>
       </Card>
 
@@ -438,6 +440,41 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           />
         )}
       </div>
+    </div>
+  );
+}
+
+const DECISION_KIND: Record<string, string> = {
+  ev_gate_reset: "ปลดล็อกเกต EV",
+  kill_switch_off: "ปลด Kill-Switch",
+  kill_switch_on: "เปิด Kill-Switch",
+};
+
+function OwnerDecisionLog({ rows }: { rows: StatusPayload["owner_decisions"] }) {
+  const items = (rows || []).slice(0, 5);
+  return (
+    <div className="mt-3 border-t border-border pt-3">
+      <div className="text-xs font-medium text-(--color-foreground)">บันทึกการตัดสินใจล่าสุด</div>
+      {items.length === 0 ? (
+        <p className="mt-1 text-xs text-(--color-muted)">ยังไม่มีบันทึก</p>
+      ) : (
+        <ul className="mt-2 space-y-1">
+          {items.map((row) => {
+            const stamp = formatDecisionStamp(row.at_ms);
+            return (
+              <li key={row.id} className="text-xs text-(--color-muted)">
+                <span className="font-mono text-(--color-foreground)">
+                  {stamp.date} {stamp.time}
+                </span>
+                {" · "}
+                {DECISION_KIND[row.kind] ?? row.kind}
+                {" · "}
+                {row.reason || "—"}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

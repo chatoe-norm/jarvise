@@ -164,6 +164,61 @@ def _risk(
     return risk
 
 
+def build_scenarios(
+    action: str | None,
+    candle: Mapping[str, Any] | None,
+    risk: Mapping[str, Any] | None,
+) -> list[dict[str, Any]] | None:
+    """Display-only paths for a long or short candidate. No probabilities or targets.
+
+    Price levels come from the stored close and invalidation. profit_lock is described,
+    not invoked: breakeven when price reaches entry ± 0.5R, then a 1R trail after ± 1R.
+    """
+    act = (action or "flat").lower()
+    if act not in {"long", "short"}:
+        return None
+    entry = _f((candle or {}).get("close"))
+    invalidation = _f((risk or {}).get("invalidation_price"))
+    distance = None
+    if entry is not None and invalidation is not None and entry != invalidation:
+        distance = abs(entry - invalidation)
+    sign = 1.0 if act == "long" else -1.0
+    follow_levels: list[dict[str, Any]] = []
+    if entry is not None and distance is not None:
+        follow_levels = [
+            {"label": "บังทุนเมื่อราคาถึง", "price": round(entry + sign * 0.5 * distance, 8)},
+            {"label": "trail 1R เมื่อราคาถึง", "price": round(entry + sign * distance, 8)},
+        ]
+    stop_levels: list[dict[str, Any]] = []
+    if invalidation is not None:
+        stop_levels.append({"label": "ราคาตัดขาดทุน", "price": round(invalidation, 8)})
+    flat_levels: list[dict[str, Any]] = []
+    if entry is not None:
+        flat_levels.append({"label": "ราคาอ้างอิงตอนนี้", "price": round(entry, 8)})
+    est = _f((risk or {}).get("est_loss_usd"))
+    loss_txt = "—" if est is None else f"{est:.2f}"
+    return [
+        {
+            "id": "follow",
+            "title": "ไปตามสัญญาณ",
+            "detail": ("จุดตัดขยับมาบังทุนเมื่อราคาถึง 0.5R และ trail 1R จากราคาที่ดีที่สุดหลังถึง 1R ไม่มีเป้าทำกำไร"),
+            "levels": follow_levels,
+        },
+        {
+            "id": "stop",
+            "title": "โดน stop",
+            "detail": f"ราคาถึงจุดตัดขาดทุน ขาดทุนโดยประมาณ {loss_txt} USD",
+            "levels": stop_levels,
+        },
+        {
+            "id": "flat_exit",
+            "title": "สัญญาณกลายเป็น FLAT",
+            "detail": "ปิดใกล้ราคา ณ ตอนนั้น หักค่าธรรมเนียม ไม่ใช่เป้าทำกำไร",
+            "levels": flat_levels,
+        },
+    ]
+
+
 def _checklist(
     approval: Mapping[str, Any],
     position: Mapping[str, Any] | None,
@@ -246,6 +301,7 @@ def build_recommendation(
             f"ความมั่นใจ {conf:.2f} < {APPROVE_CONF:.2f} และไม่พบกฎการเทรดตรงสัญญาณ "
             "→ auto-decide จะ defer ให้เจ้าของตัดสินใจเอง"
         )
+    risk = _risk(approval, candle, analysis, account)
     return {
         "ok": True,
         "approval_id": approval.get("id"),
@@ -259,7 +315,8 @@ def build_recommendation(
         "headline": _headline(rec, action, conf, position_side=position_side),
         "evidence": evidence_line(ev_gate),
         "what_happened": what,
-        "risk": _risk(approval, candle, analysis, account),
+        "risk": risk,
+        "scenarios": build_scenarios(action, candle, risk),
         "doctrine": list(doctrine),
         "checklist": _checklist(approval, position, has_news=news is not None),
         "news_context": news,

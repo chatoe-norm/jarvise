@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 11).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 12).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -276,6 +276,17 @@ CREATE TABLE IF NOT EXISTS paper_ev_gate_latch (
     sample_ev REAL,
     cleared_at_ms INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS owner_decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    reason TEXT,
+    actor TEXT NOT NULL,
+    payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_owner_decision_log_at
+    ON owner_decision_log (at_ms DESC);
 
 -- Shadow veto decision log. Not read by ingest, the analyzer, RAG, or auto_decide.
 CREATE TABLE IF NOT EXISTS paper_shadow_track (

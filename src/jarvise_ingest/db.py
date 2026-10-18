@@ -290,6 +290,19 @@ CREATE TABLE IF NOT EXISTS paper_ev_gate_latch (
     cleared_at_ms INTEGER
 );
 
+-- Owner written review before clearing the EV-gate latch or the kill switch.
+-- Jobs, risk-monitor, and market safety do not write this table.
+CREATE TABLE IF NOT EXISTS owner_decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    reason TEXT,
+    actor TEXT NOT NULL,
+    payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_owner_decision_log_at
+    ON owner_decision_log (at_ms DESC);
+
 -- Shadow veto decision log. Ingest, the analyzer, RAG, and auto_decide do not read these.
 CREATE TABLE IF NOT EXISTS paper_shadow_track (
     analysis_id TEXT NOT NULL PRIMARY KEY,
@@ -545,6 +558,23 @@ def _migrate_ev_gate_latch(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_owner_decision_log(conn: sqlite3.Connection) -> None:
+    """Additive log of owner resets. Does not rewrite the paper ledger."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS owner_decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at_ms INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            reason TEXT,
+            actor TEXT NOT NULL,
+            payload_json TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_owner_decision_log_at ON owner_decision_log (at_ms DESC)")
+
+
 def _migrate_shadow_veto(conn: sqlite3.Connection) -> None:
     """Decision log for the counterfactual shadow track. Not market truth."""
     conn.execute(
@@ -653,6 +683,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (9, "indicator_context", _migrate_indicator_context, True),
     (10, "ev_gate_latch", _migrate_ev_gate_latch, True),
     (11, "shadow_veto", _migrate_shadow_veto, True),
+    (12, "owner_decision_log", _migrate_owner_decision_log, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

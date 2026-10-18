@@ -6,6 +6,7 @@ import json
 import os
 import statistics
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from jarvise_ingest.db import (
@@ -17,6 +18,8 @@ from jarvise_ingest.db import (
 AUTO_SOURCES = frozenset({"auto_claude", "auto_rule"})
 WINDOW_30D_MS = 30 * 86_400_000
 DEFAULT_MIN_EV_N = 10
+OWNER_REASON_MIN = 10
+OWNER_DECISION_KINDS = frozenset({"ev_gate_reset", "kill_switch_off", "kill_switch_on"})
 
 
 def decision_source_from_reason(reason: str | None) -> str:
@@ -171,9 +174,82 @@ def latch_ev_gate(
     conn.commit()
 
 
-def reset_ev_gate_latch(conn: Any, *, at_ms: int | None = None) -> dict[str, Any]:
-    """Clear the latch. Callers must already have an explicit owner confirm."""
+def require_owner_reason(reason: str | None) -> str:
+    """Strip and require a written review of at least OWNER_REASON_MIN characters."""
+    text = (reason or "").strip()
+    if len(text) < OWNER_REASON_MIN:
+        raise ValueError("reason must be at least 10 characters")
+    return text
+
+
+def optional_owner_reason(reason: str | None) -> str | None:
+    """Keep a short or empty engage note. Never raises."""
+    text = (reason or "").strip()
+    return text or None
+
+
+def record_owner_decision(
+    conn: Any,
+    *,
+    at_ms: int,
+    kind: str,
+    reason: str | None,
+    actor: str,
+    payload: Mapping[str, Any] | None = None,
+) -> None:
+    """Insert one owner-review row. The caller commits."""
+    if kind not in OWNER_DECISION_KINDS:
+        raise ValueError(f"unknown owner decision kind: {kind}")
+    conn.execute(
+        """
+        INSERT INTO owner_decision_log (at_ms, kind, reason, actor, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            int(at_ms),
+            kind,
+            reason,
+            actor,
+            json.dumps(payload or {}, separators=(",", ":"), default=str),
+        ),
+    )
+
+
+def list_owner_decisions(conn: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, at_ms, kind, reason, actor
+        FROM owner_decision_log
+        ORDER BY at_ms DESC, id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+    return [
+        {
+            "id": int(row[0]),
+            "at_ms": int(row[1]),
+            "kind": row[2],
+            "reason": row[3],
+            "actor": row[4],
+        }
+        for row in rows
+    ]
+
+
+def reset_ev_gate_latch(
+    conn: Any,
+    *,
+    reason: str,
+    at_ms: int | None = None,
+    actor: str = "owner",
+) -> dict[str, Any]:
+    """Clear the latch after a written reason. The latch rule itself is unchanged."""
+    text = require_owner_reason(reason)
     ts = int(at_ms if at_ms is not None else time.time() * 1000)
+    row = conn.execute("SELECT sample_n, sample_ev FROM paper_ev_gate_latch WHERE id = 1").fetchone()
+    sample_n = None if row is None or row[0] is None else int(row[0])
+    sample_ev = None if row is None or row[1] is None else float(row[1])
     conn.execute(
         """
         INSERT INTO paper_ev_gate_latch (id, latched, cleared_at_ms)
@@ -183,6 +259,14 @@ def reset_ev_gate_latch(conn: Any, *, at_ms: int | None = None) -> dict[str, Any
             cleared_at_ms = excluded.cleared_at_ms
         """,
         (ts,),
+    )
+    record_owner_decision(
+        conn,
+        at_ms=ts,
+        kind="ev_gate_reset",
+        reason=text,
+        actor=actor,
+        payload={"sample_n": sample_n, "sample_ev": sample_ev},
     )
     conn.commit()
     return {"ok": True, "latched": False, "cleared_at_ms": ts}

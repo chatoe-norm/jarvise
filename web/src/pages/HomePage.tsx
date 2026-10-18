@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApprovalQueue } from "@/components/ApprovalQueue";
 import { KpiStrip } from "@/components/KpiStrip";
@@ -8,6 +9,7 @@ import type { DashboardPayload, NewsHome, PaperAutoStatus } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
 import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
 import { cn, formatNum, formatPrice, relativeAge } from "@/lib/utils";
+import { showQueueJump } from "@/lib/ownerReview";
 
 
 type AutoEntry = {
@@ -485,6 +487,8 @@ export function HomePage({
         autoDecideEnabled={data.status.auto_decide_config?.enabled === true}
       />
 
+      <QueueJump pendingCount={queueEmpty ? 0 : data.approvals.length} />
+
       <div className="grid gap-4 lg:grid-cols-2">
         <MarketContextCard
           status={data.status}
@@ -493,6 +497,37 @@ export function HomePage({
         <NewsCard news={data.news} />
       </div>
     </div>
+  );
+}
+
+function QueueJump({ pendingCount }: { pendingCount: number }) {
+  const [scrolledPast, setScrolledPast] = useState(false);
+
+  useEffect(() => {
+    const node = document.getElementById("approval-queue");
+    if (!node || pendingCount <= 0) {
+      setScrolledPast(false);
+      return;
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry) return;
+      setScrolledPast(!entry.isIntersecting && entry.boundingClientRect.top < 0);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [pendingCount]);
+
+  if (!showQueueJump(pendingCount, scrolledPast)) return null;
+  return (
+    <button
+      type="button"
+      className="fixed bottom-4 right-4 z-40 inline-flex h-11 items-center rounded-full border border-border bg-card px-4 text-sm font-medium text-(--color-foreground) shadow-lg sm:hidden"
+      onClick={() => {
+        document.getElementById("approval-queue")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }}
+    >
+      ไปที่ Approval Queue ↑
+    </button>
   );
 }
 

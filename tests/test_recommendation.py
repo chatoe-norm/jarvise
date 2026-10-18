@@ -1,6 +1,7 @@
 # tests/test_recommendation.py
 from jarvise_paper.recommendation import (
     build_recommendation,
+    build_scenarios,
     confidence_label,
     doctrine_query,
     evidence_line,
@@ -86,6 +87,13 @@ def test_card_approve_with_risk_math() -> None:
     assert any("ยังไม่ถือตำแหน่งเดียวกันซ้ำ" in line for line in card["checklist"])
     assert card["claude"] is None
     assert card["confidence_breakdown"]["total"] == 0.75
+    follow = card["scenarios"][0]
+    assert follow["title"] == "ไปตามสัญญาณ"
+    assert follow["levels"][0]["price"] == 85750.0
+    assert follow["levels"][1]["price"] == 86500.0
+    assert "ไม่มีเป้าทำกำไร" in follow["detail"]
+    assert card["scenarios"][1]["levels"][0]["price"] == 83500.0
+    assert "2.21" in card["scenarios"][1]["detail"]
     assert card["gates"] == {"flat": 0.55, "approve": 0.70}
     assert not any("auto-decide จะ defer" in line for line in card["what_happened"])
 
@@ -274,3 +282,38 @@ def test_news_report_does_not_change_recommendation() -> None:
     assert with_news["checklist"][1:] == plain["checklist"][1:]
     assert with_news["news_context"]["not_a_trade_signal"] is True
     assert with_news["news_context"]["lines"][0] == "บริบทข่าว ไม่ใช่สัญญาณ"
+
+
+def test_scenarios_for_long_short_and_flat() -> None:
+    long_card = build_scenarios(
+        "long",
+        {"close": 85000.0},
+        {"invalidation_price": 83500.0, "est_loss_usd": 2.21},
+    )
+    assert long_card is not None
+    assert [item["id"] for item in long_card] == ["follow", "stop", "flat_exit"]
+    assert long_card[0]["levels"] == [
+        {"label": "บังทุนเมื่อราคาถึง", "price": 85750.0},
+        {"label": "trail 1R เมื่อราคาถึง", "price": 86500.0},
+    ]
+    short_card = build_scenarios(
+        "short",
+        {"close": 100.0},
+        {"invalidation_price": 110.0, "est_loss_usd": 1.5},
+    )
+    assert short_card is not None
+    assert short_card[0]["levels"][0]["price"] == 95.0
+    assert short_card[0]["levels"][1]["price"] == 90.0
+    assert short_card[1]["levels"][0]["price"] == 110.0
+    flat = build_recommendation(
+        approval={**APPROVAL, "action": "flat", "confidence_score": 0.2},
+        candle=CANDLE,
+        analysis=ANALYSIS,
+        account=ACCOUNT,
+        position=None,
+        safety=SAFETY_OK,
+        doctrine=[],
+        claude=None,
+    )
+    assert flat["scenarios"] is None
+    assert "probability" not in str(long_card).lower()
