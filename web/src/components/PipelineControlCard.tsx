@@ -41,7 +41,7 @@ export const PIPELINE_JOBS: JobDef[] = [
     key: "paper_run",
     title: "Signal Scan & Enqueue",
     schedule: "n8n ทุก 4 ชม.",
-    description: "สแกนสัญญาณเทรดตามกฎ Pullback/Breakout แล้วเข้าคิวรออนุมัติ (Approval Queue)",
+    description: "สแกนสัญญาณแล้วเข้าคิวรออนุมัติ (Approval Queue)",
     dataKey: "paper",
   },
   {

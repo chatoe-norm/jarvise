@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type AutoDecideConfigPayload, type EvGateStatus, type PaperAutoStatus } from "@/lib/api";
 import { evGateOwnerCopy, resolveReasonLabel } from "@/lib/copy";
+import { fullyAutonomousLine } from "@/lib/fullyAutonomous";
 import { cn, relativeAge } from "@/lib/utils";
 
 interface PaperAutoDecideCardProps {
@@ -281,10 +282,10 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
                 หรือถึงจุด Stop / Profit Lock โดยไม่ต้องรอผู้ใช้กด
               </p>
             </div>
-            {enabled ? (
+            {fullyAutonomousLine(enabled) ? (
               <div className="mt-3 flex items-center gap-1.5 text-[11px] font-mono text-emerald-400">
                 <span>●</span>
-                <span>สถานะ: ทำงานอัตโนมัติเต็มรูปแบบ (Fully Autonomous)</span>
+                <span>{fullyAutonomousLine(enabled)}</span>
               </div>
             ) : null}
           </div>

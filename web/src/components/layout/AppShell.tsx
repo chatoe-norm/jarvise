@@ -122,7 +122,7 @@ export function AppShell({
             </Badge>
           </div>
           <div className="pt-1 text-[11px] text-[var(--color-muted)] text-center font-mono">
-            Hostinger KVM · :8080
+            Hostinger KVM
           </div>
         </div>
       </aside>
