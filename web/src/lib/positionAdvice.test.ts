@@ -81,7 +81,8 @@ describe("evaluateCloseRecommendation - 5 Levels Indicator", () => {
     };
     const rec = evaluateCloseRecommendation(pos);
     assert.equal(rec.level, 4);
-    assert.equal(rec.label, "ควรปิด");
+    assert.equal(rec.label, "ปล่อยให้ trail ทำงาน");
+    assert.match(rec.tooltip, /ไม่ใช่คำแนะนำของระบบ/);
     assert.equal(rec.dotColor, "#15803d");
     assert.ok(rec.rMultiple != null && rec.rMultiple >= 1.0 && rec.rMultiple < 1.5);
   });
@@ -96,7 +97,8 @@ describe("evaluateCloseRecommendation - 5 Levels Indicator", () => {
     };
     const rec = evaluateCloseRecommendation(pos);
     assert.equal(rec.level, 5);
-    assert.equal(rec.label, "ควรปิดอย่างยิ่ง");
+    assert.equal(rec.label, "กำไรสูง · trail ล็อกอยู่");
+    assert.match(rec.tooltip, /ไม่ใช่คำแนะนำของระบบ/);
     assert.equal(rec.dotColor, "#22c55e");
     assert.ok(rec.rMultiple != null && rec.rMultiple >= 1.5);
   });

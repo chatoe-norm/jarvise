@@ -75,9 +75,9 @@ def _headline(rec: str, action: str, conf: float, *, position_side: str | None =
     if action == "flat":
         return "แนะนำ: REJECT — สัญญาณ flat (approve ไม่เปิดตำแหน่งใหม่; ถ้ามีตำแหน่งเปิดอยู่จะถูกปิด)"
     if rec == "approve":
-        return f"แนะนำ: APPROVE (ความมั่นใจ {conf:.2f})"
+        return f"ผ่านเกณฑ์สัญญาณ (ความมั่นใจ {conf:.2f})"
     if rec == "approve_with_caution":
-        return f"แนะนำ: APPROVE แบบระวัง (ความมั่นใจ {conf:.2f} — ขนาดเล็ก, ดู stop ให้ดี)"
+        return f"ผ่านเกณฑ์แบบระวัง (ความมั่นใจ {conf:.2f} — ขนาดเล็ก, ดู stop ให้ดี)"
     return f"แนะนำ: REJECT (ความมั่นใจ {conf:.2f} ต่ำกว่าเกณฑ์ {CAUTION_CONF:.2f})"
 
 
@@ -202,6 +202,23 @@ def news_context_block(report: Mapping[str, Any] | None) -> dict[str, Any] | Non
     return {"not_a_trade_signal": True, "lines": lines}
 
 
+def evidence_line(gate: Mapping[str, Any] | None) -> str | None:
+    """Owner copy when the current auto-sample EV is negative.
+
+    Does not read or write the latch. Callers pass the status they already computed.
+    """
+    if not gate:
+        return None
+    ev = _f(gate.get("ev"))
+    # A latch with no current EV number must not claim the sample is still negative.
+    if ev is None or ev >= 0:
+        return None
+    n = gate.get("n")
+    n_txt = "—" if n is None else str(int(n))
+    ev_txt = "—" if ev is None else f"{ev:.2f}"
+    return f"หลักฐานย้อนหลัง: EV ของระบบยังติดลบ (n={n_txt}, EV {ev_txt}) — การ Approve เป็นการตัดสินใจของคุณ"
+
+
 def build_recommendation(
     *,
     approval: Mapping[str, Any],
@@ -214,6 +231,7 @@ def build_recommendation(
     claude: Mapping[str, Any] | None,
     signal_candle: Mapping[str, Any] | None = None,
     news_report: Mapping[str, Any] | None = None,
+    ev_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     action = str(approval.get("action") or "flat").lower()
     conf = float(approval.get("confidence_score") or 0.0)
@@ -239,6 +257,7 @@ def build_recommendation(
         "recommendation_source": "claude" if claude else "template",
         "confidence_label": confidence_label(conf),
         "headline": _headline(rec, action, conf, position_side=position_side),
+        "evidence": evidence_line(ev_gate),
         "what_happened": what,
         "risk": _risk(approval, candle, analysis, account),
         "doctrine": list(doctrine),

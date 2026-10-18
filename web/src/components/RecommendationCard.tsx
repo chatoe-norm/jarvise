@@ -11,8 +11,8 @@ const REC_LABEL: Record<
   RecommendationPayload["recommendation"],
   { text: string; variant: "ok" | "default" | "danger" }
 > = {
-  approve: { text: "แนะนำ APPROVE", variant: "ok" },
-  approve_with_caution: { text: "APPROVE ได้ แต่ระวัง", variant: "default" },
+  approve: { text: "ผ่านเกณฑ์สัญญาณ", variant: "ok" },
+  approve_with_caution: { text: "ผ่านเกณฑ์แบบระวัง", variant: "default" },
   reject: { text: "แนะนำ REJECT", variant: "danger" },
 };
 
@@ -62,6 +62,9 @@ export function RecommendationCard({
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={rec.variant}>{rec.text}</Badge>
         <span className="font-medium">{data.headline}</span>
+        {data.evidence ? (
+          <p className="w-full text-xs text-[var(--color-muted)]">{data.evidence}</p>
+        ) : null}
         <span className="text-xs text-[var(--color-muted)]">
           ความมั่นใจ: {data.confidence_label}
         </span>

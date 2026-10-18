@@ -3,6 +3,7 @@ from jarvise_paper.recommendation import (
     build_recommendation,
     confidence_label,
     doctrine_query,
+    evidence_line,
     template_recommendation,
 )
 
@@ -71,7 +72,8 @@ def test_card_approve_with_risk_math() -> None:
     assert card["recommendation"] == "approve"
     assert card["recommendation_source"] == "template"
     assert card["confidence_label"] == "ปานกลาง-สูง"
-    assert card["headline"] == "แนะนำ: APPROVE (ความมั่นใจ 0.75)"
+    assert card["headline"] == "ผ่านเกณฑ์สัญญาณ (ความมั่นใจ 0.75)"
+    assert card["evidence"] is None
     assert card["risk"]["notional_usd"] == 112.5
     assert card["risk"]["invalidation_price"] == 83500.0
     # 112.5 * |85000-83500| / 85000 + round-trip 20 bps = 2.210...
@@ -128,6 +130,7 @@ def test_card_gate_note_when_conf_below_approve_and_no_doctrine() -> None:
         signal_candle=pullback,
     )
     assert card["recommendation"] == "approve_with_caution"
+    assert card["headline"].startswith("ผ่านเกณฑ์แบบระวัง")
     assert card["confidence_breakdown"]["total"] == 0.65
     assert any("auto-decide จะ defer" in line for line in card["what_happened"])
     # With doctrine present, note should not appear
@@ -199,6 +202,26 @@ def test_card_claude_source_and_open_position_and_safety_reasons() -> None:
     assert card["claude"]["decision"] == "defer"
     assert any("ถือ BTCUSDT อยู่แล้ว" in line and "ไม่เติมไม้" in line for line in card["checklist"])
     assert any("book_stale_ms=1" in line for line in card["what_happened"])
+
+
+def test_evidence_line_when_auto_ev_is_negative() -> None:
+    line = evidence_line({"latched": True, "n": 10, "ev": -0.65})
+    assert line == ("หลักฐานย้อนหลัง: EV ของระบบยังติดลบ (n=10, EV -0.65) — การ Approve เป็นการตัดสินใจของคุณ")
+    assert evidence_line({"latched": False, "n": 3, "ev": 1.2}) is None
+    assert evidence_line({"latched": True, "n": 0, "ev": None}) is None
+    card = build_recommendation(
+        approval=APPROVAL,
+        candle=CANDLE,
+        analysis=ANALYSIS,
+        account=ACCOUNT,
+        position=None,
+        safety=SAFETY_OK,
+        doctrine=[],
+        claude=None,
+        ev_gate={"latched": True, "n": 10, "ev": -0.65},
+    )
+    assert card["evidence"] == line
+    assert card["recommendation"] == "approve"
 
 
 def test_trend_up_ignores_close_below_ema20() -> None:
