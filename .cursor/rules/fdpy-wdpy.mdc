@@ -24,6 +24,10 @@ Means: **commit → open/update PR → merge to `main` → wait VPS deploy**.
 
 Means: **wait for the in-flight queue** (PR checks, `CI` on `main`, `Deploy`) until it finishes. Do **not** start another `fdpy` (second commit/merge) until that queue is idle. After wait, report status; do not merge unless the user also said `fdpy`.
 
+## When a prompt says STOP or "do not merge"
+
+That instruction overrides `fdpy` for that PR. Open the PR, report its URL, and wait. Merge only after the named reviewer (for example Claude Sonnet 5.5 or Claude Code) has approved in this session. "Checks passed" is not a review. This also applies to docs-only PRs that a prompt marks as stage A.
+
 ## Uncommitted `AGENTS.md` from the memory updater
 
 The memory updater edits `AGENTS.md` in place and leaves it uncommitted. Do not open a PR only for it.
