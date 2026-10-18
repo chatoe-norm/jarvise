@@ -1,6 +1,11 @@
 """Weekly report text. Read-only snapshots, no ledger writes."""
 
-from jarvise_notify.weekly import SHADOW_WINDOW_ACTION, build_weekly_report, format_weekly_report
+from jarvise_notify.weekly import (
+    SHADOW_WINDOW_ACTION,
+    _health_items,
+    build_weekly_report,
+    format_weekly_report,
+)
 
 
 def _quiet_week() -> dict:
@@ -76,3 +81,30 @@ def test_weekly_send_soft_fails(monkeypatch) -> None:
     assert report["ok"] is True
     assert report["telegram_sent"] is False
     assert report["telegram_error"] == "send_failed"
+
+
+def test_ingest_age_uses_health_blob_when_ingest_has_no_at_ms() -> None:
+    now = 1_700_000_000_000
+    fresh = _health_items(
+        {
+            "ingest": {"ok": True, "paper_only": True, "exit_code": 0, "timeframes": {}},
+            "ingest_health": {"ok": True, "at_ms": now - 5 * 60_000},
+            "digest_age_hours": 2.0,
+            "risk_monitor": {"ok": True, "at_ms": now - 5 * 60_000},
+        },
+        now_ms=now,
+        freshness={"market_safety_max_age_min": 90, "risk_monitor_stale_after_min": 35},
+    )
+    ingest = fresh[0]
+    assert ingest["level"] == "OK"
+    stale = _health_items(
+        {
+            "ingest": {"ok": True, "exit_code": 0},
+            "ingest_health": {"ok": True, "at_ms": now - 200 * 60_000},
+            "digest_age_hours": 2.0,
+            "risk_monitor": {"ok": True, "at_ms": now - 5 * 60_000},
+        },
+        now_ms=now,
+        freshness={"market_safety_max_age_min": 90, "risk_monitor_stale_after_min": 35},
+    )
+    assert stale[0]["level"] == "ดู"

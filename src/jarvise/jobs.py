@@ -359,6 +359,7 @@ def run_ingest() -> tuple[int, dict[str, Any]]:
             "paper_only": True,
             "exit_code": exit_code,
             "timeframes": by_tf,
+            "at_ms": int(time.time() * 1000),
         }
         if timed_out:
             payload["error"] = f"timeout after {job_timeout_s('ingest'):.0f}s"
@@ -645,6 +646,11 @@ def run_risk_monitor() -> tuple[int, dict[str, Any]]:
             }
             _publish_best_effort(key, payload)
             return 1, payload
+        was_engaged = False
+        try:
+            was_engaged = kill_switch_engaged()
+        except Exception:  # noqa: BLE001 — an unreadable switch already fail-closes
+            was_engaged = True
         conn = open_db(path)
         try:
             try:
@@ -670,7 +676,7 @@ def run_risk_monitor() -> tuple[int, dict[str, Any]]:
                 }
         finally:
             conn.close()
-        if payload.get("halted"):
+        if payload.get("halted") and not was_engaged:
             notify_risk_halt(str(payload.get("halt_reason") or "halt"))
         _publish_best_effort(key, payload)
         return (0 if payload.get("ok") else 1), payload

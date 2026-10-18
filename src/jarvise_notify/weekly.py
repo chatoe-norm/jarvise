@@ -15,7 +15,7 @@ from jarvise_ingest.db import (
     open_db,
 )
 from jarvise_notify.telegram import notify_configured, send_telegram_message
-from jarvise_paper.feedback import auto_ev_gate_status
+from jarvise_paper.feedback import WINDOW_30D_MS, metrics_by_decision_source, read_ev_gate_latch
 from jarvise_paper.metrics import STARTING_PAPER_EQUITY, reconstruct_closed_trades
 from jarvise_paper.shadow_veto import WINDOW_DAYS, digest_dir, score_shadow
 from jarvise_risk import get_paper_auto_decide_enabled, kill_switch_state
@@ -191,8 +191,14 @@ def _health_items(
     snapshot_bits: dict[str, Any], *, now_ms: int, freshness: dict[str, Any]
 ) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
-    ingest = snapshot_bits.get("ingest")
-    ingest_age = _age_min((ingest or {}).get("at_ms") if isinstance(ingest, dict) else None, now_ms)
+    ingest = snapshot_bits.get("ingest") if isinstance(snapshot_bits.get("ingest"), dict) else None
+    health_blob = (
+        snapshot_bits.get("ingest_health") if isinstance(snapshot_bits.get("ingest_health"), dict) else None
+    )
+    ingest_at = None if ingest is None else ingest.get("at_ms")
+    if ingest_at is None and health_blob is not None:
+        ingest_at = health_blob.get("at_ms")
+    ingest_age = _age_min(ingest_at, now_ms)
     max_age = float(freshness.get("market_safety_max_age_min") or 90)
     if ingest_age is None:
         items.append({"line": "ingest ไม่มีสถานะ", "level": MARK_LOOK, "note": "ingest ไม่มีสถานะ"})
@@ -243,10 +249,10 @@ def _job_items(blobs: dict[str, Any]) -> list[dict[str, str]]:
     for name, _key in JOB_STATUS_KEYS:
         payload = blobs.get(name)
         if not isinstance(payload, dict):
-            items.append({"name": name, "result": "ไม่มีผล", "level": MARK_LOOK, "note": f"{name} ไม่มีผล"})
+            items.append({"name": name, "result": "ไม่มีผล", "level": MARK_OK, "note": ""})
             continue
         if payload.get("skipped"):
-            items.append({"name": name, "result": "ข้าม", "level": MARK_LOOK, "note": f"{name} ข้าม"})
+            items.append({"name": name, "result": "ข้าม", "level": MARK_OK, "note": ""})
             continue
         if payload.get("ok") is False:
             items.append({"name": name, "result": "ล้ม", "level": MARK_DO, "note": f"{name} ล้ม"})
@@ -294,8 +300,14 @@ def collect_weekly_snapshot(*, now_ms: int | None = None) -> dict[str, Any]:
             recent = [trade for trade in trades if int(trade["close_ts"]) >= week_start]
             closed_7d = len(recent)
             pnl_7d = round(sum(float(trade["pnl_usd"]) for trade in recent), 8)
-            gate = auto_ev_gate_status(conn, now_ms=ts)
-            ev_gate = {"latched": bool(gate.get("latched")), "n": gate.get("n"), "ev": gate.get("ev")}
+            latch = read_ev_gate_latch(conn)
+            by_src = metrics_by_decision_source(conn, since_ms=ts - WINDOW_30D_MS)
+            auto = by_src.get("auto") or {}
+            ev_gate = {
+                "latched": latch is not None,
+                "n": auto.get("closed_trades"),
+                "ev": auto.get("expected_value_ev"),
+            }
         finally:
             conn.close()
     return {
@@ -314,6 +326,7 @@ def collect_weekly_snapshot(*, now_ms: int | None = None) -> dict[str, Any]:
         "health": _health_items(
             {
                 "ingest": blobs.get("ingest"),
+                "ingest_health": blobs.get("ingest_health"),
                 "risk_monitor": blobs.get("risk_monitor"),
                 "digest_age_hours": _digest_age_hours(digest_dir(), now_ms=ts),
             },
