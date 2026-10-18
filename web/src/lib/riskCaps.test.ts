@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { capsToRaw, validateRiskCap, validateRiskCaps } from "./riskCaps.ts";
+import { capsToRaw, canSaveRiskCaps, validateRiskCap, validateRiskCaps } from "./riskCaps.ts";
 
 const GOOD = {
   max_notional_per_order: 2000,
@@ -42,5 +42,14 @@ describe("validateRiskCaps", () => {
     const bad = validateRiskCaps({ ...capsToRaw(GOOD), max_daily_loss_usd: "" });
     assert.equal(bad.caps, null);
     assert.deepEqual(Object.keys(bad.errors), ["max_daily_loss_usd"]);
+  });
+});
+
+describe("canSaveRiskCaps", () => {
+  it("refuses to save before the server caps have loaded", () => {
+    assert.equal(canSaveRiskCaps({ loaded: false, dirty: true, saving: false, hasErrors: false }), false);
+    assert.equal(canSaveRiskCaps({ loaded: true, dirty: true, saving: false, hasErrors: false }), true);
+    assert.equal(canSaveRiskCaps({ loaded: true, dirty: false, saving: false, hasErrors: false }), false);
+    assert.equal(canSaveRiskCaps({ loaded: true, dirty: true, saving: false, hasErrors: true }), false);
   });
 });

@@ -14,6 +14,9 @@ from jarvise_ingest.db import list_paper_positions, range_since_entry, set_posit
 
 DEFAULT_BREAKEVEN_R = 0.5
 DEFAULT_FEE_BPS = 20.0
+# Names for the existing 1R trail milestone. Both stay 1.0.
+DEFAULT_TRAIL_AFTER_R = 1.0
+DEFAULT_TRAIL_DISTANCE_R = 1.0
 
 
 def trail_stop_with_source(
@@ -53,8 +56,8 @@ def trail_stop_with_source(
         favorable = entry - float(best_low)
 
         # Check Stage 2: 1R trail
-        if favorable >= risk:
-            candidate = float(best_low) + risk
+        if favorable >= DEFAULT_TRAIL_AFTER_R * risk:
+            candidate = float(best_low) + DEFAULT_TRAIL_DISTANCE_R * risk
             source = "trail"
         # Check Stage 1: Breakeven (entry minus fee buffer for short)
         elif breakeven_r is not None and favorable >= breakeven_r * risk:
@@ -71,8 +74,8 @@ def trail_stop_with_source(
         favorable = float(best_high) - entry
 
         # Check Stage 2: 1R trail
-        if favorable >= risk:
-            candidate = float(best_high) - risk
+        if favorable >= DEFAULT_TRAIL_AFTER_R * risk:
+            candidate = float(best_high) - DEFAULT_TRAIL_DISTANCE_R * risk
             source = "trail"
         # Check Stage 1: Breakeven (entry plus fee buffer for long)
         elif breakeven_r is not None and favorable >= breakeven_r * risk:

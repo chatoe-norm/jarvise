@@ -1,4 +1,4 @@
-export type CloseAdviceLevel = 1 | 2 | 3 | 4 | 5;
+export type CloseAdviceLevel = 0 | 1 | 2 | 3 | 4 | 5;
 
 export interface CloseRecommendation {
   level: CloseAdviceLevel;
@@ -40,52 +40,63 @@ export function evaluateCloseRecommendation(pos: {
       ? uPnl / (qty * risk)
       : null;
 
+  if (rMultiple == null) {
+    return {
+      level: 0,
+      label: "R unknown",
+      actionText: "R unknown",
+      dotColor: "var(--color-muted)",
+      dotClass: "bg-[var(--color-muted)]",
+      btnClass: "border-[var(--color-border)] text-[var(--color-muted)]",
+      textClass: "text-[var(--color-muted)]",
+      tooltip: "คำนวณ R ไม่ได้ เพราะไม่มีจุดตัดหรือจำนวน ไม่เดาจากจำนวนดอลลาร์",
+      rMultiple: null,
+    };
+  }
+
   // Level 5: กำไรสูง · trail ล็อกอยู่ (R >= 1.5)
-  if ((rMultiple != null && rMultiple >= 1.5) || (rMultiple == null && uPnl >= 150)) {
+  if (rMultiple >= 1.5) {
     return {
       level: 5,
       label: "กำไรสูง · trail ล็อกอยู่",
       actionText: "trail ล็อกอยู่ (>= +1.5R)",
-      dotColor: "#22c55e",
-      dotClass: "bg-[#22c55e] shadow-[0_0_8px_#22c55e] animate-pulse ring-2 ring-[#4ade80]/60",
-      btnClass:
-        "border-[#22c55e] text-[#22c55e] bg-[#22c55e]/15 hover:bg-[#22c55e]/25 shadow-[0_0_12px_rgba(34,197,94,0.35)]",
-      textClass: "text-[#22c55e] font-bold drop-shadow-[0_0_4px_rgba(34,197,94,0.4)]",
-      tooltip: `ระดับ 5: กำไรสูง · trail ล็อกอยู่ (กำไร ${rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`}) จุดตัดตามกำไรอยู่แล้ว ปิดมือได้ แต่ไม่ใช่คำแนะนำของระบบ`,
+      dotColor: "var(--color-ok)",
+      dotClass: "bg-[var(--color-ok)]",
+      btnClass: "border-[var(--color-ok)] text-[var(--color-ok)] bg-[var(--color-ok)]/15",
+      textClass: "text-[var(--color-ok)] font-bold",
+      tooltip: `ระดับ 5: กำไรสูง · trail ล็อกอยู่ (กำไร +${rMultiple.toFixed(2)}R) จุดตัดตามกำไรอยู่แล้ว ปิดมือได้ แต่ไม่ใช่คำแนะนำของระบบ`,
       rMultiple,
     };
   }
 
   // Level 4: ปล่อยให้ trail ทำงาน (1.0 <= R < 1.5)
-  if ((rMultiple != null && rMultiple >= 1.0) || (rMultiple == null && uPnl >= 80)) {
+  if (rMultiple >= 1.0) {
     return {
       level: 4,
       label: "ปล่อยให้ trail ทำงาน",
       actionText: "trail ขยับ 1R (>= +1R)",
-      dotColor: "#15803d",
-      dotClass: "bg-[#16a34a] ring-2 ring-[#15803d]/60",
-      btnClass:
-        "border-[#16a34a] text-[#16a34a] bg-[#16a34a]/10 hover:bg-[#16a34a]/20",
-      textClass: "text-[#16a34a] font-semibold",
-      tooltip: `ระดับ 4: ปล่อยให้ trail ทำงาน (กำไร ${rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`}) จุดตัดขยับ 1R จากราคาที่ดีที่สุด ปิดมือได้ แต่ไม่ใช่คำแนะนำของระบบ`,
+      dotColor: "var(--color-ok)",
+      dotClass: "bg-[var(--color-ok)]",
+      btnClass: "border-[var(--color-ok)] text-[var(--color-ok)] bg-[var(--color-ok)]/10",
+      textClass: "text-[var(--color-ok)] font-semibold",
+      tooltip: `ระดับ 4: ปล่อยให้ trail ทำงาน (กำไร +${rMultiple.toFixed(2)}R) จุดตัดขยับ 1R จากราคาที่ดีที่สุด ปิดมือได้ แต่ไม่ใช่คำแนะนำของระบบ`,
       rMultiple,
     };
   }
 
   // Level 3: พิจารณาได้ (0.5 <= R < 1.0) - สีเหลือง (Yellow / Amber)
-  if ((rMultiple != null && rMultiple >= 0.5) || (rMultiple == null && uPnl > 20)) {
+  if (rMultiple >= 0.5) {
     const source = String(pos.stop_source || "");
     const locked = source === "breakeven" || source === "trail";
-    const gain = rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`;
+    const gain = `+${rMultiple.toFixed(2)}R`;
     return {
       level: 3,
       label: "พิจารณาได้",
       actionText: locked ? "บังทุนแล้ว (BE Locked)" : "จุดตัดยังไม่ขยับ",
-      dotColor: "#eab308",
-      dotClass: "bg-[#eab308] ring-2 ring-[#eab308]/50",
-      btnClass:
-        "border-[#eab308] text-[#eab308] bg-[#eab308]/10 hover:bg-[#eab308]/20",
-      textClass: "text-[#eab308] font-medium",
+      dotColor: "var(--color-warn)",
+      dotClass: "bg-[var(--color-warn)]",
+      btnClass: "border-[var(--color-warn)] text-[var(--color-warn)] bg-[var(--color-warn)]/10",
+      textClass: "text-[var(--color-warn)] font-medium",
       tooltip: locked
         ? `ระดับ 3: พิจารณาได้ (กำไร ${gain}) ขยับจุดตัดเสมอตัว (BE) แล้ว ต้นทุนปลอดภัย สามารถถือลุ้น 1R หรือปิดหากตลาดเริ่มชะลอตัว`
         : `ระดับ 3: พิจารณาได้ (กำไร ${gain}) จุดตัดยังไม่ขยับจากจุดเริ่ม ยังไม่ใช่บังทุน`,
@@ -99,12 +110,11 @@ export function evaluateCloseRecommendation(pos: {
       level: 2,
       label: "ยังไม่แนะนำ",
       actionText: "เพิ่งเริ่มวิ่ง (< +0.5R)",
-      dotColor: "#f97316",
-      dotClass: "bg-[#f97316] ring-2 ring-[#f97316]/50",
-      btnClass:
-        "border-[#f97316]/70 text-[#f97316] bg-[#f97316]/10 hover:bg-[#f97316]/20",
-      textClass: "text-[#f97316] font-medium",
-      tooltip: `ระดับ 2: ยังไม่แนะนำให้ปิด (กำไร ${rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`}) กำไรยังไม่ถึงจุด Breakeven (+0.5R) ควรปล่อยรันตามแผน`,
+      dotColor: "var(--color-warn)",
+      dotClass: "bg-[var(--color-warn)]",
+      btnClass: "border-[var(--color-warn)]/70 text-[var(--color-warn)] bg-[var(--color-warn)]/10",
+      textClass: "text-[var(--color-warn)] font-medium",
+      tooltip: `ระดับ 2: ยังไม่แนะนำให้ปิด (กำไร +${rMultiple.toFixed(2)}R) กำไรยังไม่ถึงจุด Breakeven (+0.5R) ควรปล่อยรันตามแผน`,
       rMultiple,
     };
   }
@@ -114,12 +124,11 @@ export function evaluateCloseRecommendation(pos: {
     level: 1,
     label: "ไม่ควรปิด",
     actionText: "อยู่ในแผน Stop 1.5 ATR",
-    dotColor: "#ef4444",
-    dotClass: "bg-[#ef4444] ring-2 ring-[#ef4444]/50",
-    btnClass:
-      "border-[#ef4444]/60 text-[#ef4444] bg-[#ef4444]/10 hover:bg-[#ef4444]/20",
-    textClass: "text-[#ef4444] font-medium",
-    tooltip: `ระดับ 1: ไม่ควรปิด (ติดลบ ${rMultiple != null ? `${rMultiple.toFixed(2)}R` : `$${uPnl.toFixed(2)}`}) ยังอยู่ในขอบเขตความเสี่ยงตามระบบ 1.5× ATR ไม่ควรใช้อารมณ์ Panic Sell ตัดก่อนจุดตัด`,
+    dotColor: "var(--color-danger)",
+    dotClass: "bg-[var(--color-danger)]",
+    btnClass: "border-[var(--color-danger)]/60 text-[var(--color-danger)] bg-[var(--color-danger)]/10",
+    textClass: "text-[var(--color-danger)] font-medium",
+    tooltip: `ระดับ 1: ไม่ควรปิด (ติดลบ ${rMultiple.toFixed(2)}R) ยังอยู่ในขอบเขตความเสี่ยงตามระบบ 1.5× ATR ไม่ควรใช้อารมณ์ Panic Sell ตัดก่อนจุดตัด`,
     rMultiple,
   };
 }

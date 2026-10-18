@@ -162,7 +162,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
                 size="sm"
                 variant="outline"
                 onClick={() => void copyEnv()}
-                className="h-11 sm:h-7 text-[11px] font-mono border-[var(--color-border)]"
+                className="h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-[11px] font-mono border-[var(--color-border)]"
               >
                 {copied ? "✓ คัดลอกแล้ว" : "📋 คัดลอก .env"}
               </Button>
@@ -338,7 +338,7 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
             Read-only spot balances. ไม่มีการส่งคำสั่งจากหน้านี้
           </p>
         </div>
-        <Button variant="outline" disabled={loading} onClick={() => void load()} className="h-11 sm:h-9">
+        <Button variant="outline" disabled={loading} onClick={() => void load()} className="h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11">
           {loading ? "กำลังโหลด…" : "↻ โหลดใหม่"}
         </Button>
       </div>

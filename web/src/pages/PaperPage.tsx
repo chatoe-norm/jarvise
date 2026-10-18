@@ -13,8 +13,9 @@ import {
   PaginationPrevious,
 } from "@/components/ui/pagination";
 import { api, type LossLesson, type MetricsPayload, type PaperPayload } from "@/lib/api";
-import { buildEquityPoints } from "@/lib/equity";
 import { decisionSourceLabel, evGateOwnerCopy } from "@/lib/copy";
+import { ruleText, type DashboardRules } from "@/lib/dashboardRules";
+import { buildEquityPoints } from "@/lib/equity";
 import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
 import { cn, formatDecisionStamp, formatNum, formatQty } from "@/lib/utils";
 
@@ -107,6 +108,7 @@ function visibleSourceKeys(src: Record<string, unknown>): string[] {
 export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => void } = {}) {
   const [paper, setPaper] = useState<PaperPayload | null>(null);
   const [metrics, setMetrics] = useState<MetricsPayload | null>(null);
+  const [rules, setRules] = useState<DashboardRules | null>(null);
   // Action errors (close, persist) stay until the next action; poll errors are separate
   // so a background refresh can't wipe a failed close message.
   const [error, setError] = useState<string | null>(null);
@@ -168,9 +170,10 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
   async function load() {
     try {
       // Metrics too: a stop hit changes EV, the ledger and the equity curve, not only positions.
-      const [p, m] = await Promise.all([api.paper(), api.metrics()]);
+      const [p, m, status] = await Promise.all([api.paper(), api.metrics(), api.status()]);
       setPaper(p);
       setMetrics(m);
+      setRules(status.rules ?? null);
       setPollError(null);
     } catch (err) {
       setPollError(err instanceof Error ? err.message : String(err));
@@ -406,7 +409,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
             <div>
               <CardTitle>Open positions</CardTitle>
               <CardDescription>
-                อัปเดตทุก 30 วินาที จากแท่งปิดล่าสุด · คุ้มครองด้วยจุดตัด 1.5× ATR, บังทุน 0.5R และ Trailing 1.0R
+                อัปเดตทุก 30 วินาที จากแท่งปิดล่าสุด · คุ้มครองด้วยจุดตัด {ruleText(rules?.atr_stop_mult, "× ATR")}, บังทุน {ruleText(rules?.breakeven_r, "R")} และ Trailing {ruleText(rules?.trail_distance_r, "R")}
               </CardDescription>
             </div>
             {positions.length > 0 ? (
@@ -498,15 +501,15 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                                 </span>
                                 {stopSource === "breakeven" ? (
                                   <Badge variant="ok" className="text-[10px] px-1 py-0">
-                                    บังทุน (BE +20bps)
+                                    บังทุน (BE +{ruleText(rules?.breakeven_buffer_bps)}bps)
                                   </Badge>
                                 ) : stopSource === "trail" ? (
                                   <Badge variant="default" className="text-[10px] px-1 py-0">
-                                    ล็อกกำไร (Trail 1R)
+                                    ล็อกกำไร (Trail {ruleText(rules?.trail_distance_r, "R")})
                                   </Badge>
                                 ) : (
                                   <Badge variant="outline" className="text-[10px] px-1 py-0">
-                                    จุดตัด 1.5× ATR
+                                    จุดตัด {ruleText(rules?.atr_stop_mult, "× ATR")}
                                   </Badge>
                                 )}
                               </div>

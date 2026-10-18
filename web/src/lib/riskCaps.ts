@@ -44,3 +44,13 @@ export function capsToRaw(caps: RiskCapsPayload): Record<RiskCapField, string> {
   for (const field of Object.keys(caps) as RiskCapField[]) out[field] = String(caps[field]);
   return out;
 }
+
+/** Save stays off until the server caps have loaded. Defaults must not overwrite them. */
+export function canSaveRiskCaps(opts: {
+  loaded: boolean;
+  dirty: boolean;
+  saving: boolean;
+  hasErrors: boolean;
+}): boolean {
+  return opts.loaded && opts.dirty && !opts.saving && !opts.hasErrors;
+}

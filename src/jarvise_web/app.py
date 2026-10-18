@@ -20,6 +20,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from jarvise.model_routing import load_model_routing_matrix
+from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_analyze.explain import confidence_breakdown
 from jarvise_analyze.suitability import evaluate_symbol_suitability
 from jarvise_context.news_sources import load_report, news_home_view
@@ -50,11 +51,19 @@ from jarvise_ingest.db import (
     universe_as_of,
 )
 from jarvise_ingest.health import BACKFILL_HINT, ingest_health
-from jarvise_ingest.universe import PAPER_CORE, PAPER_LIQUID, preset_members, seed_named_universe
+from jarvise_ingest.timeframes import INTERVAL_MS
+from jarvise_ingest.universe import (
+    PAPER_CORE,
+    PAPER_LIQUID,
+    preset_members,
+    preset_sizes,
+    seed_named_universe,
+)
 from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.auto_decide import load_auto_decide_config
 from jarvise_paper.close import close_position
+from jarvise_paper.engine import load_paper_fee_bps
 from jarvise_paper.feedback import (
     auto_ev_gate_status,
     list_owner_decisions,
@@ -65,6 +74,14 @@ from jarvise_paper.feedback import (
 )
 from jarvise_paper.ledger import load_paper_ledger
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
+from jarvise_paper.profit_lock import (
+    DEFAULT_BREAKEVEN_R,
+    DEFAULT_TRAIL_AFTER_R,
+    DEFAULT_TRAIL_DISTANCE_R,
+)
+from jarvise_paper.profit_lock import (
+    DEFAULT_FEE_BPS as BREAKEVEN_BUFFER_BPS,
+)
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
 from jarvise_risk import (
     HARD_MAX_RISK_PER_TRADE_PCT,
@@ -77,6 +94,7 @@ from jarvise_risk import (
     set_paper_auto_decide_enabled,
     set_risk_cap,
 )
+from jarvise_risk.market_safety import load_market_safety_config
 from jarvise_trade import live_trading_enabled
 from jarvise_web.outcomes import derive_outcome, empty_outcome_summary, summarize_outcomes
 from jarvise_web.schemas import ApprovalsResponse, DashboardResponse
@@ -408,6 +426,8 @@ def status_payload() -> dict[str, Any]:
         "btc_dominance_pct": None if not macro else macro.get("btc_dominance_pct"),
         "global_market_cap_usd": None if not macro else macro.get("global_market_cap_usd"),
         "sentiment_note": (None if macro and macro.get("fear_greed_index") is not None else "ไม่มีข้อมูล"),
+        "rules": dashboard_rules(),
+        "freshness": dashboard_freshness(),
     }
 
 
@@ -880,11 +900,38 @@ def active_universe_id() -> str:
     return os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_core"
 
 
+def paper_timeframe() -> str:
+    return os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+
+
+def dashboard_rules() -> dict[str, Any]:
+    """Read-only labels for numbers the dashboard used to hardcode."""
+    return {
+        "atr_stop_mult": ATR_STOP_MULT,
+        "breakeven_r": DEFAULT_BREAKEVEN_R,
+        "breakeven_buffer_bps": BREAKEVEN_BUFFER_BPS,
+        "trail_after_r": DEFAULT_TRAIL_AFTER_R,
+        "trail_distance_r": DEFAULT_TRAIL_DISTANCE_R,
+        "paper_fee_bps": load_paper_fee_bps(),
+        "paper_timeframe": paper_timeframe(),
+    }
+
+
+def dashboard_freshness() -> dict[str, Any]:
+    """Stale thresholds from market safety and the paper bar. No new policy."""
+    tf = paper_timeframe()
+    return {
+        "market_safety_max_age_min": load_market_safety_config().max_age_min,
+        "paper_timeframe": tf,
+        "paper_bar_ms": INTERVAL_MS.get(tf),
+    }
+
+
 @app.get("/api/universe")
 def api_universe(_: None = Depends(require_auth)) -> dict[str, Any]:
     path = db_path()
     universe_id = active_universe_id()
-    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    timeframe = paper_timeframe()
     if not path.exists():
         return {
             "ok": True,
@@ -893,6 +940,7 @@ def api_universe(_: None = Depends(require_auth)) -> dict[str, Any]:
             "active_symbols": [],
             "items": [],
             "backfill_hint": "",
+            "preset_sizes": preset_sizes(),
         }
     conn = open_db(path)
     try:
@@ -933,6 +981,7 @@ def api_universe(_: None = Depends(require_auth)) -> dict[str, Any]:
             "active_symbols": active_symbols,
             "items": items,
             "backfill_hint": hint,
+            "preset_sizes": preset_sizes(),
         }
     finally:
         conn.close()
@@ -1041,7 +1090,7 @@ async def api_universe_add(
     if not path.exists():
         raise HTTPException(status_code=404, detail="Database not found")
     universe_id = active_universe_id()
-    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    timeframe = paper_timeframe()
     htf = (os.environ.get("JARVISE_ANALYZE_HTF") or "1d").strip() or "1d"
     conn = open_db(path)
     try:
@@ -1084,7 +1133,7 @@ async def api_universe_sync(
     if not path.exists():
         raise HTTPException(status_code=404, detail="Database not found")
     universe_id = active_universe_id()
-    timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    timeframe = paper_timeframe()
     htf = (os.environ.get("JARVISE_ANALYZE_HTF") or "1d").strip() or "1d"
 
     conn = open_db(path)
@@ -1545,7 +1594,7 @@ async def api_ingest_backfill(
     if not path.exists():
         raise HTTPException(status_code=404, detail="Database not found")
 
-    tf = timeframe or os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
+    tf = timeframe or paper_timeframe()
     htf = (os.environ.get("JARVISE_ANALYZE_HTF") or "1d").strip() or "1d"
     since_date = since or "2021-01-01"
 

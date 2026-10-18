@@ -14,6 +14,7 @@ from jarvise_ingest.db import (
     upsert_paper_position,
     upsert_pending_approval,
 )
+from jarvise_ingest.universe import PAPER_CORE, PAPER_LIQUID, preset_members
 from jarvise_paper.engine import apply_signal
 from jarvise_web.app import app
 
@@ -412,6 +413,43 @@ def test_api_status_includes_paper_keys(monkeypatch) -> None:
         "known": True,
         "reason": None,
         "error": None,
+    }
+
+
+def test_api_status_rules_and_freshness(monkeypatch) -> None:
+    monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
+    monkeypatch.setenv("JARVISE_PAPER_FEE_BPS", "12")
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY_MAX_AGE_MIN", "45")
+    monkeypatch.setenv("JARVISE_PAPER_TIMEFRAME", "1h")
+    monkeypatch.setattr("jarvise_web.app.redis_get_json", lambda key: {"ok": True, "key": key})
+    monkeypatch.setattr("jarvise_web.app.redis_get", lambda k: "0")
+    monkeypatch.setattr("jarvise_web.app.redis_get_strict", lambda k: "0")
+    monkeypatch.setattr("jarvise_web.app.qdrant_info", lambda: {"exists": True, "points": 0})
+    client = TestClient(app)
+    data = client.get("/api/status").json()
+    rules = data["rules"]
+    assert rules["atr_stop_mult"] == 1.5
+    assert rules["breakeven_r"] == 0.5
+    assert rules["breakeven_buffer_bps"] == 20.0
+    assert rules["trail_after_r"] == 1.0
+    assert rules["trail_distance_r"] == 1.0
+    assert rules["paper_fee_bps"] == 12.0
+    assert rules["paper_timeframe"] == "1h"
+    assert data["freshness"]["market_safety_max_age_min"] == 45.0
+    assert data["freshness"]["paper_timeframe"] == "1h"
+    assert data["freshness"]["paper_bar_ms"] == 3_600_000
+
+
+def test_api_universe_preset_sizes(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
+    monkeypatch.setattr("jarvise_web.app.db_path", lambda: tmp_path / "missing.db")
+    client = TestClient(app)
+    data = client.get("/api/universe").json()
+    assert data["preset_sizes"] == {
+        PAPER_CORE: len(preset_members(PAPER_CORE)),
+        PAPER_LIQUID: len(preset_members(PAPER_LIQUID)),
     }
 
 

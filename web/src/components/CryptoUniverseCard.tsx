@@ -289,7 +289,7 @@ export function CryptoUniverseCard() {
                 Crypto Universe &amp; Trade Suitability Ranking
               </CardTitle>
               <Badge variant="ok" className="font-mono text-xs">
-                {data?.universe_id || "paper_liquid"} ({activeSymbols.size} active)
+                {error || !data?.universe_id ? "—" : `${data.universe_id} (${activeSymbols.size} active)`}
               </Badge>
             </div>
             <CardDescription className="mt-1">
@@ -325,7 +325,7 @@ export function CryptoUniverseCard() {
                 className="px-2 py-1 rounded hover:bg-[#1f2937] text-[var(--color-muted)] hover:text-white transition-colors"
                 title="รีเซ็ตเป็นคู่เหรียญเริ่มต้น (BTC, ETH)"
               >
-                paper_core (2)
+                paper_core ({data?.preset_sizes?.paper_core ?? "—"})
               </button>
               <span className="text-[var(--color-border)]">|</span>
               <button
@@ -335,7 +335,7 @@ export function CryptoUniverseCard() {
                 className="px-2 py-1 rounded hover:bg-[#1f2937] text-[var(--color-muted)] hover:text-white transition-colors"
                 title="รีเซ็ตเป็น 4 สกุลหลัก (BTC, ETH, SOL, BNB)"
               >
-                paper_liquid (4)
+                paper_liquid ({data?.preset_sizes?.paper_liquid ?? "—"})
               </button>
             </div>
           </div>
@@ -807,7 +807,7 @@ function CryptoAssetCard({
             disabled={busy || syncing}
             onClick={onRemove}
             className={cn(
-              "h-11 sm:h-7 text-xs font-mono transition-colors",
+              "h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono transition-colors",
               isConfirmingRemove
                 ? "bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 border border-rose-500/50"
                 : "text-slate-400 hover:text-rose-400 hover:bg-rose-500/10",
@@ -822,7 +822,7 @@ function CryptoAssetCard({
             size="sm"
             disabled={busy || syncing}
             onClick={onAdd}
-            className="h-11 sm:h-7 text-xs font-mono border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+            className="h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
           >
             + เพิ่มเข้า Universe
           </Button>

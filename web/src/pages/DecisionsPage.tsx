@@ -12,6 +12,7 @@ import {
 import { ConfidenceLadder } from "@/components/ConfidenceLadder";
 import { api, type AnalysisExplainPayload, type AnalysisSummary } from "@/lib/api";
 import { outcomeCopy, parseAnalysisOutcome, resolveReasonLabel } from "@/lib/copy";
+import { paperTimeframeLabel } from "@/lib/dashboardRules";
 import { formatDecisionStamp, formatNum, formatThesisDisplay } from "@/lib/utils";
 
 const PAGE_SIZES = [10, 15, 20, 50, 100] as const;
@@ -30,6 +31,7 @@ export function DecisionsPage() {
   const [explains, setExplains] = useState<Record<string, AnalysisExplainPayload>>({});
   const [explainError, setExplainError] = useState<Record<string, string>>({});
   const [explainLoading, setExplainLoading] = useState<Record<string, boolean>>({});
+  const [paperTf, setPaperTf] = useState<string | null>(null);
 
   const load = useCallback(
     async (
@@ -61,6 +63,7 @@ export function DecisionsPage() {
 
   useEffect(() => {
     void load("", "", 1, 10);
+    void api.status().then((status) => setPaperTf(status.rules?.paper_timeframe ?? null)).catch(() => setPaperTf(null));
   }, []);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize) || 1);
@@ -144,7 +147,7 @@ export function DecisionsPage() {
                 className="mt-1 block rounded-md border border-[var(--color-border)] bg-[#161d27] px-2 py-1.5 text-sm text-[var(--color-foreground)] font-mono"
                 value={timeframe}
                 onChange={(e) => setTimeframe(e.target.value)}
-                placeholder="4h"
+                placeholder={paperTf ?? "—"}
               />
             </label>
             <Button type="submit" size="sm">
@@ -190,8 +193,9 @@ export function DecisionsPage() {
               );
             })}
             <span className="ml-2">TF:</span>
-            {["ALL", "4h", "1h", "1d"].map((tf) => {
+            {(paperTf && paperTf !== "1h" && paperTf !== "1d" ? ["ALL", paperTf, "1h", "1d"] : ["ALL", "1h", "1d"]).map((tf) => {
               const active = (tf === "ALL" && !timeframe) || timeframe === tf;
+              const label = tf === "ALL" ? "ALL" : tf === paperTf ? `${paperTimeframeLabel(tf)} (paper)` : tf;
               return (
                 <button
                   key={tf}
@@ -202,13 +206,13 @@ export function DecisionsPage() {
                     setPage(1);
                     void load(symbol, target, 1, pageSize);
                   }}
-                  className={`rounded min-h-11 px-3 sm:min-h-0 sm:px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                  className={`rounded min-h-11 px-3 sm:min-h-0 sm:px-2 py-0.5 font-mono text-[11px] transition-colors pointer-coarse:min-h-11 ${
                     active
                       ? "bg-[var(--color-accent)] text-white font-medium"
                       : "bg-[#161d27] hover:bg-[#1e2a38] text-[var(--color-foreground)]"
                   }`}
                 >
-                  {tf}
+                  {label}
                 </button>
               );
             })}

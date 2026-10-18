@@ -1,4 +1,5 @@
 import { errorMessage } from "@/lib/errors";
+import type { DashboardFreshness, DashboardRules } from "@/lib/dashboardRules";
 import { dashboardSchema, paperSchema, statusSchema } from "@/lib/schemas";
 
 export type EvGateStatus = {
@@ -109,6 +110,8 @@ export type StatusPayload = {
   risk_monitor?: unknown;
   auth_warning?: string | null;
   owner_decisions?: OwnerDecision[];
+  rules?: DashboardRules | null;
+  freshness?: DashboardFreshness | null;
 };
 
 export type OwnerDecision = {
@@ -337,6 +340,7 @@ export type UniversePayload = {
   active_symbols: string[];
   items: CryptoSuitability[];
   backfill_hint?: string;
+  preset_sizes?: { paper_core?: number; paper_liquid?: number };
   error?: string;
 };
 

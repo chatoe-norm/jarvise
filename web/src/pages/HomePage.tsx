@@ -5,8 +5,10 @@ import { KpiStrip } from "@/components/KpiStrip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { MarketContextCard } from "@/components/MarketContextCard";
+import { StateChip } from "@/components/StateChip";
 import type { DashboardPayload, NewsHome, PaperAutoStatus } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
+import { autoDecideChip, paperTimeframeLabel, ruleText, type DashboardRules } from "@/lib/dashboardRules";
 import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
 import { cn, formatNum, formatPrice, relativeAge } from "@/lib/utils";
 import { showQueueJump } from "@/lib/ownerReview";
@@ -63,9 +65,11 @@ function kindVariant(
 function ActivePositionsCard({
   positions,
   autoDecideEnabled,
+  rules,
 }: {
   positions: Array<Record<string, unknown>>;
   autoDecideEnabled: boolean;
+  rules?: DashboardRules | null;
 }) {
   if (!positions || positions.length === 0) {
     return (
@@ -125,7 +129,7 @@ function ActivePositionsCard({
           </div>
         </div>
         <CardDescription>
-          Live simulated positions protected by 1.5× ATR stop, 0.5R Breakeven lock, and 1.0R Trail
+          Live simulated positions protected by {ruleText(rules?.atr_stop_mult, "× ATR")} stop, {ruleText(rules?.breakeven_r, "R")} Breakeven lock, and {ruleText(rules?.trail_distance_r, "R")} Trail
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -174,11 +178,11 @@ function ActivePositionsCard({
                           <span>{formatPrice(stop)}</span>
                           {stopSource === "breakeven" ? (
                             <Badge variant="ok" className="text-[10px] px-1 py-0">
-                              BE +20bps
+                              BE +{ruleText(rules?.breakeven_buffer_bps)}bps
                             </Badge>
                           ) : stopSource === "trail" ? (
                             <Badge variant="default" className="text-[10px] px-1 py-0">
-                              Trail 1R
+                              Trail {ruleText(rules?.trail_distance_r, "R")}
                             </Badge>
                           ) : (
                             <span className="text-[10px] text-[var(--color-muted)]">Initial</span>
@@ -332,10 +336,28 @@ function NewsCard({ news }: { news: NewsHome | null | undefined }) {
 
 function LastAutoDecideCard({
   auto,
+  enabled,
+  latched,
+  paperTimeframe,
 }: {
   auto: PaperAutoStatus | null | undefined;
+  enabled: boolean | undefined;
+  latched: boolean | undefined;
+  paperTimeframe: string | null | undefined;
 }) {
-  if (!auto || typeof auto !== "object") return null;
+  const chip = autoDecideChip(enabled, latched);
+  if (!auto || typeof auto !== "object") {
+    return (
+      <Card className="border-[var(--color-border)]">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <CardTitle className="text-base font-semibold">Latest Auto-Decide Review</CardTitle>
+            <StateChip tone={chip.tone} label={chip.label} />
+          </div>
+        </CardHeader>
+      </Card>
+    );
+  }
   const raw = auto as PaperAutoStatus & { raw?: unknown };
   // Redis can hand back {raw: "..."} when the job wrote non-JSON; say so instead of "Processed".
   const unreadable = raw.raw !== undefined && raw.ok === undefined;
@@ -357,6 +379,7 @@ function LastAutoDecideCard({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <CardTitle className="text-base font-semibold">Latest Auto-Decide Review</CardTitle>
+            <StateChip tone={chip.tone} label={chip.label} />
             <Badge variant={state.variant}>{state.label}</Badge>
           </div>
           <span className="text-xs text-[var(--color-muted)]">
@@ -365,7 +388,7 @@ function LastAutoDecideCard({
           </span>
         </div>
         <CardDescription>
-          Claude (OpenRouter) second-layer review after 4h candidate enqueue.{" "}
+          Claude (OpenRouter) second-layer review after {paperTimeframeLabel(paperTimeframe)} candidate enqueue.{" "}
           <Link to="/ops" className="text-[var(--color-accent)] underline-offset-2 hover:underline">
             View details on Ops →
           </Link>
@@ -463,7 +486,14 @@ export function HomePage({
         onChanged={onRefresh}
       />
 
-      {queueEmpty ? <LastAutoDecideCard auto={data.status.paper_auto} /> : null}
+      {queueEmpty ? (
+        <LastAutoDecideCard
+          auto={data.status.paper_auto}
+          enabled={data.status.auto_decide_config?.enabled}
+          latched={data.status.auto_ev_gate?.latched}
+          paperTimeframe={data.status.rules?.paper_timeframe}
+        />
+      ) : null}
 
       <KpiStrip
         items={[
@@ -485,6 +515,7 @@ export function HomePage({
       <ActivePositionsCard
         positions={positions}
         autoDecideEnabled={data.status.auto_decide_config?.enabled === true}
+        rules={data.status.rules}
       />
 
       <QueueJump pendingCount={queueEmpty ? 0 : data.approvals.length} />

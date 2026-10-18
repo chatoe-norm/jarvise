@@ -16,7 +16,7 @@ import { IngestHealthControlCard } from "@/components/IngestHealthControlCard";
 import { ModelRoutingCard } from "@/components/ModelRoutingCard";
 import { ObservabilityControlCard } from "@/components/ObservabilityControlCard";
 import { PaperAutoDecideCard } from "@/components/PaperAutoDecideCard";
-import { PipelineControlCard } from "@/components/PipelineControlCard";
+import { PipelineControlCard, PIPELINE_JOBS } from "@/components/PipelineControlCard";
 import { QdrantTradingRulesCard } from "@/components/QdrantTradingRulesCard";
 import { RiskCapsControlCard } from "@/components/RiskCapsControlCard";
 import { RiskMonitorCard } from "@/components/RiskMonitorCard";
@@ -133,7 +133,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       label: "Pipeline & Jobs",
       labelTh: "ไปป์ไลน์ & Jobs",
       icon: Workflow,
-      badge: "7 Jobs",
+      badge: `${PIPELINE_JOBS.length} Jobs`,
       badgeVariant: "outline",
       indicatorColor: "bg-violet-400",
     },
@@ -151,7 +151,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       label: "Universe",
       labelTh: "พอร์ตเหรียญ",
       icon: Coins,
-      badge: "Crypto",
+      badge: undefined,
       badgeVariant: "outline",
       indicatorColor: "bg-amber-400",
     },
@@ -169,7 +169,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       label: "AI Models",
       labelTh: "โมเดล OpenRouter",
       icon: Cpu,
-      badge: "แผน",
+      badge: undefined,
       badgeVariant: "muted",
       indicatorColor: "bg-emerald-400",
     },
@@ -196,7 +196,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
       label: "View All",
       labelTh: "แสดงทั้งหมด",
       icon: Layers,
-      badge: "Full",
+      badge: undefined,
       badgeVariant: "muted",
       indicatorColor: "bg-slate-400",
     },
@@ -219,7 +219,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
           size="sm"
           disabled={refreshing}
           onClick={() => void load()}
-          className="border-border text-xs font-mono h-11 sm:h-8"
+          className="border-border text-xs font-mono h-11 sm:h-8 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
         >
           {refreshing ? "Polling…" : "↻ Refresh Telemetry"}
         </Button>
@@ -285,7 +285,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
               <Button
                 variant="danger"
                 size="sm"
-                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9"
+                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                 disabled={busy || killMode === "engaged" || killMode === "loading"}
                 onClick={() => void setKill("on")}
               >
@@ -294,7 +294,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
               <Button
                 variant="ok"
                 size="sm"
-                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9"
+                className="flex-1 sm:flex-initial text-xs font-mono font-semibold h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                 disabled={busy || killMode !== "engaged"}
                 onClick={() => void setKill("off")}
               >
@@ -360,7 +360,12 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
 
       {/* Tab Panels */}
       <div className="space-y-6">
-        {(activeTab === "risk" || activeTab === "all") && <RiskMonitorCard monitor={status?.risk_monitor} />}
+        {(activeTab === "risk" || activeTab === "all") && (
+          <RiskMonitorCard
+            monitor={status?.risk_monitor}
+            maxAgeMin={status?.freshness?.market_safety_max_age_min}
+          />
+        )}
 
         {(activeTab === "risk" || activeTab === "all") && (
           <RiskCapsControlCard
@@ -379,6 +384,8 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         {(activeTab === "health" || activeTab === "all") && (
           <IngestHealthControlCard
             health={status?.ingest_health}
+            rules={status?.rules}
+            freshness={status?.freshness}
             onRefresh={() => void load()}
           />
         )}

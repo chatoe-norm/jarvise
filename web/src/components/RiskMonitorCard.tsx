@@ -1,21 +1,25 @@
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ageIsStale } from "@/lib/dashboardRules";
 import { cn, formatNum, relativeAge } from "@/lib/utils";
 
 type Obj = Record<string, unknown>;
-
-/** n8n runs the risk monitor every 15 minutes; two missed runs means it is not watching. */
-const STALE_AFTER_MS = 35 * 60 * 1000;
 
 const asObj = (v: unknown): Obj | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : null);
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const len = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
 
 /** Paper risk monitor (MTM, stops, profit lock, daily-loss halt) from `status.risk_monitor`. */
-export function RiskMonitorCard({ monitor }: { monitor: unknown }) {
+export function RiskMonitorCard({
+  monitor,
+  maxAgeMin,
+}: {
+  monitor: unknown;
+  maxAgeMin?: number | null;
+}) {
   const m = asObj(monitor);
   const atMs = num(m?.at_ms);
-  const stale = atMs == null || Date.now() - atMs > STALE_AFTER_MS;
+  const stale = ageIsStale(atMs, maxAgeMin) === true;
   const halted = m?.halted === true;
   const equity = num(asObj(m?.mtm)?.equity);
   const dayPnl = num(m?.day_mtm_pnl);
@@ -58,8 +62,8 @@ export function RiskMonitorCard({ monitor }: { monitor: unknown }) {
           </p>
         ) : null}
         {m && stale && !halted ? (
-          <p className="text-xs text-amber-400">
-            ไม่มีผลรันใหม่เกิน 35 นาที — ตรวจ n8n workflow &quot;Jarvise risk monitor&quot;
+          <p className="text-xs text-[var(--color-warn)]">
+            ไม่มีผลรันใหม่เกิน {maxAgeMin} นาที — ตรวจ n8n workflow &quot;Jarvise risk monitor&quot;
           </p>
         ) : null}
         <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
