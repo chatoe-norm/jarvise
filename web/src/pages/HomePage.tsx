@@ -7,7 +7,7 @@ import { MarketContextCard } from "@/components/MarketContextCard";
 import type { DashboardPayload, NewsHome, PaperAutoStatus } from "@/lib/api";
 import { resolveReasonLabel } from "@/lib/copy";
 import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
-import { cn, formatNum, relativeAge } from "@/lib/utils";
+import { cn, formatNum, formatPrice, relativeAge } from "@/lib/utils";
 
 
 type AutoEntry = {
@@ -60,8 +60,10 @@ function kindVariant(
 
 function ActivePositionsCard({
   positions,
+  autoDecideEnabled,
 }: {
   positions: Array<Record<string, unknown>>;
+  autoDecideEnabled: boolean;
 }) {
   if (!positions || positions.length === 0) {
     return (
@@ -75,8 +77,11 @@ function ActivePositionsCard({
         </CardHeader>
         <CardContent>
           <div className="flex flex-col items-center justify-center py-6 text-center text-sm text-[var(--color-muted)]">
-            <p>No open positions in the paper ledger.</p>
-            <p className="mt-1 text-xs">Waiting for new high-confidence signals aligned with HTF trend.</p>
+            <p>
+              {autoDecideEnabled
+                ? "ยังไม่มีไม้เปิด"
+                : "ยังไม่มีไม้เปิด · auto-decide ปิดอยู่ ไม้ใหม่เปิดเมื่อคุณ Approve เท่านั้น"}
+            </p>
           </div>
         </CardContent>
       </Card>
@@ -160,11 +165,11 @@ function ActivePositionsCard({
                         {side}
                       </span>
                     </td>
-                    <td className="py-2.5 font-mono text-xs tabular-nums">{formatNum(entry)}</td>
+                    <td className="py-2.5 font-mono text-xs tabular-nums">{formatPrice(entry)}</td>
                     <td className="py-2.5 font-mono text-xs">
                       {stop != null ? (
                         <div className="flex items-center gap-1.5">
-                          <span>{formatNum(stop)}</span>
+                          <span>{formatPrice(stop)}</span>
                           {stopSource === "breakeven" ? (
                             <Badge variant="ok" className="text-[10px] px-1 py-0">
                               BE +20bps
@@ -475,7 +480,10 @@ export function HomePage({
         ]}
       />
 
-      <ActivePositionsCard positions={positions} />
+      <ActivePositionsCard
+        positions={positions}
+        autoDecideEnabled={data.status.auto_decide_config?.enabled === true}
+      />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <MarketContextCard

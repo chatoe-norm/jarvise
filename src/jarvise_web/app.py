@@ -800,8 +800,14 @@ def api_approval_ohlcv(
         analysis = get_analysis_output(conn, str(analysis_id)) if analysis_id else None
         inv = (analysis or {}).get("invalidation_price")
         invalidation = float(inv) if inv is not None else None
+        signal_raw = (analysis or {}).get("timestamp")
+        signal_ts = int(signal_raw) if signal_raw is not None else None
     finally:
         conn.close()
+
+    def _stored(value: Any) -> float | None:
+        return None if value is None else float(value)
+
     bars = [
         {
             "t": int(b["timestamp"]),
@@ -809,6 +815,8 @@ def api_approval_ohlcv(
             "h": float(b["high"]),
             "l": float(b["low"]),
             "c": float(b["close"]),
+            "ema_20": _stored(b.get("ema_20")),
+            "ema_200": _stored(b.get("ema_200")),
         }
         for b in raw
     ]
@@ -819,6 +827,7 @@ def api_approval_ohlcv(
         "timeframe": timeframe,
         "bars": bars,
         "invalidation_price": invalidation,
+        "signal_ts": signal_ts,
         "action": action,
     }
 

@@ -16,6 +16,21 @@ export function formatNum(value: unknown, digits = 2): string {
   });
 }
 
+/** Price digits from magnitude. USD and PnL stay on formatNum. */
+export function formatPrice(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  if (n === 0) return "0";
+  const abs = Math.abs(n);
+  const digits = abs >= 1000 ? 2 : abs >= 1 ? 4 : abs >= 0.01 ? 5 : 8;
+  const trimmed = abs
+    .toFixed(digits)
+    .replace(/(\.\d*?)0+$/, "$1")
+    .replace(/\.$/, "");
+  return n < 0 ? `-${trimmed}` : trimmed;
+}
+
 /** Crypto size / qty — enough fraction digits so BTC ~0.0013 is not "0". */
 export function formatQty(value: unknown, digits = 8): string {
   return formatNum(value, digits);

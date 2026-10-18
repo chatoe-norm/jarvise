@@ -129,6 +129,8 @@ export type OhlcvBar = {
   h: number;
   l: number;
   c: number;
+  ema_20?: number | null;
+  ema_200?: number | null;
 };
 
 export type OhlcvPayload = {
@@ -138,6 +140,7 @@ export type OhlcvPayload = {
   timeframe: string;
   bars: OhlcvBar[];
   invalidation_price: number | null;
+  signal_ts?: number | null;
   action: string;
 };
 

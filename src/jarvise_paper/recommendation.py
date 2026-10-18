@@ -11,6 +11,7 @@ from typing import Any
 
 from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_analyze.explain import confidence_breakdown
+from jarvise_paper.engine import load_paper_fee_bps
 
 APPROVE_CONF = 0.70
 CAUTION_CONF = 0.55
@@ -80,18 +81,34 @@ def _headline(rec: str, action: str, conf: float, *, position_side: str | None =
     return f"แนะนำ: REJECT (ความมั่นใจ {conf:.2f} ต่ำกว่าเกณฑ์ {CAUTION_CONF:.2f})"
 
 
-def _what_happened(candle: Mapping[str, Any] | None, safety: Mapping[str, Any] | None) -> list[str]:
+_REGIME_LINE = {
+    "trend_up": "แท่งสัญญาณอ่านแนวโน้มขาขึ้น",
+    "trend_down": "แท่งสัญญาณอ่านแนวโน้มขาลง",
+    "range": "แท่งสัญญาณอ่านว่าออกข้าง",
+    "chaotic": "แท่งสัญญาณอ่านแนวโน้มไม่ได้",
+}
+
+
+def _what_happened(
+    candle: Mapping[str, Any] | None,
+    safety: Mapping[str, Any] | None,
+    *,
+    analysis: Mapping[str, Any] | None = None,
+    signal_candle: Mapping[str, Any] | None = None,
+) -> list[str]:
     lines: list[str] = []
+    regime = str((analysis or {}).get("regime_state") or "").lower()
+    regime_line = _REGIME_LINE.get(regime)
+    if regime_line is not None:
+        signal_close = _f((signal_candle or {}).get("close"))
+        if signal_close is not None:
+            lines.append(f"{regime_line} (ปิด {signal_close:g})")
+        else:
+            lines.append(regime_line)
     c = candle or {}
     close, ema20, ema200 = _f(c.get("close")), _f(c.get("ema_20")), _f(c.get("ema_200"))
     if close is None or ema20 is None or ema200 is None:
         lines.append("ตัวชี้วัดระยะยาว (EMA200) ยังไม่พร้อม — ระบบจะไม่เสนอเทรดจนกว่าข้อมูลครบ")
-    elif close > ema20 > ema200:
-        lines.append("ราคาอยู่เหนือเส้นค่าเฉลี่ยทั้งระยะสั้นและระยะยาว = แนวโน้มขาขึ้น")
-    elif close < ema20 < ema200:
-        lines.append("ราคาอยู่ต่ำกว่าเส้นค่าเฉลี่ยทั้งระยะสั้นและระยะยาว = แนวโน้มขาลง")
-    else:
-        lines.append("ราคาอยู่ระหว่างเส้นค่าเฉลี่ย = ยังไม่มีแนวโน้มชัด (ออกข้าง)")
 
     rsi = _f(c.get("rsi_14"))
     if rsi is not None:
@@ -141,14 +158,24 @@ def _risk(
         "stop_atr_multiple": ATR_STOP_MULT,
     }
     if invalidation is not None and close:
-        risk["est_loss_usd"] = round(notional * abs(close - invalidation) / close, 2)
+        price_loss = notional * abs(close - invalidation) / close
+        fee = notional * 2.0 * load_paper_fee_bps() / 10_000.0
+        risk["est_loss_usd"] = round(price_loss + fee, 2)
     return risk
 
 
-def _checklist(approval: Mapping[str, Any], position: Mapping[str, Any] | None) -> list[str]:
+def _checklist(
+    approval: Mapping[str, Any],
+    position: Mapping[str, Any] | None,
+    *,
+    has_news: bool = False,
+) -> list[str]:
     symbol = str(approval.get("symbol") or "")
     timeframe = str(approval.get("timeframe") or "")
-    lines = [f"มีข่าวใหญ่ใน {timeframe} ข้างหน้าหรือไม่ (ระบบไม่เห็นข่าว)"]
+    if has_news:
+        lines = ["ดูบริบทข่าวด้านล่าง (ไม่ใช่สัญญาณ)"]
+    else:
+        lines = [f"มีข่าวใหญ่ใน {timeframe} ข้างหน้าหรือไม่ (ระบบไม่เห็นข่าว)"]
     action = str(approval.get("action") or "flat").lower()
     if position:
         held = str(position.get("side") or "").lower()
@@ -194,7 +221,8 @@ def build_recommendation(
     rec = template_recommendation(action, conf, position_side=position_side)
     explain_src = signal_candle if signal_candle is not None else candle
     breakdown = confidence_breakdown(explain_src or {})
-    what = _what_happened(candle, safety)
+    news = news_context_block(news_report)
+    what = _what_happened(candle, safety, analysis=analysis, signal_candle=signal_candle)
     if conf < APPROVE_CONF and not doctrine:
         what.append(
             f"ความมั่นใจ {conf:.2f} < {APPROVE_CONF:.2f} และไม่พบกฎการเทรดตรงสัญญาณ "
@@ -214,8 +242,8 @@ def build_recommendation(
         "what_happened": what,
         "risk": _risk(approval, candle, analysis, account),
         "doctrine": list(doctrine),
-        "checklist": _checklist(approval, position),
-        "news_context": news_context_block(news_report),
+        "checklist": _checklist(approval, position, has_news=news is not None),
+        "news_context": news,
         "thesis": (analysis or {}).get("thesis"),
         "claude": dict(claude) if claude else None,
         "confidence_breakdown": breakdown,

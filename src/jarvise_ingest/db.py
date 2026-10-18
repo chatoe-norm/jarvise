@@ -1138,7 +1138,7 @@ def load_recent_ohlcv(
     cap = max(1, min(int(limit), 120))
     cur = conn.execute(
         """
-        SELECT timestamp, open, high, low, close
+        SELECT timestamp, open, high, low, close, ema_20, ema_200
         FROM market_technicals
         WHERE symbol=? AND timeframe=?
         ORDER BY timestamp DESC

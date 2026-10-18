@@ -44,8 +44,31 @@ describe("evaluateCloseRecommendation - 5 Levels Indicator", () => {
     const rec = evaluateCloseRecommendation(pos);
     assert.equal(rec.level, 3);
     assert.equal(rec.label, "พิจารณาได้");
+    assert.equal(rec.actionText, "จุดตัดยังไม่ขยับ");
     assert.equal(rec.dotColor, "#eab308");
     assert.ok(rec.rMultiple != null && rec.rMultiple >= 0.5 && rec.rMultiple < 1.0);
+  });
+
+  it("Level 3 says BE Locked only after the stop has moved", () => {
+    const base = {
+      unrealized_pnl: 75,
+      entry_price: 65000,
+      stop_price: 65130,
+      initial_stop_price: 64000,
+      qty: 0.1,
+    };
+    assert.equal(
+      evaluateCloseRecommendation({ ...base, stop_source: "breakeven" }).actionText,
+      "บังทุนแล้ว (BE Locked)",
+    );
+    assert.equal(
+      evaluateCloseRecommendation({ ...base, stop_source: "trail" }).actionText,
+      "บังทุนแล้ว (BE Locked)",
+    );
+    assert.equal(
+      evaluateCloseRecommendation({ ...base, stop_source: "initial" }).actionText,
+      "จุดตัดยังไม่ขยับ",
+    );
   });
 
   it("Level 4: Dark Green - ควรปิด when 1.0 <= R < 1.5", () => {

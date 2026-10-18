@@ -800,6 +800,16 @@ def test_api_ohlcv_seeded_closed_bars_in_order(monkeypatch, tmp_path: Path) -> N
             }
         )
     upsert_market_technicals(conn, candles)
+    last_ts = 1_700_000_000_000 + 49 * 14_400_000
+    conn.execute(
+        """
+        UPDATE market_technicals
+        SET ema_20=?, ema_200=?
+        WHERE symbol=? AND timeframe=? AND timestamp=?
+        """,
+        (140.2, 100.5, "BTCUSDT", "4h", last_ts),
+    )
+    conn.commit()
     upsert_analysis_output(
         conn,
         {
@@ -845,6 +855,8 @@ def test_api_ohlcv_seeded_closed_bars_in_order(monkeypatch, tmp_path: Path) -> N
     assert stamps[-1] == 1_700_000_000_000 + 49 * 14_400_000
     last = body["bars"][-1]
     assert last["o"] == 149.0 and last["c"] == 149.5
+    assert last["ema_20"] == 140.2 and last["ema_200"] == 100.5
+    assert body["signal_ts"] == 1_700_000_000_000 + 49 * 14_400_000
     assert body["invalidation_price"] == 90.5
     assert body["action"] == "long"
 
