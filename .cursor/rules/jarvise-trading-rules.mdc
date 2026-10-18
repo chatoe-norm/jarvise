@@ -13,7 +13,7 @@ Capital preservation comes before trade frequency. These rules point at the Pyth
 - Doctrine-free auto-approve stays at `0.70` (`NO_DOCTRINE_MIN_CONF` / `DOCTRINE_FREE_APPROVE`).
 - Read closed candles from SQLite. Fear & Greed and altseason are Home context and never enqueue, size, or raise confidence.
 - Thin books, wide spreads, stale books, and unsafe derivatives or macro force `FLAT` through `jarvise_risk.market_safety`.
-- Leave `JARVISE_ANALYZE_MTF` off. Leave floors `0.55` / `0.70` and `same_side_hold` unchanged.
+- `JARVISE_ANALYZE_MTF` is on (HTF `1d`); do not turn it off without a pre-registered study. Leave floors `0.55` / `0.70` and `same_side_hold` unchanged.
 
 ## Risk
 

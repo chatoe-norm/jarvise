@@ -190,7 +190,7 @@ export function QdrantTradingRulesCard({
               3 Streams
             </div>
             <div className="text-[11px] text-[var(--color-muted)] mt-0.5 truncate">
-              Notebook + OpenClaw + Local
+              NotebookLM
             </div>
           </div>
 
@@ -218,7 +218,7 @@ export function QdrantTradingRulesCard({
               {lastIndex.chunks ? (
                 <span>Indexed {String(lastIndex.chunks)} chunks เข้า {String(lastIndex.collection || "jarvise_doctrine")}</span>
               ) : (
-                <span>พร้อมซิงค์กฎล่าสุดจาก Gemini NotebookLM และ OpenClaw</span>
+                <span>แหล่งกฎการเทรดคือ Gemini NotebookLM บันทึก OpenClaw จะซิงค์เมื่อมีไฟล์ใน exports เท่านั้น</span>
               )}
             </div>
           </div>
@@ -405,7 +405,7 @@ export function QdrantTradingRulesCard({
             </li>
             <li>
               <span className="text-[var(--color-foreground)] font-mono">OpenClaw Trading Notes</span>:
-              <code className="bg-[#161d27] px-1 py-0.5 rounded ml-1">data/openclaw/exports</code> (บันทึกกลยุทธ์และการวิเคราะห์สภาวะตลาด)
+              <code className="bg-[#161d27] px-1 py-0.5 rounded ml-1">data/openclaw/exports</code> (ซิงค์เฉพาะเมื่อมีบันทึก ไม่ได้แปลว่ามีบทเรียนในคลังแล้ว)
             </li>
           </ul>
         </div>

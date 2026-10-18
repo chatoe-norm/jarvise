@@ -27,6 +27,8 @@ def test_default_agent_matrix_has_5_roles() -> None:
     assert DEFAULT_AGENT_MATRIX["QUANT_ANALYZER"].primary_model == "deepseek/deepseek-v4-pro"
     assert DEFAULT_AGENT_MATRIX["CONTEXT_DIGEST"].primary_model == "google/gemini-3.8-flash"
     assert DEFAULT_AGENT_MATRIX["PAPER_SANDBOX"].primary_model == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert all("Token Audit" not in cfg.core_task for cfg in DEFAULT_AGENT_MATRIX.values())
+    assert all("ยังไม่เชื่อมต่อ" in cfg.core_task for cfg in DEFAULT_AGENT_MATRIX.values())
 
 
 def test_resolve_model_chain() -> None:
@@ -49,3 +51,4 @@ def test_load_model_routing_matrix_from_file() -> None:
     assert matrix["agents"]["DOCTRINE_JUDGE"]["primaryModel"] == "anthropic/claude-sonnet-5"
     assert matrix["agents"]["DOCTRINE_JUDGE"]["cacheControl"] == "ephemeral"
     assert matrix["agents"]["DOCTRINE_JUDGE"]["compactorEnabled"] is True
+    assert "Token Audit" not in matrix["agents"]["DOCTRINE_JUDGE"]["coreTask"]

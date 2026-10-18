@@ -67,7 +67,7 @@ export function ModelRoutingCard({ activeModel }: { activeModel?: string | null 
                 </Badge>
               </CardTitle>
               <CardDescription className="text-xs">
-                แผนการกำหนดโมเดลต่อบทบาท — ยังไม่มีงานใดในระบบเรียกใช้ตารางนี้
+                แผนการกำหนดโมเดลต่อบทบาท — ยังไม่มีงานใดในระบบเรียกใช้ตารางนี้ ทีม OpenClaw ที่รันอยู่คือ chief, researcher, writer, reviewer, ingest
               </CardDescription>
             </div>
           </div>
