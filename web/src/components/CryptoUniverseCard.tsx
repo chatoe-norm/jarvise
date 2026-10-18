@@ -807,7 +807,7 @@ function CryptoAssetCard({
             disabled={busy || syncing}
             onClick={onRemove}
             className={cn(
-              "h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono transition-colors",
+              "h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono transition-colors",
               isConfirmingRemove
                 ? "bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 border border-rose-500/50"
                 : "text-slate-400 hover:text-rose-400 hover:bg-rose-500/10",
@@ -822,7 +822,7 @@ function CryptoAssetCard({
             size="sm"
             disabled={busy || syncing}
             onClick={onAdd}
-            className="h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+            className="h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
           >
             + เพิ่มเข้า Universe
           </Button>

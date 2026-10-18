@@ -83,6 +83,8 @@ function jobBlurb(job: JobDef, rules: DashboardRules | null | undefined): string
   }
   return job.description;
 }
+
+/** Jobs that change the book or the queue, not just refresh data. */
 const JOB_RUN_WARNINGS: Record<string, string> = {
   paper_run: "สแกนสัญญาณใหม่และอาจเพิ่ม/แทนที่การ์ดใน Approval Queue",
   paper_expire: "การ์ดที่หมดอายุจะถูกปิด และโพสิชันที่ไม่ได้ถือฝั่งเดิมอาจถูกปิดเป็น FLAT",

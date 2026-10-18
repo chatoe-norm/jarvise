@@ -19,7 +19,7 @@ export function RiskMonitorCard({
 }) {
   const m = asObj(monitor);
   const atMs = num(m?.at_ms);
-  const stale = ageIsStale(atMs, maxAgeMin) === true;
+  const stale = atMs == null || ageIsStale(atMs, maxAgeMin) === true;
   const halted = m?.halted === true;
   const equity = num(asObj(m?.mtm)?.equity);
   const dayPnl = num(m?.day_mtm_pnl);

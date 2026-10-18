@@ -917,6 +917,10 @@ def dashboard_rules() -> dict[str, Any]:
     }
 
 
+# Two missed 15-minute risk-monitor runs. Display only; not a market-safety age.
+RISK_MONITOR_STALE_AFTER_MIN = 35.0
+
+
 def dashboard_freshness() -> dict[str, Any]:
     """Stale thresholds from market safety and the paper bar. No new policy."""
     tf = paper_timeframe()
@@ -924,6 +928,7 @@ def dashboard_freshness() -> dict[str, Any]:
         "market_safety_max_age_min": load_market_safety_config().max_age_min,
         "paper_timeframe": tf,
         "paper_bar_ms": INTERVAL_MS.get(tf),
+        "risk_monitor_stale_after_min": RISK_MONITOR_STALE_AFTER_MIN,
     }
 
 
