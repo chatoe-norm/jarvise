@@ -44,7 +44,7 @@
           ]
         },
         "temperature": 0.0,
-        "description": "ตรวจสอบกฎ 1% Risk, Token Audit Veto (HIGH risk -> FLAT), และเงื่อนไข Pullback 6 ข้อ"
+        "description": "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw"
       },
       "heartbeat_ingest": {
         "identity": {
@@ -60,7 +60,7 @@
           ]
         },
         "temperature": 0.1,
-        "description": "รันสแกนตลาด 24/7 รอบละ 30 นาที ดึงข้อมูล TradingView, CMC, และ CoinGlass V4 API"
+        "description": "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw"
       },
       "quant_analyzer": {
         "identity": {
@@ -76,7 +76,7 @@
           ]
         },
         "temperature": 0.0,
-        "description": "คำนวณสมการ EV, ระยะ Stop-Loss (>= 1.5x ATR), และสร้าง JSON Signal"
+        "description": "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw"
       },
       "context_digest": {
         "identity": {
@@ -92,7 +92,7 @@
           ]
         },
         "temperature": 0.3,
-        "description": "สรุปข่าวสาร Macro และสร้างข้อความภาษาไทยแบบ Semi-Dynamic สำหรับ Fear & Greed Index"
+        "description": "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw"
       },
       "paper_sandbox": {
         "identity": {
@@ -108,7 +108,7 @@
           ]
         },
         "temperature": 0.1,
-        "description": "โหมดทดสอบระบบจำลอง (Paper Trading) แบบไม่เสียค่าใช้จ่าย"
+        "description": "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw"
       }
     }
   },

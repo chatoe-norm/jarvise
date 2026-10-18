@@ -36,7 +36,7 @@ $$EV_{\text{net}} = (\text{Win}\% \times \text{AvgWin}) - (\text{Loss}\% \times 
 
 ### 3.2 Analyzer and the "believability" idea
 
-- **Current analyzer (locked):** EMA20/EMA200 stack with a 1.5% gap for trend, RSI band, ATR chaotic check, regimes `trend_up` / `trend_down` / `range` / `chaotic`, floors 0.55 / 0.70. MTF code exists and is off.
+- **Current analyzer (locked):** EMA20/EMA200 stack with a 1.5% gap for trend, RSI band, ATR chaotic check, regimes `trend_up` / `trend_down` / `range` / `chaotic`, floors 0.55 / 0.70. MTF code exists and is on.
 - **Fixed weights (50/30/20) are dropped.** Believability in Dalio's sense means weight by track record. The shadow veto (#194) measures that: net R per verdict and per reason category, on forward data, under a pre-registered pass rule. Weights come from that log, not from a prompt.
 - **Indicator lists (Heikin-Ashi, ADX, Parabolic SAR, Bollinger/Keltner/Donchian, OBV, A/D, CMF, POC, VWAP, MACD, Stochastic, CCI, MFI):** not to be added. Columns `vwap` and `adx_14` exist but are never computed. Adding any of them changes the locked formula and needs a pre-registered study on data after 2026-10-17. The 2026-10-17 entry-gate audit found that extra filters raised win rate and lowered EV.
 - **On-chain flows / exchange reserves:** no data source. The usual vendors are forbidden. Not available.

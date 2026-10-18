@@ -181,7 +181,7 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
               </Badge>
             </div>
             <CardDescription className="text-xs text-(--color-muted)">
-              ควบคุมระบบตัดสินใจอัตโนมัติ (Claude Sonnet 5.5) และกำหนดเพดานความเสี่ยงเงินทุนต่อไม้ (Paper Engine Only)
+              ควบคุมระบบตัดสินใจอัตโนมัติ (Claude Sonnet 5.5) และเพดานความเสี่ยงที่จุดตัด ไม่ใช่ขนาดไม้ที่ใช้ (Paper Engine Only)
             </CardDescription>
           </div>
           <Button
@@ -281,10 +281,12 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
                 หรือถึงจุด Stop / Profit Lock โดยไม่ต้องรอผู้ใช้กด
               </p>
             </div>
-            <div className="mt-3 flex items-center gap-1.5 text-[11px] font-mono text-emerald-400">
-              <span>●</span>
-              <span>สถานะ: ทำงานอัตโนมัติเต็มรูปแบบ (Fully Autonomous)</span>
-            </div>
+            {enabled ? (
+              <div className="mt-3 flex items-center gap-1.5 text-[11px] font-mono text-emerald-400">
+                <span>●</span>
+                <span>สถานะ: ทำงานอัตโนมัติเต็มรูปแบบ (Fully Autonomous)</span>
+              </div>
+            ) : null}
           </div>
 
           {/* Option 2: Off (User Trade + AI Guardrail) */}
@@ -342,10 +344,10 @@ export function PaperAutoDecideCard({ auto, gate, initialConfig, onRefresh }: Pa
             <div>
               <label className="text-xs font-semibold text-(--color-foreground) flex items-center gap-1.5">
                 <span>🎯</span>
-                <span>หาก On Autotrade สามารถเสียได้กี่ % ของทุน (Max Capital Risk % per Trade)</span>
+                <span>เพดานความเสี่ยงที่จุดตัด (% ของทุน) ไม่ใช่ขนาดไม้ที่ใช้</span>
               </label>
               <p className="text-xs text-(--color-muted) mt-0.5">
-                คำนวณขนาดไม้ (Position Size) และระยะ Stop Loss ให้จำกัดการขาดทุนสูงสุดไม่เกินค่าที่ระบุ
+                ค่านี้คือเพดาน risk-at-stop ขนาดไม้มาจากสัดส่วน notional ของสัญญาณ ไม่ได้เสี่ยงเท่าเพดานทุกไม้
               </p>
             </div>
             <div className="flex items-center gap-2">

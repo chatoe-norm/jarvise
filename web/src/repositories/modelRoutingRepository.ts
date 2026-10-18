@@ -6,7 +6,7 @@ import type {
 } from "@/types/modelRouting";
 import { modelRoutingMatrixSchema } from "@/types/modelRouting";
 
-const CACHE_KEY = "jarvise_model_routing_matrix_v1";
+const CACHE_KEY = "jarvise_model_routing_matrix_v2";
 const LOGS_KEY = "jarvise_ai_execution_logs_v1";
 const MAX_LOGS = 100;
 
@@ -23,7 +23,7 @@ export const DEFAULT_MODEL_ROUTING_PROFILES: Record<AgentRole, AgentProfile> = {
       "anthropic/claude-opus-5.5",
     ],
     temperature: 0.0,
-    coreTask: "ตรวจสอบกฎ 1% Risk, Token Audit Veto (HIGH risk -> FLAT), และเงื่อนไข Pullback 6 ข้อ",
+    coreTask: "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw",
     cacheControl: "ephemeral",
     compactorEnabled: true,
     compactionThresholdKb: 300,
@@ -40,7 +40,7 @@ export const DEFAULT_MODEL_ROUTING_PROFILES: Record<AgentRole, AgentProfile> = {
       "google/gemini-3.8-flash",
     ],
     temperature: 0.1,
-    coreTask: "รันสแกนตลาด 24/7 รอบละ 30 นาที ดึงข้อมูล TradingView, CMC, และ CoinGlass V4 API",
+    coreTask: "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw",
     cacheControl: "ephemeral",
     compactorEnabled: true,
     compactionThresholdKb: 300,
@@ -57,7 +57,7 @@ export const DEFAULT_MODEL_ROUTING_PROFILES: Record<AgentRole, AgentProfile> = {
       "anthropic/claude-sonnet-5",
     ],
     temperature: 0.0,
-    coreTask: "คำนวณสมการ EV, ระยะ Stop-Loss (>= 1.5x ATR), และสร้าง JSON Signal",
+    coreTask: "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw",
     cacheControl: "ephemeral",
     compactorEnabled: true,
     compactionThresholdKb: 300,
@@ -74,7 +74,7 @@ export const DEFAULT_MODEL_ROUTING_PROFILES: Record<AgentRole, AgentProfile> = {
       "deepseek/deepseek-v4.1-flash",
     ],
     temperature: 0.3,
-    coreTask: "สรุปข่าวสาร Macro และสร้างข้อความภาษาไทยแบบ Semi-Dynamic สำหรับ Fear & Greed Index",
+    coreTask: "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw",
     cacheControl: "ephemeral",
     compactorEnabled: true,
     compactionThresholdKb: 300,
@@ -91,7 +91,7 @@ export const DEFAULT_MODEL_ROUTING_PROFILES: Record<AgentRole, AgentProfile> = {
       "google/gemini-3.8-flash",
     ],
     temperature: 0.1,
-    coreTask: "โหมดทดสอบระบบจำลอง (Paper Trading) แบบไม่เสียค่าใช้จ่าย",
+    coreTask: "ยังไม่เชื่อมต่อ ตารางนี้ไม่ใช่ทีม OpenClaw",
     cacheControl: "ephemeral",
     compactorEnabled: true,
     compactionThresholdKb: 300,

@@ -56,7 +56,7 @@ test("ModelRoutingService - All 5 agent roles configured per Phase 1 spec", () =
     "anthropic/claude-opus-5.5",
   ]);
   assert.equal(judge.temperature, 0.0);
-  assert.match(judge.coreTask, /1% Risk/);
+  assert.match(judge.coreTask, /ยังไม่เชื่อมต่อ/);
 
   // 2. HEARTBEAT_INGEST
   const ingest = service.getAgentProfile("HEARTBEAT_INGEST");

@@ -387,7 +387,7 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
               {evSign(metrics.expected_value_ev)}
             </p>
             <p>
-              ไม้ที่แพ้ปิดที่จุดตัด {metrics.loss_lesson.by_exit.stop_hit.n} ไม้ รวม{" "}
+              ในไม้ที่แพ้เท่านั้น ปิดที่จุดตัด {metrics.loss_lesson.by_exit.stop_hit.n} ไม้ รวม{" "}
               {formatNum(metrics.loss_lesson.by_exit.stop_hit.pnl_usd)} ดอลลาร์ ปิดตาม FLAT{" "}
               {metrics.loss_lesson.by_exit.flat.n} ไม้ รวม{" "}
               {formatNum(metrics.loss_lesson.by_exit.flat.pnl_usd)} ดอลลาร์

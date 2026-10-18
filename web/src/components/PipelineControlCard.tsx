@@ -160,7 +160,7 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
               <span className="inline-block h-2 w-2 rounded-full bg-violet-400 shadow-[0_0_8px_rgba(167,139,250,0.8)]" />
             </CardTitle>
             <CardDescription>
-              Direct triggers for scheduled pipeline jobs, background workers, and automated trade executors.
+              แถวทั้งเจ็ดคืองานที่การ์ดนี้สั่งรันได้ งานที่อยู่ที่ n8n อย่างเดียวคือ pending digest, news ingest, news reaction, shadow veto และรายงานวันจันทร์
             </CardDescription>
           </div>
           <Button
