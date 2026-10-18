@@ -78,7 +78,7 @@ export function ModelRoutingCard({ activeModel }: { activeModel?: string | null 
               size="sm"
               disabled={syncing}
               onClick={() => void handleSync()}
-              className="text-xs h-11 sm:h-8 border-[var(--color-border)] hover:bg-[var(--color-surface)] cursor-pointer"
+              className="text-xs h-11 sm:h-8 pointer-coarse:min-h-11 pointer-coarse:min-w-11 border-[var(--color-border)] hover:bg-[var(--color-surface)] cursor-pointer"
             >
               <RefreshCw className={cn("w-3.5 h-3.5 mr-1.5", syncing && "animate-spin text-emerald-400")} />
               <span>{syncing ? "กำลังโหลด…" : "โหลดใหม่"}</span>
@@ -106,6 +106,7 @@ export function ModelRoutingCard({ activeModel }: { activeModel?: string | null 
             <code className="text-[var(--color-foreground)]">{activeModel || "—"}</code> จากการตั้งค่า auto-decide
             ไม่ได้อ่านจากตารางด้านล่าง
           </p>
+          <p className="font-medium text-[var(--color-foreground)]">catalog (local)</p>
         </div>
 
         {/* 5-Tier Agent Routing Grid */}

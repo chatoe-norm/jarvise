@@ -1,26 +1,35 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { describeIssues } from "@/lib/syncIssues";
 import { api, type BackfillPayload, type IngestHealthStatus } from "@/lib/api";
+import { ageIsStale, type DashboardFreshness, type DashboardRules } from "@/lib/dashboardRules";
 import { relativeAge } from "@/lib/utils";
 
 interface IngestHealthControlCardProps {
   health: IngestHealthStatus | null | undefined;
+  rules?: DashboardRules | null;
+  freshness?: DashboardFreshness | null;
   onRefresh?: () => void;
 }
 
-export function IngestHealthControlCard({ health, onRefresh }: IngestHealthControlCardProps) {
+export function IngestHealthControlCard({ health, rules, freshness, onRefresh }: IngestHealthControlCardProps) {
   const [checking, setChecking] = useState(false);
   const [backfilling, setBackfilling] = useState(false);
-  const [selectedTf, setSelectedTf] = useState("4h");
+  const [selectedTf, setSelectedTf] = useState("");
+  const [tfTouched, setTfTouched] = useState(false);
   const [sinceDate, setSinceDate] = useState("2021-01-01");
   const [targetSymbol, setTargetSymbol] = useState("ALL");
   const [feedback, setFeedback] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
   const [backfillResult, setBackfillResult] = useState<BackfillPayload | null>(null);
   const { confirm, dialog } = useConfirm();
+  const paper = rules?.paper_timeframe?.trim() || "";
+
+  useEffect(() => {
+    if (!tfTouched && rules?.paper_timeframe) setSelectedTf(rules.paper_timeframe);
+  }, [rules?.paper_timeframe, tfTouched]);
 
   const handleRunHealthCheck = async () => {
     setChecking(true);
@@ -115,7 +124,7 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
               size="sm"
               disabled={checking || backfilling}
               onClick={() => void handleRunHealthCheck()}
-              className="h-11 sm:h-8 text-xs font-mono font-medium"
+              className="h-11 sm:h-8 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono font-medium"
             >
               {checking ? "กำลังตรวจสอบ…" : "⚡ Run Health Check Now"}
             </Button>
@@ -129,7 +138,16 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--color-muted)]">
             <div>
               กรอบเวลาหลัก: <span className="font-mono font-semibold text-[var(--color-foreground)]">{health.timeframe}</span> ·
-              ตรวจสอบล่าสุด: {relativeAge(health.at_ms)}
+              ตรวจสอบล่าสุด:{" "}
+              <span
+                className={
+                  ageIsStale(health.at_ms, freshness?.market_safety_max_age_min) === true
+                    ? "text-[var(--color-warn)]"
+                    : undefined
+                }
+              >
+                {relativeAge(health.at_ms)}
+              </span>
             </div>
             {health.telegram_sent && (
               <span className="text-cyan-400 font-mono">✓ ส่งการแจ้งเตือนลง Telegram แล้ว</span>
@@ -241,12 +259,21 @@ export function IngestHealthControlCard({ health, onRefresh }: IngestHealthContr
               <select
                 id="target_tf"
                 value={selectedTf}
-                onChange={(e) => setSelectedTf(e.target.value)}
+                onChange={(e) => {
+                  setTfTouched(true);
+                  setSelectedTf(e.target.value);
+                }}
                 className="w-full rounded-md border border-[var(--color-border)] bg-[#0c1017] px-2.5 py-1.5 text-xs text-[var(--color-foreground)] focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono"
               >
-                <option value="4h">4h (Paper Trade Timeframe)</option>
-                <option value="1h">1h (Microstructure Context)</option>
-                <option value="1d">1d (Higher Timeframe Trend)</option>
+                {paper && paper !== "1h" && paper !== "1d" ? (
+                  <option value={paper}>{paper} (Paper Trade Timeframe)</option>
+                ) : null}
+                <option value="1h">
+                  1h{paper === "1h" ? " (Paper Trade Timeframe)" : " (Microstructure Context)"}
+                </option>
+                <option value="1d">
+                  1d{paper === "1d" ? " (Paper Trade Timeframe)" : " (Higher Timeframe Trend)"}
+                </option>
               </select>
             </div>
 

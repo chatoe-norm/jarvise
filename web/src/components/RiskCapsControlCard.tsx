@@ -3,7 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type RiskCapsPayload } from "@/lib/api";
-import { capsToRaw, validateRiskCaps, type RiskCapField } from "@/lib/riskCaps";
+import { capsToRaw, canSaveRiskCaps, validateRiskCaps, type RiskCapField } from "@/lib/riskCaps";
 
 interface RiskCapsControlCardProps {
   initialCaps?: Record<string, unknown> | null;
@@ -21,11 +21,17 @@ const DEFAULT_CAPS: RiskCapsPayload = {
   max_risk_per_trade_pct: 1.0,
 };
 
+function emptyCaps(): Record<RiskCapField, string> {
+  const out = {} as Record<RiskCapField, string>;
+  for (const field of Object.keys(DEFAULT_CAPS) as RiskCapField[]) out[field] = "";
+  return out;
+}
+
 export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlCardProps) {
   // Inputs hold raw text so a cleared field is an error, never a silent 0.
-  const [raw, setRaw] = useState<Record<RiskCapField, string>>(() => capsToRaw(DEFAULT_CAPS));
-  const [savedRaw, setSavedRaw] = useState<Record<RiskCapField, string>>(() => capsToRaw(DEFAULT_CAPS));
-  // Until the server caps arrive the card shows defaults; saving those would overwrite real caps.
+  const [raw, setRaw] = useState<Record<RiskCapField, string>>(() => emptyCaps());
+  const [savedRaw, setSavedRaw] = useState<Record<RiskCapField, string>>(() => emptyCaps());
+  // Until the server caps arrive the inputs stay blank. Saving them would overwrite real caps.
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
@@ -150,7 +156,7 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
         {/* Presets Bar */}
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)]/40 p-2.5 text-xs">
           <div className="flex items-center gap-1.5 text-[var(--color-muted)] font-medium">
-            <span>⚡ โหลด Preset:</span>
+            <span>ค่าเริ่มต้นในหน้านี้ ไม่ใช่ค่าบนเซิร์ฟเวอร์:</span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
             <Button
@@ -158,7 +164,7 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               variant="outline"
               size="sm"
               onClick={() => applyPreset("default")}
-              className="h-11 sm:h-7 text-xs font-mono"
+              className="h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono"
             >
               Paper Core (2 Pairs)
             </Button>
@@ -167,7 +173,7 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               variant="outline"
               size="sm"
               onClick={() => applyPreset("liquid")}
-              className="h-11 sm:h-7 text-xs font-mono"
+              className="h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono"
             >
               Liquid 4-Pair
             </Button>
@@ -176,7 +182,7 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               variant="outline"
               size="sm"
               onClick={() => applyPreset("conservative")}
-              className="h-11 sm:h-7 text-xs font-mono"
+              className="h-11 sm:h-7 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono"
             >
               Conservative Defense
             </Button>
@@ -196,6 +202,8 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             <input
               id="cap_notional"
               type="number"
+              placeholder="—"
+              disabled={!loaded}
               step="100"
               min="0.01"
               value={caps.max_notional_per_order}
@@ -217,6 +225,8 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             <input
               id="cap_daily_loss"
               type="number"
+              placeholder="—"
+              disabled={!loaded}
               step="10"
               min="0.01"
               value={caps.max_daily_loss_usd}
@@ -238,6 +248,8 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             <input
               id="cap_drawdown"
               type="number"
+              placeholder="—"
+              disabled={!loaded}
               step="0.5"
               min="0.01"
               max="100"
@@ -260,6 +272,8 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             <input
               id="cap_positions"
               type="number"
+              placeholder="—"
+              disabled={!loaded}
               step="1"
               min="1"
               max="20"
@@ -282,6 +296,8 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             <input
               id="cap_gross"
               type="number"
+              placeholder="—"
+              disabled={!loaded}
               step="1"
               min="0.01"
               max="100"
@@ -304,6 +320,8 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             <input
               id="cap_symbol"
               type="number"
+              placeholder="—"
+              disabled={!loaded}
               step="1"
               min="0.01"
               max="100"
@@ -326,6 +344,8 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             <input
               id="cap_bucket"
               type="number"
+              placeholder="—"
+              disabled={!loaded}
               step="1"
               min="0.01"
               max="100"
@@ -348,6 +368,8 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
             <input
               id="cap_risk_trade"
               type="number"
+              placeholder="—"
+              disabled={!loaded}
               step="0.05"
               min="0.01"
               max="1.0"
@@ -393,9 +415,9 @@ export function RiskCapsControlCard({ initialCaps, onRefresh }: RiskCapsControlC
               type="button"
               variant={isDirty && !hasErrors ? "ok" : "outline"}
               size="sm"
-              disabled={!isDirty || saving || hasErrors || !loaded}
+              disabled={!canSaveRiskCaps({ loaded, dirty: isDirty, saving, hasErrors })}
               onClick={() => void handleSave()}
-              className="text-xs font-mono font-semibold h-11 sm:h-8"
+              className="text-xs font-mono font-semibold h-11 sm:h-8 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
             >
               {saving ? "กำลังบันทึก…" : hasErrors ? "แก้ช่องที่ผิดก่อนบันทึก" : "💾 บันทึก Risk Caps"}
             </Button>

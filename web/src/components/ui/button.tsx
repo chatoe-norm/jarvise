@@ -16,9 +16,9 @@ const buttonVariants = cva(
         ghost: "hover:bg-[var(--color-card)] text-[var(--color-muted)]",
       },
       size: {
-        default: "h-9 px-3 py-2",
-        // 44px touch target on phones; compact from the sm breakpoint up.
-        sm: "h-11 px-3 text-xs sm:h-8 sm:px-2.5",
+        default: "h-9 px-3 py-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
+        // 44px on phones and on any coarse pointer (tablets). Fine pointers stay compact.
+        sm: "h-11 px-3 text-xs sm:h-8 sm:px-2.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
         lg: "h-10 px-4",
       },
     },

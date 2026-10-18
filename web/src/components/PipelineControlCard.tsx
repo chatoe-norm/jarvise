@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type PipelineRunResult } from "@/lib/api";
+import { paperTimeframeLabel, ruleText, ageIsStale, type DashboardRules, type DashboardFreshness } from "@/lib/dashboardRules";
 import { summarizeJob } from "@/lib/jobSummary";
 import { relativeAge } from "@/lib/utils";
 
@@ -20,12 +21,12 @@ interface JobDef {
   dataKey: string;
 }
 
-const PIPELINE_JOBS: JobDef[] = [
+export const PIPELINE_JOBS: JobDef[] = [
   {
     key: "ingest",
     title: "Market Ingest & Indicators",
     schedule: "n8n ทุก 15 นาที",
-    description: "ดึงราคา Binance klines (1h, 4h, 1d) และคำนวณ EMA20/EMA200, RSI, ATR",
+    description: "ดึงราคา Binance klines และคำนวณ EMA20/EMA200, RSI, ATR",
     dataKey: "ingest",
   },
   {
@@ -53,7 +54,7 @@ const PIPELINE_JOBS: JobDef[] = [
     key: "risk_monitor",
     title: "Risk Monitor (MTM & Stops)",
     schedule: "n8n ทุก 15 นาที",
-    description: "คำนวณ Mark-to-Market, ตรวจสอบ Stop Loss 1R, และบังคับใช้ Daily Loss Cap",
+    description: "คำนวณ Mark-to-Market และบังคับใช้ Daily Loss Cap",
     dataKey: "risk_monitor",
   },
   {
@@ -72,7 +73,16 @@ const PIPELINE_JOBS: JobDef[] = [
   },
 ];
 
-/** Jobs that change the book or the queue, not just refresh data. */
+function jobBlurb(job: JobDef, rules: DashboardRules | null | undefined): string {
+  if (job.key === "ingest") {
+    const tf = paperTimeframeLabel(rules?.paper_timeframe);
+    return `${job.description} (1h, ${tf}, 1d)`;
+  }
+  if (job.key === "risk_monitor") {
+    return `${job.description}. จุดตัดเข้า ${ruleText(rules?.atr_stop_mult, "× ATR")}, trail ${ruleText(rules?.trail_distance_r, "R")}`;
+  }
+  return job.description;
+}
 const JOB_RUN_WARNINGS: Record<string, string> = {
   paper_run: "สแกนสัญญาณใหม่และอาจเพิ่ม/แทนที่การ์ดใน Approval Queue",
   paper_expire: "การ์ดที่หมดอายุจะถูกปิด และโพสิชันที่ไม่ได้ถือฝั่งเดิมอาจถูกปิดเป็น FLAT",
@@ -112,6 +122,8 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
   const [error, setError] = useState<string | null>(null);
   const [rawOpen, setRawOpen] = useState(false);
   const { confirm, dialog } = useConfirm();
+  const rules = (statusPayload?.rules ?? null) as DashboardRules | null;
+  const freshness = (statusPayload?.freshness ?? null) as DashboardFreshness | null;
 
   const handleRunJob = async (jobKey: string) => {
     const job = PIPELINE_JOBS.find((j) => j.key === jobKey);
@@ -153,7 +165,7 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
             variant="outline"
             size="sm"
             onClick={() => onRefresh?.()}
-            className="h-11 sm:h-8 text-xs font-mono"
+            className="h-11 sm:h-8 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono"
           >
             ↻ ซิงค์สถานะ Job
           </Button>
@@ -216,13 +228,19 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
                     >
                       {parsed.ok === true ? "OK" : parsed.ok === false ? "Fail" : "Idle"}
                     </Badge>
-                    {parsed.ageMs && (
-                      <span className="text-[11px] text-[var(--color-muted)]">
+                    {parsed.ageMs ? (
+                      <span
+                        className={
+                          ageIsStale(parsed.ageMs, freshness?.market_safety_max_age_min) === true
+                            ? "text-[11px] text-[var(--color-warn)]"
+                            : "text-[11px] text-[var(--color-muted)]"
+                        }
+                      >
                         · รันล่าสุด {relativeAge(parsed.ageMs)}
                       </span>
-                    )}
+                    ) : null}
                   </div>
-                  <div className="text-xs text-[var(--color-muted)]">{job.description}</div>
+                  <div className="text-xs text-[var(--color-muted)]">{jobBlurb(job, rules)}</div>
                   {parsed.detail && (
                     <div className="text-[11px] font-mono text-[var(--color-muted)]/80 bg-[#11161f] px-2 py-0.5 rounded border border-[var(--color-border)]/40 inline-block">
                       {parsed.detail}
@@ -237,7 +255,7 @@ export function PipelineControlCard({ statusPayload, onRefresh }: PipelineContro
                     size="sm"
                     disabled={isRunning || runningJob !== null}
                     onClick={() => void handleRunJob(job.key)}
-                    className="h-11 sm:h-8 text-xs font-mono font-semibold min-w-[100px]"
+                    className="h-11 sm:h-8 pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-xs font-mono font-semibold min-w-[100px]"
                   >
                     {isRunning ? "กำลังรัน…" : "▶ Run Now"}
                   </Button>

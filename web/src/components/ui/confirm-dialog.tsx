@@ -86,12 +86,12 @@ function ConfirmDialog({ opts, onSettle }: { opts: ConfirmOptions; onSettle: (ok
           </label>
         ) : null}
         <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <Button ref={cancelRef} variant="outline" className="h-11 sm:h-9" onClick={() => onSettle(false)}>
+          <Button ref={cancelRef} variant="outline" className="h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11" onClick={() => onSettle(false)}>
             {opts.cancelLabel ?? "ยกเลิก"}
           </Button>
           <Button
             variant={opts.tone === "danger" ? "danger" : "default"}
-            className="h-11 sm:h-9"
+            className="h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
             disabled={!reasonOk}
             onClick={() => onSettle(needsReason ? reason.trim() : true)}
           >

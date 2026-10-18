@@ -93,6 +93,14 @@ def seed_named_universe(conn: sqlite3.Connection, universe_id: str) -> int:
     return 0
 
 
+def preset_sizes() -> dict[str, int]:
+    """Member counts of the named presets. Not the live Ops list."""
+    return {
+        PAPER_CORE: len(_PAPER_CORE_MEMBERS),
+        PAPER_LIQUID: len(_PAPER_LIQUID_MEMBERS),
+    }
+
+
 def preset_members(preset: str) -> list[tuple[str, str]]:
     """(symbol, asset_class) pairs for a named preset; [] for unknown ids."""
     if preset == PAPER_CORE:

@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { NewsHome, StatusPayload } from "@/lib/api";
 import { useMarketContext } from "@/controllers/useMarketContext";
+import { ruleText } from "@/lib/dashboardRules";
 import { cn } from "@/lib/utils";
 
 export interface MarketContextCardProps {
@@ -566,7 +567,7 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
                   </div>
                 </div>
 
-                <ContextOnlyNote />
+                <ContextOnlyNote atr={status.rules?.atr_stop_mult} />
               </div>
             )}
 
@@ -715,7 +716,7 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
                   </div>
                 </div>
 
-                <ContextOnlyNote />
+                <ContextOnlyNote atr={status.rules?.atr_stop_mult} />
               </div>
             )}
 
@@ -737,7 +738,7 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
 }
 
 /** Fear & Greed and Altseason are context: the analyzer, stops and กฎการเทรด decide trades. */
-function ContextOnlyNote() {
+function ContextOnlyNote({ atr }: { atr?: number | null }) {
   return (
     <div className="p-3.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)]/50 text-xs space-y-1">
       <div className="flex items-center gap-1.5 font-bold text-[var(--color-foreground)]">
@@ -745,7 +746,7 @@ function ContextOnlyNote() {
         <span>บริบทตลาดเท่านั้น ไม่ใช่สัญญาณเทรด</span>
       </div>
       <p className="text-[var(--color-muted)] leading-relaxed">
-        การเปิด/ปิดไม้ตัดสินจาก Analyzer, จุด Stop 1.5× ATR และกฎการเทรดเท่านั้น
+        การเปิด/ปิดไม้ตัดสินจาก Analyzer, จุด Stop {ruleText(atr, "× ATR")} และกฎการเทรดเท่านั้น
         ดัชนีนี้ไม่ได้เปลี่ยนเกณฑ์ความมั่นใจหรือคำแนะนำของการ์ดใน Approval Queue
       </p>
     </div>

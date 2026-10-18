@@ -14,7 +14,7 @@ describe("evaluateCloseRecommendation - 5 Levels Indicator", () => {
     const rec = evaluateCloseRecommendation(pos);
     assert.equal(rec.level, 1);
     assert.equal(rec.label, "ไม่ควรปิด");
-    assert.equal(rec.dotColor, "#ef4444");
+    assert.equal(rec.dotColor, "var(--color-danger)");
     assert.ok(rec.rMultiple != null && rec.rMultiple < 0);
   });
 
@@ -29,7 +29,7 @@ describe("evaluateCloseRecommendation - 5 Levels Indicator", () => {
     const rec = evaluateCloseRecommendation(pos);
     assert.equal(rec.level, 2);
     assert.equal(rec.label, "ยังไม่แนะนำ");
-    assert.equal(rec.dotColor, "#f97316");
+    assert.equal(rec.dotColor, "var(--color-warn)");
     assert.ok(rec.rMultiple != null && rec.rMultiple >= 0 && rec.rMultiple < 0.5);
   });
 
@@ -45,7 +45,7 @@ describe("evaluateCloseRecommendation - 5 Levels Indicator", () => {
     assert.equal(rec.level, 3);
     assert.equal(rec.label, "พิจารณาได้");
     assert.equal(rec.actionText, "จุดตัดยังไม่ขยับ");
-    assert.equal(rec.dotColor, "#eab308");
+    assert.equal(rec.dotColor, "var(--color-warn)");
     assert.ok(rec.rMultiple != null && rec.rMultiple >= 0.5 && rec.rMultiple < 1.0);
   });
 
@@ -83,7 +83,7 @@ describe("evaluateCloseRecommendation - 5 Levels Indicator", () => {
     assert.equal(rec.level, 4);
     assert.equal(rec.label, "ปล่อยให้ trail ทำงาน");
     assert.match(rec.tooltip, /ไม่ใช่คำแนะนำของระบบ/);
-    assert.equal(rec.dotColor, "#15803d");
+    assert.equal(rec.dotColor, "var(--color-ok)");
     assert.ok(rec.rMultiple != null && rec.rMultiple >= 1.0 && rec.rMultiple < 1.5);
   });
 
@@ -99,7 +99,14 @@ describe("evaluateCloseRecommendation - 5 Levels Indicator", () => {
     assert.equal(rec.level, 5);
     assert.equal(rec.label, "กำไรสูง · trail ล็อกอยู่");
     assert.match(rec.tooltip, /ไม่ใช่คำแนะนำของระบบ/);
-    assert.equal(rec.dotColor, "#22c55e");
+    assert.equal(rec.dotColor, "var(--color-ok)");
     assert.ok(rec.rMultiple != null && rec.rMultiple >= 1.5);
+  });
+
+  it("does not guess a level from dollars when R is unknown", () => {
+    const rec = evaluateCloseRecommendation({ unrealized_pnl: 200 });
+    assert.equal(rec.level, 0);
+    assert.equal(rec.label, "R unknown");
+    assert.equal(rec.rMultiple, null);
   });
 });
