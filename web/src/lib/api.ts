@@ -189,6 +189,7 @@ export type RecommendationPayload = {
   recommendation_source: "template" | "claude";
   confidence_label: string;
   headline: string;
+  evidence?: string | null;
   what_happened: string[];
   risk: {
     size_pct_equity: number | null;

@@ -495,6 +495,7 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         account = ensure_paper_account(conn)
         position = get_paper_position(conn, symbol)
         safety = evaluate_from_db(conn, symbol).as_dict()
+        ev_gate = auto_ev_gate_status(conn)
         review = get_latest_llm_review(conn, approval_id)
         if review is not None and int(review["created_at_ms"]) < int(row["created_at_ms"]):
             review = None
@@ -521,6 +522,7 @@ def load_recommendation(approval_id: str) -> dict[str, Any] | None:
         claude=claude,
         signal_candle=signal_candle,
         news_report=load_report(),
+        ev_gate=ev_gate,
     )
 
 

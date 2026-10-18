@@ -18,8 +18,8 @@ export interface CloseRecommendation {
  * 1 = ไม่ควรปิด (สีแดง) - ติดลบ ยังอยู่ในขอบเขต Stop 1.5 ATR ไม่ควร Panic Close
  * 2 = ยังไม่แนะนำ (เหลืองส้ม) - กำไรเล็กน้อย (< +0.5R) ยังไม่ถึงจุดขยับ Breakeven
  * 3 = พิจารณาได้ (เหลือง) - ขยับ Breakeven (+0.5R) ปลอดภัยแล้ว สามารถถือต่อหรือปิดหากผันผวน
- * 4 = ควรปิด (สีเขียวเข้ม) - กำไรทะลุเป้า 1R+ และเปิดระบบ Trailing Stop
- * 5 = ควรปิดอย่างยิ่ง (สีเขียวสดสะท้อนแสง) - กำไรสูงมาก (>= +1.5R) ควรล็อกกำไรสูงสุดเข้าพอร์ตทันที
+ * 4 = ปล่อยให้ trail ทำงาน (>= 1R) - จุดตัดขยับ 1R ปิดมือได้แต่ไม่ใช่คำแนะนำของระบบ
+ * 5 = กำไรสูง · trail ล็อกอยู่ (>= 1.5R) - ปิดมือได้แต่ไม่ใช่คำแนะนำของระบบ
  */
 export function evaluateCloseRecommendation(pos: {
   unrealized_pnl?: unknown;
@@ -44,14 +44,14 @@ export function evaluateCloseRecommendation(pos: {
   if ((rMultiple != null && rMultiple >= 1.5) || (rMultiple == null && uPnl >= 150)) {
     return {
       level: 5,
-      label: "ควรปิดอย่างยิ่ง",
-      actionText: "ล็อกกำไรสูงสุด (>= +1.5R)",
+      label: "กำไรสูง · trail ล็อกอยู่",
+      actionText: "trail ล็อกอยู่ (>= +1.5R)",
       dotColor: "#22c55e",
       dotClass: "bg-[#22c55e] shadow-[0_0_8px_#22c55e] animate-pulse ring-2 ring-[#4ade80]/60",
       btnClass:
         "border-[#22c55e] text-[#22c55e] bg-[#22c55e]/15 hover:bg-[#22c55e]/25 shadow-[0_0_12px_rgba(34,197,94,0.35)]",
       textClass: "text-[#22c55e] font-bold drop-shadow-[0_0_4px_rgba(34,197,94,0.4)]",
-      tooltip: `ระดับ 5: ควรปิดอย่างยิ่ง (กำไร ${rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`}) แนะนำล็อกกำไรสูงสุดเข้าพอร์ตทันที ป้องกันการย่อตัวแรง`,
+      tooltip: `ระดับ 5: กำไรสูง · trail ล็อกอยู่ (กำไร ${rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`}) จุดตัดตามกำไรอยู่แล้ว ปิดมือได้ แต่ไม่ใช่คำแนะนำของระบบ`,
       rMultiple,
     };
   }
@@ -60,14 +60,14 @@ export function evaluateCloseRecommendation(pos: {
   if ((rMultiple != null && rMultiple >= 1.0) || (rMultiple == null && uPnl >= 80)) {
     return {
       level: 4,
-      label: "ควรปิด",
-      actionText: "เป้ากำไร 1R+ (Trail Stop)",
+      label: "ปล่อยให้ trail ทำงาน",
+      actionText: "trail ขยับ 1R (>= +1R)",
       dotColor: "#15803d",
       dotClass: "bg-[#16a34a] ring-2 ring-[#15803d]/60",
       btnClass:
         "border-[#16a34a] text-[#16a34a] bg-[#16a34a]/10 hover:bg-[#16a34a]/20",
       textClass: "text-[#16a34a] font-semibold",
-      tooltip: `ระดับ 4: ควรปิด (กำไร ${rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`}) ทะลุเป้า 1R เรียบร้อยแล้ว อยู่ในโซนทยอยปิดล็อกผลตอบแทนได้ดี`,
+      tooltip: `ระดับ 4: ปล่อยให้ trail ทำงาน (กำไร ${rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`}) จุดตัดขยับ 1R จากราคาที่ดีที่สุด ปิดมือได้ แต่ไม่ใช่คำแนะนำของระบบ`,
       rMultiple,
     };
   }
