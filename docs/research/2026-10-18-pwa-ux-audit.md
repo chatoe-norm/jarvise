@@ -133,3 +133,12 @@ After the owner approves this note, on this branch or a new one:
 7. Open a PR, Sonnet 5.5 review (no number that is not from the API; safety copy still reachable), then `fdpy`.
 
 Hard rules for that pass: Fear & Greed and Altseason never become advice; live stays off; VPS `.env` stays untouched; do not add Playwright.
+
+## Review changes (2026-10-18)
+
+The owner approved this note with these changes. Stage B1 follows them. Layout reorder and table-to-card work stay in a later pass.
+
+- (a) `status.rules` is read-only: `atr_stop_mult` (`ATR_STOP_MULT`), `breakeven_r` (`DEFAULT_BREAKEVEN_R`), `breakeven_buffer_bps` (`profit_lock.DEFAULT_FEE_BPS` = 20; this is the breakeven buffer, not the paper fee), `trail_after_r` and `trail_distance_r` (both the literal 1.0 milestone), `paper_fee_bps` (effective `JARVISE_PAPER_FEE_BPS`, default 10), and `paper_timeframe` (same value as `/api/universe`).
+- (b) Home "Latest Auto-Decide Review" leads with a state chip from `status.auto_decide_config.enabled` and the EV-gate latch: off, latched, or on. The last-run details follow.
+- (c) Stale thresholds come from the backend (market-safety staleness settings and the paper timeframe) and are exposed read-only on `status`. `web/` does not hardcode new threshold numbers.
+- (d) ApprovalQueue stays as shipped in PR #168 for B1. A sideways scroll at 375px is a B2 layout change, and only if that scroll is still there.
