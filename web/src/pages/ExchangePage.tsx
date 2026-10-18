@@ -563,7 +563,7 @@ function ChecklistRow({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="inline-flex items-center gap-1 font-medium text-[var(--color-foreground)]">
             {title}
-            <InfoTip label={title} text={`${detail}. ${body}`} />
+            <InfoTip label={title} text={`${detail.replace(/\.+$/, "")}. ${body}`} />
           </span>
           <Badge variant={badge.variant}>{badge.text}</Badge>
         </div>
