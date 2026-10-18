@@ -24,6 +24,13 @@ Means: **commit → open/update PR → merge to `main` → wait VPS deploy**.
 
 Means: **wait for the in-flight queue** (PR checks, `CI` on `main`, `Deploy`) until it finishes. Do **not** start another `fdpy` (second commit/merge) until that queue is idle. After wait, report status; do not merge unless the user also said `fdpy`.
 
+## Uncommitted `AGENTS.md` from the memory updater
+
+The memory updater edits `AGENTS.md` in place and leaves it uncommitted. Do not open a PR only for it.
+
+- **Docs-only PR:** add it as one extra commit, `docs(agents): fold memory`, after checking that no rule was removed or loosened (floors 0.55/0.70, `same_side_hold`, no 1:3 take-profit, keep the universe, EV-gate latch, kill-switch engage rules, Fear & Greed context only, live off). If a rule changed, stop and ask the owner.
+- **Code PR:** never include it. Run `git stash push -- AGENTS.md` before branching and `git stash pop` after the PR is merged.
+
 ## Hard stops (not overridden by `fdpy`)
 
 - Live trading flag / withdraw / transfer
