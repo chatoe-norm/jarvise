@@ -9,6 +9,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import type { StatusPayload } from "@/lib/api";
+import { killBadge } from "@/lib/killBadge";
 
 const nav = [
   { to: "/", label: "Home", icon: LayoutDashboard, end: true },
@@ -57,7 +58,8 @@ export function AppShell({
   pendingCount: number;
   openPositionsCount?: number;
 }) {
-  const kill = Boolean(status?.kill_switch);
+  const killView = killBadge(status);
+  const killHot = killView.kind !== "clear";
   const live = Boolean(status?.live_trading);
   const noc = nocState(status);
   const universe = universeSymbols(status);
@@ -103,7 +105,7 @@ export function AppShell({
                 <span
                   className={cn(
                     "ml-auto h-2 w-2 rounded-full",
-                    kill ? "bg-[var(--color-danger)] animate-ping" : "bg-[var(--color-ok)]/80",
+                    killHot ? "bg-[var(--color-danger)] animate-ping" : "bg-[var(--color-ok)]/80",
                   )}
                 />
               ) : null}
@@ -115,8 +117,8 @@ export function AppShell({
             <Badge variant={live ? "danger" : "ok"} className="w-full justify-center py-1">
               {live ? "LIVE APPROVAL" : "PAPER SHIELD ACTIVE"}
             </Badge>
-            <Badge variant={kill ? "danger" : "muted"} className="w-full justify-center py-1">
-              Kill Switch: {kill ? "ENGAGED" : "CLEAR"}
+            <Badge variant={killView.variant} className="w-full justify-center py-1">
+              {killView.kind === "unknown" ? killView.text : `Kill Switch: ${killView.kind === "engaged" ? "ENGAGED" : "CLEAR"}`}
             </Badge>
           </div>
           <div className="pt-1 text-[11px] text-[var(--color-muted)] text-center font-mono">
@@ -139,9 +141,9 @@ export function AppShell({
             ) : null}
           </div>
           <div className="flex items-center gap-2">
-            {kill ? (
+            {killHot ? (
               <Badge variant="danger" className="text-[10px] py-0 px-1.5 animate-pulse">
-                KILL ENGAGED
+                {killView.kind === "unknown" ? killView.text : "KILL ENGAGED"}
               </Badge>
             ) : (
               <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-muted)] font-mono">
@@ -169,9 +171,9 @@ export function AppShell({
               </Badge>
             ) : null}
           </div>
-          {kill ? (
+          {killHot ? (
             <Badge variant="danger" className="animate-pulse">
-              Kill switch engaged — pipeline blocked
+              {killView.kind === "unknown" ? killView.text : "Kill switch engaged — pipeline blocked"}
             </Badge>
           ) : (
             <div className="flex items-center gap-2 text-xs text-[var(--color-muted)] font-mono">
@@ -229,7 +231,7 @@ export function AppShell({
                     <span
                       className={cn(
                         "absolute top-1.5 right-4 h-1.5 w-1.5 rounded-full",
-                        kill ? "bg-[var(--color-danger)] animate-ping" : "bg-[var(--color-ok)]",
+                        killHot ? "bg-[var(--color-danger)] animate-ping" : "bg-[var(--color-ok)]",
                       )}
                     />
                   ) : null}

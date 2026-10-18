@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { InfoTip } from "@/components/InfoTip";
 import { api, type DashboardPayload, type ExchangePayload } from "@/lib/api";
+import { exchangeEvBadge } from "@/lib/exchangeReadiness";
 import { copyText } from "@/lib/clipboard";
 import { cn, formatNum, formatQty, relativeAge } from "@/lib/utils";
 
@@ -271,7 +272,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
                 <span>Automatic Venue Stop-Loss Limit Orders</span>
               </div>
               <p className="text-[var(--color-muted)] leading-relaxed">
-                ทุกคำสั่งซื้อ (BUY) ที่แมตช์สำเร็จบน Binance ระบบจะส่งคำสั่งตั้ง Stop Loss Limit ไปยัง Exchange ทันทีโดยอัตโนมัติที่ระดับ Invalidation Price เพื่อป้องกันความเสี่ยงแม้ในกรณีเซิร์ฟเวอร์หลุดการเชื่อมต่อ
+                จุดตัดบน Exchange ทำงานเฉพาะเมื่อ Live Trading เปิดอยู่ และมีคำสั่งซื้อที่แมตช์บน Binance แล้ว ระบบจึงส่ง Stop Loss Limit ที่ราคา Invalidation จุดตัดของ paper อยู่ในสมุดจำลอง ไม่ได้ไปที่ Exchange
               </p>
             </div>
 
@@ -282,7 +283,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
               </div>
               <p className="text-[var(--color-muted)] leading-relaxed">
                 งาน Risk Monitor ทำงานทุก 15 นาที หากการขาดทุนรายวันเกินเพดาน (${dailyLossCap != null ? `$${formatNum(dailyLossCap)}` : "Max Daily Loss"})
-                ระบบจะสั่ง Engage Kill-Switch ยกเลิกออเดอร์รออนุมัติทั้งหมด และสั่งขายตัดขาดทุนแบบ Market Sell ทันทีอัตโนมัติ (<code className="text-rose-400">jarvise trade flatten</code>)
+                เมื่อ Live Trading เปิดอยู่ ระบบจะสั่ง Engage Kill-Switch ยกเลิกออเดอร์รออนุมัติทั้งหมด และสั่งขายตัดขาดทุนแบบ Market Sell (<code className="text-rose-400">jarvise trade flatten</code>) ขณะที่ Live ปิดอยู่ คำสั่งขายนี้ไม่ถูกส่ง
               </p>
             </div>
           </div>
@@ -411,11 +412,7 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
                   n="01"
                   title="EV > 0"
                   detail="Prove Paper Trade Expectancy (EV > 0). Requirements that must be satisfied before enabling live spot execution."
-                  badge={
-                    gate?.n != null
-                      ? { text: `${gate.blocked ? "ยังไม่ผ่าน" : "ผ่านเกณฑ์"} (N=${gate.n})`, variant: gate.blocked ? "muted" : "ok" }
-                      : { text: "ยังไม่มีข้อมูล", variant: "outline" }
-                  }
+                  badge={exchangeEvBadge(gate)}
                   body={
                     gate?.n != null
                       ? `ต้องมีไม้ auto ปิดแล้ว ≥ ${gate.min_n ?? 8} ไม้ และ EV เป็นบวก — ตอนนี้ N=${gate.n}, EV ${formatNum(gate.ev)} ดอลลาร์ต่อไม้`

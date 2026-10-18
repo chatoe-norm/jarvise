@@ -215,6 +215,24 @@ def test_weekly_report_requires_token(monkeypatch) -> None:
     assert handler._status == 401
 
 
+def test_weekly_report_build_failure_sends_short_line(monkeypatch) -> None:
+    def boom(**_k: object) -> dict:
+        raise RuntimeError("db")
+
+    monkeypatch.setattr("jarvise.jobs.build_weekly_report", boom)
+    monkeypatch.setattr(
+        "jarvise.jobs.notify_weekly_build_failure",
+        lambda: {"telegram_sent": False, "telegram_error": "send_failed"},
+    )
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *_a, **_k: None)
+    code, body = run_weekly_report()
+    assert code == 1
+    assert body["ok"] is False
+    assert body["text"] == "รายงานสัปดาห์สร้างไม่สำเร็จ"
+    assert body["telegram_error"] == "send_failed"
+    assert "RuntimeError" in body["error"]
+
+
 def test_weekly_report_sends_when_kill_switch_on(monkeypatch) -> None:
     monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: True)
     monkeypatch.setattr(
