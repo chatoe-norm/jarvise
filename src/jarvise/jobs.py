@@ -35,7 +35,7 @@ from jarvise_notify import (
     notify_pending_digest,
     notify_risk_halt,
 )
-from jarvise_notify.weekly import build_weekly_report
+from jarvise_notify.weekly import WEEKLY_BUILD_FAILURE, build_weekly_report, notify_weekly_build_failure
 from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
 from jarvise_paper.risk_monitor import run_risk_monitor as paper_risk_monitor
@@ -690,12 +690,13 @@ def run_weekly_report() -> tuple[int, dict[str, Any]]:
         try:
             payload = build_weekly_report(send=True)
         except Exception as exc:  # noqa: BLE001
+            sent = notify_weekly_build_failure()
             payload = {
                 "ok": False,
                 "paper_only": True,
-                "text": "",
-                "telegram_sent": False,
-                "telegram_error": type(exc).__name__,
+                "text": WEEKLY_BUILD_FAILURE,
+                "telegram_sent": sent["telegram_sent"],
+                "telegram_error": sent["telegram_error"],
                 "error": f"{type(exc).__name__}: {exc}",
             }
         _publish_best_effort("jarvise:weekly_report:last", payload)

@@ -100,30 +100,12 @@ def format_weekly_report(snapshot: dict[str, Any]) -> dict[str, Any]:
     else:
         lines.append(f"ระบบ: kill switch ปิด [{MARK_OK}]")
 
-    shadow = snapshot.get("shadow") or {}
-    scored = int(shadow.get("n_scored") or 0)
-    no_obj = int(shadow.get("n_no_objection") or 0)
-    veto = int(shadow.get("n_veto") or 0)
-    elapsed = shadow.get("elapsed_days")
-    elapsed_txt = "—" if elapsed is None else _num(elapsed, 1)
-    window = "ปิด" if shadow.get("window_closed") else "เปิด"
-    shadow_line = (
-        f"shadow: {scored}/{SHADOW_SCORED_CAP} ไม่คัดค้าน {no_obj} veto {veto} "
-        f"วัน {elapsed_txt}/{WINDOW_DAYS} หน้าต่าง{window}"
-    )
-    if shadow.get("window_closed"):
-        lines.append(f"{shadow_line} [{MARK_DO}]")
-        flag(MARK_DO, SHADOW_WINDOW_ACTION)
+    if snapshot.get("ledger_error"):
+        lines.append(f"paper: อ่านสมุดไม่ได้ [{MARK_DO}]")
+        flag(MARK_DO, "อ่านสมุด paper ไม่ได้")
+        lines.append(f"shadow: อ่านสมุดไม่ได้ [{MARK_DO}]")
     else:
-        lines.append(f"{shadow_line} [{MARK_OK}]")
-
-    paper = snapshot.get("paper") or {}
-    lines.append(
-        f"paper: equity {_num(paper.get('equity'))} เปิด {int(paper.get('open_positions') or 0)} ไม้ [{MARK_OK}]"
-    )
-    lines.append(
-        f"paper: ปิด {int(paper.get('closed_7d') or 0)} ไม้ 7 วัน PnL {_num(paper.get('pnl_7d'))} [{MARK_OK}]"
-    )
+        _append_shadow_and_paper(lines, flag, snapshot)
 
     for item in snapshot.get("health") or []:
         level = str(item.get("level") or MARK_OK)
@@ -151,6 +133,37 @@ def format_weekly_report(snapshot: dict[str, Any]) -> dict[str, Any]:
         "text": "\n".join(lines),
         "actions": do + look,
     }
+
+
+def _append_shadow_and_paper(
+    lines: list[str],
+    flag: Any,
+    snapshot: dict[str, Any],
+) -> None:
+    shadow = snapshot.get("shadow") or {}
+    scored = int(shadow.get("n_scored") or 0)
+    no_obj = int(shadow.get("n_no_objection") or 0)
+    veto = int(shadow.get("n_veto") or 0)
+    elapsed = shadow.get("elapsed_days")
+    elapsed_txt = "—" if elapsed is None else _num(elapsed, 1)
+    window = "ปิด" if shadow.get("window_closed") else "เปิด"
+    shadow_line = (
+        f"shadow: {scored}/{SHADOW_SCORED_CAP} ไม่คัดค้าน {no_obj} veto {veto} "
+        f"วัน {elapsed_txt}/{WINDOW_DAYS} หน้าต่าง{window}"
+    )
+    if shadow.get("window_closed"):
+        lines.append(f"{shadow_line} [{MARK_DO}]")
+        flag(MARK_DO, SHADOW_WINDOW_ACTION)
+    else:
+        lines.append(f"{shadow_line} [{MARK_OK}]")
+
+    paper = snapshot.get("paper") or {}
+    lines.append(
+        f"paper: equity {_num(paper.get('equity'))} เปิด {int(paper.get('open_positions') or 0)} ไม้ [{MARK_OK}]"
+    )
+    lines.append(
+        f"paper: ปิด {int(paper.get('closed_7d') or 0)} ไม้ 7 วัน PnL {_num(paper.get('pnl_7d'))} [{MARK_OK}]"
+    )
 
 
 def _redis_json(key: str) -> Any:
@@ -279,11 +292,15 @@ def collect_weekly_snapshot(*, now_ms: int | None = None) -> dict[str, Any]:
     closed_7d = 0
     pnl_7d = 0.0
     ev_gate: dict[str, Any] = {"latched": False, "n": 0, "ev": None}
+    ledger_error: str | None = None
     raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
     path = Path(raw)
-    if path.exists():
-        conn = open_db(path)
+    if not path.exists():
+        ledger_error = "missing"
+    else:
+        conn = None
         try:
+            conn = open_db(path)
             scored = score_shadow(conn, now_ms=ts)
             shadow = {
                 "n_scored": scored.get("n_scored"),
@@ -308,14 +325,18 @@ def collect_weekly_snapshot(*, now_ms: int | None = None) -> dict[str, Any]:
                 "n": auto.get("closed_trades"),
                 "ev": auto.get("expected_value_ev"),
             }
+        except Exception:  # noqa: BLE001 — a failed read must not look like a quiet book
+            ledger_error = "read_failed"
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
     return {
         "live": live_trading_enabled(),
         "auto_decide": get_paper_auto_decide_enabled(),
         "ev_gate": ev_gate,
         "kill_switch": bool(ks.get("engaged")),
         "kill_switch_known": ks.get("known", True),
+        "ledger_error": ledger_error,
         "shadow": shadow,
         "paper": {
             "equity": equity,
@@ -356,3 +377,23 @@ def build_weekly_report(*, send: bool = False, now_ms: int | None = None) -> dic
     if not sent:
         report["telegram_error"] = "send_failed"
     return report
+
+
+WEEKLY_BUILD_FAILURE = "รายงานสัปดาห์สร้างไม่สำเร็จ"
+
+
+def notify_weekly_build_failure() -> dict[str, Any]:
+    """One short line when the report cannot be built. Send errors stay in the JSON."""
+    out: dict[str, Any] = {"telegram_sent": False, "telegram_error": None}
+    if not notify_configured():
+        out["telegram_error"] = "not_configured"
+        return out
+    try:
+        sent = send_telegram_message(WEEKLY_BUILD_FAILURE)
+    except Exception as exc:  # noqa: BLE001
+        out["telegram_error"] = type(exc).__name__
+        return out
+    out["telegram_sent"] = bool(sent)
+    if not sent:
+        out["telegram_error"] = "send_failed"
+    return out

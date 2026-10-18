@@ -2,9 +2,12 @@
 
 from jarvise_notify.weekly import (
     SHADOW_WINDOW_ACTION,
+    WEEKLY_BUILD_FAILURE,
     _health_items,
     build_weekly_report,
+    collect_weekly_snapshot,
     format_weekly_report,
+    notify_weekly_build_failure,
 )
 
 
@@ -68,6 +71,34 @@ def test_weekly_report_kill_switch_on() -> None:
     assert "ระบบ: kill switch เปิด [ต้องทำ]" in text
     assert "ต้องทำ: kill switch เปิด" in text
     assert "ไม่ต้องทำอะไร" not in text
+
+
+def test_missing_ledger_is_action_required(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("JARVISE_DB", str(tmp_path / "missing.db"))
+    monkeypatch.setattr(
+        "jarvise_notify.weekly.kill_switch_state",
+        lambda **_k: {"engaged": False, "known": True},
+    )
+    monkeypatch.setattr("jarvise_notify.weekly.live_trading_enabled", lambda: False)
+    monkeypatch.setattr("jarvise_notify.weekly.get_paper_auto_decide_enabled", lambda: False)
+    monkeypatch.setattr("jarvise_notify.weekly._redis_json", lambda _key: None)
+    monkeypatch.setattr("jarvise_notify.weekly.digest_dir", lambda: tmp_path)
+    snap = collect_weekly_snapshot(now_ms=1_700_000_000_000)
+    text = format_weekly_report(snap)["text"]
+    assert snap["ledger_error"] == "missing"
+    assert "10000" not in text
+    assert "paper: อ่านสมุดไม่ได้ [ต้องทำ]" in text
+    assert "ไม่ต้องทำอะไร" not in text
+
+
+def test_weekly_build_failure_sends_short_line(monkeypatch) -> None:
+    sent: list[str] = []
+    monkeypatch.setattr("jarvise_notify.weekly.notify_configured", lambda: True)
+    monkeypatch.setattr("jarvise_notify.weekly.send_telegram_message", lambda text: sent.append(text) or True)
+    out = notify_weekly_build_failure()
+    assert sent == [WEEKLY_BUILD_FAILURE]
+    assert out["telegram_sent"] is True
+    assert out["telegram_error"] is None
 
 
 def test_weekly_send_soft_fails(monkeypatch) -> None:
