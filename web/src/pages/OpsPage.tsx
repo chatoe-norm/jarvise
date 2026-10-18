@@ -363,7 +363,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         {(activeTab === "risk" || activeTab === "all") && (
           <RiskMonitorCard
             monitor={status?.risk_monitor}
-            maxAgeMin={status?.freshness?.market_safety_max_age_min}
+            maxAgeMin={status?.freshness?.risk_monitor_stale_after_min}
           />
         )}
 
