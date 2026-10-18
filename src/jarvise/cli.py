@@ -15,6 +15,7 @@ from jarvise.charts import analytics_db_path, export_candle_graphs
 from jarvise_exchange.cli import exchange_app
 from jarvise_ingest.db_cli import db_app
 from jarvise_ingest.universe_cli import universe_app
+from jarvise_notify.weekly import build_weekly_report
 from jarvise_trade.cli import trade_app
 
 ROOT_EPILOG = """Examples:
@@ -506,3 +507,22 @@ def rag_refresh(
     emit(steps, output)
     if not steps.get("ok"):
         raise typer.Exit(code=2)
+
+
+report_app = typer.Typer(help="Read-only owner reports. No orders.")
+app.add_typer(report_app, name="report")
+
+
+@report_app.command("weekly")
+def report_weekly(
+    json_output: Annotated[bool, typer.Option("--json", help="Print the report JSON.")] = False,
+    send: Annotated[bool, typer.Option("--send", help="Send the report on Telegram.")] = False,
+) -> None:
+    """Build the weekly paper report. Telegram failures stay in the JSON."""
+    payload = build_weekly_report(send=send)
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+    else:
+        typer.echo(payload.get("text") or "")
+    if payload.get("ok") is False:
+        raise typer.Exit(code=1)

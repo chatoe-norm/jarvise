@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+from jarvise.jobs import JOB_TIMEOUTS_S
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / "infra" / "n8n" / "workflows"
 COMPOSE = ROOT / "docker-compose.yml"
@@ -64,6 +66,7 @@ def test_jobs_workflows_send_token_placeholder() -> None:
     assert len(callers) >= 9
     assert "jarvise-live-reconcile.json" in callers
     assert "jarvise-shadow-veto.json" in callers
+    assert "jarvise-weekly-report.json" in callers
     shadow = json.loads((WORKFLOWS / "jarvise-shadow-veto.json").read_text(encoding="utf-8"))
     assert shadow["id"] == "jrvsShadowVeto4h1"
     shadow_timeout = next(
@@ -72,6 +75,21 @@ def test_jobs_workflows_send_token_placeholder() -> None:
         if node.get("type") == "n8n-nodes-base.httpRequest"
     )
     assert shadow_timeout >= 360000
+    weekly = json.loads((WORKFLOWS / "jarvise-weekly-report.json").read_text(encoding="utf-8"))
+    assert weekly["id"] == "jrvsWeeklyReport1"
+    assert weekly["settings"]["timezone"] == "Asia/Bangkok"
+    cron = next(
+        node["parameters"]["rule"]["interval"][0]["expression"]
+        for node in weekly["nodes"]
+        if node.get("type") == "n8n-nodes-base.scheduleTrigger"
+    )
+    assert cron == "0 8 * * 1"
+    weekly_timeout = next(
+        node["parameters"]["options"]["timeout"]
+        for node in weekly["nodes"]
+        if node.get("type") == "n8n-nodes-base.httpRequest"
+    )
+    assert weekly_timeout >= JOB_TIMEOUTS_S["weekly_report"] * 1000
     script = (ROOT / "infra" / "docker" / "render-n8n-jobs-workflows.sh").read_text(encoding="utf-8")
     assert "JARVISE_JOBS_TOKEN" in script
     assert "jarvise-live-reconcile.json" in script

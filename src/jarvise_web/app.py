@@ -59,6 +59,7 @@ from jarvise_ingest.universe import (
     preset_sizes,
     seed_named_universe,
 )
+from jarvise_notify.quiet import quiet_mode_enabled, set_quiet_mode
 from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.auto_decide import load_auto_decide_config
@@ -428,6 +429,7 @@ def status_payload() -> dict[str, Any]:
         "sentiment_note": (None if macro and macro.get("fear_greed_index") is not None else "ไม่มีข้อมูล"),
         "rules": dashboard_rules(),
         "freshness": dashboard_freshness(),
+        "notify_quiet": quiet_mode_enabled(),
     }
 
 
@@ -1768,6 +1770,23 @@ async def set_kill_switch(
     if wants_json(request):
         return JSONResponse({"ok": True, "kill_switch": value == "1"})
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/api/notify/quiet")
+async def api_notify_quiet(
+    request: Request,
+    enabled: str = Form("false"),
+    _: None = Depends(require_auth),
+) -> Any:
+    """Toggle quiet mode. Pending alerts wait; critical alerts still send."""
+    on = enabled.strip().lower() in {"1", "true", "on", "yes"}
+    try:
+        set_quiet_mode(on)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=type(exc).__name__) from exc
+    if wants_json(request):
+        return JSONResponse({"ok": True, "notify_quiet": on})
+    return RedirectResponse("/ops", status_code=303)
 
 
 def _log_owner_kill_switch(*, kind: str, reason: str | None, payload: dict[str, Any]) -> None:

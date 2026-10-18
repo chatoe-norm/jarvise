@@ -15,6 +15,7 @@ from jarvise.jobs import (
     run_paper_expire,
     run_paper_pending_digest,
     run_paper_run,
+    run_weekly_report,
 )
 from jarvise_ingest.db import open_db
 
@@ -187,6 +188,34 @@ def test_jobs_token_required(monkeypatch) -> None:
     handler.headers = {"X-Jarvise-Token": "nope"}
     handler._dispatch()
     assert handler._status == 401
+
+
+def test_weekly_report_requires_token(monkeypatch) -> None:
+    monkeypatch.setenv("JARVISE_JOBS_TOKEN", "secret")
+    handler = _Handler()
+    handler.path = "/jobs/weekly-report"
+    handler.headers = {}
+    handler._dispatch()
+    assert handler._status == 401
+
+
+def test_weekly_report_sends_when_kill_switch_on(monkeypatch) -> None:
+    monkeypatch.setattr("jarvise.jobs.kill_switch_engaged", lambda: True)
+    monkeypatch.setattr(
+        "jarvise.jobs.build_weekly_report",
+        lambda **_k: {
+            "ok": True,
+            "paper_only": True,
+            "text": "รายงาน",
+            "telegram_sent": False,
+            "telegram_error": "send_failed",
+        },
+    )
+    monkeypatch.setattr("jarvise.jobs.publish_redis_status", lambda *_a, **_k: None)
+    code, body = run_weekly_report()
+    assert code == 0
+    assert body["text"] == "รายงาน"
+    assert body["telegram_error"] == "send_failed"
 
 
 def test_paper_run_respects_kill_switch(monkeypatch) -> None:

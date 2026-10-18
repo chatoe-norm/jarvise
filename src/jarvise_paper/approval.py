@@ -233,7 +233,8 @@ def enqueue_approval(
             "status": "pending",
         },
     )
-    notify_pending_enqueue(row)
+    open_symbols = {str(pos.get("symbol") or "").upper() for pos in list_paper_positions(conn)}
+    notify_pending_enqueue(row, open_symbols=open_symbols)
     return row
 
 

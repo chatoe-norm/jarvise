@@ -16,6 +16,7 @@ import { IngestHealthControlCard } from "@/components/IngestHealthControlCard";
 import { ModelRoutingCard } from "@/components/ModelRoutingCard";
 import { ObservabilityControlCard } from "@/components/ObservabilityControlCard";
 import { PaperAutoDecideCard } from "@/components/PaperAutoDecideCard";
+import { QuietModeCard } from "@/components/QuietModeCard";
 import { PipelineControlCard, PIPELINE_JOBS } from "@/components/PipelineControlCard";
 import { QdrantTradingRulesCard } from "@/components/QdrantTradingRulesCard";
 import { RiskCapsControlCard } from "@/components/RiskCapsControlCard";
@@ -321,6 +322,7 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
                       initialConfig={status?.auto_decide_config}
                       onRefresh={() => void load()}
                     />
+                    <QuietModeCard enabled={Boolean(status?.notify_quiet)} onRefresh={() => void load()} />
                     <PipelineControlCard
                       statusPayload={status as unknown as Record<string, unknown>}
                       onRefresh={() => void load()}
@@ -388,12 +390,15 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
         )}
 
         {activeTab === "auto_decide" && (
-          <PaperAutoDecideCard
-            auto={status?.paper_auto}
-            gate={status?.auto_ev_gate}
-            initialConfig={status?.auto_decide_config}
-            onRefresh={() => void load()}
-          />
+          <>
+            <PaperAutoDecideCard
+              auto={status?.paper_auto}
+              gate={status?.auto_ev_gate}
+              initialConfig={status?.auto_decide_config}
+              onRefresh={() => void load()}
+            />
+            <QuietModeCard enabled={Boolean(status?.notify_quiet)} onRefresh={() => void load()} />
+          </>
         )}
 
         {(activeTab === "models" || activeTab === "auto_decide") && (
