@@ -108,6 +108,15 @@ export type StatusPayload = {
   sentiment_note?: string | null;
   risk_monitor?: unknown;
   auth_warning?: string | null;
+  owner_decisions?: OwnerDecision[];
+};
+
+export type OwnerDecision = {
+  id: number;
+  at_ms: number;
+  kind: string;
+  reason?: string | null;
+  actor?: string;
 };
 
 export type ApprovalRow = {
@@ -178,6 +187,13 @@ export type AnalysisExplainPayload = {
   breakdown: ConfidenceBreakdown;
 };
 
+export type RecommendationScenario = {
+  id: string;
+  title: string;
+  detail: string;
+  levels: { label: string; price: number | null }[];
+};
+
 export type RecommendationPayload = {
   ok: boolean;
   approval_id: string;
@@ -199,6 +215,7 @@ export type RecommendationPayload = {
     est_loss_usd?: number;
     stop_atr_multiple: number;
   };
+  scenarios?: RecommendationScenario[] | null;
   doctrine: string[];
   checklist: string[];
   news_context?: { not_a_trade_signal: true; lines: string[] } | null;
@@ -486,11 +503,11 @@ export const api = {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ id }),
     }).then(requireOk),
-  killSwitch: (state: "on" | "off") =>
+  killSwitch: (state: "on" | "off", reason?: string) =>
     request<{ ok: boolean; kill_switch: boolean }>("/kill-switch", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ state }),
+      body: new URLSearchParams(reason ? { state, reason } : { state }),
     }),
   persistMetrics: () =>
     request<{ ok: boolean }>("/paper/metrics/persist", { method: "POST" }),
@@ -583,11 +600,11 @@ export const api = {
     request<PaperAutoStatus & { ok: boolean; error?: string }>("/api/paper/auto-decide/run", {
       method: "POST",
     }),
-  resetEvGate: () =>
+  resetEvGate: (reason: string) =>
     request<{ ok: boolean; latched: boolean; auto_ev_gate?: EvGateStatus }>("/api/paper/ev-gate/reset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm: true }),
+      body: JSON.stringify({ confirm: true, reason }),
     }),
   queryDoctrine: (q: string, limit: number = 3) =>
     request<DoctrineQueryResponse>(

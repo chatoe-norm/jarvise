@@ -150,7 +150,6 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
     context,
     displayScore,
     isOpen,
-    isMobile,
     modalTab,
     setModalTab,
     openFearGreed,
@@ -410,21 +409,11 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
       {/* FULL RESPONSIVE MODAL DIALOG (CENTERED ON DESKTOP/TABLET, BOTTOM SHEET ON MOBILE) */}
       {isOpen && (
         <div
-          className={cn(
-            "fixed inset-0 z-[60] bg-black/75 backdrop-blur-sm animate-fade-in",
-            isMobile
-              ? "flex flex-col justify-end"
-              : "flex items-center justify-center p-4 sm:p-6",
-          )}
+          className="fixed inset-0 z-[60] flex items-end bg-black/75 backdrop-blur-sm animate-fade-in sm:items-center sm:justify-center sm:p-6"
           onClick={closeDetails}
         >
           <div
-            className={cn(
-              "w-full overflow-y-auto bg-[#0d131f] border border-[var(--color-border)] shadow-2xl transition-all",
-              isMobile
-                ? "max-h-[88vh] rounded-t-2xl p-5 animate-slide-up"
-                : "max-w-2xl max-h-[88vh] rounded-2xl p-6 animate-scale-in",
-            )}
+            className="fixed inset-x-0 bottom-0 max-h-[80vh] w-full overflow-y-auto rounded-t-2xl border border-[var(--color-border)] bg-[#0d131f] p-5 shadow-2xl animate-slide-up sm:static sm:max-h-[88vh] sm:max-w-2xl sm:rounded-2xl sm:p-6 sm:animate-scale-in"
             style={{
               boxShadow: `0 20px 50px rgba(0,0,0,0.85), 0 0 25px ${
                 modalTab === "fear_greed" ? themeColor : altPhase.themeColor
@@ -432,10 +421,7 @@ export function MarketContextCard({ status, news }: MarketContextCardProps) {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Mobile Sheet Drag Handle */}
-            {isMobile && (
-              <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-[var(--color-border)] cursor-pointer" />
-            )}
+            <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-[var(--color-border)] sm:hidden" />
 
             {/* Modal Header */}
             <div className="flex items-center justify-between pb-3.5 border-b border-[var(--color-border)]/80">

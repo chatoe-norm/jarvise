@@ -358,7 +358,21 @@ def test_ev_gate_latch_survives_thin_sample_until_reset(tmp_path: Path, monkeypa
     still = auto_ev_gate_status(conn, now_ms=later)
     assert still["latched"] is True
 
-    assert run(["ev-gate", "reset", "--confirm", "--db", str(db), "--json"]) == 0
+    assert (
+        run(
+            [
+                "ev-gate",
+                "reset",
+                "--confirm",
+                "--reason",
+                "owner reviewed the losing sample",
+                "--db",
+                str(db),
+                "--json",
+            ]
+        )
+        == 0
+    )
     cleared = auto_ev_gate_status(conn, now_ms=later)
     assert cleared["latched"] is False
     assert cleared["blocked"] is False
@@ -379,7 +393,7 @@ def test_ev_gate_reset_clears_latch_while_sample_still_negative(tmp_path: Path, 
     now = 20_000_000
     _seed_auto_round_trips(conn, 6, now=now, exit_price=90.0)
     assert auto_ev_gate_status(conn, now_ms=now)["latched"] is True
-    reset_ev_gate_latch(conn, at_ms=now + 1)
+    reset_ev_gate_latch(conn, at_ms=now + 1, reason="owner reviewed the losing sample")
     assert read_ev_gate_latch(conn) is None
     # The sample still fails, so the next evaluation latches again.
     again = auto_ev_gate_status(conn, now_ms=now)

@@ -109,6 +109,26 @@ export function RecommendationCard({
         </dl>
       </Section>
 
+      {data.scenarios?.length ? (
+        <Section title="สถานการณ์ที่เป็นไปได้ (ไม่ใช่การทำนาย)">
+          <ul className="space-y-3">
+            {data.scenarios.map((item) => (
+              <li key={item.id} className="rounded-md border border-[var(--color-border)] px-3 py-2">
+                <div className="text-sm font-medium text-[var(--color-foreground)]">{item.title}</div>
+                <p className="mt-1 text-xs text-[var(--color-muted)]">{item.detail}</p>
+                {item.levels.length ? (
+                  <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1">
+                    {item.levels.map((level) => (
+                      <Stat key={level.label} label={level.label} value={formatPrice(level.price)} />
+                    ))}
+                  </dl>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
+
       <Section title="กฎการเทรด">
         {data.doctrine.length ? (
           <List items={data.doctrine} />

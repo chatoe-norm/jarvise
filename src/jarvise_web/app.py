@@ -55,7 +55,14 @@ from jarvise_obs.metrics import render_prometheus, set_gauge
 from jarvise_paper.approval import approve_approval, reject_approval
 from jarvise_paper.auto_decide import load_auto_decide_config
 from jarvise_paper.close import close_position
-from jarvise_paper.feedback import auto_ev_gate_status, reset_ev_gate_latch
+from jarvise_paper.feedback import (
+    auto_ev_gate_status,
+    list_owner_decisions,
+    optional_owner_reason,
+    record_owner_decision,
+    require_owner_reason,
+    reset_ev_gate_latch,
+)
 from jarvise_paper.ledger import load_paper_ledger
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.recommendation import build_recommendation, doctrine_query
@@ -363,12 +370,14 @@ def status_payload() -> dict[str, Any]:
     ks = kill_switch_state()
     macro = None
     gate = None
+    decisions: list[dict[str, Any]] = []
     path = db_path()
     if path.exists():
         conn = open_db(path)
         try:
             macro = latest_macro_sentiment(conn)
             gate = auto_ev_gate_status(conn)
+            decisions = list_owner_decisions(conn, limit=5)
         finally:
             conn.close()
     return {
@@ -383,6 +392,7 @@ def status_payload() -> dict[str, Any]:
         "paper_expire": redis_get_json(PAPER_EXPIRE_KEY),
         "paper_auto": redis_get_json(PAPER_AUTO_KEY),
         "auto_ev_gate": gate,
+        "owner_decisions": decisions,
         "auto_decide_config": {
             "enabled": get_paper_auto_decide_enabled(),
             "max_risk_per_trade_pct": max_risk_per_trade_pct(),
@@ -736,11 +746,13 @@ async def api_paper_ev_gate_reset(
 ) -> dict[str, Any]:
     """Clear the EV-gate latch. The body must include confirm=true."""
     confirmed = False
+    reason = ""
     ct = request.headers.get("content-type", "")
     if "application/json" in ct:
         body = await request.json()
         if isinstance(body, dict):
             confirmed = body.get("confirm") is True
+            reason = str(body.get("reason") or "")
     if not confirmed:
         raise HTTPException(status_code=400, detail="confirm=true is required")
     path = db_path()
@@ -748,7 +760,10 @@ async def api_paper_ev_gate_reset(
         raise HTTPException(status_code=404, detail="Database not found")
     conn = open_db(path)
     try:
-        result = reset_ev_gate_latch(conn)
+        try:
+            result = reset_ev_gate_latch(conn, reason=reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         gate = auto_ev_gate_status(conn)
     finally:
         conn.close()
@@ -1669,6 +1684,7 @@ async def api_observability_persist(
 async def set_kill_switch(
     request: Request,
     state: str = Form(...),
+    reason: str = Form(""),
     _: None = Depends(require_auth),
 ) -> Any:
     gap = live_auth_gap()
@@ -1677,13 +1693,51 @@ async def set_kill_switch(
             return JSONResponse({"ok": False, "error": gap}, status_code=403)
         raise HTTPException(status_code=403, detail=gap)
     value = "1" if state.lower() in {"on", "1", "true", "engage"} else "0"
-    try:
-        _redis().set(KILL_SWITCH_KEY, value)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    clearing = value == "0"
+    note = optional_owner_reason(reason)
+    if clearing:
+        try:
+            note = require_owner_reason(reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not clearing:
+        try:
+            _redis().set(KILL_SWITCH_KEY, value)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _log_owner_kill_switch(kind="kill_switch_on", reason=note)
+    else:
+        _log_owner_kill_switch(kind="kill_switch_off", reason=note, strict=True)
+        try:
+            _redis().set(KILL_SWITCH_KEY, value)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
     if wants_json(request):
         return JSONResponse({"ok": True, "kill_switch": value == "1"})
     return RedirectResponse("/", status_code=303)
+
+
+def _log_owner_kill_switch(*, kind: str, reason: str | None, strict: bool = False) -> None:
+    """Record an owner kill-switch action. Engage (strict=False) never raises."""
+    path = db_path()
+    try:
+        conn = open_db(path)
+        try:
+            record_owner_decision(
+                conn,
+                at_ms=int(time.time() * 1000),
+                kind=kind,
+                reason=reason,
+                actor="owner",
+                payload={"kind": kind},
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise HTTPException(status_code=500, detail="could not record the written review") from exc
+        logger.warning("owner kill-switch log soft-fail: %s", type(exc).__name__)
 
 
 @app.post("/approvals/approve")
