@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { api, type ApprovalRow, type OhlcvPayload, type RecommendationPayload } from "@/lib/api";
 import { RecommendationCard } from "@/components/RecommendationCard";
 import { Badge } from "@/components/ui/badge";
@@ -45,12 +45,15 @@ export function ApprovalQueue({
   killSwitch,
   openSymbols,
   onChanged,
+  emptyExtra,
 }: {
   rows: ApprovalRow[];
   killSwitch: boolean;
   /** Symbols with an open paper position; FLAT cards for other symbols are no-ops. */
   openSymbols: ReadonlySet<string>;
   onChanged: () => void;
+  /** Shown inside this card when the queue has no rows. */
+  emptyExtra?: ReactNode;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -243,9 +246,12 @@ export function ApprovalQueue({
           <p className="mb-3 text-sm text-[var(--color-danger)]">{error}</p>
         ) : null}
         {rows.length === 0 ? (
-          <p className="text-sm text-[var(--color-muted)]">
-            No pending approvals — pipeline idle. Paper jobs enqueue here on schedule.
-          </p>
+          <div className="space-y-4">
+            <p className="text-sm text-[var(--color-muted)]">
+              No pending approvals — pipeline idle. Paper jobs enqueue here on schedule.
+            </p>
+            {emptyExtra}
+          </div>
         ) : actionable.length > 0 ? (
           renderTable(actionable)
         ) : (

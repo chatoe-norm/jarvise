@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { InfoTip } from "@/components/InfoTip";
 import { api, type CryptoSuitability, type UniversePayload } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { describeIssues } from "@/lib/syncIssues";
@@ -304,10 +305,13 @@ export function CryptoUniverseCard() {
               disabled={loading || actionBusy || syncingMarket}
               onClick={() => void handleSyncMarket()}
               className="border-sky-500/40 text-sky-400 hover:bg-sky-500/10 text-xs font-mono"
-              title="ซิงค์ดึง OHLCV ล่าสุดและคำนวณ Indicator/Analysis ทุกเหรียญใน Universe"
             >
               {syncingMarket ? "⏳ กำลังซิงค์ข้อมูล…" : "⚡ ซิงค์ข้อมูลตลาด (Sync)"}
             </Button>
+            <InfoTip
+              label="ซิงค์ทั้ง Universe"
+              text="ซิงค์ดึง OHLCV ล่าสุดและคำนวณ Indicator/Analysis ทุกเหรียญใน Universe"
+            />
             <Button
               variant="outline"
               size="sm"
@@ -322,21 +326,21 @@ export function CryptoUniverseCard() {
                 type="button"
                 disabled={actionBusy || syncingMarket}
                 onClick={() => void handleReset("paper_core")}
-                className="px-2 py-1 rounded hover:bg-[#1f2937] text-[var(--color-muted)] hover:text-white transition-colors"
-                title="รีเซ็ตเป็นคู่เหรียญเริ่มต้น (BTC, ETH)"
+                className="px-2 py-1 rounded hover:bg-[#1f2937] text-[var(--color-muted)] hover:text-white transition-colors pointer-coarse:min-h-11 pointer-coarse:min-w-11"
               >
                 paper_core ({data?.preset_sizes?.paper_core ?? "—"})
               </button>
+              <InfoTip label="paper_core" text="รีเซ็ตเป็นคู่เหรียญเริ่มต้น (BTC, ETH)" />
               <span className="text-[var(--color-border)]">|</span>
               <button
                 type="button"
                 disabled={actionBusy || syncingMarket}
                 onClick={() => void handleReset("paper_liquid")}
-                className="px-2 py-1 rounded hover:bg-[#1f2937] text-[var(--color-muted)] hover:text-white transition-colors"
-                title="รีเซ็ตเป็น 4 สกุลหลัก (BTC, ETH, SOL, BNB)"
+                className="px-2 py-1 rounded hover:bg-[#1f2937] text-[var(--color-muted)] hover:text-white transition-colors pointer-coarse:min-h-11 pointer-coarse:min-w-11"
               >
                 paper_liquid ({data?.preset_sizes?.paper_liquid ?? "—"})
               </button>
+              <InfoTip label="paper_liquid" text="รีเซ็ตเป็น 4 สกุลหลัก (BTC, ETH, SOL, BNB)" />
             </div>
           </div>
         </div>
@@ -792,10 +796,12 @@ function CryptoAssetCard({
               disabled={busy || syncing}
               onClick={onSync}
               className="text-[10px] text-sky-400 hover:text-sky-300 font-mono underline disabled:opacity-50"
-              title="ซิงค์ดึงข้อมูลแท่งเทียนล่าสุดเฉพาะเหรียญนี้"
             >
               {syncing ? "ซิงค์…" : "⚡ ซิงค์"}
             </button>
+          ) : null}
+          {onSync && item.is_active ? (
+            <InfoTip label="ซิงค์เหรียญนี้" text="ซิงค์ดึงข้อมูลแท่งเทียนล่าสุดเฉพาะเหรียญนี้" />
           ) : null}
         </div>
 

@@ -61,14 +61,14 @@ function ConfirmDialog({ opts, onSettle }: { opts: ConfirmOptions; onSettle: (ok
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[70] flex items-end bg-black/70 backdrop-blur-sm sm:items-center sm:justify-center sm:p-4"
       onClick={() => onSettle(false)}
     >
       <div
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
-        className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5 shadow-2xl"
+        className="w-full rounded-t-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5 shadow-2xl sm:max-w-md sm:rounded-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 id="confirm-dialog-title" className="text-base font-semibold text-[var(--color-foreground)]">

@@ -3,6 +3,7 @@ import { UsdBars } from "@/components/Charts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { InfoTip } from "@/components/InfoTip";
 import { api, type DashboardPayload, type ExchangePayload } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { cn, formatNum, formatQty, relativeAge } from "@/lib/utils";
@@ -408,7 +409,8 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
               <div className="space-y-3 text-sm">
                 <ChecklistRow
                   n="01"
-                  title="Prove Paper Trade Expectancy (EV > 0)"
+                  title="EV > 0"
+                  detail="Prove Paper Trade Expectancy (EV > 0). Requirements that must be satisfied before enabling live spot execution."
                   badge={
                     gate?.n != null
                       ? { text: `${gate.blocked ? "ยังไม่ผ่าน" : "ผ่านเกณฑ์"} (N=${gate.n})`, variant: gate.blocked ? "muted" : "ok" }
@@ -422,19 +424,22 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
                 />
                 <ChecklistRow
                   n="02"
-                  title="Read-Only Key Permission Probe"
+                  title="คีย์อ่านอย่างเดียว"
+                  detail="Read-Only Key Permission Probe"
                   badge={{ text: data.error ? "คีย์มีปัญหา" : "Pending Setup", variant: "outline" }}
                   body="Probe Binance API key scopes. System strictly refuses and alarms if withdrawal or transfer permissions are detected."
                 />
                 <ChecklistRow
                   n="03"
-                  title="Human Approval Gate (Two-Man Rule)"
+                  title="อนุมัติด้วยคน"
+                  detail="Human Approval Gate (Two-Man Rule)"
                   badge={{ text: "Built & Verified", variant: "ok" }}
                   body="Even with live enabled, orders never place autonomously (P5). Each trade requires explicit manual Approve on Home."
                 />
                 <ChecklistRow
                   n="04"
-                  title="Emergency Kill-Switch Flatten"
+                  title="Kill-switch"
+                  detail="Emergency Kill-Switch Flatten"
                   badge={{ text: "Operational", variant: "ok" }}
                   body={`Daily loss cap${dailyLossCap != null ? ` ($${formatNum(dailyLossCap)})` : ""} automatically triggers Redis kill switch, cancels all stops, and closes live spot exposure.`}
                 />
@@ -475,7 +480,33 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
               {(data.balances || []).length === 0 ? (
                 <p className="text-sm text-[var(--color-muted)]">No non-zero assets</p>
               ) : (
-                <div className="overflow-x-auto -mx-1 sm:mx-0">
+                <>
+                  <ul className="space-y-3 sm:hidden">
+                    {(data.balances || []).map((b) => (
+                      <li key={b.asset} className="rounded-lg border border-[var(--color-border)] p-3">
+                        <div className="font-medium">{b.asset}</div>
+                        <div className="mt-2 text-sm">
+                          <span className="text-xs text-[var(--color-muted)]">~USD </span>
+                          <UsdCell asset={b.asset} usd={b.usd} pricing={b.pricing} />
+                        </div>
+                        <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                          <div>
+                            <dt className="text-[var(--color-muted)]">Free</dt>
+                            <dd className="font-mono tabular-nums">{formatQty(b.free)}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-[var(--color-muted)]">Locked</dt>
+                            <dd className="font-mono tabular-nums">{formatQty(b.locked)}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-[var(--color-muted)]">Total</dt>
+                            <dd className="font-mono tabular-nums">{formatQty(b.total)}</dd>
+                          </div>
+                        </dl>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="hidden overflow-x-auto sm:block -mx-1 sm:mx-0">
                   <table className="w-full min-w-[500px] text-left text-sm">
                     <thead className="text-[var(--color-muted)]">
                       <tr className="border-b border-[var(--color-border)]">
@@ -500,7 +531,8 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
                       ))}
                     </tbody>
                   </table>
-                </div>
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>
@@ -514,11 +546,13 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
 function ChecklistRow({
   n,
   title,
+  detail,
   badge,
   body,
 }: {
   n: string;
   title: string;
+  detail: string;
   badge: { text: string; variant: "ok" | "muted" | "outline" };
   body: string;
 }) {
@@ -527,10 +561,12 @@ function ChecklistRow({
       <span className="mt-0.5 text-xs font-mono font-bold text-[var(--color-muted)]">{n}</span>
       <div className="flex-1 space-y-1">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="font-medium text-[var(--color-foreground)]">{title}</span>
+          <span className="inline-flex items-center gap-1 font-medium text-[var(--color-foreground)]">
+            {title}
+            <InfoTip label={title} text={`${detail}. ${body}`} />
+          </span>
           <Badge variant={badge.variant}>{badge.text}</Badge>
         </div>
-        <p className="text-xs text-[var(--color-muted)]">{body}</p>
       </div>
     </div>
   );

@@ -15,6 +15,7 @@ import {
 import { api, type LossLesson, type MetricsPayload, type PaperPayload } from "@/lib/api";
 import { decisionSourceLabel, evGateOwnerCopy } from "@/lib/copy";
 import { ruleText, type DashboardRules } from "@/lib/dashboardRules";
+import { InfoTip } from "@/components/InfoTip";
 import { buildEquityPoints } from "@/lib/equity";
 import { evaluateCloseRecommendation } from "@/lib/positionAdvice";
 import { cn, formatDecisionStamp, formatNum, formatQty } from "@/lib/utils";
@@ -413,9 +414,15 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <CardTitle>Open positions</CardTitle>
-              <CardDescription>
-                อัปเดตทุก 30 วินาที จากแท่งปิดล่าสุด · คุ้มครองด้วยจุดตัด {ruleText(rules?.atr_stop_mult, "× ATR")}, บังทุน {ruleText(rules?.breakeven_r, "R")} และ Trailing {ruleText(rules?.trail_distance_r, "R")}
-              </CardDescription>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-(--color-muted)">
+                <span>Stop {ruleText(rules?.atr_stop_mult, "× ATR")}</span>
+                <span>BE {ruleText(rules?.breakeven_r, "R")}</span>
+                <span>Trail {ruleText(rules?.trail_distance_r, "R")}</span>
+                <InfoTip
+                  label="จุดคุ้มครองของโพสิชัน"
+                  text={`อัปเดตทุก 30 วินาที จากแท่งปิดล่าสุด · คุ้มครองด้วยจุดตัด ${ruleText(rules?.atr_stop_mult, "× ATR")}, บังทุน ${ruleText(rules?.breakeven_r, "R")} และ Trailing ${ruleText(rules?.trail_distance_r, "R")}`}
+                />
+              </div>
             </div>
             {positions.length > 0 ? (
               <div className="flex items-center gap-3 text-xs">
@@ -447,7 +454,55 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
               No open paper positions. Run <code>jarvise paper run</code> then Approve.
             </p>
           ) : (
-            <div className="overflow-x-auto -mx-1 sm:mx-0">
+            <>
+              <ul className="space-y-3 sm:hidden">
+                {positions.map((p, i) => {
+                  const symbol = String(p.symbol ?? "");
+                  const side = String(p.side ?? "").toLowerCase();
+                  const unrealized = Number(p.unrealized_pnl) || 0;
+                  const closeAdvice = evaluateCloseRecommendation(p);
+                  const rMultiple = closeAdvice.rMultiple;
+                  return (
+                    <li key={symbol || i} className="rounded-lg border border-border p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold">{symbol}</span>
+                        <span className="text-xs font-mono uppercase">{side}</span>
+                      </div>
+                      <dl className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <dt className="text-(--color-muted)">uPnL</dt>
+                          <dd className="font-mono tabular-nums">
+                            {unrealized >= 0 ? "+" : ""}
+                            {formatNum(unrealized)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-(--color-muted)">R</dt>
+                          <dd className="font-mono tabular-nums">
+                            {rMultiple != null ? `${formatNum(rMultiple)}R` : "—"}
+                          </dd>
+                        </div>
+                      </dl>
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className={cn("text-xs", closeAdvice.btnClass)}
+                          disabled={closing === symbol}
+                          onClick={() => void closePosition(symbol, unrealized)}
+                        >
+                          {closing === symbol ? "กำลังปิด…" : "ปิดไม้ (FLAT)"}
+                        </Button>
+                        <span className="inline-flex items-center gap-1 text-[10px]">
+                          {closeAdvice.label}
+                          <InfoTip label="คำแนะนำปิดไม้" text={closeAdvice.tooltip} />
+                        </span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              <div className="hidden overflow-x-auto sm:block -mx-1 sm:mx-0">
               <table className="w-full min-w-175 text-left text-sm">
                 <thead className="text-(--color-muted) border-b border-border text-xs">
                   <tr>
@@ -581,7 +636,6 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                                   )}
                                   disabled={closing === symbol}
                                   onClick={() => void closePosition(symbol, unrealized)}
-                                  title={closeAdvice.tooltip}
                                 >
                                   <span
                                     className={cn(
@@ -593,12 +647,12 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                                 </Button>
                                 <span
                                   className={cn(
-                                    "text-[10px] font-mono font-medium flex items-center gap-1",
+                                    "inline-flex items-center gap-1 text-[10px] font-mono font-medium",
                                     closeAdvice.textClass,
                                   )}
-                                  title={closeAdvice.tooltip}
                                 >
                                   {closeAdvice.label}
+                                  <InfoTip label="คำแนะนำปิดไม้" text={closeAdvice.tooltip} />
                                 </span>
                               </div>
                             </td>
@@ -608,7 +662,8 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
                     </tbody>
                   </table>
                 </div>
-              )}
+              </>
+            )}
             </CardContent>
           </Card>
 
