@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from jarvise.freshness import RISK_MONITOR_STALE_AFTER_MIN, dashboard_freshness
 from jarvise_ingest.db import (
     get_paper_account,
     list_paper_orders_asc,
@@ -20,7 +21,6 @@ from jarvise_paper.metrics import STARTING_PAPER_EQUITY, reconstruct_closed_trad
 from jarvise_paper.shadow_veto import WINDOW_DAYS, digest_dir, score_shadow
 from jarvise_risk import get_paper_auto_decide_enabled, kill_switch_state
 from jarvise_trade.flags import live_trading_enabled
-from jarvise_web.app import RISK_MONITOR_STALE_AFTER_MIN, dashboard_freshness
 
 MARK_OK = "OK"
 MARK_LOOK = "ดู"

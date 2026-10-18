@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
+from jarvise.freshness import dashboard_freshness, paper_timeframe
 from jarvise.model_routing import load_model_routing_matrix
 from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_analyze.explain import confidence_breakdown
@@ -51,7 +52,6 @@ from jarvise_ingest.db import (
     universe_as_of,
 )
 from jarvise_ingest.health import BACKFILL_HINT, ingest_health
-from jarvise_ingest.timeframes import INTERVAL_MS
 from jarvise_ingest.universe import (
     PAPER_CORE,
     PAPER_LIQUID,
@@ -95,7 +95,6 @@ from jarvise_risk import (
     set_paper_auto_decide_enabled,
     set_risk_cap,
 )
-from jarvise_risk.market_safety import load_market_safety_config
 from jarvise_trade import live_trading_enabled
 from jarvise_web.outcomes import derive_outcome, empty_outcome_summary, summarize_outcomes
 from jarvise_web.schemas import ApprovalsResponse, DashboardResponse
@@ -902,10 +901,6 @@ def active_universe_id() -> str:
     return os.environ.get("JARVISE_PAPER_UNIVERSE") or "paper_core"
 
 
-def paper_timeframe() -> str:
-    return os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
-
-
 def dashboard_rules() -> dict[str, Any]:
     """Read-only labels for numbers the dashboard used to hardcode."""
     return {
@@ -916,21 +911,6 @@ def dashboard_rules() -> dict[str, Any]:
         "trail_distance_r": DEFAULT_TRAIL_DISTANCE_R,
         "paper_fee_bps": load_paper_fee_bps(),
         "paper_timeframe": paper_timeframe(),
-    }
-
-
-# Two missed 15-minute risk-monitor runs. Display only; not a market-safety age.
-RISK_MONITOR_STALE_AFTER_MIN = 35.0
-
-
-def dashboard_freshness() -> dict[str, Any]:
-    """Stale thresholds from market safety and the paper bar. No new policy."""
-    tf = paper_timeframe()
-    return {
-        "market_safety_max_age_min": load_market_safety_config().max_age_min,
-        "paper_timeframe": tf,
-        "paper_bar_ms": INTERVAL_MS.get(tf),
-        "risk_monitor_stale_after_min": RISK_MONITOR_STALE_AFTER_MIN,
     }
 
 
