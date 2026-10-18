@@ -439,6 +439,7 @@ def test_api_status_rules_and_freshness(monkeypatch) -> None:
     assert data["freshness"]["market_safety_max_age_min"] == 45.0
     assert data["freshness"]["paper_timeframe"] == "1h"
     assert data["freshness"]["paper_bar_ms"] == 3_600_000
+    assert data["freshness"]["risk_monitor_stale_after_min"] == 35.0
 
 
 def test_api_universe_preset_sizes(monkeypatch, tmp_path: Path) -> None:

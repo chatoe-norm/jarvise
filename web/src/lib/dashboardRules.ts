@@ -12,6 +12,7 @@ export type DashboardFreshness = {
   market_safety_max_age_min?: number | null;
   paper_timeframe?: string | null;
   paper_bar_ms?: number | null;
+  risk_monitor_stale_after_min?: number | null;
 };
 
 /** Format a number from the API. Missing values stay a dash. */

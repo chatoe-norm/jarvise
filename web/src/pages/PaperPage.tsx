@@ -170,11 +170,16 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
   async function load() {
     try {
       // Metrics too: a stop hit changes EV, the ledger and the equity curve, not only positions.
-      const [p, m, status] = await Promise.all([api.paper(), api.metrics(), api.status()]);
+      const [p, m] = await Promise.all([api.paper(), api.metrics()]);
       setPaper(p);
       setMetrics(m);
-      setRules(status.rules ?? null);
       setPollError(null);
+      try {
+        const status = await api.status();
+        setRules(status.rules ?? null);
+      } catch {
+        // Rules are labels. A status miss must not hide the ledger.
+      }
     } catch (err) {
       setPollError(err instanceof Error ? err.message : String(err));
     }
