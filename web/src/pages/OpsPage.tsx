@@ -25,18 +25,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { api, type StatusPayload } from "@/lib/api";
+import { defaultOpsTab, type OpsTabId } from "@/lib/opsTabs";
 import { cn, formatDecisionStamp } from "@/lib/utils";
-
-type OpsTabId =
-  | "risk"
-  | "pipeline"
-  | "health"
-  | "universe"
-  | "auto_decide"
-  | "models"
-  | "rules"
-  | "observability"
-  | "all";
 
 interface OpsTab {
   id: OpsTabId;
@@ -56,25 +46,9 @@ export function OpsPage({ onStatusChange }: { onStatusChange?: () => void }) {
   const { confirm, dialog } = useConfirm();
 
   const [activeTab, setActiveTab] = useState<OpsTabId>(() => {
-    if (typeof window !== "undefined") {
-      const hash = window.location.hash.replace("#", "").toLowerCase() as OpsTabId;
-      if (
-        [
-          "risk",
-          "pipeline",
-          "health",
-          "universe",
-          "auto_decide",
-          "models",
-          "rules",
-          "observability",
-          "all",
-        ].includes(hash)
-      ) {
-        return hash;
-      }
-    }
-    return "risk";
+    if (typeof window === "undefined") return defaultOpsTab("", false);
+    const isMobile = window.matchMedia("(max-width: 639px)").matches;
+    return defaultOpsTab(window.location.hash, isMobile);
   });
 
   async function load() {
