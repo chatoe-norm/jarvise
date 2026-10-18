@@ -26,6 +26,8 @@ Picker options:
 
 Not in any tier: Claude Opus 5.5, GPT-5.6 Sol, Codex 5.3, Gemini 4 Argon, Muse Wonder. If a newer version replaces a tier model, use it in the same tier.
 
+**T2 fallback (owner-approved 2026-10-18):** when Claude Sonnet 5.5 is unavailable (usage limit), a reviewer-only chat may use GPT-5.6 Sol or Gemini 4 Argon for UI, copy, docs, and hardcoded-data PRs. Never review a PR with the model that wrote it (no Grok reviewing Grok). PRs that touch the kill switch, EV gate, stops, sizing, order paths, or ledger migrations go to Claude Code. The reviewer ends with exactly one line, APPROVE or REQUEST CHANGES.
+
 ## Jarvise task map
 
 - `fdpy`, `wdpy`, CI watch, Deploy and healthz check: **T0**.
