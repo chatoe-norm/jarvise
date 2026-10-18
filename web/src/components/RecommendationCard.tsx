@@ -5,7 +5,7 @@ import { ConfidenceLadder } from "@/components/ConfidenceLadder";
 import { Badge } from "@/components/ui/badge";
 import type { OhlcvPayload, RecommendationPayload } from "@/lib/api";
 import { ownerReasonCopy } from "@/lib/copy";
-import { formatNum } from "@/lib/utils";
+import { formatNum, formatPrice } from "@/lib/utils";
 
 const REC_LABEL: Record<
   RecommendationPayload["recommendation"],
@@ -84,6 +84,7 @@ export function RecommendationCard({
           bars={ohlcv?.bars ?? []}
           invalidation={ohlcv?.invalidation_price ?? data.risk.invalidation_price}
           label={tfLabel}
+          signalTs={ohlcv?.signal_ts}
         />
       </Section>
 
@@ -95,7 +96,7 @@ export function RecommendationCard({
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
           <Stat label="ขนาด (% พอร์ต)" value={formatNum(data.risk.size_pct_equity, 3)} />
           <Stat label="มูลค่า (USD)" value={formatNum(data.risk.notional_usd, 2)} />
-          <Stat label="ราคาตัดขาดทุน" value={formatNum(data.risk.invalidation_price, 2)} />
+          <Stat label="ราคาตัดขาดทุน" value={formatPrice(data.risk.invalidation_price)} />
           <Stat
             label="ขาดทุนโดยประมาณ (USD)"
             value={data.risk.est_loss_usd == null ? "—" : formatNum(data.risk.est_loss_usd, 2)}

@@ -74,16 +74,21 @@ export function evaluateCloseRecommendation(pos: {
 
   // Level 3: พิจารณาได้ (0.5 <= R < 1.0) - สีเหลือง (Yellow / Amber)
   if ((rMultiple != null && rMultiple >= 0.5) || (rMultiple == null && uPnl > 20)) {
+    const source = String(pos.stop_source || "");
+    const locked = source === "breakeven" || source === "trail";
+    const gain = rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`;
     return {
       level: 3,
       label: "พิจารณาได้",
-      actionText: "บังทุนแล้ว (BE Locked)",
+      actionText: locked ? "บังทุนแล้ว (BE Locked)" : "จุดตัดยังไม่ขยับ",
       dotColor: "#eab308",
       dotClass: "bg-[#eab308] ring-2 ring-[#eab308]/50",
       btnClass:
         "border-[#eab308] text-[#eab308] bg-[#eab308]/10 hover:bg-[#eab308]/20",
       textClass: "text-[#eab308] font-medium",
-      tooltip: `ระดับ 3: พิจารณาได้ (กำไร ${rMultiple != null ? `+${rMultiple.toFixed(2)}R` : `+$${uPnl.toFixed(2)}`}) ขยับจุดตัดเสมอตัว (BE) แล้ว ต้นทุนปลอดภัย สามารถถือลุ้น 1R หรือปิดหากตลาดเริ่มชะลอตัว`,
+      tooltip: locked
+        ? `ระดับ 3: พิจารณาได้ (กำไร ${gain}) ขยับจุดตัดเสมอตัว (BE) แล้ว ต้นทุนปลอดภัย สามารถถือลุ้น 1R หรือปิดหากตลาดเริ่มชะลอตัว`
+        : `ระดับ 3: พิจารณาได้ (กำไร ${gain}) จุดตัดยังไม่ขยับจากจุดเริ่ม ยังไม่ใช่บังทุน`,
       rMultiple,
     };
   }
