@@ -1700,25 +1700,24 @@ async def set_kill_switch(
             note = require_owner_reason(reason)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if not clearing:
-        try:
-            _redis().set(KILL_SWITCH_KEY, value)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        _log_owner_kill_switch(kind="kill_switch_on", reason=note)
-    else:
-        _log_owner_kill_switch(kind="kill_switch_off", reason=note, strict=True)
-        try:
-            _redis().set(KILL_SWITCH_KEY, value)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    kind = "kill_switch_off" if clearing else "kill_switch_on"
+    try:
+        _redis().set(KILL_SWITCH_KEY, value)
+    except Exception as exc:  # noqa: BLE001
+        _log_owner_kill_switch(
+            kind=kind,
+            reason=note,
+            payload={"ok": False, "error": type(exc).__name__},
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _log_owner_kill_switch(kind=kind, reason=note, payload={"ok": True})
     if wants_json(request):
         return JSONResponse({"ok": True, "kill_switch": value == "1"})
     return RedirectResponse("/", status_code=303)
 
 
-def _log_owner_kill_switch(*, kind: str, reason: str | None, strict: bool = False) -> None:
-    """Record an owner kill-switch action. Engage (strict=False) never raises."""
+def _log_owner_kill_switch(*, kind: str, reason: str | None, payload: dict[str, Any]) -> None:
+    """Record the Redis result. A log failure never changes the HTTP result."""
     path = db_path()
     try:
         conn = open_db(path)
@@ -1729,14 +1728,12 @@ def _log_owner_kill_switch(*, kind: str, reason: str | None, strict: bool = Fals
                 kind=kind,
                 reason=reason,
                 actor="owner",
-                payload={"kind": kind},
+                payload=payload,
             )
             conn.commit()
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
-        if strict:
-            raise HTTPException(status_code=500, detail="could not record the written review") from exc
         logger.warning("owner kill-switch log soft-fail: %s", type(exc).__name__)
 
 
