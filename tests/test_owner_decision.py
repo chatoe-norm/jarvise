@@ -137,6 +137,11 @@ def test_kill_switch_engage_is_never_blocked_by_a_missing_reason(monkeypatch, tm
     rows = list_owner_decisions(conn, limit=10)
     assert rows[0]["kind"] == "kill_switch_off"
     assert rows[0]["reason"] == "reviewed the halt cause"
+    payloads = {
+        row[0]: row[1] for row in conn.execute("SELECT kind, payload_json FROM owner_decision_log").fetchall()
+    }
+    assert '"ok":true' in payloads["kill_switch_off"]
+    assert '"ok":true' in payloads["kill_switch_on"]
     assert any(row["kind"] == "kill_switch_on" and not row["reason"] for row in rows)
     conn.close()
 
@@ -155,3 +160,30 @@ def test_kill_switch_engage_survives_a_log_failure(monkeypatch, tmp_path: Path) 
     )
     assert engaged.status_code == 200
     assert store.data["jarvise:kill_switch"] == "1"
+
+
+def test_kill_switch_off_logs_failure_without_clearing(monkeypatch, tmp_path: Path) -> None:
+    client, store = _client(monkeypatch, tmp_path / "ks-redis.db")
+    headers = {"Accept": "application/json"}
+    assert client.post("/kill-switch", data={"state": "on"}, headers=headers).status_code == 200
+    assert store.data["jarvise:kill_switch"] == "1"
+
+    class _Down:
+        def set(self, key: str, value: str) -> None:
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr("jarvise_web.app._redis", lambda: _Down())
+    failed = client.post(
+        "/kill-switch",
+        data={"state": "off", "reason": "reviewed the halt cause"},
+        headers=headers,
+    )
+    assert failed.status_code == 500
+    assert store.data["jarvise:kill_switch"] == "1"
+    conn = open_db(tmp_path / "ks-redis.db")
+    kind, payload = conn.execute(
+        "SELECT kind, payload_json FROM owner_decision_log ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert kind == "kill_switch_off"
+    assert payload == '{"ok":false,"error":"ConnectionError"}'
+    conn.close()
