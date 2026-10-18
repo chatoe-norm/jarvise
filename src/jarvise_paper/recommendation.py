@@ -203,17 +203,15 @@ def news_context_block(report: Mapping[str, Any] | None) -> dict[str, Any] | Non
 
 
 def evidence_line(gate: Mapping[str, Any] | None) -> str | None:
-    """Owner copy when the stored auto EV gate is latched or the sample EV is negative.
+    """Owner copy when the current auto-sample EV is negative.
 
     Does not read or write the latch. Callers pass the status they already computed.
     """
     if not gate:
         return None
     ev = _f(gate.get("ev"))
-    latched = bool(gate.get("latched"))
-    if not latched and (ev is None or ev >= 0):
-        return None
-    if ev is not None and ev >= 0:
+    # A latch with no current EV number must not claim the sample is still negative.
+    if ev is None or ev >= 0:
         return None
     n = gate.get("n")
     n_txt = "—" if n is None else str(int(n))

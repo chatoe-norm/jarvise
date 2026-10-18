@@ -40,7 +40,7 @@ export function evaluateCloseRecommendation(pos: {
       ? uPnl / (qty * risk)
       : null;
 
-  // Level 5: ควรปิดอย่างยิ่ง (R >= 1.5) - สีเขียวสดสะท้อนแสง (Neon Bright Lime)
+  // Level 5: กำไรสูง · trail ล็อกอยู่ (R >= 1.5)
   if ((rMultiple != null && rMultiple >= 1.5) || (rMultiple == null && uPnl >= 150)) {
     return {
       level: 5,
@@ -56,7 +56,7 @@ export function evaluateCloseRecommendation(pos: {
     };
   }
 
-  // Level 4: ควรปิด (1.0 <= R < 1.5) - สีเขียวเข้ม (Dark Green / Emerald)
+  // Level 4: ปล่อยให้ trail ทำงาน (1.0 <= R < 1.5)
   if ((rMultiple != null && rMultiple >= 1.0) || (rMultiple == null && uPnl >= 80)) {
     return {
       level: 4,

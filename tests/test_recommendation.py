@@ -208,6 +208,7 @@ def test_evidence_line_when_auto_ev_is_negative() -> None:
     line = evidence_line({"latched": True, "n": 10, "ev": -0.65})
     assert line == ("หลักฐานย้อนหลัง: EV ของระบบยังติดลบ (n=10, EV -0.65) — การ Approve เป็นการตัดสินใจของคุณ")
     assert evidence_line({"latched": False, "n": 3, "ev": 1.2}) is None
+    assert evidence_line({"latched": True, "n": 0, "ev": None}) is None
     card = build_recommendation(
         approval=APPROVAL,
         candle=CANDLE,
