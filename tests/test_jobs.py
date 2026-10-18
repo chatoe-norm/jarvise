@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from io import BytesIO
 
 from jarvise.jobs import (
@@ -18,6 +20,20 @@ from jarvise.jobs import (
     run_weekly_report,
 )
 from jarvise_ingest.db import open_db
+
+
+def test_jobs_import_without_fastapi() -> None:
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['fastapi'] = None; import jarvise.jobs",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 class _Handler(JobHandler):
