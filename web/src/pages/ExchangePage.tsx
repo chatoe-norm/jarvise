@@ -69,7 +69,7 @@ function LiveTradingGuideCard({ dailyLossCap }: { dailyLossCap: number | null })
   const [copied, setCopied] = useState(false);
 
   const envTemplate = `# ==============================================================================
-# JARVISE LIVE TRADING CONFIGURATION (/opt/jarvise/.env)
+# ตัวอย่างเทมเพลตสำหรับคัดลอก ไม่ใช่ไฟล์ .env ที่รันอยู่บน VPS
 # ==============================================================================
 
 # 1. Master Live Switch (เปิดโหมดส่งคำสั่งซื้อขายจริงบน Exchange)
@@ -158,7 +158,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-slate-300">
-                ตัวแปรที่ต้องตั้งค่าในไฟล์ <code className="bg-[#121923] text-emerald-400 px-1 py-0.5 rounded">/opt/jarvise/.env</code> บน VPS:
+                ตัวอย่างเทมเพลต ไม่ใช่ไฟล์ <code className="bg-[#121923] text-emerald-400 px-1 py-0.5 rounded">/opt/jarvise/.env</code> ที่รันอยู่บน VPS
               </span>
               <Button
                 size="sm"
