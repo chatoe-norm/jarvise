@@ -1,0 +1,74 @@
+{
+  "id": "jrvsWeeklyReport1",
+  "name": "Jarvise weekly report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "cron-weekly-report",
+      "name": "Monday 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/weekly-report",
+        "options": {
+          "timeout": 180000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
+        }
+      },
+      "id": "http-weekly-report",
+      "name": "POST weekly report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Read-only Thai weekly report. Still sends when the kill switch is on. Does not approve, fill, or change the analyzer."
+    }
+  ],
+  "connections": {
+    "Monday 08:00": {
+      "main": [
+        [
+          {
+            "node": "POST weekly report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Bangkok"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "Render __JARVISE_JOBS_TOKEN__ with infra/docker/render-n8n-jobs-workflows.sh before import. Do not commit a real token."
+    }
+  },
+  "pinData": {},
+  "active": false
+}

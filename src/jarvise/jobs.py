@@ -18,7 +18,14 @@ from urllib.parse import parse_qs
 
 from jarvise.charts import export_candle_graphs
 from jarvise.rag import doctrine_snippets, publish_redis_status
-from jarvise_ingest.db import count_indicator_ready, count_market, list_approvals, open_db, universe_as_of
+from jarvise_ingest.db import (
+    count_indicator_ready,
+    count_market,
+    list_approvals,
+    list_paper_positions,
+    open_db,
+    universe_as_of,
+)
 from jarvise_ingest.health import ingest_health
 from jarvise_ingest.indicators import warm_from
 from jarvise_notify import (
@@ -26,7 +33,9 @@ from jarvise_notify import (
     notify_ingest_health,
     notify_job_failure,
     notify_pending_digest,
+    notify_risk_halt,
 )
+from jarvise_notify.weekly import build_weekly_report
 from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
 from jarvise_paper.risk_monitor import run_risk_monitor as paper_risk_monitor
@@ -43,6 +52,7 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     # Four GDELT queries, 8 s apart, with rate-limit backoff: a few minutes at worst.
     "news_reaction": 420.0,
     "shadow_veto": 300.0,
+    "weekly_report": 120.0,
 }
 # Single-flight lock TTLs (seconds): a crashed holder frees the lock automatically.
 JOB_LOCK_TTL_S: dict[str, int] = {
@@ -55,6 +65,7 @@ JOB_LOCK_TTL_S: dict[str, int] = {
     "paper_auto_decide": 900,
     "live_reconcile": 300,
     "shadow_veto": 300,
+    "weekly_report": 180,
 }
 TIMEOUT_EXIT_CODE = 124
 
@@ -490,9 +501,10 @@ def run_paper_pending_digest() -> tuple[int, dict[str, Any]]:
         conn = open_db(path)
         try:
             rows = list_approvals(conn, status="pending", limit=100)
+            open_symbols = {str(pos.get("symbol") or "").upper() for pos in list_paper_positions(conn)}
         finally:
             conn.close()
-        result = notify_pending_digest(rows)
+        result = notify_pending_digest(rows, open_symbols=open_symbols)
         payload = {**result, "paper_only": True}
         _publish_best_effort("jarvise:paper:digest:last", payload)
         return 0, payload
@@ -658,7 +670,29 @@ def run_risk_monitor() -> tuple[int, dict[str, Any]]:
                 }
         finally:
             conn.close()
+        if payload.get("halted"):
+            notify_risk_halt(str(payload.get("halt_reason") or "halt"))
         _publish_best_effort(key, payload)
+        return (0 if payload.get("ok") else 1), payload
+
+
+def run_weekly_report() -> tuple[int, dict[str, Any]]:
+    """Read-only owner report. Still sends when the kill switch is on."""
+    with single_flight("weekly_report") as acquired:
+        if not acquired:
+            return 3, _running("weekly_report")
+        try:
+            payload = build_weekly_report(send=True)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "paper_only": True,
+                "text": "",
+                "telegram_sent": False,
+                "telegram_error": type(exc).__name__,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        _publish_best_effort("jarvise:weekly_report:last", payload)
         return (0 if payload.get("ok") else 1), payload
 
 
@@ -699,6 +733,7 @@ ROUTES = {
     ("POST", "/jobs/risk-monitor"): "risk_monitor",
     ("POST", "/jobs/news-reaction"): "news_reaction",
     ("POST", "/jobs/shadow-veto"): "shadow_veto",
+    ("POST", "/jobs/weekly-report"): "weekly_report",
 }
 
 
@@ -760,6 +795,7 @@ class JobHandler(BaseHTTPRequestHandler):
             "risk_monitor": run_risk_monitor,
             "news_reaction": run_news_reaction,
             "shadow_veto": run_shadow_veto,
+            "weekly_report": run_weekly_report,
         }
         runner = runners.get(action or "")
         if runner is None or action is None:

@@ -112,6 +112,7 @@ export type StatusPayload = {
   owner_decisions?: OwnerDecision[];
   rules?: DashboardRules | null;
   freshness?: DashboardFreshness | null;
+  notify_quiet?: boolean;
 };
 
 export type OwnerDecision = {
@@ -512,6 +513,12 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams(reason ? { state, reason } : { state }),
+    }),
+  setQuietMode: (enabled: boolean) =>
+    request<{ ok: boolean; notify_quiet: boolean }>("/api/notify/quiet", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ enabled: enabled ? "true" : "false" }),
     }),
   persistMetrics: () =>
     request<{ ok: boolean }>("/paper/metrics/persist", { method: "POST" }),

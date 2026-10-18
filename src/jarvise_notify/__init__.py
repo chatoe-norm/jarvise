@@ -14,6 +14,7 @@ from jarvise_notify.telegram import (
     notify_live_flatten,
     notify_pending_digest,
     notify_pending_enqueue,
+    notify_risk_halt,
     send_telegram_message,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "notify_live_flatten",
     "notify_pending_digest",
     "notify_pending_enqueue",
+    "notify_risk_halt",
     "send_telegram_message",
 ]

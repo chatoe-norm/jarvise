@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from jarvise_notify.quiet import pending_alert_allowed
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org"
@@ -79,9 +81,12 @@ def format_digest_message(rows: list[dict[str, Any]], *, total: int) -> str:
 def notify_pending_enqueue(
     row: dict[str, Any],
     *,
+    open_symbols: set[str] | None = None,
     client: httpx.Client | None = None,
 ) -> bool:
     """Soft-fail notify for one newly enqueued approval."""
+    if not pending_alert_allowed(row, open_symbols=open_symbols or set()):
+        return False
     if not notify_configured():
         return False
     try:
@@ -94,20 +99,24 @@ def notify_pending_enqueue(
 def notify_pending_digest(
     rows: list[dict[str, Any]],
     *,
+    open_symbols: set[str] | None = None,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """Send digest if rows non-empty. Soft-fail. Returns status dict."""
+    allowed = [row for row in rows if pending_alert_allowed(row, open_symbols=open_symbols or set())]
     if not rows:
         return {"ok": True, "sent": False, "reason": "empty", "count": 0}
+    if not allowed:
+        return {"ok": True, "sent": False, "reason": "quiet_mode", "count": 0}
     if not notify_configured():
-        return {"ok": True, "sent": False, "reason": "not_configured", "count": len(rows)}
-    text = format_digest_message(rows, total=len(rows))
+        return {"ok": True, "sent": False, "reason": "not_configured", "count": len(allowed)}
+    text = format_digest_message(allowed, total=len(allowed))
     sent = send_telegram_message(text, client=client)
     return {
         "ok": True,
         "sent": sent,
         "reason": None if sent else "send_failed",
-        "count": len(rows),
+        "count": len(allowed),
     }
 
 
@@ -194,6 +203,18 @@ def notify_kill_switch(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("notify kill-switch soft-fail: %s", type(exc).__name__)
+        return False
+
+
+def notify_risk_halt(reason: str, *, client: httpx.Client | None = None) -> bool:
+    """Critical. Quiet mode does not suppress a risk-monitor halt."""
+    if not notify_configured():
+        return False
+    text = f"Jarvise RISK MONITOR HALT\nreason: {reason}\npending cancelled; no new entries until cleared"
+    try:
+        return send_telegram_message(text, client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify risk-halt soft-fail: %s", type(exc).__name__)
         return False
 
 
