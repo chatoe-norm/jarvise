@@ -21,7 +21,7 @@ dependencies = [
 dev = [
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
-  "fastapi>=0.143.0",
+  "fastapi>=0.156.4",
   "httpx>=0.28.1",
   "python-multipart>=0.0.32",
   "ruff>=0.17.0",
@@ -36,7 +36,7 @@ rag = [
   "redis>=6.0,<9",
 ]
 web = [
-  "fastapi>=0.143.0",
+  "fastapi>=0.156.4",
   "uvicorn[standard]>=0.54.0",
   "python-multipart>=0.0.32",
   "redis>=6.0,<9",
