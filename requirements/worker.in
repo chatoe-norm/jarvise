@@ -7,4 +7,4 @@ pydantic>=2.14.1
 redis==8.1.0
 qdrant-client==1.19.1
 sentence-transformers>=6.1.0
-notebooklm-mcp-cli==0.15.4
+notebooklm-mcp-cli==0.15.6
