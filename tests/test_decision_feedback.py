@@ -9,6 +9,7 @@ from jarvise_ingest.db import (
     SCHEMA_VERSION,
     ensure_paper_account,
     insert_paper_order,
+    list_paper_decision_outcomes,
     open_db,
     schema_version,
     upsert_market_technicals,
@@ -249,6 +250,11 @@ def test_auto_ev_gate_blocks_when_negative(tmp_path: Path, monkeypatch) -> None:
     assert gate["blocked"] is True
     assert gate["n"] >= 5
     assert gate["ev"] is not None and gate["ev"] < 0
+    # EV is mean pnl_usd (-10 per round-trip); the R columns do not change it.
+    assert gate["ev"] == -10.0
+    outcomes = list_paper_decision_outcomes(conn, limit=10)
+    assert all(row.get("r_multiple") is None for row in outcomes)
+    assert all(row.get("return_on_notional") == -0.1 for row in outcomes)
 
     monkeypatch.setenv("JARVISE_PAPER_AUTO_DECIDE", "true")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -267,6 +273,150 @@ def test_auto_ev_gate_blocks_when_negative(tmp_path: Path, monkeypatch) -> None:
     assert out.get("reason") == "auto_ev_gate"
     runs = conn.execute("SELECT COUNT(*) FROM paper_auto_runs").fetchone()[0]
     assert runs >= 1
+    conn.close()
+
+
+def test_outcome_r_multiple_long_and_short(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "r.db")
+    ensure_paper_account(conn)
+    # Long: entry 100, stop 97, qty 2, exit 94 → pnl -12, risk 6 → R -2.0
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "long_open",
+            "ts": 1_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "side": "buy",
+            "qty": 2.0,
+            "price": 100.0,
+            "fee_usd": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "a1",
+            "reason": "open_long",
+            "approval_id": "ap_long",
+            "decision_source": "manual",
+            "initial_stop_price": 97.0,
+        },
+    )
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "long_close",
+            "ts": 2_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "side": "sell",
+            "qty": 2.0,
+            "price": 94.0,
+            "fee_usd": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "a1",
+            "reason": "close_long",
+            "approval_id": "ap_long",
+            "decision_source": "manual",
+        },
+    )
+    # Short: entry 100, stop 103, qty 2, exit 106 → pnl -12, risk 6 → R -2.0
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "short_open",
+            "ts": 3_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "side": "sell",
+            "qty": 2.0,
+            "price": 100.0,
+            "fee_usd": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "a2",
+            "reason": "open_short",
+            "approval_id": "ap_short",
+            "decision_source": "manual",
+            "initial_stop_price": 103.0,
+        },
+    )
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "short_close",
+            "ts": 4_000,
+            "symbol": "ETHUSDT",
+            "timeframe": "4h",
+            "side": "buy",
+            "qty": 2.0,
+            "price": 106.0,
+            "fee_usd": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "a2",
+            "reason": "close_short",
+            "approval_id": "ap_short",
+            "decision_source": "manual",
+        },
+    )
+    conn.commit()
+    compute_paper_metrics(conn, now_ms=5_000)
+    by_open = {row["open_order_id"]: row for row in list_paper_decision_outcomes(conn, limit=10)}
+    long_row = by_open["long_open"]
+    assert long_row["r_multiple"] == -2.0
+    assert long_row["return_on_notional"] == -0.06
+    short_row = by_open["short_open"]
+    assert short_row["r_multiple"] == -2.0
+    assert short_row["return_on_notional"] == -0.06
+    conn.close()
+
+
+def test_outcome_r_multiple_null_without_initial_stop(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "legacy_r.db")
+    ensure_paper_account(conn)
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "legacy_open",
+            "ts": 1_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "side": "buy",
+            "qty": 1.0,
+            "price": 100.0,
+            "fee_usd": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "a1",
+            "reason": "open_long",
+            "approval_id": "ap1",
+            "decision_source": "manual",
+        },
+    )
+    insert_paper_order(
+        conn,
+        {
+            "order_id": "legacy_close",
+            "ts": 2_000,
+            "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "side": "sell",
+            "qty": 1.0,
+            "price": 90.0,
+            "fee_usd": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": 0.0,
+            "analysis_id": "a1",
+            "reason": "close_long",
+            "approval_id": "ap1",
+            "decision_source": "manual",
+        },
+    )
+    conn.commit()
+    compute_paper_metrics(conn, now_ms=3_000)
+    row = list_paper_decision_outcomes(conn, limit=1)[0]
+    assert row["r_multiple"] is None
+    assert row["return_on_notional"] == -0.1
     conn.close()
 
 

@@ -95,6 +95,27 @@ def test_apply_signal_stores_stop_price(tmp_path: Path) -> None:
     assert pos is not None
     assert pos["stop_price"] == 97.0
     assert pos["stop_source"] == "analysis"
+    open_orders = [o for o in list_paper_orders(conn) if str(o.get("reason") or "").startswith("open_")]
+    assert len(open_orders) == 1
+    assert open_orders[0]["initial_stop_price"] == pos["stop_price"] == 97.0
+
+    apply_signal(
+        conn,
+        analysis={
+            "analysis_id": "a2",
+            "symbol": "BTCUSDT",
+            "action": "flat",
+            "size_pct_equity": 0.0,
+            "regime_state": "range",
+            "confidence_score": 0.4,
+        },
+        mid_price=99.0,
+        timeframe="4h",
+        now_ms=2_000,
+    )
+    close_orders = [o for o in list_paper_orders(conn) if str(o.get("reason") or "").startswith("close_")]
+    assert len(close_orders) == 1
+    assert close_orders[0]["initial_stop_price"] is None
 
 
 def test_stop_monitor_flats_even_when_kill_switch_on(tmp_path: Path, monkeypatch) -> None:

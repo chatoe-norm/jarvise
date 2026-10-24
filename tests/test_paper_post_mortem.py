@@ -28,6 +28,7 @@ def test_diagnose_trade_long_overextended_loss() -> None:
         "exit_price": 66500.0,
         "pnl_usd": -150.0,
         "r_multiple": -0.022,
+        "return_on_notional": -0.0022,
         "hold_ms": 7_200_000,
         "exit_reason": "stop_hit",
         "decision_source": "auto_claude",
@@ -54,6 +55,25 @@ def test_diagnose_trade_long_overextended_loss() -> None:
     assert "EMA20" in md
     assert "กฎการเทรด" in md
     assert "1.5x ATR" in md
+    assert "R: -0.0220, return on notional: -0.0022" in md
+
+
+def test_post_mortem_null_r_shows_na() -> None:
+    trade = {
+        "symbol": "BTCUSDT",
+        "side": "long",
+        "entry_price": 100.0,
+        "exit_price": 90.0,
+        "pnl_usd": -10.0,
+        "r_multiple": None,
+        "return_on_notional": -0.1,
+        "hold_ms": 3_600_000,
+        "exit_reason": "close_long",
+        "decision_source": "manual",
+        "close_ts": 1_700_000_000_000,
+    }
+    md = format_post_mortem_markdown(diagnose_trade(trade, None, 0.0))
+    assert "R: N/A, return on notional: -0.1000" in md
 
 
 def test_diagnose_trade_short_loss() -> None:
