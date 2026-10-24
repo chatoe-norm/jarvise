@@ -57,7 +57,13 @@ def sync_decision_outcomes(
         qty = float(trade["qty"])
         notional = abs(entry * qty)
         pnl = float(trade["pnl_usd"])
-        r_mult = round(pnl / notional, 8) if notional > 0 else None
+        return_on_notional = round(pnl / notional, 8) if notional > 0 else None
+        stop_raw = open_o.get("initial_stop_price")
+        r_mult = None
+        if stop_raw is not None:
+            risk_usd = abs(entry - float(stop_raw)) * abs(qty)
+            if risk_usd > 0:
+                r_mult = round(pnl / risk_usd, 8)
         upsert_paper_decision_outcome(
             conn,
             {
@@ -68,6 +74,7 @@ def sync_decision_outcomes(
                 "side": trade["side"],
                 "pnl_usd": pnl,
                 "r_multiple": r_mult,
+                "return_on_notional": return_on_notional,
                 "hold_ms": hold_ms,
                 "decision_source": source,
                 "prompt_version": prompt_version,
@@ -397,14 +404,15 @@ def get_outcome_memory(
         pnl = float(r.get("pnl_usd") or 0.0)
         is_win = pnl > 0
         hold_hrs = round(float(r.get("hold_ms") or 0.0) / 3_600_000.0, 1)
+        r_raw = r.get("r_multiple")
+        ron_raw = r.get("return_on_notional")
         recent_trades.append(
             {
                 "symbol": str(r.get("symbol") or ""),
                 "side": str(r.get("side") or ""),
                 "pnl_usd": round(pnl, 2),
-                "r_multiple": round(float(r.get("r_multiple") or 0.0), 4)
-                if r.get("r_multiple") is not None
-                else None,
+                "r_multiple": round(float(r_raw), 4) if r_raw is not None else "N/A",
+                "return_on_notional": round(float(ron_raw), 4) if ron_raw is not None else "N/A",
                 "hold_hours": hold_hrs,
                 "decision_source": str(r.get("decision_source") or ""),
                 "result": "win" if is_win else "loss",

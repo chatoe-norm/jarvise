@@ -137,7 +137,8 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     analysis_id TEXT,
     reason TEXT,
     approval_id TEXT,
-    decision_source TEXT
+    decision_source TEXT,
+    initial_stop_price REAL
 );
 
 CREATE TABLE IF NOT EXISTS paper_positions (
@@ -250,6 +251,7 @@ CREATE TABLE IF NOT EXISTS paper_decision_outcomes (
     side TEXT NOT NULL,
     pnl_usd REAL NOT NULL,
     r_multiple REAL,
+    return_on_notional REAL,
     hold_ms INTEGER,
     decision_source TEXT NOT NULL,
     prompt_version TEXT,
@@ -575,6 +577,12 @@ def _migrate_owner_decision_log(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_owner_decision_log_at ON owner_decision_log (at_ms DESC)")
 
 
+def _migrate_outcome_r(conn: sqlite3.Connection) -> None:
+    """Store the open fill's starting stop; split true R from return on notional."""
+    _add_column_if_missing(conn, "paper_orders", "initial_stop_price", "REAL")
+    _add_column_if_missing(conn, "paper_decision_outcomes", "return_on_notional", "REAL")
+
+
 def _migrate_shadow_veto(conn: sqlite3.Connection) -> None:
     """Decision log for the counterfactual shadow track. Not market truth."""
     conn.execute(
@@ -684,6 +692,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (10, "ev_gate_latch", _migrate_ev_gate_latch, True),
     (11, "shadow_veto", _migrate_shadow_veto, True),
     (12, "owner_decision_log", _migrate_owner_decision_log, True),
+    (13, "outcome_r", _migrate_outcome_r, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -1524,16 +1533,17 @@ def insert_paper_order(conn: sqlite3.Connection, row: dict) -> None:
     payload.setdefault("fee_bps", None)
     payload.setdefault("approval_id", None)
     payload.setdefault("decision_source", None)
+    payload.setdefault("initial_stop_price", None)
     conn.execute(
         """
         INSERT INTO paper_orders (
             order_id, ts, symbol, timeframe, side, qty, price,
             fee_usd, fee_bps, slip_bps, analysis_id, reason,
-            approval_id, decision_source
+            approval_id, decision_source, initial_stop_price
         ) VALUES (
             :order_id, :ts, :symbol, :timeframe, :side, :qty, :price,
             :fee_usd, :fee_bps, :slip_bps, :analysis_id, :reason,
-            :approval_id, :decision_source
+            :approval_id, :decision_source, :initial_stop_price
         )
         """,
         payload,
@@ -1608,7 +1618,7 @@ def list_paper_orders(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict
         """
         SELECT order_id, ts, symbol, timeframe, side, qty, price,
                fee_usd, fee_bps, slip_bps, analysis_id, reason,
-               approval_id, decision_source
+               approval_id, decision_source, initial_stop_price
         FROM paper_orders
         ORDER BY ts DESC
         LIMIT ?
@@ -1624,7 +1634,7 @@ def list_paper_orders_asc(conn: sqlite3.Connection) -> list[dict]:
         """
         SELECT order_id, ts, symbol, timeframe, side, qty, price,
                fee_usd, fee_bps, slip_bps, analysis_id, reason,
-               approval_id, decision_source
+               approval_id, decision_source, initial_stop_price
         FROM paper_orders
         ORDER BY ts ASC, order_id ASC
         """
@@ -1637,10 +1647,12 @@ def upsert_paper_decision_outcome(conn: sqlite3.Connection, row: dict) -> None:
         """
         INSERT INTO paper_decision_outcomes (
             approval_id, open_order_id, close_order_id, symbol, side,
-            pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+            pnl_usd, r_multiple, return_on_notional, hold_ms, decision_source,
+            prompt_version, closed_at_ms
         ) VALUES (
             :approval_id, :open_order_id, :close_order_id, :symbol, :side,
-            :pnl_usd, :r_multiple, :hold_ms, :decision_source, :prompt_version, :closed_at_ms
+            :pnl_usd, :r_multiple, :return_on_notional, :hold_ms, :decision_source,
+            :prompt_version, :closed_at_ms
         )
         ON CONFLICT(open_order_id, close_order_id) DO UPDATE SET
             approval_id=excluded.approval_id,
@@ -1648,6 +1660,7 @@ def upsert_paper_decision_outcome(conn: sqlite3.Connection, row: dict) -> None:
             side=excluded.side,
             pnl_usd=excluded.pnl_usd,
             r_multiple=excluded.r_multiple,
+            return_on_notional=excluded.return_on_notional,
             hold_ms=excluded.hold_ms,
             decision_source=excluded.decision_source,
             prompt_version=excluded.prompt_version,
@@ -1661,6 +1674,7 @@ def upsert_paper_decision_outcome(conn: sqlite3.Connection, row: dict) -> None:
             "side": str(row["side"]),
             "pnl_usd": float(row["pnl_usd"]),
             "r_multiple": row.get("r_multiple"),
+            "return_on_notional": row.get("return_on_notional"),
             "hold_ms": row.get("hold_ms"),
             "decision_source": str(row.get("decision_source") or "unknown"),
             "prompt_version": row.get("prompt_version"),
@@ -1710,7 +1724,8 @@ def list_paper_decision_outcomes(
         cur = conn.execute(
             """
             SELECT id, approval_id, open_order_id, close_order_id, symbol, side,
-                   pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+                   pnl_usd, r_multiple, return_on_notional, hold_ms, decision_source,
+                   prompt_version, closed_at_ms
             FROM paper_decision_outcomes
             ORDER BY closed_at_ms DESC
             LIMIT ?
@@ -1721,7 +1736,8 @@ def list_paper_decision_outcomes(
         cur = conn.execute(
             """
             SELECT id, approval_id, open_order_id, close_order_id, symbol, side,
-                   pnl_usd, r_multiple, hold_ms, decision_source, prompt_version, closed_at_ms
+                   pnl_usd, r_multiple, return_on_notional, hold_ms, decision_source,
+                   prompt_version, closed_at_ms
             FROM paper_decision_outcomes
             WHERE closed_at_ms >= ?
             ORDER BY closed_at_ms DESC

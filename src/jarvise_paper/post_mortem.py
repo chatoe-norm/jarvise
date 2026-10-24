@@ -61,6 +61,7 @@ def diagnose_trade(
     side = str(trade.get("side") or "long").lower()
     pnl = float(trade.get("pnl_usd") or 0.0)
     r_mult = trade.get("r_multiple")
+    return_on_notional = trade.get("return_on_notional")
     hold_ms = int(trade.get("hold_ms") or (int(trade.get("close_ts", 0)) - int(trade.get("open_ts", 0))))
     hold_hrs = round(hold_ms / 3_600_000.0, 1) if hold_ms > 0 else 0.0
     exit_reason = str(trade.get("exit_reason") or "closed")
@@ -143,6 +144,7 @@ def diagnose_trade(
         "side": side,
         "pnl_usd": pnl,
         "r_multiple": r_mult,
+        "return_on_notional": return_on_notional,
         "hold_hours": hold_hrs,
         "exit_reason": exit_reason,
         "decision_source": decision_source,
@@ -165,6 +167,12 @@ def diagnose_trade(
     }
 
 
+def _ratio_label(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"{float(value):.4f}"
+
+
 def format_post_mortem_markdown(diag: dict[str, Any]) -> str:
     """Format diagnosis into markdown following the OpenClaw tactical note standard."""
     sym = diag["symbol"]
@@ -172,7 +180,8 @@ def format_post_mortem_markdown(diag: dict[str, Any]) -> str:
     res = "Loss Lesson" if diag["is_loss"] else ("Win Case" if diag["is_win"] else "Neutral")
     date = diag["date_str"]
     pnl = diag["pnl_usd"]
-    r_val = f"{diag['r_multiple']:.4f}" if diag["r_multiple"] is not None else "N/A"
+    r_val = _ratio_label(diag.get("r_multiple"))
+    ron_val = _ratio_label(diag.get("return_on_notional"))
 
     inds = diag["indicators"]
     ineff_bullets = "\n".join(f"- {item}" for item in diag["inefficiencies"])
@@ -183,7 +192,7 @@ def format_post_mortem_markdown(diag: dict[str, Any]) -> str:
 - **Category**: Post-Mortem
 - **Asset**: {sym}
 - **Side**: {diag["side"]}
-- **PnL**: ${pnl:.2f} (R: {r_val})
+- **PnL**: ${pnl:.2f} (R: {r_val}, return on notional: {ron_val})
 - **Hold Duration**: {diag["hold_hours"]}h
 - **Decision Source**: {diag["decision_source"]}
 - **Exit Reason**: {diag["exit_reason"]}
@@ -215,6 +224,7 @@ def generate_post_mortems(
 
     # 1. Fetch closed trades from paper_decision_outcomes or reconstructed orders
     outcomes = list_paper_decision_outcomes(conn, limit=limit * 2)
+    outcomes_by_open = {str(oc["open_order_id"]): oc for oc in outcomes}
     orders = list_paper_orders_asc(conn)
     reconstructed, _, _ = reconstruct_closed_trades(orders)
 
@@ -224,7 +234,13 @@ def generate_post_mortems(
         for t in reversed(reconstructed):
             if losses_only and float(t.get("pnl_usd") or 0.0) >= 0:
                 continue
-            trades.append(t)
+            row = dict(t)
+            oc = outcomes_by_open.get(str(t.get("open_order_id") or ""))
+            if oc is not None:
+                row["r_multiple"] = oc.get("r_multiple")
+                row["return_on_notional"] = oc.get("return_on_notional")
+                row["decision_source"] = oc.get("decision_source") or row.get("decision_source")
+            trades.append(row)
     elif outcomes:
         for oc in outcomes:
             if losses_only and float(oc.get("pnl_usd") or 0.0) >= 0:
@@ -235,6 +251,7 @@ def generate_post_mortems(
                     "side": oc["side"],
                     "pnl_usd": oc["pnl_usd"],
                     "r_multiple": oc.get("r_multiple"),
+                    "return_on_notional": oc.get("return_on_notional"),
                     "hold_ms": oc.get("hold_ms"),
                     "open_order_id": oc["open_order_id"],
                     "close_order_id": oc["close_order_id"],

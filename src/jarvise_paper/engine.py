@@ -175,7 +175,14 @@ def apply_signal(
     # Working copy of positions for dry-run
     working: dict[str, dict] = {str(p["symbol"]).upper(): dict(p) for p in list_paper_positions(conn)}
 
-    def _record_fill(side: str, qty: float, price: float, reason: str) -> None:
+    def _record_fill(
+        side: str,
+        qty: float,
+        price: float,
+        reason: str,
+        *,
+        initial_stop_price: float | None = None,
+    ) -> None:
         nonlocal cash
         notional = qty * price
         fee = fee_usd(notional, fee_bps=use_fee_bps)
@@ -198,6 +205,7 @@ def apply_signal(
             "reason": reason,
             "approval_id": stamp_approval,
             "decision_source": stamp_source,
+            "initial_stop_price": initial_stop_price,
         }
         fills.append(order)
         if not dry_run:
@@ -239,7 +247,13 @@ def apply_signal(
         px = fill_price(mid_price, side=open_side, slip_bps=use_slip, bid_ask_spread=spread)
         if px > 0 and target_notional > 0:
             qty = target_notional / px
-            _record_fill(open_side, qty, px, f"open_{action}")
+            _record_fill(
+                open_side,
+                qty,
+                px,
+                f"open_{action}",
+                initial_stop_price=inv_f,
+            )
             new_pos = {
                 "symbol": symbol,
                 "side": action,
