@@ -1,0 +1,74 @@
+{
+  "id": "jrvsForwardH3Daily",
+  "name": "Jarvise forward H3",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "40 0 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-forward-h3",
+      "name": "Daily 00:40 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/forward-h3",
+        "options": {
+          "timeout": 360000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
+        }
+      },
+      "id": "http-forward-h3",
+      "name": "POST forward H3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Isolated replay of frozen donchian_long + trail from 2026-10-26. Never writes the live ledger."
+    }
+  ],
+  "connections": {
+    "Daily 00:40 UTC": {
+      "main": [
+        [
+          {
+            "node": "POST forward H3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "Render __JARVISE_JOBS_TOKEN__ with infra/docker/render-n8n-jobs-workflows.sh before import. Do not commit a real token."
+    }
+  },
+  "pinData": {},
+  "active": false
+}

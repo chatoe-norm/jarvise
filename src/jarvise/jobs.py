@@ -41,6 +41,8 @@ from jarvise_notify import (
 from jarvise_notify.weekly import WEEKLY_BUILD_FAILURE, build_weekly_report, notify_weekly_build_failure
 from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
+from jarvise_paper.forward_h3 import REDIS_KEY as FORWARD_H3_REDIS_KEY
+from jarvise_paper.forward_h3 import run_forward_h3_job
 from jarvise_paper.risk_monitor import run_risk_monitor as paper_risk_monitor
 from jarvise_paper.shadow_veto import digest_dir, run_shadow
 from jarvise_risk import kill_switch_state
@@ -55,6 +57,7 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     # Four GDELT queries, 8 s apart, with rate-limit backoff: a few minutes at worst.
     "news_reaction": 420.0,
     "shadow_veto": 300.0,
+    "forward_h3": 300.0,
     "weekly_report": 120.0,
 }
 # Single-flight lock TTLs (seconds): a crashed holder frees the lock automatically.
@@ -68,6 +71,7 @@ JOB_LOCK_TTL_S: dict[str, int] = {
     "paper_auto_decide": 900,
     "live_reconcile": 300,
     "shadow_veto": 300,
+    "forward_h3": 360,
     "weekly_report": 180,
 }
 TIMEOUT_EXIT_CODE = 124
@@ -388,6 +392,26 @@ def run_rag_refresh() -> tuple[int, dict[str, Any]]:
         proc = _run_cmd("rag", cmd)
         # CLI also publishes; mirror ingest so Redis stays JSON even if CLI publish is skipped.
         return _finish_cli_payload("rag", proc, "jarvise:rag:last")
+
+
+def run_forward_h3() -> tuple[int, dict[str, Any]]:
+    """Daily H3 forward replay on an isolated ledger copy. Never writes the live DB."""
+    with single_flight("forward_h3") as acquired:
+        if not acquired:
+            return 3, _running("forward_h3")
+        now = int(time.time() * 1000)
+        try:
+            payload = run_forward_h3_job(now_ms=now)
+        except Exception as exc:  # noqa: BLE001 — publish failure instead of hanging the lock
+            payload = {
+                "ok": False,
+                "paper_only": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "at_ms": now,
+            }
+        payload["at_ms"] = int(payload.get("at_ms") or now)
+        _publish_best_effort(FORWARD_H3_REDIS_KEY, payload)
+        return (0 if payload.get("ok") else 1), payload
 
 
 def run_shadow_veto() -> tuple[int, dict[str, Any]]:
@@ -771,6 +795,7 @@ ROUTES = {
     ("POST", "/jobs/risk-monitor"): "risk_monitor",
     ("POST", "/jobs/news-reaction"): "news_reaction",
     ("POST", "/jobs/shadow-veto"): "shadow_veto",
+    ("POST", "/jobs/forward-h3"): "forward_h3",
     ("POST", "/jobs/weekly-report"): "weekly_report",
 }
 
@@ -833,6 +858,7 @@ class JobHandler(BaseHTTPRequestHandler):
             "risk_monitor": run_risk_monitor,
             "news_reaction": run_news_reaction,
             "shadow_veto": run_shadow_veto,
+            "forward_h3": run_forward_h3,
             "weekly_report": run_weekly_report,
         }
         runner = runners.get(action or "")

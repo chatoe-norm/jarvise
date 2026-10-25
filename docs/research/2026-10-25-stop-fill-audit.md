@@ -78,6 +78,32 @@ In `resting_stop_fill`, when no bar after `stop_moved_ts` crossed the stop, the 
 
 The "PR + mid fix" columns fill the fallback at the close when the close is beyond the stop. That is the correct rule. It costs 0.03–0.04 EV on the trail cells and changes no verdict.
 
+## Re-run of the daily long-only study with the corrected fill (registered before running)
+
+The §3 study in `2026-10-17-ledger-cause-and-replay.md` decided on `--stops fixed` cells, and those exits used the old worst-extreme fill. This is a measurement correction of the same kind as §2.1 there, not a new hypothesis. It is run once.
+
+- The rule is unchanged from §3. Same data copy (the 2026-10-17 VPS ledger backup), same seven symbols, `1d`, `--paper-policy rules`, `--stops fixed`, no `--mtf`, and the same windows W0, W1, W2, each a separate replay with a fresh ledger copy.
+- The only decision cells are H1 `trend_long` and H2 `donchian_long`. A cell passes only if every window has at least 8 closed trades and EV ≥ 0.
+- Tool check first: `39bf510` (before PR #225) must reproduce the §3 decision table. The corrected run uses `main` at `0775e9f`.
+- Reference only, never selected: the trail cells and `current`.
+- If neither cell passes, the long-only question stays closed. If one passes, it earns forward paper confirmation only. It does not earn live trading, and it does not change `analyze_snapshot`.
+
+### Result
+
+The tool check passed: `39bf510` reproduces every cell of the §3 tables exactly. Trade counts are identical before and after the correction. The table shows EV in USD per closed trade, old fill → corrected fill.
+
+| Cell | W0 n / EV | W1 n / EV | W2 n / EV | Verdict |
+| --- | --- | --- | --- | --- |
+| **H1 trend_long fixed** | 90 / 0.234 → **0.686** | 212 / −2.181 → **−1.656** | 77 / −1.865 → **−1.292** | **fails** |
+| **H2 donchian_long fixed** | 50 / −2.991 → **−1.602** | 63 / 10.493 → **12.437** | 60 / −2.175 → **−1.548** | **fails** |
+| ref: trend_long trail | 159 / −0.869 → 0.162 | 341 / −2.583 → −1.034 | 134 / −2.077 → −0.972 | not selectable |
+| ref: donchian_long trail | 88 / −1.635 → 0.508 | 109 / −2.083 → 1.371 | 86 / −1.186 → 0.504 | not selectable |
+| ref: current fixed | 170 / −0.010 → 0.339 | 272 / −2.264 → −1.798 | 191 / −0.121 → 0.218 | not selectable |
+
+Neither decision cell passes, and the daily long-only study stays closed.
+
+The `donchian_long trail` reference cell is now ≥ 0 in all three windows. It was picked out after seeing five cells under a changed tool, so it cannot be adopted from this data. At most it can be registered as a new hypothesis and tested on forward data only.
+
 ## Proposed changes
 
 1. **Freshness guard (no locked area):** when the newest closed bar is stale, the risk monitor skips stop and mark writes and sends one alert.
