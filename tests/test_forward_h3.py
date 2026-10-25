@@ -12,6 +12,7 @@ from jarvise_ingest.db import open_db, remove_universe_symbol
 from jarvise_ingest.universe import PAPER_LIQUID, seed_named_universe
 from jarvise_paper.forward_h3 import (
     H3_SINCE,
+    H3_SINCE_MS,
     assert_copy_not_live,
     build_replay_argv,
     h3_copy_path,
@@ -75,7 +76,7 @@ def test_build_replay_argv_matches_frozen_flags(tmp_path: Path) -> None:
 def test_second_run_keeps_first_symbol_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     live = _live_tree(tmp_path)
     monkeypatch.setenv("JARVISE_DB", str(live))
-    first_ms = 1_767_000_000_000
+    first_ms = H3_SINCE_MS + 86_400_000  # day after window opens
     symbols_path = h3_symbols_path(live)
 
     def stub_replay(_argv: list[str]) -> dict:
@@ -120,6 +121,24 @@ def test_window_and_pass_rules() -> None:
     assert passed(closed=True, closed_trades=5, expected_value_ev=0.1) is False
 
 
+def test_before_window_skips_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    live = _live_tree(tmp_path)
+    monkeypatch.setenv("JARVISE_DB", str(live))
+    called: list[list[str]] = []
+
+    def stub_replay(argv: list[str]) -> dict:
+        called.append(argv)
+        raise AssertionError("replay must not run before H3_SINCE")
+
+    before_ms = H3_SINCE_MS - 1
+    payload = run_forward_h3_job(live_db=live, now_ms=before_ms, run_replay=stub_replay)
+    assert payload["ok"] is True
+    assert payload["closed_trades"] == 0
+    assert payload["replay_skipped"] == "before_window"
+    assert payload["replay_ok"] is True
+    assert called == []
+
+
 def test_live_db_unchanged_after_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     live = _live_tree(tmp_path)
     monkeypatch.setenv("JARVISE_DB", str(live))
@@ -140,7 +159,9 @@ def test_live_db_unchanged_after_run(tmp_path: Path, monkeypatch: pytest.MonkeyP
             },
         }
 
-    payload = run_forward_h3_job(live_db=live, now_ms=1_767_000_000_000, run_replay=stub_replay)
+    payload = run_forward_h3_job(
+        live_db=live, now_ms=H3_SINCE_MS + 86_400_000, run_replay=stub_replay
+    )
     assert payload["ok"] is True
     assert _sha256(live) == before
     assert h3_copy_path(live).exists()
