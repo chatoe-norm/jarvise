@@ -40,7 +40,14 @@ Live is different. The live path places a venue-side `STOP_LOSS_LIMIT` (`src/jar
 
 `run_risk_monitor` (`src/jarvise_paper/risk_monitor.py`) never checks data freshness. It marks equity and evaluates stops on whatever closes are stored, with no alert when they are stale.
 
-Kline timing cannot be proven from the ledger, because klines are backfilled. The outage is inferred from the order book, derivatives, macro, and snapshot gaps. The host-side cause needs VPS logs.
+Kline timing cannot be proven from the ledger, because klines are backfilled. The outage is inferred from the order book, derivatives, macro, and snapshot gaps.
+
+**Root cause: the VPS disk filled up.** The owner's Telegram history for 2026-10-06 shows the following messages (UTC+7 times converted to UTC):
+
+- 10:30 UTC: `KILL-SWITCH ENGAGED`, with reason `market_safety:provider_error: book:database or disk is full; provider_error: derivatives:database or disk is full`.
+- From 13:00 UTC, every hour: `ingest health (4h)`, saying the newest 4h candle closed 300 min, then 360 min, ago.
+
+The Deploy failure at 10:22 UTC ("Rebuild the paper stack") is most likely the same disk-full condition. The alerts fired as designed. What was missing was a warning before the disk was full. Container logs from that window are gone, because the containers were recreated on 2026-10-25.
 
 ### 3. Not a stop failure
 

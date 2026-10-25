@@ -218,6 +218,36 @@ def notify_risk_halt(reason: str, *, client: httpx.Client | None = None) -> bool
         return False
 
 
+def notify_disk_space(
+    *,
+    low: bool,
+    free_pct: float | None,
+    free_bytes: int | None,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Disk free-space edge alert. Quiet mode does not suppress."""
+    if not notify_configured():
+        return False
+    free_gb = None if free_bytes is None else round(free_bytes / (1024.0**3), 2)
+    if low:
+        text = (
+            "Jarvise DISK LOW\n"
+            f"free_pct={free_pct} free_gb={free_gb}\n"
+            "Ingest and Deploy can fail when the host fills. Free space before the next bake."
+        )
+    else:
+        text = (
+            "Jarvise DISK OK again\n"
+            f"free_pct={free_pct} free_gb={free_gb}\n"
+            "Free space is back above the alert threshold."
+        )
+    try:
+        return send_telegram_message(text, client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify disk space soft-fail: %s", type(exc).__name__)
+        return False
+
+
 def notify_risk_candle_stale(
     stale: list[dict[str, Any]],
     *,

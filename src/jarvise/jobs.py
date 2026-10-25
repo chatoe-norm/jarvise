@@ -17,10 +17,12 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from jarvise.charts import export_candle_graphs
+from jarvise.disk import disk_edge_alerted, disk_free
 from jarvise.rag import doctrine_snippets, publish_redis_status
 from jarvise_ingest.db import (
     count_indicator_ready,
     count_market,
+    ensure_paper_account,
     list_approvals,
     list_paper_positions,
     open_db,
@@ -30,6 +32,7 @@ from jarvise_ingest.health import ingest_health
 from jarvise_ingest.indicators import warm_from
 from jarvise_notify import (
     notify_auto_decide,
+    notify_disk_space,
     notify_ingest_health,
     notify_job_failure,
     notify_pending_digest,
@@ -518,6 +521,8 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
     timeframe = os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
     symbols = [s for s in resolve_active_ingest_symbols().split(",") if s.strip()]
     max_age = _fenv("JARVISE_INGEST_HEALTH_MAX_AGE_MIN", 60.0)
+    disk = disk_free(path)
+    disk_alert: str | None = None
     if not path.exists():
         payload: dict[str, Any] = {
             "ok": False,
@@ -531,8 +536,34 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
         conn = open_db(path)
         try:
             payload = ingest_health(conn, symbols, timeframe, max_age_min=max_age)
+            ensure_paper_account(conn)
+            if disk.get("disk_error"):
+                payload["disk_error"] = disk["disk_error"]
+            else:
+                edge = disk_edge_alerted(conn, bool(disk.get("disk_low")))
+                if edge == "low":
+                    if notify_disk_space(
+                        low=True,
+                        free_pct=disk.get("disk_free_pct"),
+                        free_bytes=disk.get("disk_free_bytes"),
+                    ):
+                        disk_alert = "low"
+                elif edge == "ok":
+                    if notify_disk_space(
+                        low=False,
+                        free_pct=disk.get("disk_free_pct"),
+                        free_bytes=disk.get("disk_free_bytes"),
+                    ):
+                        disk_alert = "ok"
         finally:
             conn.close()
+    payload["disk_free_bytes"] = disk.get("disk_free_bytes")
+    payload["disk_total_bytes"] = disk.get("disk_total_bytes")
+    payload["disk_free_pct"] = disk.get("disk_free_pct")
+    payload["disk_low"] = bool(disk.get("disk_low"))
+    if disk.get("disk_error"):
+        payload["disk_error"] = disk["disk_error"]
+    payload["disk_alert"] = disk_alert
     payload["telegram_sent"] = notify_ingest_health(payload)
     _publish_best_effort("jarvise:ingest:health", payload)
     return 0, payload
