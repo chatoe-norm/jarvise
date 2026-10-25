@@ -221,6 +221,36 @@ def run_forward_h3_job(
 
     online_backup(live, copy)
     symbols = load_or_freeze_symbols(live, now_ms=ts)
+    days = days_elapsed(now_ms=ts)
+
+    # Before the forward window opens, publish zeros without calling replay
+    # (CLI refuses --since after --until).
+    if ts < H3_SINCE_MS:
+        payload = {
+            "ok": True,
+            "paper_only": True,
+            "at_ms": ts,
+            "git_sha": git_sha(),
+            "symbols": symbols,
+            "closed_trades": 0,
+            "expected_value_ev": None,
+            "win_rate": None,
+            "max_drawdown_pct": None,
+            "open_positions": 0,
+            "days_elapsed": round(days, 6),
+            "window_closed": False,
+            "passed": None,
+            "extension_requires_owner": True,
+            "buy_and_hold_equal_weight": None,
+            "since": H3_SINCE,
+            "until": until_iso,
+            "copy_db": str(copy),
+            "replay_ok": True,
+            "replay_skipped": "before_window",
+        }
+        _write_latest(live, payload)
+        return payload
+
     argv = build_replay_argv(copy_db=copy, symbols=symbols, until_iso=until_iso)
     if run_replay is None:
         proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=280)
@@ -231,7 +261,6 @@ def run_forward_h3_job(
     metrics = replay_out.get("metrics") or {}
     closed_trades = int(metrics.get("closed_trades") or 0)
     ev = metrics.get("expected_value_ev")
-    days = days_elapsed(now_ms=ts)
     closed = window_closed(closed_trades=closed_trades, days=days)
     pass_flag = passed(closed=closed, closed_trades=closed_trades, expected_value_ev=ev)
 
@@ -242,7 +271,7 @@ def run_forward_h3_job(
     finally:
         copy_conn.close()
 
-    payload: dict[str, Any] = {
+    payload = {
         "ok": True,
         "paper_only": True,
         "at_ms": ts,
