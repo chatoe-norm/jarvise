@@ -159,9 +159,7 @@ def test_live_db_unchanged_after_run(tmp_path: Path, monkeypatch: pytest.MonkeyP
             },
         }
 
-    payload = run_forward_h3_job(
-        live_db=live, now_ms=H3_SINCE_MS + 86_400_000, run_replay=stub_replay
-    )
+    payload = run_forward_h3_job(live_db=live, now_ms=H3_SINCE_MS + 86_400_000, run_replay=stub_replay)
     assert payload["ok"] is True
     assert _sha256(live) == before
     assert h3_copy_path(live).exists()
