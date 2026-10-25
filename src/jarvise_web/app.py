@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
+from jarvise.disk import disk_free
 from jarvise.freshness import dashboard_freshness, paper_timeframe
 from jarvise.model_routing import load_model_routing_matrix
 from jarvise_analyze.engine import ATR_STOP_MULT
@@ -668,9 +669,19 @@ def exchange_payload() -> dict[str, Any]:
 def healthz() -> dict[str, Any]:
     # Unauthenticated liveness probe: no mode flags beyond paper_only (live state is on /api/status).
     live = live_trading_enabled()
+    disk = disk_free(db_path())
+    disk_out: dict[str, Any] = {
+        "disk_free_bytes": disk.get("disk_free_bytes"),
+        "disk_total_bytes": disk.get("disk_total_bytes"),
+        "disk_free_pct": disk.get("disk_free_pct"),
+        "disk_low": bool(disk.get("disk_low")),
+    }
+    if disk.get("disk_error"):
+        disk_out["disk_error"] = disk["disk_error"]
     return {
         "ok": True,
         "paper_only": PAPER_ONLY and not live,
+        "disk": disk_out,
     }
 
 
