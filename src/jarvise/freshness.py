@@ -16,6 +16,18 @@ def paper_timeframe() -> str:
     return os.environ.get("JARVISE_PAPER_TIMEFRAME") or "4h"
 
 
+def risk_stale_threshold_ms(shortest_interval_ms: int) -> int:
+    """Max age of newest closed candle before risk-monitor skips MTM/stops.
+
+    ``JARVISE_RISK_STALE_MS`` overrides. Default is 2× the shortest stored
+    timeframe interval for that symbol (1h → 7_200_000 ms).
+    """
+    raw = (os.environ.get("JARVISE_RISK_STALE_MS") or "").strip()
+    if raw:
+        return int(raw)
+    return int(shortest_interval_ms) * 2
+
+
 def dashboard_freshness() -> dict[str, Any]:
     """Stale thresholds from market safety and the paper bar. No new policy."""
     timeframe = paper_timeframe()

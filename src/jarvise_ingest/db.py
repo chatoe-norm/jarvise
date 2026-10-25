@@ -1100,6 +1100,34 @@ def load_newest_close(conn: sqlite3.Connection, symbol: str) -> float | None:
     return float(row[0])
 
 
+def load_newest_candle_ts(conn: sqlite3.Connection, symbol: str) -> int | None:
+    """Newest stored closed-candle open time for ``symbol`` (any timeframe)."""
+    cur = conn.execute(
+        """
+        SELECT timestamp FROM market_technicals
+        WHERE symbol=?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol.upper(),),
+    )
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return int(row[0])
+
+
+def listed_timeframes_for_symbol(conn: sqlite3.Connection, symbol: str) -> list[str]:
+    cur = conn.execute(
+        """
+        SELECT DISTINCT timeframe FROM market_technicals
+        WHERE symbol=?
+        """,
+        (symbol.upper(),),
+    )
+    return [str(row[0]) for row in cur.fetchall() if row[0]]
+
+
 def range_since_entry(
     conn: sqlite3.Connection,
     symbol: str,

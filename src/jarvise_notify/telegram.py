@@ -218,6 +218,44 @@ def notify_risk_halt(reason: str, *, client: httpx.Client | None = None) -> bool
         return False
 
 
+def notify_risk_candle_stale(
+    stale: list[dict[str, Any]],
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Open-position candles are stale; risk monitor skipped MTM/stops. Quiet mode does not suppress."""
+    if not notify_configured():
+        return False
+    lines = [
+        "Jarvise RISK MONITOR: candle data stale",
+        "Skipped MTM, profit lock, and stop evaluation until candles refresh.",
+    ]
+    for row in stale[:8]:
+        sym = row.get("symbol")
+        age = row.get("age_ms")
+        thr = row.get("threshold_ms")
+        age_h = None if age is None else round(float(age) / 3_600_000.0, 2)
+        thr_h = None if thr is None else round(float(thr) / 3_600_000.0, 2)
+        lines.append(f"- {sym}: age_h={age_h} threshold_h={thr_h}")
+    try:
+        return send_telegram_message("\n".join(lines), client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify risk candle stale soft-fail: %s", type(exc).__name__)
+        return False
+
+
+def notify_risk_candle_fresh(*, client: httpx.Client | None = None) -> bool:
+    """Candles for open positions are fresh again after a stale skip. Quiet mode does not suppress."""
+    if not notify_configured():
+        return False
+    text = "Jarvise RISK MONITOR: candle data fresh again\nResuming MTM, profit lock, and stop evaluation."
+    try:
+        return send_telegram_message(text, client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify risk candle fresh soft-fail: %s", type(exc).__name__)
+        return False
+
+
 def format_live_flatten_message(result: dict[str, Any]) -> str:
     lines = [f"Jarvise LIVE FLATTEN (kill-switch: {result.get('reason') or 'engaged'})"]
     for symbol in result.get("unprotected") or []:
