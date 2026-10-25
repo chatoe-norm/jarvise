@@ -378,7 +378,8 @@ def apply_replay_stop(
             pos = get_paper_position(conn, symbol)
             if pos is None:
                 return 0
-            # Stop moved on this bar: high/low order unknown; only close can fill.
+            # Stop moved on this bar: high/low order unknown; only close can fill,
+            # and the fill is at the close when the close is beyond the stop.
             hit = resting_stop_fill(conn, pos, mid=close, until_ms=ts, timeframe=timeframe)
     if hit is None:
         return 0

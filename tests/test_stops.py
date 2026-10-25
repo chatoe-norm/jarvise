@@ -462,3 +462,52 @@ def test_resting_stop_paper_and_replay_same_fill(tmp_path: Path, monkeypatch) ->
     )
     assert replay_shared is not None
     assert replay_shared.fill_mid == monitor["hits"][0]["fill_mid"] == 97.0
+
+
+def test_resting_stop_mid_fallback_long_fills_at_close(tmp_path: Path) -> None:
+    """Stop moved on this bar: no later bar; close below the new stop fills at close."""
+    conn = open_db(tmp_path / "mid-long.db")
+    ensure_paper_account(conn)
+    pos = _long_pos(stop_price=102.0, stop_moved_ts=2_000, stop_source="trail")
+    upsert_paper_position(conn, pos)
+    upsert_market_technicals(
+        conn,
+        [_ohlc("BTCUSDT", 2_000, open_=100.0, high=105.0, low=99.0, close=101.0)],
+    )
+    conn.commit()
+    hit = resting_stop_fill(conn, pos, mid=101.0, until_ms=2_000, timeframe="4h")
+    assert hit is not None
+    assert hit.fill_mid == 101.0
+    assert hit.trigger == "mid"
+
+
+def test_resting_stop_mid_fallback_short_fills_at_close(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "mid-short.db")
+    ensure_paper_account(conn)
+    pos = _short_pos(stop_price=98.0, stop_moved_ts=2_000, stop_source="trail")
+    upsert_paper_position(conn, pos)
+    upsert_market_technicals(
+        conn,
+        [_ohlc("ETHUSDT", 2_000, open_=100.0, high=101.0, low=95.0, close=99.0)],
+    )
+    conn.commit()
+    hit = resting_stop_fill(conn, pos, mid=99.0, until_ms=2_000, timeframe="4h")
+    assert hit is not None
+    assert hit.fill_mid == 99.0
+    assert hit.trigger == "mid"
+
+
+def test_resting_stop_mid_fallback_at_stop_fills_at_stop(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "mid-eq.db")
+    ensure_paper_account(conn)
+    pos = _long_pos(stop_price=97.0, stop_moved_ts=2_000, stop_source="trail")
+    upsert_paper_position(conn, pos)
+    upsert_market_technicals(
+        conn,
+        [_ohlc("BTCUSDT", 2_000, open_=100.0, high=101.0, low=98.0, close=97.0)],
+    )
+    conn.commit()
+    hit = resting_stop_fill(conn, pos, mid=97.0, until_ms=2_000, timeframe="4h")
+    assert hit is not None
+    assert hit.fill_mid == 97.0
+    assert hit.trigger == "mid"

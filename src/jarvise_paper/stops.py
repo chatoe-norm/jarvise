@@ -183,9 +183,21 @@ def resting_stop_fill(
     if mid_f is None:
         return None
     if side == "long" and mid_f <= stop_f:
-        return StopHit(symbol=symbol, side=side, stop=stop_f, fill_mid=stop_f, trigger="mid")
+        return StopHit(
+            symbol=symbol,
+            side=side,
+            stop=stop_f,
+            fill_mid=min(stop_f, mid_f),
+            trigger="mid",
+        )
     if side == "short" and mid_f >= stop_f:
-        return StopHit(symbol=symbol, side=side, stop=stop_f, fill_mid=stop_f, trigger="mid")
+        return StopHit(
+            symbol=symbol,
+            side=side,
+            stop=stop_f,
+            fill_mid=max(stop_f, mid_f),
+            trigger="mid",
+        )
     return None
 
 
