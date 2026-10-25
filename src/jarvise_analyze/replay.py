@@ -18,7 +18,7 @@ from jarvise_paper.auto_decide import flat_exit_needed, same_side_already_open
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.metrics import compute_paper_metrics
 from jarvise_paper.profit_lock import trail_stop
-from jarvise_paper.stops import evaluate_stop
+from jarvise_paper.stops import resting_stop_fill
 
 PaperPolicy = Literal["naive", "rules"]
 PAPER_POLICIES: tuple[str, ...] = ("naive", "rules")
@@ -360,11 +360,7 @@ def apply_replay_stop(
     ts = int(candle["timestamp"])
     timeframe = str(candle.get("timeframe") or "4h")
     close = float(candle["close"])
-    raw_since = pos.get("stop_moved_ts")
-    if raw_since is None:
-        raw_since = pos["entry_ts"]
-    bar_low, bar_high = bar_range_after(conn, symbol, timeframe, after_ts=int(raw_since), until_ms=ts)
-    hit = evaluate_stop(pos, mid=close, low_since_entry=bar_low, high_since_entry=bar_high)
+    hit = resting_stop_fill(conn, pos, mid=close, until_ms=ts, timeframe=timeframe)
     if hit is None and mode == "trail":
         low, high = bar_range_after(conn, symbol, timeframe, after_ts=int(pos["entry_ts"]), until_ms=ts)
         if no_breakeven:
@@ -382,7 +378,9 @@ def apply_replay_stop(
             pos = get_paper_position(conn, symbol)
             if pos is None:
                 return 0
-            hit = evaluate_stop(pos, mid=close, low_since_entry=None, high_since_entry=None)
+            # Stop moved on this bar: high/low order unknown; only close can fill,
+            # and the fill is at the close when the close is beyond the stop.
+            hit = resting_stop_fill(conn, pos, mid=close, until_ms=ts, timeframe=timeframe)
     if hit is None:
         return 0
     prefix = "trail" if str(pos.get("stop_source") or "") == "trail" else "stop"

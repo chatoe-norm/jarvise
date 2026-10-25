@@ -10,12 +10,15 @@ from jarvise_ingest.db import (
     get_analysis_output,
     list_paper_orders_asc,
     list_paper_positions,
+    load_candles_in_range,
     load_latest_candle,
     load_newest_close,
-    range_since_entry,
     set_position_stop,
 )
 from jarvise_paper.engine import apply_signal
+
+# Shortest first when the preferred timeframe has no bars in the stop window.
+_STOP_TF_FALLBACK = ("1h", "4h", "1d")
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ def evaluate_stop(
     low_since_entry: float | None,
     high_since_entry: float | None,
 ) -> StopHit | None:
+    """Shadow / pre-registered fill: worst extreme since entry. Not the paper path."""
     stop = position.get("stop_price")
     if stop is None:
         return None
@@ -72,6 +76,131 @@ def evaluate_stop(
     return None
 
 
+def _open_order_timeframe(conn: Any, symbol: str) -> str | None:
+    latest: dict[str, Any] | None = None
+    for order in list_paper_orders_asc(conn):
+        if str(order.get("symbol") or "").upper() != symbol.upper():
+            continue
+        reason = str(order.get("reason") or "")
+        if reason.startswith("open_"):
+            latest = order
+        elif reason.startswith("close_") or reason == "stop_hit":
+            latest = None
+    if latest is None:
+        return None
+    tf = latest.get("timeframe")
+    return None if tf is None else str(tf)
+
+
+def _bars_after_for_stop(
+    conn: Any,
+    symbol: str,
+    *,
+    after_ts: int,
+    until_ms: int,
+    preferred_tf: str | None,
+) -> tuple[str, list[dict[str, Any]]]:
+    ordered: list[str] = []
+    if preferred_tf:
+        ordered.append(str(preferred_tf))
+    for tf in _STOP_TF_FALLBACK:
+        if tf not in ordered:
+            ordered.append(tf)
+    for tf in ordered:
+        rows = load_candles_in_range(
+            conn,
+            symbol,
+            tf,
+            since_ms=int(after_ts),
+            until_ms=int(until_ms),
+        )
+        bars = [row for row in rows if int(row["timestamp"]) > int(after_ts)]
+        if bars:
+            return tf, bars
+    return preferred_tf or "4h", []
+
+
+def resting_stop_fill(
+    conn: Any,
+    position: dict[str, Any],
+    *,
+    mid: float | None,
+    until_ms: int,
+    timeframe: str | None = None,
+) -> StopHit | None:
+    """Fill a stop as a resting order: at the stop, or at a gap open.
+
+    Scans one timeframe after ``stop_moved_ts`` (else ``entry_ts``). Does not
+    change the stop level. Slippage and fees are applied by the fill path.
+    """
+    stop = position.get("stop_price")
+    if stop is None:
+        return None
+    stop_f = float(stop)
+    side = str(position.get("side") or "").lower()
+    symbol = str(position.get("symbol") or "").upper()
+    if side not in {"long", "short"}:
+        return None
+    raw_since = position.get("stop_moved_ts")
+    if raw_since is None:
+        raw_since = position.get("entry_ts")
+    if raw_since is None:
+        return None
+    preferred = timeframe or _open_order_timeframe(conn, symbol) or "4h"
+    _, bars = _bars_after_for_stop(
+        conn,
+        symbol,
+        after_ts=int(raw_since),
+        until_ms=int(until_ms),
+        preferred_tf=preferred,
+    )
+    for bar in bars:
+        open_px = float(bar["open"])
+        if side == "long":
+            low = float(bar["low"])
+            if low > stop_f:
+                continue
+            fill_mid = open_px if open_px <= stop_f else stop_f
+            return StopHit(
+                symbol=symbol,
+                side=side,
+                stop=stop_f,
+                fill_mid=fill_mid,
+                trigger="bar_low",
+            )
+        high = float(bar["high"])
+        if high < stop_f:
+            continue
+        fill_mid = open_px if open_px >= stop_f else stop_f
+        return StopHit(
+            symbol=symbol,
+            side=side,
+            stop=stop_f,
+            fill_mid=fill_mid,
+            trigger="bar_high",
+        )
+    mid_f = None if mid is None else float(mid)
+    if mid_f is None:
+        return None
+    if side == "long" and mid_f <= stop_f:
+        return StopHit(
+            symbol=symbol,
+            side=side,
+            stop=stop_f,
+            fill_mid=min(stop_f, mid_f),
+            trigger="mid",
+        )
+    if side == "short" and mid_f >= stop_f:
+        return StopHit(
+            symbol=symbol,
+            side=side,
+            stop=stop_f,
+            fill_mid=max(stop_f, mid_f),
+            trigger="mid",
+        )
+    return None
+
+
 def run_stop_monitor(conn: Any, *, now_ms: int) -> dict[str, Any]:
     """FLAT any paper position whose stop is hit. Allowed while kill-switch is engaged."""
     closed = 0
@@ -81,19 +210,12 @@ def run_stop_monitor(conn: Any, *, now_ms: int) -> dict[str, Any]:
             continue
         symbol = str(pos["symbol"])
         mid = load_newest_close(conn, symbol)
-        since = pos.get("stop_moved_ts")
-        if since is None:
-            since = pos.get("entry_ts")
-        if since is None:
-            low, high = None, None
-        else:
-            low, high = range_since_entry(conn, symbol, entry_ts=int(since))
-        hit = evaluate_stop(pos, mid=mid, low_since_entry=low, high_since_entry=high)
+        hit = resting_stop_fill(conn, pos, mid=mid, until_ms=int(now_ms))
         if hit is None:
             continue
-        tf = "4h"
-        candle = load_latest_candle(conn, symbol, tf)
-        timeframe = str(candle["timeframe"]) if candle else tf
+        preferred = _open_order_timeframe(conn, symbol) or "4h"
+        candle = load_latest_candle(conn, symbol, preferred)
+        timeframe = str(candle["timeframe"]) if candle else preferred
         prefix = "trail" if str(pos.get("stop_source") or "") == "trail" else "stop"
         apply_signal(
             conn,
