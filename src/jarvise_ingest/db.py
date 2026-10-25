@@ -18,6 +18,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from jarvise_ingest.timeframes import INTERVAL_MS
+
 SCHEMA_SQL = """
 -- Timestamps: INTEGER Unix milliseconds (UTC)
 CREATE TABLE IF NOT EXISTS market_technicals (
@@ -1100,32 +1102,36 @@ def load_newest_close(conn: sqlite3.Connection, symbol: str) -> float | None:
     return float(row[0])
 
 
-def load_newest_candle_ts(conn: sqlite3.Connection, symbol: str) -> int | None:
-    """Newest stored closed-candle open time for ``symbol`` (any timeframe)."""
+def load_newest_candle_close_ms(conn: sqlite3.Connection, symbol: str) -> tuple[int | None, int | None]:
+    """Newest candle close time and shortest stored interval for ``symbol``.
+
+    ``market_technicals.timestamp`` is the candle open. Close = open + INTERVAL_MS.
+    Returns ``(newest_close_ms, shortest_interval_ms)``, or ``(None, None)`` when
+    no known timeframe rows exist.
+    """
     cur = conn.execute(
         """
-        SELECT timestamp FROM market_technicals
+        SELECT timeframe, MAX(timestamp) AS open_ts
+        FROM market_technicals
         WHERE symbol=?
-        ORDER BY timestamp DESC
-        LIMIT 1
+        GROUP BY timeframe
         """,
         (symbol.upper(),),
     )
-    row = cur.fetchone()
-    if row is None or row[0] is None:
-        return None
-    return int(row[0])
-
-
-def listed_timeframes_for_symbol(conn: sqlite3.Connection, symbol: str) -> list[str]:
-    cur = conn.execute(
-        """
-        SELECT DISTINCT timeframe FROM market_technicals
-        WHERE symbol=?
-        """,
-        (symbol.upper(),),
-    )
-    return [str(row[0]) for row in cur.fetchall() if row[0]]
+    newest_close: int | None = None
+    shortest: int | None = None
+    for row in cur.fetchall():
+        tf = str(row[0] or "")
+        open_ts = row[1]
+        if open_ts is None or tf not in INTERVAL_MS:
+            continue
+        interval = int(INTERVAL_MS[tf])
+        close_ms = int(open_ts) + interval
+        if newest_close is None or close_ms > newest_close:
+            newest_close = close_ms
+        if shortest is None or interval < shortest:
+            shortest = interval
+    return newest_close, shortest
 
 
 def range_since_entry(

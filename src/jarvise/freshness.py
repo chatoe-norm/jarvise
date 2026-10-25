@@ -17,10 +17,11 @@ def paper_timeframe() -> str:
 
 
 def risk_stale_threshold_ms(shortest_interval_ms: int) -> int:
-    """Max age of newest closed candle before risk-monitor skips MTM/stops.
+    """Max close-age of the newest candle before risk-monitor skips MTM/stops.
 
-    ``JARVISE_RISK_STALE_MS`` overrides. Default is 2× the shortest stored
-    timeframe interval for that symbol (1h → 7_200_000 ms).
+    Age is ``now - (open + INTERVAL_MS)``. ``JARVISE_RISK_STALE_MS`` overrides.
+    Default is 2× the shortest stored timeframe (1h → 7_200_000 ms of close-age,
+    so a 1h symbol goes stale only when the newest open is older than 3 h).
     """
     raw = (os.environ.get("JARVISE_RISK_STALE_MS") or "").strip()
     if raw:
