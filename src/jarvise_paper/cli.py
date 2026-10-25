@@ -42,6 +42,7 @@ from jarvise_paper.approval import (
 )
 from jarvise_paper.engine import apply_signal
 from jarvise_paper.feedback import auto_ev_gate_status, reset_ev_gate_latch
+from jarvise_paper.forward_h3 import read_latest as read_forward_h3_latest
 from jarvise_paper.metrics import compute_paper_metrics, persist_metrics_snapshot
 from jarvise_paper.risk_monitor import run_risk_monitor
 from jarvise_paper.shadow_veto import run_shadow, score_shadow
@@ -206,6 +207,11 @@ def build_parser() -> argparse.ArgumentParser:
     sv_score = sv_sub.add_parser("score", help="Score the pre-registered pass rule")
     sv_score.add_argument("--db", type=Path, default=DEFAULT_DB)
     sv_score.add_argument("--json", action="store_true", dest="as_json")
+
+    fh = sub.add_parser("forward-h3", help="Forward H3 daily Donchian trail score (read-only)")
+    fh_sub = fh.add_subparsers(dest="forward_h3_cmd", required=True)
+    fh_score = fh_sub.add_parser("score", help="Print h3_latest.json")
+    fh_score.add_argument("--json", action="store_true", dest="as_json")
     return p
 
 
@@ -630,6 +636,32 @@ def cmd_shadow_veto(args: argparse.Namespace) -> int:
     return code
 
 
+def cmd_forward_h3(args: argparse.Namespace) -> int:
+    if args.forward_h3_cmd != "score":
+        return 2
+    payload = read_forward_h3_latest()
+    if args.as_json:
+        print(json.dumps(payload, default=str))
+    else:
+        print(
+            json.dumps(
+                {
+                    k: payload.get(k)
+                    for k in (
+                        "ok",
+                        "passed",
+                        "window_closed",
+                        "closed_trades",
+                        "expected_value_ev",
+                        "days_elapsed",
+                    )
+                },
+                default=str,
+            )
+        )
+    return 0 if payload.get("ok") else 1
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -657,6 +689,8 @@ def run(argv: list[str] | None = None) -> int:
         return cmd_ev_gate(args)
     if args.cmd == "shadow-veto":
         return cmd_shadow_veto(args)
+    if args.cmd == "forward-h3":
+        return cmd_forward_h3(args)
     return 2
 
 

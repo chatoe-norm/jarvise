@@ -67,6 +67,7 @@ def test_jobs_workflows_send_token_placeholder() -> None:
     assert "jarvise-live-reconcile.json" in callers
     assert "jarvise-shadow-veto.json" in callers
     assert "jarvise-weekly-report.json" in callers
+    assert "jarvise-forward-h3.json" in callers
     shadow = json.loads((WORKFLOWS / "jarvise-shadow-veto.json").read_text(encoding="utf-8"))
     assert shadow["id"] == "jrvsShadowVeto4h1"
     shadow_timeout = next(
@@ -90,6 +91,22 @@ def test_jobs_workflows_send_token_placeholder() -> None:
         if node.get("type") == "n8n-nodes-base.httpRequest"
     )
     assert weekly_timeout >= JOB_TIMEOUTS_S["weekly_report"] * 1000
+    forward = json.loads((WORKFLOWS / "jarvise-forward-h3.json").read_text(encoding="utf-8"))
+    assert forward["id"] == "jrvsForwardH3Daily"
+    assert forward["settings"]["timezone"] == "UTC"
+    forward_cron = next(
+        node["parameters"]["rule"]["interval"][0]["expression"]
+        for node in forward["nodes"]
+        if node.get("type") == "n8n-nodes-base.scheduleTrigger"
+    )
+    assert forward_cron == "40 0 * * *"
+    forward_timeout = next(
+        node["parameters"]["options"]["timeout"]
+        for node in forward["nodes"]
+        if node.get("type") == "n8n-nodes-base.httpRequest"
+    )
+    assert forward_timeout >= 360000
+    assert forward_timeout >= JOB_TIMEOUTS_S["forward_h3"] * 1000
     script = (ROOT / "infra" / "docker" / "render-n8n-jobs-workflows.sh").read_text(encoding="utf-8")
     assert "JARVISE_JOBS_TOKEN" in script
     assert "jarvise-live-reconcile.json" in script
