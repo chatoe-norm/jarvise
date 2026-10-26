@@ -19,6 +19,7 @@ from urllib.parse import parse_qs
 from jarvise.charts import export_candle_graphs
 from jarvise.disk import disk_edge_alerted, disk_free
 from jarvise.rag import doctrine_snippets, publish_redis_status
+from jarvise_assist.signals import run_assist_morning, run_assist_signals
 from jarvise_ingest.db import (
     count_indicator_ready,
     count_market,
@@ -58,6 +59,8 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     "news_reaction": 420.0,
     "shadow_veto": 300.0,
     "forward_h3": 300.0,
+    "assist_signal": 300.0,
+    "assist_morning": 180.0,
     "weekly_report": 120.0,
 }
 # Single-flight lock TTLs (seconds): a crashed holder frees the lock automatically.
@@ -72,6 +75,8 @@ JOB_LOCK_TTL_S: dict[str, int] = {
     "live_reconcile": 300,
     "shadow_veto": 300,
     "forward_h3": 360,
+    "assist_signal": 360,
+    "assist_morning": 240,
     "weekly_report": 180,
 }
 TIMEOUT_EXIT_CODE = 124
@@ -411,6 +416,76 @@ def run_forward_h3() -> tuple[int, dict[str, Any]]:
             }
         payload["at_ms"] = int(payload.get("at_ms") or now)
         _publish_best_effort(FORWARD_H3_REDIS_KEY, payload)
+        return (0 if payload.get("ok") else 1), payload
+
+
+def run_assist_signal_job() -> tuple[int, dict[str, Any]]:
+    """Read-only futures advice after paper-run. Never places orders."""
+    with single_flight("assist_signal") as acquired:
+        if not acquired:
+            return 3, _running("assist_signal")
+        now = int(time.time() * 1000)
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        if not path.exists():
+            payload = {
+                "ok": False,
+                "error": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
+            _publish_best_effort("jarvise:assist_signal:last", payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            payload = run_assist_signals(conn, now_ms_value=now)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "paper_only": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "at_ms": now,
+            }
+        finally:
+            conn.close()
+        at_ms = payload.get("at_ms")
+        payload["at_ms"] = int(at_ms) if isinstance(at_ms, (int, float)) else now
+        _publish_best_effort("jarvise:assist_signal:last", payload)
+        return (0 if payload.get("ok") else 1), payload
+
+
+def run_assist_morning_job() -> tuple[int, dict[str, Any]]:
+    """08:00 Bangkok batch: send or expire held overnight signals."""
+    with single_flight("assist_morning") as acquired:
+        if not acquired:
+            return 3, _running("assist_morning")
+        now = int(time.time() * 1000)
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        if not path.exists():
+            payload = {
+                "ok": False,
+                "error": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
+            _publish_best_effort("jarvise:assist_morning:last", payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            payload = run_assist_morning(conn, now_ms_value=now)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "paper_only": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "at_ms": now,
+            }
+        finally:
+            conn.close()
+        at_ms = payload.get("at_ms")
+        payload["at_ms"] = int(at_ms) if isinstance(at_ms, (int, float)) else now
+        _publish_best_effort("jarvise:assist_morning:last", payload)
         return (0 if payload.get("ok") else 1), payload
 
 
@@ -796,6 +871,8 @@ ROUTES = {
     ("POST", "/jobs/news-reaction"): "news_reaction",
     ("POST", "/jobs/shadow-veto"): "shadow_veto",
     ("POST", "/jobs/forward-h3"): "forward_h3",
+    ("POST", "/jobs/assist-signal"): "assist_signal",
+    ("POST", "/jobs/assist-morning"): "assist_morning",
     ("POST", "/jobs/weekly-report"): "weekly_report",
 }
 
@@ -859,6 +936,8 @@ class JobHandler(BaseHTTPRequestHandler):
             "news_reaction": run_news_reaction,
             "shadow_veto": run_shadow_veto,
             "forward_h3": run_forward_h3,
+            "assist_signal": run_assist_signal_job,
+            "assist_morning": run_assist_morning_job,
             "weekly_report": run_weekly_report,
         }
         runner = runners.get(action or "")

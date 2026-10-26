@@ -1,0 +1,74 @@
+{
+  "id": "jrvsAssistMorning1",
+  "name": "Jarvise assist morning",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-assist-morning",
+      "name": "Daily 08:00 Bangkok",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/assist-morning",
+        "options": {
+          "timeout": 360000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
+        }
+      },
+      "id": "http-assist-morning",
+      "name": "POST assist morning",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Send or expire overnight held signals. Read-only; never places orders."
+    }
+  ],
+  "connections": {
+    "Daily 08:00 Bangkok": {
+      "main": [
+        [
+          {
+            "node": "POST assist morning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Bangkok"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "Render __JARVISE_JOBS_TOKEN__ with infra/docker/render-n8n-jobs-workflows.sh before import. Do not commit a real token."
+    }
+  },
+  "pinData": {},
+  "active": false
+}

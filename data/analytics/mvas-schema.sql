@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 13).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 14).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -323,4 +323,69 @@ CREATE TABLE IF NOT EXISTS paper_shadow_verdicts (
     created_at INTEGER NOT NULL,
     timing TEXT NOT NULL,
     FOREIGN KEY (analysis_id) REFERENCES paper_shadow_track(analysis_id)
+);
+
+-- Trade assistant (Telegram advice only; never writes paper/live/approval).
+CREATE TABLE IF NOT EXISTS assist_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    risk_pct REAL NOT NULL DEFAULT 2.0,
+    enabled INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS assist_edge (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    futures_down_since_ms INTEGER,
+    futures_down_alerted INTEGER NOT NULL DEFAULT 0,
+    permission_error_reported INTEGER NOT NULL DEFAULT 0,
+    key_unsafe_reported INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS assist_signal (
+    id TEXT NOT NULL PRIMARY KEY,
+    analysis_id TEXT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry REAL NOT NULL,
+    stop REAL NOT NULL,
+    target REAL NOT NULL,
+    qty REAL NOT NULL,
+    notional REAL NOT NULL,
+    leverage INTEGER NOT NULL,
+    loss_at_stop REAL NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    sent_at_ms INTEGER,
+    leverage_capped INTEGER NOT NULL DEFAULT 0,
+    uncapped_leverage INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_assist_signal_symbol_status
+    ON assist_signal (symbol, status);
+CREATE INDEX IF NOT EXISTS idx_assist_signal_status_created
+    ON assist_signal (status, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS assist_track (
+    signal_id TEXT NOT NULL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry REAL NOT NULL,
+    stop REAL NOT NULL,
+    target REAL NOT NULL,
+    qty REAL NOT NULL,
+    sent_at_ms INTEGER NOT NULL,
+    exit_at_ms INTEGER,
+    exit_px REAL,
+    exit_reason TEXT,
+    gross_r REAL,
+    pnl_usdt REAL,
+    FOREIGN KEY (signal_id) REFERENCES assist_signal(id)
+);
+
+CREATE TABLE IF NOT EXISTS assist_position_seen (
+    symbol TEXT NOT NULL,
+    position_side TEXT NOT NULL,
+    qty REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (symbol, position_side)
 );
