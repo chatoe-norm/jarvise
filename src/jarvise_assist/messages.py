@@ -89,3 +89,39 @@ def format_futures_down_alert(*, minutes: int) -> str:
 
 def format_futures_recovered_alert() -> str:
     return "Jarvise trade assist: อ่าน futures ได้แล้ว"
+
+
+def format_no_stop_warning(*, symbol: str, side: str, stop: Decimal) -> str:
+    side_label = "LONG" if side.lower() == "long" else "SHORT"
+    return (
+        f"⚠️ {symbol.upper()} {side_label} ไม่มี stop order — "
+        f"ตั้ง Stop-Market (Reduce-Only, Mark Price) ที่ {_fmt_price(stop)}"
+    )
+
+
+def format_move_stop_advice(*, symbol: str, side: str, stop: Decimal) -> str:
+    side_l = side.lower()
+    emoji = "↗️" if side_l == "long" else "↘️"
+    side_label = "LONG" if side_l == "long" else "SHORT"
+    return f"{emoji} {symbol.upper()} {side_label} · เลื่อน stop → {_fmt_price(stop)}"
+
+
+def format_exit_advice(
+    *,
+    symbol: str,
+    side: str,
+    reason: str,
+    approx_r: Decimal,
+) -> str:
+    side_label = "LONG" if side.lower() == "long" else "SHORT"
+    reason_l = reason.lower()
+    if reason_l == "flat":
+        detail = "สัญญาณ 4h เป็น FLAT"
+    elif reason_l == "opposite":
+        detail = "สัญญาณ 4h กลับด้าน"
+    elif reason_l == "target_2r":
+        detail = "ราคาถึงเป้า 2R"
+    else:
+        detail = reason
+    r_s = f"{float(approx_r):.1f}"
+    return f"✅ {symbol.upper()} {side_label} · ออกตอนนี้\n{detail} · ประมาณ {r_s}R"

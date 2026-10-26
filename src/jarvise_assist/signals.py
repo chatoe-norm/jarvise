@@ -7,12 +7,16 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_assist import ASSIST_SYMBOLS, ASSIST_TIMEFRAME
 from jarvise_assist.futures import (
     BinanceFuturesClient,
     FuturesKeyUnsafeError,
     FuturesPermissionError,
+    FuturesPosition,
+    SymbolFilters,
     build_futures_client,
+    find_protective_stop,
 )
 from jarvise_assist.messages import (
     format_futures_down_alert,
@@ -22,17 +26,25 @@ from jarvise_assist.messages import (
     format_signal_message,
 )
 from jarvise_assist.sizing import (
+    IDEA_LOOKBACK_MS,
+    ExistingIdea,
+    SignalCandidate,
+    admit_signals,
     analysis_is_fresh,
+    below_min_notional,
     chase_exceeded,
     next_assist_run_ms,
     passes_signal_floor,
+    position_risk_usdt,
     size_signal,
 )
 from jarvise_assist.store import (
     ensure_settings,
     expire_older_held_keep_newest,
+    find_linkable_signal,
     get_edge,
     insert_signal,
+    list_active_idea_signals,
     list_held_signals,
     mark_signal_expired,
     mark_signal_sent,
@@ -41,7 +53,7 @@ from jarvise_assist.store import (
     recent_same_idea,
     write_edge,
 )
-from jarvise_ingest.db import load_latest_analysis
+from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
 from jarvise_notify.telegram import send_telegram_message
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -166,6 +178,85 @@ def _same_idea_skip(
     return recent_same_idea(conn, symbol=symbol, side=side, now_ms=now_ms)
 
 
+def _latest_atr(conn: Any, symbol: str, *, now_ms: int) -> Decimal | None:
+    since = int(now_ms) - 30 * 24 * 3_600_000
+    rows = load_candles_in_range(conn, symbol, ASSIST_TIMEFRAME, since_ms=since, until_ms=int(now_ms))
+    for row in reversed(rows):
+        atr = row.get("atr_14")
+        if atr is not None:
+            return Decimal(str(atr))
+    return None
+
+
+def _stop_for_open_position(
+    conn: Any,
+    pos: FuturesPosition,
+    *,
+    orders: list[dict[str, Any]],
+    now_ms: int,
+) -> Decimal | None:
+    trade_side = pos.side
+    protective = find_protective_stop(
+        orders,
+        symbol=pos.symbol,
+        position_side=pos.position_side,
+        trade_side=trade_side,
+    )
+    if protective is not None:
+        return protective
+    linked = find_linkable_signal(conn, symbol=pos.symbol, side=trade_side, now_ms=now_ms)
+    if linked is not None:
+        return Decimal(str(linked["stop"]))
+    atr = _latest_atr(conn, pos.symbol, now_ms=now_ms)
+    if atr is None or atr <= 0:
+        return None
+    dist = Decimal(str(ATR_STOP_MULT)) * atr
+    if trade_side == "long":
+        return pos.entry_price - dist
+    return pos.entry_price + dist
+
+
+def build_existing_ideas(
+    conn: Any,
+    *,
+    positions: list[FuturesPosition],
+    orders: list[dict[str, Any]],
+    balance: Decimal,
+    risk_pct: Decimal,
+    now_ms: int,
+) -> list[ExistingIdea]:
+    """Open universe positions plus recent sent/held signals not already open."""
+    ideas: list[ExistingIdea] = []
+    open_keys: set[tuple[str, str]] = set()
+    for pos in positions:
+        if pos.symbol not in ASSIST_SYMBOLS:
+            continue
+        trade_side = pos.side
+        open_keys.add((pos.symbol, trade_side))
+        stop = _stop_for_open_position(conn, pos, orders=orders, now_ms=now_ms)
+        risk = position_risk_usdt(
+            entry=pos.entry_price,
+            qty=pos.qty,
+            stop=stop,
+            balance=balance,
+            risk_pct=risk_pct,
+        )
+        ideas.append(ExistingIdea(symbol=pos.symbol, side=trade_side, risk_usdt=risk))
+    for row in list_active_idea_signals(conn, now_ms=now_ms, within_ms=IDEA_LOOKBACK_MS):
+        key = (str(row["symbol"]).upper(), str(row["side"]).lower())
+        if key in open_keys:
+            continue
+        ideas.append(
+            ExistingIdea(
+                symbol=key[0],
+                side=key[1],
+                risk_usdt=Decimal(str(row["loss_at_stop"])),
+            )
+        )
+        open_keys.add(key)
+    return ideas
+
+
 def run_assist_signals(
     conn: Any,
     *,
@@ -205,7 +296,12 @@ def run_assist_signals(
 
     try:
         balance = client.usdt_wallet_balance()
-        open_syms = client.open_symbols()
+        positions = client.position_risk()
+        open_syms = {p.symbol for p in positions}
+        try:
+            orders = client.all_open_orders()
+        except AttributeError:
+            orders = [*client.open_orders(), *client.open_algo_orders()]
         recovered = _handle_futures_ok(conn, send=send_fn)
     except FuturesPermissionError as exc:
         return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
@@ -216,6 +312,8 @@ def run_assist_signals(
     night = is_night_hold(now_ms=ts)
     created: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    candidates: list[SignalCandidate] = []
+    symbol_rank = {sym: i for i, sym in enumerate(ASSIST_SYMBOLS)}
 
     for symbol in ASSIST_SYMBOLS:
         if symbol in open_syms:
@@ -234,7 +332,14 @@ def run_assist_signals(
             continue
         try:
             mark = client.mark_price(symbol)
-            step = client.step_size(symbol)
+            if hasattr(client, "symbol_filters"):
+                filters = client.symbol_filters(symbol)
+            else:
+                filters = SymbolFilters(
+                    step_size=client.step_size(symbol),
+                    min_qty=Decimal("0"),
+                    min_notional=Decimal("0"),
+                )
         except Exception as exc:  # noqa: BLE001
             skipped.append({"symbol": symbol, "reason": f"mark:{type(exc).__name__}"})
             continue
@@ -245,13 +350,51 @@ def run_assist_signals(
             stop=Decimal(str(analysis["invalidation_price"])),
             balance=balance,
             risk_pct=risk_pct,
-            step_size=step,
+            step_size=filters.step_size,
             analysis_id=str(analysis.get("analysis_id") or "") or None,
         )
         if sized is None:
             skipped.append({"symbol": symbol, "reason": "size_failed"})
             continue
-        expires = next_assist_run_ms(ts)
+        if below_min_notional(
+            qty=sized.qty,
+            notional=sized.notional,
+            min_qty=filters.min_qty,
+            min_notional=filters.min_notional,
+        ):
+            skipped.append(
+                {
+                    "symbol": symbol,
+                    "reason": "below_min_notional",
+                    "min_notional": float(filters.min_notional),
+                    "notional": float(sized.notional),
+                }
+            )
+            continue
+        candidates.append(
+            SignalCandidate(
+                sized=sized,
+                confidence=float(analysis.get("confidence_score") or 0.0),
+                symbol_rank=symbol_rank[symbol],
+            )
+        )
+
+    existing = build_existing_ideas(
+        conn,
+        positions=positions,
+        orders=orders,
+        balance=balance,
+        risk_pct=risk_pct,
+        now_ms=ts,
+    )
+    admitted, rejected = admit_signals(existing=existing, candidates=candidates, balance=balance)
+    for cand in rejected:
+        skipped.append({"symbol": cand.sized.symbol, "reason": "risk_cap"})
+
+    expires = next_assist_run_ms(ts)
+    for cand in admitted:
+        sized = cand.sized
+        symbol = sized.symbol
         if night:
             sid = insert_signal(
                 conn,
@@ -391,6 +534,11 @@ def run_assist_morning(
             mark_signal_sent(conn, str(row["id"]), sized, sent_at_ms=ts, expires_at_ms=expires)
             sent.append(str(row["id"]))
 
+    # Late import: watch.py imports alert helpers from this module.
+    from jarvise_assist.watch import flush_held_watch_advice
+
+    watch_flush = flush_held_watch_advice(conn, futures=client, now_ms_value=ts, send=send_fn)
+
     return _strip_secrets(
         {
             "ok": True,
@@ -399,5 +547,6 @@ def run_assist_morning(
             "sent": sent,
             "expired": expired,
             "balance_usdt": float(balance),
+            "watch_advice": watch_flush,
         }
     )

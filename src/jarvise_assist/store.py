@@ -320,5 +320,250 @@ def mark_signal_expired(conn: Any, signal_id: str) -> None:
     conn.commit()
 
 
+def mark_signal_taken(conn: Any, signal_id: str) -> None:
+    conn.execute(
+        "UPDATE assist_signal SET status='taken' WHERE id=?",
+        (signal_id,),
+    )
+    conn.commit()
+
+
+def list_active_idea_signals(
+    conn: Any,
+    *,
+    now_ms: int,
+    within_ms: int,
+) -> list[dict[str, Any]]:
+    """sent/held signals created in the lookback window and not yet expired."""
+    cur = conn.execute(
+        """
+        SELECT id, analysis_id, symbol, side, entry, stop, target, qty, notional,
+               leverage, loss_at_stop, created_at_ms, expires_at_ms, status, sent_at_ms,
+               leverage_capped, uncapped_leverage
+        FROM assist_signal
+        WHERE status IN ('sent', 'held')
+          AND created_at_ms >= ?
+          AND expires_at_ms > ?
+        ORDER BY created_at_ms DESC
+        """,
+        (int(now_ms) - int(within_ms), int(now_ms)),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def find_linkable_signal(
+    conn: Any,
+    *,
+    symbol: str,
+    side: str,
+    now_ms: int,
+) -> dict[str, Any] | None:
+    """Newest still-valid sent/held signal for symbol+side."""
+    cur = conn.execute(
+        """
+        SELECT id, analysis_id, symbol, side, entry, stop, target, qty, notional,
+               leverage, loss_at_stop, created_at_ms, expires_at_ms, status, sent_at_ms,
+               leverage_capped, uncapped_leverage
+        FROM assist_signal
+        WHERE symbol=? AND side=? AND status IN ('sent', 'held')
+          AND expires_at_ms > ?
+        ORDER BY created_at_ms DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), side.lower(), int(now_ms)),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def upsert_watch_position(conn: Any, row: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO assist_watch_position (
+            symbol, position_side, side, entry, qty, in_universe, signal_id,
+            initial_stop, initial_stop_source, entry_time_ms, no_stop_latched,
+            last_seen_ms, closed_at_ms
+        ) VALUES (
+            :symbol, :position_side, :side, :entry, :qty, :in_universe, :signal_id,
+            :initial_stop, :initial_stop_source, :entry_time_ms, :no_stop_latched,
+            :last_seen_ms, :closed_at_ms
+        )
+        ON CONFLICT(symbol, position_side) DO UPDATE SET
+            side=excluded.side,
+            entry=excluded.entry,
+            qty=excluded.qty,
+            in_universe=excluded.in_universe,
+            signal_id=COALESCE(assist_watch_position.signal_id, excluded.signal_id),
+            initial_stop=COALESCE(assist_watch_position.initial_stop, excluded.initial_stop),
+            initial_stop_source=COALESCE(
+                assist_watch_position.initial_stop_source, excluded.initial_stop_source
+            ),
+            entry_time_ms=COALESCE(assist_watch_position.entry_time_ms, excluded.entry_time_ms),
+            no_stop_latched=excluded.no_stop_latched,
+            last_seen_ms=excluded.last_seen_ms,
+            closed_at_ms=excluded.closed_at_ms
+        """,
+        row,
+    )
+    conn.commit()
+
+
+def get_watch_position(conn: Any, symbol: str, position_side: str) -> dict[str, Any] | None:
+    cur = conn.execute(
+        """
+        SELECT symbol, position_side, side, entry, qty, in_universe, signal_id,
+               initial_stop, initial_stop_source, entry_time_ms, no_stop_latched,
+               last_seen_ms, closed_at_ms
+        FROM assist_watch_position
+        WHERE symbol=? AND position_side=?
+        """,
+        (symbol.upper(), position_side.upper()),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def set_watch_no_stop_latched(conn: Any, symbol: str, position_side: str, *, latched: bool) -> None:
+    conn.execute(
+        """
+        UPDATE assist_watch_position SET no_stop_latched=?
+        WHERE symbol=? AND position_side=?
+        """,
+        (1 if latched else 0, symbol.upper(), position_side.upper()),
+    )
+    if not latched:
+        # Allow a new warning after a stop appears and later disappears.
+        conn.execute(
+            """
+            UPDATE assist_watch_advice SET status='dropped'
+            WHERE symbol=? AND position_side=? AND kind='no_stop'
+              AND status IN ('sent', 'held')
+            """,
+            (symbol.upper(), position_side.upper()),
+        )
+    conn.commit()
+
+
+def mark_watch_positions_closed(
+    conn: Any, *, open_keys: set[tuple[str, str]], now_ms: int
+) -> list[tuple[str, str]]:
+    """Mark previously open watch rows closed when absent from open_keys."""
+    cur = conn.execute(
+        """
+        SELECT symbol, position_side FROM assist_watch_position
+        WHERE closed_at_ms IS NULL
+        """
+    )
+    closed: list[tuple[str, str]] = []
+    for symbol, position_side in cur.fetchall():
+        key = (str(symbol).upper(), str(position_side).upper())
+        if key not in open_keys:
+            conn.execute(
+                """
+                UPDATE assist_watch_position SET closed_at_ms=?
+                WHERE symbol=? AND position_side=?
+                """,
+                (int(now_ms), key[0], key[1]),
+            )
+            closed.append(key)
+    if closed:
+        conn.commit()
+    return closed
+
+
+def advice_already_sent(
+    conn: Any,
+    *,
+    symbol: str,
+    position_side: str,
+    kind: str,
+    reason: str | None = None,
+    level: float | None = None,
+) -> bool:
+    sql = """
+        SELECT 1 FROM assist_watch_advice
+        WHERE symbol=? AND position_side=? AND kind=? AND status IN ('sent', 'held')
+    """
+    params: list[Any] = [symbol.upper(), position_side.upper(), kind]
+    if reason is not None:
+        sql += " AND reason=?"
+        params.append(reason)
+    if level is not None:
+        sql += " AND level=?"
+        params.append(float(level))
+    sql += " LIMIT 1"
+    return conn.execute(sql, params).fetchone() is not None
+
+
+def insert_watch_advice(
+    conn: Any,
+    *,
+    symbol: str,
+    position_side: str,
+    kind: str,
+    reason: str | None,
+    level: float | None,
+    approx_r: float | None,
+    status: str,
+    created_at_ms: int,
+    sent_at_ms: int | None = None,
+) -> str:
+    advice_id = f"awa_{uuid.uuid4().hex[:16]}"
+    conn.execute(
+        """
+        INSERT INTO assist_watch_advice (
+            id, symbol, position_side, kind, reason, level, approx_r,
+            status, created_at_ms, sent_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            advice_id,
+            symbol.upper(),
+            position_side.upper(),
+            kind,
+            reason,
+            level,
+            approx_r,
+            status,
+            int(created_at_ms),
+            sent_at_ms,
+        ),
+    )
+    conn.commit()
+    return advice_id
+
+
+def list_held_watch_advice(conn: Any) -> list[dict[str, Any]]:
+    cur = conn.execute(
+        """
+        SELECT id, symbol, position_side, kind, reason, level, approx_r,
+               status, created_at_ms, sent_at_ms
+        FROM assist_watch_advice
+        WHERE status='held'
+        ORDER BY created_at_ms ASC
+        """
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def mark_watch_advice_sent(conn: Any, advice_id: str, *, sent_at_ms: int) -> None:
+    conn.execute(
+        """
+        UPDATE assist_watch_advice SET status='sent', sent_at_ms=?
+        WHERE id=?
+        """,
+        (int(sent_at_ms), advice_id),
+    )
+    conn.commit()
+
+
+def mark_watch_advice_dropped(conn: Any, advice_id: str) -> None:
+    conn.execute(
+        "UPDATE assist_watch_advice SET status='dropped' WHERE id=?",
+        (advice_id,),
+    )
+    conn.commit()
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)

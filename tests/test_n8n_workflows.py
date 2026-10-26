@@ -140,6 +140,23 @@ def test_jobs_workflows_send_token_placeholder() -> None:
     assert morning_timeout >= 360000
     assert "jarvise-assist-signal.json" in callers
     assert "jarvise-assist-morning.json" in callers
+    assert "jarvise-assist-watch.json" in callers
+    watch = json.loads((WORKFLOWS / "jarvise-assist-watch.json").read_text(encoding="utf-8"))
+    assert watch["id"] == "jrvsAssistWatch5m"
+    assert watch["settings"]["timezone"] == "Asia/Bangkok"
+    watch_cron = next(
+        node["parameters"]["rule"]["interval"][0]["expression"]
+        for node in watch["nodes"]
+        if node.get("type") == "n8n-nodes-base.scheduleTrigger"
+    )
+    assert watch_cron == "*/5 * * * *"
+    watch_timeout = next(
+        node["parameters"]["options"]["timeout"]
+        for node in watch["nodes"]
+        if node.get("type") == "n8n-nodes-base.httpRequest"
+    )
+    assert watch_timeout >= 360000
+    assert watch_timeout >= JOB_TIMEOUTS_S["assist_watch"] * 1000
     script = (ROOT / "infra" / "docker" / "render-n8n-jobs-workflows.sh").read_text(encoding="utf-8")
     assert "JARVISE_JOBS_TOKEN" in script
     assert "jarvise-live-reconcile.json" in script
