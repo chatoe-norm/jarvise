@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any
 
-from jarvise_assist.sizing import SizedSignal
+from jarvise_assist.sizing import SAME_IDEA_MS, SizedSignal
 
 _UNSET: object = object()
 
@@ -23,7 +23,8 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
 def get_edge(conn: Any) -> dict[str, Any]:
     row = conn.execute(
         """
-        SELECT futures_down_since_ms, futures_down_alerted, permission_error_reported
+        SELECT futures_down_since_ms, futures_down_alerted,
+               permission_error_reported, key_unsafe_reported
         FROM assist_edge WHERE id=1
         """
     ).fetchone()
@@ -31,8 +32,9 @@ def get_edge(conn: Any) -> dict[str, Any]:
         conn.execute(
             """
             INSERT INTO assist_edge (
-                id, futures_down_since_ms, futures_down_alerted, permission_error_reported
-            ) VALUES (1, NULL, 0, 0)
+                id, futures_down_since_ms, futures_down_alerted,
+                permission_error_reported, key_unsafe_reported
+            ) VALUES (1, NULL, 0, 0, 0)
             """
         )
         conn.commit()
@@ -40,11 +42,14 @@ def get_edge(conn: Any) -> dict[str, Any]:
             "futures_down_since_ms": None,
             "futures_down_alerted": False,
             "permission_error_reported": False,
+            "key_unsafe_reported": False,
         }
+    key_unsafe = bool(int(row[3])) if len(row) > 3 and row[3] is not None else False
     return {
         "futures_down_since_ms": row[0],
         "futures_down_alerted": bool(int(row[1])),
         "permission_error_reported": bool(int(row[2])),
+        "key_unsafe_reported": key_unsafe,
     }
 
 
@@ -54,6 +59,7 @@ def write_edge(
     futures_down_since_ms: Any = _UNSET,
     futures_down_alerted: bool | None = None,
     permission_error_reported: bool | None = None,
+    key_unsafe_reported: bool | None = None,
 ) -> None:
     cur = get_edge(conn)
     since = cur["futures_down_since_ms"] if futures_down_since_ms is _UNSET else futures_down_since_ms
@@ -65,33 +71,22 @@ def write_edge(
         if permission_error_reported is not None
         else int(cur["permission_error_reported"])
     )
+    unsafe = int(key_unsafe_reported) if key_unsafe_reported is not None else int(cur["key_unsafe_reported"])
     conn.execute(
         """
         INSERT INTO assist_edge (
-            id, futures_down_since_ms, futures_down_alerted, permission_error_reported
-        ) VALUES (1, ?, ?, ?)
+            id, futures_down_since_ms, futures_down_alerted,
+            permission_error_reported, key_unsafe_reported
+        ) VALUES (1, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             futures_down_since_ms=excluded.futures_down_since_ms,
             futures_down_alerted=excluded.futures_down_alerted,
-            permission_error_reported=excluded.permission_error_reported
+            permission_error_reported=excluded.permission_error_reported,
+            key_unsafe_reported=excluded.key_unsafe_reported
         """,
-        (since, down_alerted, perm),
+        (since, down_alerted, perm, unsafe),
     )
     conn.commit()
-
-
-def active_signal_for_symbol(conn: Any, symbol: str, *, now_ms: int) -> dict[str, Any] | None:
-    row = conn.execute(
-        """
-        SELECT id, status, expires_at_ms, side, entry, stop
-        FROM assist_signal
-        WHERE symbol=? AND status IN ('sent', 'held') AND expires_at_ms > ?
-        ORDER BY created_at_ms DESC
-        LIMIT 1
-        """,
-        (symbol.upper(), int(now_ms)),
-    ).fetchone()
-    return dict(row) if row is not None else None
 
 
 def list_held_signals(conn: Any) -> list[dict[str, Any]]:
@@ -106,6 +101,89 @@ def list_held_signals(conn: Any) -> list[dict[str, Any]]:
         """
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+def expire_older_held(conn: Any, symbol: str, *, keep_id: str) -> list[str]:
+    """Expire other held rows for symbol; return expired ids."""
+    cur = conn.execute(
+        """
+        SELECT id FROM assist_signal
+        WHERE symbol=? AND status='held' AND id != ?
+        """,
+        (symbol.upper(), keep_id),
+    )
+    ids = [str(r[0]) for r in cur.fetchall()]
+    if ids:
+        conn.executemany(
+            "UPDATE assist_signal SET status='expired' WHERE id=?",
+            [(i,) for i in ids],
+        )
+        conn.commit()
+    return ids
+
+
+def expire_older_held_keep_newest(conn: Any) -> list[str]:
+    """Per symbol keep newest held; expire the rest. Returns expired ids."""
+    expired: list[str] = []
+    cur = conn.execute(
+        """
+        SELECT symbol, id FROM assist_signal
+        WHERE status='held'
+        ORDER BY symbol ASC, created_at_ms DESC
+        """
+    )
+    seen: set[str] = set()
+    for symbol, signal_id in cur.fetchall():
+        sym = str(symbol).upper()
+        if sym in seen:
+            mark_signal_expired(conn, str(signal_id))
+            expired.append(str(signal_id))
+        else:
+            seen.add(sym)
+    return expired
+
+
+def recent_same_idea(
+    conn: Any,
+    *,
+    symbol: str,
+    side: str,
+    now_ms: int,
+    within_ms: int = SAME_IDEA_MS,
+) -> bool:
+    """True when a sent/held/expired row for symbol+side exists within within_ms."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM assist_signal
+        WHERE symbol=? AND side=? AND status IN ('sent', 'held', 'expired')
+          AND created_at_ms >= ?
+        LIMIT 1
+        """,
+        (symbol.upper(), side.lower(), int(now_ms) - int(within_ms)),
+    ).fetchone()
+    return row is not None
+
+
+def previous_analysis_action(
+    conn: Any,
+    *,
+    symbol: str,
+    timeframe: str,
+) -> str | None:
+    """Action of the second-newest analysis row, or None when absent."""
+    cur = conn.execute(
+        """
+        SELECT action FROM analysis_output
+        WHERE symbol=? AND timeframe=?
+        ORDER BY timestamp DESC
+        LIMIT 2
+        """,
+        (symbol.upper(), timeframe),
+    )
+    rows = cur.fetchall()
+    if len(rows) < 2:
+        return None
+    return str(rows[1][0] or "").lower() or None
 
 
 def insert_signal(
@@ -150,6 +228,8 @@ def insert_signal(
             int(sized.uncapped_leverage),
         ),
     )
+    if status in {"held", "sent"}:
+        expire_older_held(conn, sized.symbol, keep_id=signal_id)
     if status == "sent" and sent_at_ms is not None:
         conn.execute(
             """

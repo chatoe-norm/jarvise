@@ -17,24 +17,28 @@ from jarvise_assist.futures import (
 from jarvise_assist.messages import (
     format_futures_down_alert,
     format_futures_recovered_alert,
+    format_key_unsafe_alert,
     format_permission_error_alert,
     format_signal_message,
 )
 from jarvise_assist.sizing import (
+    analysis_is_fresh,
     chase_exceeded,
-    next_4h_close_ms,
+    next_assist_run_ms,
     passes_signal_floor,
     size_signal,
 )
 from jarvise_assist.store import (
-    active_signal_for_symbol,
     ensure_settings,
+    expire_older_held_keep_newest,
     get_edge,
     insert_signal,
     list_held_signals,
     mark_signal_expired,
     mark_signal_sent,
     now_ms,
+    previous_analysis_action,
+    recent_same_idea,
     write_edge,
 )
 from jarvise_ingest.db import load_latest_analysis
@@ -64,9 +68,6 @@ def _strip_secrets(payload: dict[str, Any]) -> dict[str, Any]:
             out[key] = _strip_secrets(value)
         elif isinstance(value, list):
             out[key] = [_strip_secrets(v) if isinstance(v, dict) else v for v in value]
-        elif isinstance(value, str) and len(value) > 20 and value.isalnum():
-            # Do not copy opaque long tokens into nested reasons.
-            out[key] = value
         else:
             out[key] = value
     return out
@@ -101,15 +102,68 @@ def _handle_futures_down(
 
 
 def _handle_futures_ok(conn: Any, *, send: SendFn) -> str | None:
+    """Clear down/permission/key-unsafe flags after a successful futures read."""
     edge = get_edge(conn)
-    if edge["futures_down_since_ms"] is None and not edge["futures_down_alerted"]:
-        return None
     recovered = None
     if edge["futures_down_alerted"]:
         if send(format_futures_recovered_alert()):
             recovered = "recovered"
-    write_edge(conn, futures_down_since_ms=None, futures_down_alerted=False)
+    write_edge(
+        conn,
+        futures_down_since_ms=None,
+        futures_down_alerted=False,
+        permission_error_reported=False,
+        key_unsafe_reported=False,
+    )
     return recovered
+
+
+def _alert_key_unsafe(conn: Any, *, send: SendFn, detail: str, now: int) -> dict[str, Any]:
+    edge = get_edge(conn)
+    alerted = False
+    if not edge["key_unsafe_reported"]:
+        if send(format_key_unsafe_alert()):
+            write_edge(conn, key_unsafe_reported=True)
+            alerted = True
+    return {
+        "ok": False,
+        "error": "key_unsafe",
+        "detail": detail,
+        "key_unsafe_alert": alerted,
+        "paper_only": True,
+        "at_ms": now,
+    }
+
+
+def _alert_permission(conn: Any, *, send: SendFn, detail: str, now: int) -> dict[str, Any]:
+    edge = get_edge(conn)
+    alerted = False
+    if not edge["permission_error_reported"]:
+        if send(format_permission_error_alert()):
+            write_edge(conn, permission_error_reported=True)
+            alerted = True
+    return {
+        "ok": False,
+        "error": "permission_error",
+        "detail": detail,
+        "permission_alert": alerted,
+        "paper_only": True,
+        "at_ms": now,
+    }
+
+
+def _same_idea_skip(
+    conn: Any,
+    *,
+    symbol: str,
+    side: str,
+    now_ms: int,
+) -> bool:
+    """True when we should not resend the same side within 24h without a side flip."""
+    prev = previous_analysis_action(conn, symbol=symbol, timeframe=ASSIST_TIMEFRAME)
+    if prev is not None and prev != side:
+        return False
+    return recent_same_idea(conn, symbol=symbol, side=side, now_ms=now_ms)
 
 
 def run_assist_signals(
@@ -144,43 +198,17 @@ def run_assist_signals(
             }
         )
 
-    edge = get_edge(conn)
     try:
         client.assert_key_safe()
     except FuturesKeyUnsafeError as exc:
-        return _strip_secrets(
-            {
-                "ok": False,
-                "error": "key_unsafe",
-                "detail": str(exc),
-                "paper_only": True,
-                "at_ms": ts,
-            }
-        )
+        return _strip_secrets(_alert_key_unsafe(conn, send=send_fn, detail=str(exc), now=ts))
 
     try:
         balance = client.usdt_wallet_balance()
         open_syms = client.open_symbols()
         recovered = _handle_futures_ok(conn, send=send_fn)
     except FuturesPermissionError as exc:
-        alerted = False
-        if not edge["permission_error_reported"]:
-            if send_fn(format_permission_error_alert()):
-                write_edge(conn, permission_error_reported=True)
-                alerted = True
-            else:
-                write_edge(conn, permission_error_reported=True)
-                alerted = True
-        return _strip_secrets(
-            {
-                "ok": False,
-                "error": "permission_error",
-                "detail": str(exc),
-                "permission_alert": alerted,
-                "paper_only": True,
-                "at_ms": ts,
-            }
-        )
+        return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
     except Exception as exc:  # noqa: BLE001 — surface as futures down, not a crash
         return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
 
@@ -190,15 +218,19 @@ def run_assist_signals(
     skipped: list[dict[str, Any]] = []
 
     for symbol in ASSIST_SYMBOLS:
-        if active_signal_for_symbol(conn, symbol, now_ms=ts) is not None:
-            skipped.append({"symbol": symbol, "reason": "active_signal"})
-            continue
         if symbol in open_syms:
             skipped.append({"symbol": symbol, "reason": "open_position"})
             continue
         analysis = load_latest_analysis(conn, symbol, ASSIST_TIMEFRAME)
         if analysis is None or not passes_signal_floor(analysis):
             skipped.append({"symbol": symbol, "reason": "floor"})
+            continue
+        if not analysis_is_fresh(analysis, now_ms=ts):
+            skipped.append({"symbol": symbol, "reason": "stale_analysis"})
+            continue
+        side = str(analysis["action"]).lower()
+        if _same_idea_skip(conn, symbol=symbol, side=side, now_ms=ts):
+            skipped.append({"symbol": symbol, "reason": "same_idea"})
             continue
         try:
             mark = client.mark_price(symbol)
@@ -208,7 +240,7 @@ def run_assist_signals(
             continue
         sized = size_signal(
             symbol=symbol,
-            side=str(analysis["action"]),
+            side=side,
             entry=mark,
             stop=Decimal(str(analysis["invalidation_price"])),
             balance=balance,
@@ -219,7 +251,7 @@ def run_assist_signals(
         if sized is None:
             skipped.append({"symbol": symbol, "reason": "size_failed"})
             continue
-        expires = next_4h_close_ms(ts)
+        expires = next_assist_run_ms(ts)
         if night:
             sid = insert_signal(
                 conn,
@@ -298,37 +330,18 @@ def run_assist_morning(
     try:
         client.assert_key_safe()
         balance = client.usdt_wallet_balance()
+        client.open_symbols()
         _handle_futures_ok(conn, send=send_fn)
     except FuturesKeyUnsafeError as exc:
-        return _strip_secrets(
-            {
-                "ok": False,
-                "error": "key_unsafe",
-                "detail": str(exc),
-                "paper_only": True,
-                "at_ms": ts,
-            }
-        )
+        return _strip_secrets(_alert_key_unsafe(conn, send=send_fn, detail=str(exc), now=ts))
     except FuturesPermissionError as exc:
-        edge = get_edge(conn)
-        if not edge["permission_error_reported"]:
-            send_fn(format_permission_error_alert())
-            write_edge(conn, permission_error_reported=True)
-        return _strip_secrets(
-            {
-                "ok": False,
-                "error": "permission_error",
-                "detail": str(exc),
-                "paper_only": True,
-                "at_ms": ts,
-            }
-        )
+        return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
     except Exception as exc:  # noqa: BLE001
         return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
 
     risk_pct = Decimal(str(settings["risk_pct"]))
     sent: list[str] = []
-    expired: list[str] = []
+    expired: list[str] = list(expire_older_held_keep_newest(conn))
 
     for row in list_held_signals(conn):
         symbol = str(row["symbol"]).upper()
@@ -343,38 +356,40 @@ def run_assist_morning(
             mark_signal_expired(conn, str(row["id"]))
             expired.append(str(row["id"]))
             continue
+        if not analysis_is_fresh(analysis, now_ms=ts):
+            mark_signal_expired(conn, str(row["id"]))
+            expired.append(str(row["id"]))
+            continue
         same_side = (
             analysis is not None
             and passes_signal_floor(analysis)
             and str(analysis.get("action") or "").lower() == side
         )
         chased = chase_exceeded(side=side, entry=entry0, stop=stop0, mark=mark)
-        if not same_side or chased:
+        if analysis is None or not same_side or chased:
             mark_signal_expired(conn, str(row["id"]))
             expired.append(str(row["id"]))
             continue
+        new_stop = Decimal(str(analysis["invalidation_price"]))
         sized = size_signal(
             symbol=symbol,
             side=side,
             entry=mark,
-            stop=stop0,
+            stop=new_stop,
             balance=balance,
             risk_pct=risk_pct,
             step_size=step,
-            analysis_id=str(row.get("analysis_id") or "") or None,
+            analysis_id=str(analysis.get("analysis_id") or row.get("analysis_id") or "") or None,
         )
         if sized is None:
             mark_signal_expired(conn, str(row["id"]))
             expired.append(str(row["id"]))
             continue
-        expires = next_4h_close_ms(ts)
+        expires = next_assist_run_ms(ts)
         text = format_signal_message(sized, expires_at_ms=expires, balance=balance)
         if send_fn(text):
             mark_signal_sent(conn, str(row["id"]), sized, sent_at_ms=ts, expires_at_ms=expires)
             sent.append(str(row["id"]))
-        else:
-            # Keep held if Telegram fails.
-            pass
 
     return _strip_secrets(
         {

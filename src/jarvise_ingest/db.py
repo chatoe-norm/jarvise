@@ -603,15 +603,18 @@ def _migrate_trade_assist(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY CHECK (id = 1),
             futures_down_since_ms INTEGER,
             futures_down_alerted INTEGER NOT NULL DEFAULT 0,
-            permission_error_reported INTEGER NOT NULL DEFAULT 0
+            permission_error_reported INTEGER NOT NULL DEFAULT 0,
+            key_unsafe_reported INTEGER NOT NULL DEFAULT 0
         )
         """
     )
+    _add_column_if_missing(conn, "assist_edge", "key_unsafe_reported", "INTEGER NOT NULL DEFAULT 0")
     conn.execute(
         """
         INSERT OR IGNORE INTO assist_edge (
-            id, futures_down_since_ms, futures_down_alerted, permission_error_reported
-        ) VALUES (1, NULL, 0, 0)
+            id, futures_down_since_ms, futures_down_alerted,
+            permission_error_reported, key_unsafe_reported
+        ) VALUES (1, NULL, 0, 0, 0)
         """
     )
     conn.execute(

@@ -79,6 +79,10 @@ def format_permission_error_alert() -> str:
     )
 
 
+def format_key_unsafe_alert() -> str:
+    return "Jarvise trade assist: คีย์ Binance มีสิทธิ์เทรดหรือถอน — ใช้เฉพาะ Enable Reading แล้วลองใหม่"
+
+
 def format_futures_down_alert(*, minutes: int) -> str:
     return f"Jarvise trade assist: อ่าน futures ไม่ได้เกิน {minutes} นาที"
 

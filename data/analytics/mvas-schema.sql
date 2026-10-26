@@ -336,7 +336,8 @@ CREATE TABLE IF NOT EXISTS assist_edge (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     futures_down_since_ms INTEGER,
     futures_down_alerted INTEGER NOT NULL DEFAULT 0,
-    permission_error_reported INTEGER NOT NULL DEFAULT 0
+    permission_error_reported INTEGER NOT NULL DEFAULT 0,
+    key_unsafe_reported INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS assist_signal (

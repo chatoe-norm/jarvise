@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
@@ -12,6 +13,12 @@ from jarvise_analyze.engine import CONFIDENCE_THRESHOLD
 MAX_LEVERAGE = 5
 CHASE_R = Decimal("0.3")
 TARGET_R = Decimal("2")
+BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+# Assist cron: 25 0,4,8,12,16,20 Asia/Bangkok
+ASSIST_HOURS = (0, 4, 8, 12, 16, 20)
+ASSIST_MINUTE = 25
+SAME_IDEA_MS = 24 * 3_600_000
+ANALYSIS_MAX_AGE_MS = int(8.5 * 3_600_000)
 
 
 @dataclass(frozen=True)
@@ -131,10 +138,43 @@ def chase_exceeded(*, side: str, entry: Decimal, stop: Decimal, mark: Decimal) -
 
 
 def next_4h_close_ms(now_ms: int) -> int:
-    """Next UTC 4h boundary (00/04/08/12/16/20)."""
+    """Next UTC 4h boundary (00/04/08/12/16/20). Kept for tests; assist uses next_assist_run_ms."""
     four_h = 4 * 3_600_000
     bucket = (int(now_ms) // four_h) * four_h
     nxt = bucket + four_h
     if nxt <= int(now_ms):
         nxt += four_h
     return nxt
+
+
+def next_assist_run_ms(now_ms: int) -> int:
+    """Next Asia/Bangkok assist slot at :25 on hours 0/4/8/12/16/20, strictly after now."""
+    local = datetime.fromtimestamp(int(now_ms) / 1000.0, tz=BANGKOK)
+    for day_offset in (0, 1):
+        day = (local + timedelta(days=day_offset)).date()
+        for hour in ASSIST_HOURS:
+            candidate = datetime(
+                day.year,
+                day.month,
+                day.day,
+                hour,
+                ASSIST_MINUTE,
+                tzinfo=BANGKOK,
+            )
+            cand_ms = int(candidate.timestamp() * 1000)
+            if cand_ms > int(now_ms):
+                return cand_ms
+    # Fallback: first slot two days out (should be unreachable).
+    day = (local + timedelta(days=2)).date()
+    candidate = datetime(day.year, day.month, day.day, ASSIST_HOURS[0], ASSIST_MINUTE, tzinfo=BANGKOK)
+    return int(candidate.timestamp() * 1000)
+
+
+def analysis_is_fresh(analysis: dict[str, Any] | None, *, now_ms: int) -> bool:
+    if analysis is None:
+        return False
+    raw = analysis.get("timestamp")
+    if raw is None:
+        return False
+    age = int(now_ms) - int(raw)
+    return 0 <= age <= ANALYSIS_MAX_AGE_MS

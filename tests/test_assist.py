@@ -20,6 +20,7 @@ from jarvise_assist.sizing import (
     chase_exceeded,
     floor_to_step,
     next_4h_close_ms,
+    next_assist_run_ms,
     passes_signal_floor,
     size_signal,
 )
@@ -243,8 +244,8 @@ def test_night_hold_window() -> None:
 
 def test_no_signal_when_position_exists(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "a.db")
-    _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0)
     day = _ms_bangkok(2026, 10, 27, 12, 0)
+    _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=day - 60_000)
     fake = FakeFutures(
         marks={"BTCUSDT": Decimal("100")},
         open_symbols={"BTCUSDT"},
@@ -264,9 +265,9 @@ def test_no_signal_when_position_exists(tmp_path: Path) -> None:
 
 def test_floor_blocks_flat_and_low_conf(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "b.db")
-    _seed_analysis(conn, symbol="ETHUSDT", action="flat", confidence=0.9, invalidation=None)
-    _seed_analysis(conn, symbol="SOLUSDT", action="long", confidence=0.5, invalidation=10.0)
     day = _ms_bangkok(2026, 10, 27, 12, 0)
+    _seed_analysis(conn, symbol="ETHUSDT", action="flat", confidence=0.9, invalidation=None, ts=day - 60_000)
+    _seed_analysis(conn, symbol="SOLUSDT", action="long", confidence=0.5, invalidation=10.0, ts=day - 60_000)
     fake = FakeFutures(marks={"ETHUSDT": Decimal("2000"), "SOLUSDT": Decimal("100")})
     sent: list[str] = []
 
@@ -284,14 +285,15 @@ def test_floor_blocks_flat_and_low_conf(tmp_path: Path) -> None:
 
 def test_night_hold_then_morning_send(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "c.db")
+    night = _ms_bangkok(2026, 10, 26, 23, 45)
     _seed_analysis(
         conn,
         symbol="DOGEUSDT",
         action="short",
         confidence=0.72,
         invalidation=0.0835,
+        ts=night - 60_000,
     )
-    night = _ms_bangkok(2026, 10, 26, 23, 45)
     fake = FakeFutures(
         balance=Decimal("1000"),
         marks={"DOGEUSDT": Decimal("0.0800")},
@@ -309,37 +311,55 @@ def test_night_hold_then_morning_send(tmp_path: Path) -> None:
     held = list_held_signals(conn)
     assert len(held) == 1
     assert held[0]["status"] == "held"
+    assert held[0]["expires_at_ms"] == next_assist_run_ms(night)
 
     morning = _ms_bangkok(2026, 10, 27, 8, 0)
-    # Mark still near entry (within 0.3R).
+    # Keep analysis fresh for morning.
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=0.0830,
+        ts=morning - 60_000,
+    )
     fake.marks["DOGEUSDT"] = Decimal("0.0795")
     p2 = run_assist_morning(conn, futures=fake, now_ms_value=morning, send=capture)
     assert p2["ok"] is True
     assert len(p2["sent"]) == 1
     assert len(sent) == 1
     assert "DOGEUSDT" in sent[0]
+    assert "0.083" in sent[0]  # newest invalidation in message
     assert list_held_signals(conn) == []
     conn.close()
 
 
 def test_morning_expires_on_chase(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "d.db")
+    night = _ms_bangkok(2026, 10, 26, 23, 45)
     _seed_analysis(
         conn,
         symbol="DOGEUSDT",
         action="short",
         confidence=0.72,
         invalidation=0.0835,
+        ts=night - 60_000,
     )
-    night = _ms_bangkok(2026, 10, 26, 23, 45)
     fake = FakeFutures(
         marks={"DOGEUSDT": Decimal("0.0800")},
         steps={"DOGEUSDT": Decimal("1")},
     )
     run_assist_signals(conn, futures=fake, now_ms_value=night, send=lambda _t: True)
-    # Price ran more than 0.3R toward target (down for short).
-    fake.marks["DOGEUSDT"] = Decimal("0.0780")
     morning = _ms_bangkok(2026, 10, 27, 8, 0)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=0.0835,
+        ts=morning - 60_000,
+    )
+    fake.marks["DOGEUSDT"] = Decimal("0.0780")
     sent: list[str] = []
 
     def capture(text: str) -> bool:
@@ -350,6 +370,200 @@ def test_morning_expires_on_chase(tmp_path: Path) -> None:
     assert p["expired"]
     assert sent == []
     conn.close()
+
+
+def test_stale_analysis_skipped(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "stale.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="long",
+        confidence=0.7,
+        invalidation=90.0,
+        ts=day - 9 * 3_600_000,
+    )
+    fake = FakeFutures(marks={"BTCUSDT": Decimal("100")}, steps={"BTCUSDT": Decimal("0.001")})
+    payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    assert any(s.get("reason") == "stale_analysis" for s in payload["skipped"])
+    conn.close()
+
+
+def test_morning_dedupes_two_held(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "dup.db")
+    night1 = _ms_bangkok(2026, 10, 27, 0, 25)
+    night2 = _ms_bangkok(2026, 10, 27, 4, 25)
+    fake = FakeFutures(
+        marks={"DOGEUSDT": Decimal("0.0800")},
+        steps={"DOGEUSDT": Decimal("1")},
+    )
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=0.0835,
+        ts=night1 - 60_000,
+    )
+    run_assist_signals(conn, futures=fake, now_ms_value=night1, send=lambda _t: True)
+    # Force a second held by inserting after clearing same_idea via older created_at.
+    # Expire the first manually then create another held at night2.
+    conn.execute("UPDATE assist_signal SET status='expired'")
+    conn.commit()
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=0.0835,
+        ts=night2 - 60_000,
+    )
+    # Side flip then back so same_idea allows a new signal, then force two held rows.
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="long",
+        confidence=0.72,
+        invalidation=0.0760,
+        ts=night2 - 120_000,
+    )
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=0.0835,
+        ts=night2 - 60_000,
+    )
+    run_assist_signals(conn, futures=fake, now_ms_value=night2, send=lambda _t: True)
+    # Insert a second held row with older created_at to simulate the pre-fix race.
+    held = list_held_signals(conn)
+    assert len(held) >= 1
+    keep = held[0]
+    conn.execute(
+        """
+        INSERT INTO assist_signal (
+            id, analysis_id, symbol, side, entry, stop, target, qty, notional,
+            leverage, loss_at_stop, created_at_ms, expires_at_ms, status, sent_at_ms,
+            leverage_capped, uncapped_leverage
+        ) VALUES (
+            'as_old_dup', ?, 'DOGEUSDT', 'short', 0.08, 0.0835, 0.073, 5714, 457,
+            1, 20, ?, ?, 'held', NULL, 0, 1
+        )
+        """,
+        (keep.get("analysis_id"), night1, keep["expires_at_ms"]),
+    )
+    conn.commit()
+    assert len(list_held_signals(conn)) == 2
+
+    morning = _ms_bangkok(2026, 10, 27, 8, 0)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=0.0835,
+        ts=morning - 60_000,
+    )
+    sent: list[str] = []
+
+    def capture(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    p = run_assist_morning(conn, futures=fake, now_ms_value=morning, send=capture)
+    assert len(p["sent"]) == 1
+    assert "as_old_dup" in p["expired"]
+    assert len(sent) == 1
+    conn.close()
+
+
+def test_same_idea_skips_then_allows_after_24h_or_side_change(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "idea.db")
+    t0 = _ms_bangkok(2026, 10, 27, 12, 25)
+    fake = FakeFutures(marks={"BTCUSDT": Decimal("100")}, steps={"BTCUSDT": Decimal("0.001")})
+    _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=t0 - 60_000)
+    p0 = run_assist_signals(conn, futures=fake, now_ms_value=t0, send=lambda _t: True)
+    assert len(p0["created"]) == 1
+
+    t1 = t0 + 4 * 3_600_000
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="long",
+        confidence=0.7,
+        invalidation=91.0,
+        ts=t1 - 60_000,
+    )
+    # Previous bar same side + recent signal → same_idea
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="long",
+        confidence=0.7,
+        invalidation=90.0,
+        ts=t1 - 4 * 3_600_000 - 60_000,
+    )
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="long",
+        confidence=0.7,
+        invalidation=91.0,
+        ts=t1 - 60_000,
+    )
+    p1 = run_assist_signals(conn, futures=fake, now_ms_value=t1, send=lambda _t: True)
+    assert any(s.get("reason") == "same_idea" for s in p1["skipped"])
+
+    # Side change allows a new signal inside 24h.
+    t2 = t1 + 4 * 3_600_000
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="long",
+        confidence=0.7,
+        invalidation=91.0,
+        ts=t2 - 4 * 3_600_000 - 60_000,
+    )
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="short",
+        confidence=0.7,
+        invalidation=110.0,
+        ts=t2 - 60_000,
+    )
+    p2 = run_assist_signals(conn, futures=fake, now_ms_value=t2, send=lambda _t: True)
+    assert any(c.get("symbol") == "BTCUSDT" for c in p2["created"])
+
+    # After 24h same side may send again.
+    t3 = t2 + 25 * 3_600_000
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="short",
+        confidence=0.7,
+        invalidation=110.0,
+        ts=t3 - 4 * 3_600_000 - 60_000,
+    )
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="short",
+        confidence=0.7,
+        invalidation=111.0,
+        ts=t3 - 60_000,
+    )
+    p3 = run_assist_signals(conn, futures=fake, now_ms_value=t3, send=lambda _t: True)
+    assert any(c.get("symbol") == "BTCUSDT" for c in p3["created"])
+    conn.close()
+
+
+def test_expiry_equals_next_assist_run() -> None:
+    now = _ms_bangkok(2026, 10, 27, 12, 25)
+    nxt = next_assist_run_ms(now)
+    assert nxt == _ms_bangkok(2026, 10, 27, 16, 25)
+    assert next_assist_run_ms(_ms_bangkok(2026, 10, 27, 20, 25)) == _ms_bangkok(2026, 10, 28, 0, 25)
 
 
 def test_permission_refusal_before_fapi() -> None:
@@ -388,31 +602,9 @@ def test_permission_refusal_before_fapi() -> None:
     assert audit3["ok_for_assist"] is False
 
 
-def test_key_unsafe_refuses_run(tmp_path: Path) -> None:
+def test_key_unsafe_alert_once(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "e.db")
     fake = FakeFutures(key_safe=False)
-    sent: list[str] = []
-
-    def capture(text: str) -> bool:
-        sent.append(text)
-        return True
-
-    payload = run_assist_signals(
-        conn,
-        futures=fake,
-        now_ms_value=_ms_bangkok(2026, 10, 27, 12, 0),
-        send=capture,
-    )
-    assert payload["ok"] is False
-    assert payload["error"] == "key_unsafe"
-    assert sent == []
-    conn.close()
-
-
-def test_permission_error_reported_once(tmp_path: Path) -> None:
-    conn = open_db(tmp_path / "f.db")
-    ensure_settings(conn)
-    fake = FakeFutures(permission_on_balance=FuturesPermissionError("code=-2015"))
     sent: list[str] = []
 
     def capture(text: str) -> bool:
@@ -425,28 +617,72 @@ def test_permission_error_reported_once(tmp_path: Path) -> None:
         now_ms_value=_ms_bangkok(2026, 10, 27, 12, 0),
         send=capture,
     )
-    assert p1["error"] == "permission_error"
+    assert p1["ok"] is False
+    assert p1["error"] == "key_unsafe"
     assert len(sent) == 1
-    assert get_edge(conn)["permission_error_reported"] is True
+    assert get_edge(conn)["key_unsafe_reported"] is True
     p2 = run_assist_signals(
         conn,
         futures=fake,
         now_ms_value=_ms_bangkok(2026, 10, 27, 12, 5),
         send=capture,
     )
-    assert p2["error"] == "permission_error"
-    assert len(sent) == 1  # no second alert
+    assert p2["error"] == "key_unsafe"
+    assert len(sent) == 1
+    conn.close()
+
+
+def test_permission_flag_only_on_successful_send_and_clears(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "f.db")
+    ensure_settings(conn)
+    fake = FakeFutures(permission_on_balance=FuturesPermissionError("code=-2015"))
+    p_fail = run_assist_signals(
+        conn,
+        futures=fake,
+        now_ms_value=_ms_bangkok(2026, 10, 27, 12, 0),
+        send=lambda _t: False,
+    )
+    assert p_fail["error"] == "permission_error"
+    assert get_edge(conn)["permission_error_reported"] is False
+
+    sent: list[str] = []
+
+    def capture(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    p_ok = run_assist_signals(
+        conn,
+        futures=fake,
+        now_ms_value=_ms_bangkok(2026, 10, 27, 12, 5),
+        send=capture,
+    )
+    assert p_ok["error"] == "permission_error"
+    assert get_edge(conn)["permission_error_reported"] is True
+    assert len(sent) == 1
+
+    # Recovery clears flags after a successful futures read.
+    fake.permission_on_balance = None
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=day - 60_000)
+    fake.marks["BTCUSDT"] = Decimal("100")
+    fake.steps["BTCUSDT"] = Decimal("0.001")
+    run_assist_signals(conn, futures=fake, now_ms_value=day, send=capture)
+    edge = get_edge(conn)
+    assert edge["permission_error_reported"] is False
+    assert edge["key_unsafe_reported"] is False
     conn.close()
 
 
 def test_payload_never_contains_api_key(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "g.db")
-    _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0)
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=day - 60_000)
     fake = FakeFutures(marks={"BTCUSDT": Decimal("100")}, steps={"BTCUSDT": Decimal("0.001")})
     payload = run_assist_signals(
         conn,
         futures=fake,
-        now_ms_value=_ms_bangkok(2026, 10, 27, 12, 0),
+        now_ms_value=day,
         send=lambda _t: True,
     )
     blob = json.dumps(payload)
