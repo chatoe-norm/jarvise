@@ -585,6 +585,52 @@ def _migrate_outcome_r(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "paper_decision_outcomes", "return_on_notional", "REAL")
 
 
+def _migrate_assist_watch(conn: sqlite3.Connection) -> None:
+    """Position-watch state for trade assistant. Never writes paper/live/approval rows."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_watch_position (
+            symbol TEXT NOT NULL,
+            position_side TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry REAL NOT NULL,
+            qty REAL NOT NULL,
+            in_universe INTEGER NOT NULL DEFAULT 1,
+            signal_id TEXT,
+            initial_stop REAL,
+            initial_stop_source TEXT,
+            entry_time_ms INTEGER,
+            no_stop_latched INTEGER NOT NULL DEFAULT 0,
+            last_seen_ms INTEGER NOT NULL,
+            closed_at_ms INTEGER,
+            PRIMARY KEY (symbol, position_side)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_watch_advice (
+            id TEXT NOT NULL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            position_side TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            reason TEXT,
+            level REAL,
+            approx_r REAL,
+            status TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            sent_at_ms INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_watch_advice_pos
+        ON assist_watch_advice (symbol, position_side, kind, status)
+        """
+    )
+
+
 def _migrate_trade_assist(conn: sqlite3.Connection) -> None:
     """Trade assistant tables. Never writes paper/live/approval rows."""
     conn.execute(
@@ -791,6 +837,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (12, "owner_decision_log", _migrate_owner_decision_log, True),
     (13, "outcome_r", _migrate_outcome_r, True),
     (14, "trade_assist", _migrate_trade_assist, True),
+    (15, "assist_watch", _migrate_assist_watch, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

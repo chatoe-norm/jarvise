@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 14).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 15).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -389,3 +389,35 @@ CREATE TABLE IF NOT EXISTS assist_position_seen (
     updated_at_ms INTEGER NOT NULL,
     PRIMARY KEY (symbol, position_side)
 );
+
+CREATE TABLE IF NOT EXISTS assist_watch_position (
+    symbol TEXT NOT NULL,
+    position_side TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry REAL NOT NULL,
+    qty REAL NOT NULL,
+    in_universe INTEGER NOT NULL DEFAULT 1,
+    signal_id TEXT,
+    initial_stop REAL,
+    initial_stop_source TEXT,
+    entry_time_ms INTEGER,
+    no_stop_latched INTEGER NOT NULL DEFAULT 0,
+    last_seen_ms INTEGER NOT NULL,
+    closed_at_ms INTEGER,
+    PRIMARY KEY (symbol, position_side)
+);
+
+CREATE TABLE IF NOT EXISTS assist_watch_advice (
+    id TEXT NOT NULL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    position_side TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    reason TEXT,
+    level REAL,
+    approx_r REAL,
+    status TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    sent_at_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_assist_watch_advice_pos
+    ON assist_watch_advice (symbol, position_side, kind, status);

@@ -13,12 +13,29 @@ from jarvise_analyze.engine import CONFIDENCE_THRESHOLD
 MAX_LEVERAGE = 5
 CHASE_R = Decimal("0.3")
 TARGET_R = Decimal("2")
+MAX_OPEN_IDEAS = 2
+MAX_PORTFOLIO_RISK_PCT = Decimal("4")
+IDEA_LOOKBACK_MS = 4 * 3_600_000
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 # Assist cron: 25 0,4,8,12,16,20 Asia/Bangkok
 ASSIST_HOURS = (0, 4, 8, 12, 16, 20)
 ASSIST_MINUTE = 25
 SAME_IDEA_MS = 24 * 3_600_000
 ANALYSIS_MAX_AGE_MS = int(8.5 * 3_600_000)
+
+
+@dataclass(frozen=True)
+class ExistingIdea:
+    symbol: str
+    side: str
+    risk_usdt: Decimal
+
+
+@dataclass(frozen=True)
+class SignalCandidate:
+    sized: SizedSignal
+    confidence: float
+    symbol_rank: int
 
 
 @dataclass(frozen=True)
@@ -178,3 +195,71 @@ def analysis_is_fresh(analysis: dict[str, Any] | None, *, now_ms: int) -> bool:
         return False
     age = int(now_ms) - int(raw)
     return 0 <= age <= ANALYSIS_MAX_AGE_MS
+
+
+def below_min_notional(
+    *,
+    qty: Decimal,
+    notional: Decimal,
+    min_qty: Decimal,
+    min_notional: Decimal,
+) -> bool:
+    """True when the sized trade is below exchange lot or notional floors."""
+    if min_qty > 0 and qty < min_qty:
+        return True
+    if min_notional > 0 and notional < min_notional:
+        return True
+    return False
+
+
+def position_risk_usdt(
+    *,
+    entry: Decimal,
+    qty: Decimal,
+    stop: Decimal | None,
+    balance: Decimal,
+    risk_pct: Decimal,
+) -> Decimal:
+    """USDT at risk for an open idea. Falls back to risk_pct of balance."""
+    if stop is not None and entry > 0 and qty > 0:
+        r = abs(entry - stop)
+        if r > 0:
+            return qty * r
+    if balance > 0 and risk_pct > 0:
+        return balance * (risk_pct / Decimal("100"))
+    return Decimal("0")
+
+
+def admit_signals(
+    *,
+    existing: list[ExistingIdea],
+    candidates: list[SignalCandidate],
+    balance: Decimal,
+    max_ideas: int = MAX_OPEN_IDEAS,
+    max_risk_pct: Decimal = MAX_PORTFOLIO_RISK_PCT,
+) -> tuple[list[SignalCandidate], list[SignalCandidate]]:
+    """Admit by confidence desc (symbol_rank asc tie-break). Reject the rest as risk_cap.
+
+    Once one candidate fails a slot or risk budget, every lower-ranked candidate is
+    rejected — a smaller later idea is not backfilled.
+    """
+    budget = balance * (max_risk_pct / Decimal("100")) if balance > 0 else Decimal("0")
+    used = sum((e.risk_usdt for e in existing), Decimal("0"))
+    slots = len(existing)
+    ordered = sorted(candidates, key=lambda c: (-c.confidence, c.symbol_rank, c.sized.symbol))
+    admitted: list[SignalCandidate] = []
+    rejected: list[SignalCandidate] = []
+    blocked = False
+    for cand in ordered:
+        if blocked:
+            rejected.append(cand)
+            continue
+        next_used = used + cand.sized.loss_at_stop
+        if slots + 1 > max_ideas or next_used > budget:
+            rejected.append(cand)
+            blocked = True
+            continue
+        admitted.append(cand)
+        used = next_used
+        slots += 1
+    return admitted, rejected

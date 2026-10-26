@@ -29,6 +29,15 @@ OPEN_ALGO_ORDERS_PATH = "/fapi/v1/openAlgoOrders"
 # Binance codes that mean the key cannot use this endpoint.
 PERMISSION_ERROR_CODES = frozenset({-2014, -2015, -1022})
 
+STOP_ORDER_TYPES = frozenset(
+    {
+        "STOP",
+        "STOP_MARKET",
+        "STOP_LOSS",
+        "STOP_LOSS_LIMIT",
+    }
+)
+
 
 class FuturesPermissionError(RuntimeError):
     """Key lacks futures read access or has trading/withdraw scope."""
@@ -45,6 +54,28 @@ class FuturesPosition:
     position_amt: Decimal
     entry_price: Decimal
     mark_price: Decimal
+    update_time_ms: int | None = None
+
+    @property
+    def side(self) -> str:
+        """Trade side: long or short (hedge positionSide or one-way amt sign)."""
+        ps = self.position_side.upper()
+        if ps == "LONG":
+            return "long"
+        if ps == "SHORT":
+            return "short"
+        return "long" if self.position_amt > 0 else "short"
+
+    @property
+    def qty(self) -> Decimal:
+        return abs(self.position_amt)
+
+
+@dataclass(frozen=True)
+class SymbolFilters:
+    step_size: Decimal
+    min_qty: Decimal
+    min_notional: Decimal
 
 
 def audit_key_for_assist(perms: dict[str, Any]) -> dict[str, Any]:
@@ -92,6 +123,73 @@ def _is_permission_failure(exc: BaseException) -> bool:
     return False
 
 
+def order_stop_price(order: dict[str, Any]) -> Decimal | None:
+    """Stop / trigger price from a regular or algo order row."""
+    for key in ("stopPrice", "triggerPrice", "activatePrice"):
+        raw = order.get(key)
+        if raw is None or str(raw) in {"", "0", "0.0", "0.00000000"}:
+            continue
+        try:
+            px = Decimal(str(raw))
+        except Exception:  # noqa: BLE001
+            continue
+        if px > 0:
+            return px
+    return None
+
+
+def order_type(order: dict[str, Any]) -> str:
+    return str(order.get("type") or order.get("orderType") or "").upper()
+
+
+def is_protective_stop(
+    order: dict[str, Any],
+    *,
+    position_side: str,
+    trade_side: str,
+) -> bool:
+    """True when the order is a reduce-only / close stop on the closing side."""
+    if order_type(order) not in STOP_ORDER_TYPES:
+        return False
+    reduce_only = bool(order.get("reduceOnly")) or str(order.get("closePosition") or "").lower() in {
+        "true",
+        "1",
+    }
+    if not reduce_only:
+        return False
+    close_side = "SELL" if trade_side == "long" else "BUY"
+    if str(order.get("side") or "").upper() != close_side:
+        return False
+    ops = str(order.get("positionSide") or "BOTH").upper()
+    if ops not in {"BOTH", position_side.upper()}:
+        return False
+    return order_stop_price(order) is not None
+
+
+def find_protective_stop(
+    orders: list[dict[str, Any]],
+    *,
+    symbol: str,
+    position_side: str,
+    trade_side: str,
+) -> Decimal | None:
+    """Best (tightest for the side) protective stop price, or None."""
+    prices: list[Decimal] = []
+    for order in orders:
+        if str(order.get("symbol") or "").upper() != symbol.upper():
+            continue
+        if not is_protective_stop(order, position_side=position_side, trade_side=trade_side):
+            continue
+        px = order_stop_price(order)
+        if px is not None:
+            prices.append(px)
+    if not prices:
+        return None
+    if trade_side == "long":
+        return max(prices)
+    return min(prices)
+
+
 class BinanceFuturesClient:
     """Read-only USDⓈ-M client. No POST/PUT/DELETE order methods."""
 
@@ -105,6 +203,8 @@ class BinanceFuturesClient:
         self._auth = auth
         self._client = client
         self._base_url = base_url.rstrip("/")
+        self._exchange_info: dict[str, Any] | None = None
+        self._filters: dict[str, SymbolFilters] = {}
 
     def _signed_url(self, path: str, params: dict[str, Any] | None = None) -> str:
         merged = dict(params or {})
@@ -156,6 +256,8 @@ class BinanceFuturesClient:
             amt = Decimal(str(row.get("positionAmt") or "0"))
             if amt == 0:
                 continue
+            update_raw = row.get("updateTime")
+            update_ms = int(update_raw) if update_raw not in (None, "") else None
             out.append(
                 FuturesPosition(
                     symbol=str(row.get("symbol") or "").upper(),
@@ -163,6 +265,7 @@ class BinanceFuturesClient:
                     position_amt=amt,
                     entry_price=Decimal(str(row.get("entryPrice") or "0")),
                     mark_price=Decimal(str(row.get("markPrice") or "0")),
+                    update_time_ms=update_ms,
                 )
             )
         return out
@@ -177,18 +280,45 @@ class BinanceFuturesClient:
             raise ValueError("unexpected premiumIndex response type")
         return Decimal(str(payload.get("markPrice") or "0"))
 
-    def step_size(self, symbol: str) -> Decimal:
+    def _load_exchange_info(self) -> dict[str, Any]:
+        if self._exchange_info is not None:
+            return self._exchange_info
         url = f"{self._base_url}{EXCHANGE_INFO_PATH}"
         payload = get_json(url, client=self._client, provider="binance_fapi_exchange_info")
         if not isinstance(payload, dict):
             raise ValueError("unexpected exchangeInfo response type")
+        self._exchange_info = payload
+        return payload
+
+    def symbol_filters(self, symbol: str) -> SymbolFilters:
+        sym = symbol.upper()
+        cached = self._filters.get(sym)
+        if cached is not None:
+            return cached
+        payload = self._load_exchange_info()
         for row in payload.get("symbols") or []:
-            if str(row.get("symbol") or "").upper() != symbol.upper():
+            if str(row.get("symbol") or "").upper() != sym:
                 continue
+            step = Decimal("1")
+            min_qty = Decimal("0")
+            min_notional = Decimal("0")
             for filt in row.get("filters") or []:
-                if str(filt.get("filterType") or "") == "LOT_SIZE":
-                    return Decimal(str(filt.get("stepSize") or "1"))
-        raise ValueError(f"LOT_SIZE missing for {symbol}")
+                ftype = str(filt.get("filterType") or "")
+                if ftype == "LOT_SIZE":
+                    step = Decimal(str(filt.get("stepSize") or "1"))
+                    min_qty = Decimal(str(filt.get("minQty") or "0"))
+                elif ftype in {"MIN_NOTIONAL", "NOTIONAL"}:
+                    raw = filt.get("notional")
+                    if raw is None:
+                        raw = filt.get("minNotional")
+                    min_notional = Decimal(str(raw or "0"))
+            filters = SymbolFilters(step_size=step, min_qty=min_qty, min_notional=min_notional)
+            self._filters[sym] = filters
+            return filters
+        raise ValueError(f"exchangeInfo missing for {symbol}")
+
+    def step_size(self, symbol: str) -> Decimal:
+        return self.symbol_filters(symbol).step_size
 
     def open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         params = {"symbol": symbol} if symbol else None
@@ -201,6 +331,9 @@ class BinanceFuturesClient:
             params["symbol"] = symbol
         payload = self._signed_get(OPEN_ALGO_ORDERS_PATH, params, provider="binance_fapi_open_algo")
         return list(payload) if isinstance(payload, list) else []
+
+    def all_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+        return [*self.open_orders(symbol=symbol), *self.open_algo_orders(symbol=symbol)]
 
 
 def build_futures_client(*, client: httpx.Client | None = None) -> BinanceFuturesClient | None:

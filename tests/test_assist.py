@@ -1,4 +1,4 @@
-"""Trade assistant PR A — sizing, floors, night hold, futures permission."""
+"""Trade assistant PR A/B — sizing, risk cap, watch, night hold."""
 
 from __future__ import annotations
 
@@ -12,11 +12,20 @@ from jarvise_assist.futures import (
     FuturesKeyUnsafeError,
     FuturesPermissionError,
     FuturesPosition,
+    SymbolFilters,
     audit_key_for_assist,
 )
-from jarvise_assist.messages import format_signal_message
+from jarvise_assist.messages import (
+    format_exit_advice,
+    format_move_stop_advice,
+    format_no_stop_warning,
+    format_signal_message,
+)
 from jarvise_assist.signals import is_night_hold, run_assist_morning, run_assist_signals
 from jarvise_assist.sizing import (
+    ExistingIdea,
+    SignalCandidate,
+    admit_signals,
     chase_exceeded,
     floor_to_step,
     next_4h_close_ms,
@@ -24,10 +33,19 @@ from jarvise_assist.sizing import (
     passes_signal_floor,
     size_signal,
 )
-from jarvise_assist.store import ensure_settings, get_edge, list_held_signals
-from jarvise_ingest.db import open_db, upsert_analysis_output
+from jarvise_assist.store import (
+    ensure_settings,
+    get_edge,
+    get_watch_position,
+    insert_signal,
+    list_held_signals,
+    list_held_watch_advice,
+)
+from jarvise_assist.watch import run_assist_watch
+from jarvise_ingest.db import open_db, upsert_analysis_output, upsert_market_technicals
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+FOUR_H_MS = 4 * 3_600_000
 
 
 class FakeFutures:
@@ -37,7 +55,12 @@ class FakeFutures:
         balance: Decimal = Decimal("1000"),
         marks: dict[str, Decimal] | None = None,
         steps: dict[str, Decimal] | None = None,
+        min_qty: dict[str, Decimal] | None = None,
+        min_notional: dict[str, Decimal] | None = None,
         open_symbols: set[str] | None = None,
+        positions: list[FuturesPosition] | None = None,
+        orders: list[dict[str, Any]] | None = None,
+        algo_orders: list[dict[str, Any]] | None = None,
         key_safe: bool = True,
         key_error: Exception | None = None,
         read_error: Exception | None = None,
@@ -46,7 +69,12 @@ class FakeFutures:
         self.balance = balance
         self.marks = marks or {}
         self.steps = steps or {}
+        self.min_qty = min_qty or {}
+        self.min_notional = min_notional or {}
         self._open = open_symbols or set()
+        self.positions = list(positions or [])
+        self.orders = list(orders or [])
+        self.algo_orders = list(algo_orders or [])
         self.key_safe = key_safe
         self.key_error = key_error
         self.read_error = read_error
@@ -70,29 +98,58 @@ class FakeFutures:
     def open_symbols(self) -> set[str]:
         if self.read_error:
             raise self.read_error
+        if self.positions:
+            return {p.symbol for p in self.positions}
         return set(self._open)
 
     def position_risk(self, *, symbol: str | None = None) -> list[FuturesPosition]:
-        out = []
-        for sym in self._open:
-            if symbol and sym != symbol:
-                continue
-            out.append(
-                FuturesPosition(
-                    symbol=sym,
-                    position_side="BOTH",
-                    position_amt=Decimal("1"),
-                    entry_price=Decimal("1"),
-                    mark_price=self.marks.get(sym, Decimal("1")),
+        if self.read_error:
+            raise self.read_error
+        if self.positions:
+            out = self.positions
+        else:
+            out = []
+            for sym in self._open:
+                out.append(
+                    FuturesPosition(
+                        symbol=sym,
+                        position_side="BOTH",
+                        position_amt=Decimal("1"),
+                        entry_price=Decimal("1"),
+                        mark_price=self.marks.get(sym, Decimal("1")),
+                        update_time_ms=1,
+                    )
                 )
-            )
-        return out
+        if symbol:
+            return [p for p in out if p.symbol == symbol]
+        return list(out)
 
     def mark_price(self, symbol: str) -> Decimal:
         return self.marks.get(symbol.upper(), Decimal("100"))
 
     def step_size(self, symbol: str) -> Decimal:
-        return self.steps.get(symbol.upper(), Decimal("1"))
+        return self.symbol_filters(symbol).step_size
+
+    def symbol_filters(self, symbol: str) -> SymbolFilters:
+        sym = symbol.upper()
+        return SymbolFilters(
+            step_size=self.steps.get(sym, Decimal("1")),
+            min_qty=self.min_qty.get(sym, Decimal("0")),
+            min_notional=self.min_notional.get(sym, Decimal("0")),
+        )
+
+    def open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+        if symbol:
+            return [o for o in self.orders if str(o.get("symbol")) == symbol]
+        return list(self.orders)
+
+    def open_algo_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+        if symbol:
+            return [o for o in self.algo_orders if str(o.get("symbol")) == symbol]
+        return list(self.algo_orders)
+
+    def all_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+        return [*self.open_orders(symbol=symbol), *self.open_algo_orders(symbol=symbol)]
 
 
 def _seed_analysis(
@@ -705,6 +762,8 @@ def test_migration_14_creates_assist_tables(tmp_path: Path) -> None:
         "assist_signal",
         "assist_track",
         "assist_position_seen",
+        "assist_watch_position",
+        "assist_watch_advice",
     }
     settings = ensure_settings(conn)
     assert settings["risk_pct"] == 2.0
@@ -717,3 +776,680 @@ def test_next_4h_close_ms() -> None:
     ts = int(datetime(2026, 10, 27, 10, 0, tzinfo=UTC).timestamp() * 1000)
     nxt = next_4h_close_ms(ts)
     assert datetime.fromtimestamp(nxt / 1000, tz=UTC).hour == 12
+
+
+def _seed_candle(
+    conn: Any,
+    *,
+    symbol: str,
+    ts: int,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    atr: float,
+) -> None:
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": symbol,
+                "timestamp": ts,
+                "timeframe": "4h",
+                "open": open_,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 1.0,
+            }
+        ],
+    )
+    conn.execute(
+        "UPDATE market_technicals SET atr_14=? WHERE symbol=? AND timeframe='4h' AND timestamp=?",
+        (atr, symbol, ts),
+    )
+    conn.commit()
+
+
+def test_admit_signals_stops_after_first_reject() -> None:
+    sized_hi = size_signal(
+        symbol="ADAUSDT",
+        side="short",
+        entry=Decimal("1"),
+        stop=Decimal("1.02"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("1"),
+    )
+    sized_mid = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("1"),
+        stop=Decimal("1.02"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("1"),
+    )
+    sized_lo = size_signal(
+        symbol="XRPUSDT",
+        side="short",
+        entry=Decimal("1"),
+        stop=Decimal("1.02"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("1"),
+    )
+    assert sized_hi and sized_mid and sized_lo
+    existing = [ExistingIdea(symbol="BTCUSDT", side="long", risk_usdt=Decimal("2"))]
+    admitted, rejected = admit_signals(
+        existing=existing,
+        candidates=[
+            SignalCandidate(sized=sized_lo, confidence=0.56, symbol_rank=6),
+            SignalCandidate(sized=sized_hi, confidence=0.80, symbol_rank=4),
+            SignalCandidate(sized=sized_mid, confidence=0.70, symbol_rank=5),
+        ],
+        balance=Decimal("100"),
+    )
+    assert [c.sized.symbol for c in admitted] == ["ADAUSDT"]
+    assert [c.sized.symbol for c in rejected] == ["DOGEUSDT", "XRPUSDT"]
+
+
+def test_risk_cap_sends_highest_confidence_only(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "risk.db")
+    ensure_settings(conn)
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    # One existing open idea occupies a slot.
+    existing = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("90"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("0.001"),
+    )
+    assert existing is not None
+    insert_signal(
+        conn,
+        existing,
+        status="sent",
+        created_at_ms=day - 60_000,
+        expires_at_ms=day + 3_600_000,
+        sent_at_ms=day - 60_000,
+    )
+    for sym, conf, inv in (
+        ("ADAUSDT", 0.80, 0.42),
+        ("DOGEUSDT", 0.70, 0.21),
+        ("XRPUSDT", 0.60, 2.6),
+    ):
+        _seed_analysis(conn, symbol=sym, action="short", confidence=conf, invalidation=inv, ts=day - 60_000)
+    fake = FakeFutures(
+        balance=Decimal("100"),
+        marks={
+            "ADAUSDT": Decimal("0.40"),
+            "DOGEUSDT": Decimal("0.20"),
+            "XRPUSDT": Decimal("2.5"),
+        },
+        steps={
+            "ADAUSDT": Decimal("1"),
+            "DOGEUSDT": Decimal("1"),
+            "XRPUSDT": Decimal("0.1"),
+        },
+    )
+    payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    created_syms = [c["symbol"] for c in payload["created"]]
+    assert created_syms == ["ADAUSDT"]
+    risk_skips = [s for s in payload["skipped"] if s.get("reason") == "risk_cap"]
+    assert {s["symbol"] for s in risk_skips} == {"DOGEUSDT", "XRPUSDT"}
+    conn.close()
+
+
+def test_below_min_notional_does_not_raise_qty(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "min.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    _seed_analysis(conn, symbol="ADAUSDT", action="short", confidence=0.7, invalidation=0.42, ts=day - 60_000)
+    fake = FakeFutures(
+        balance=Decimal("100"),
+        marks={"ADAUSDT": Decimal("0.40")},
+        steps={"ADAUSDT": Decimal("1")},
+        min_notional={"ADAUSDT": Decimal("500")},
+    )
+    payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    skips = [s for s in payload["skipped"] if s.get("reason") == "below_min_notional"]
+    assert len(skips) == 1
+    assert skips[0]["min_notional"] == 500.0
+    assert skips[0]["notional"] < 500.0
+    assert payload["created"] == []
+    conn.close()
+
+
+def test_format_watch_messages() -> None:
+    assert (
+        format_no_stop_warning(symbol="ADAUSDT", side="long", stop=Decimal("0.32"))
+        == "⚠️ ADAUSDT LONG ไม่มี stop order — ตั้ง Stop-Market (Reduce-Only, Mark Price) ที่ 0.32"
+    )
+    assert (
+        format_move_stop_advice(symbol="ADAUSDT", side="long", stop=Decimal("0.35"))
+        == "↗️ ADAUSDT LONG · เลื่อน stop → 0.35"
+    )
+    assert (
+        format_move_stop_advice(symbol="ADAUSDT", side="short", stop=Decimal("0.48"))
+        == "↘️ ADAUSDT SHORT · เลื่อน stop → 0.48"
+    )
+    text = format_exit_advice(symbol="ADAUSDT", side="short", reason="flat", approx_r=Decimal("0.4"))
+    assert text == "✅ ADAUSDT SHORT · ออกตอนนี้\nสัญญาณ 4h เป็น FLAT · ประมาณ 0.4R"
+
+
+def test_no_stop_warning_once_then_rearms(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "nostop.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    entry_ts = day - FOUR_H_MS
+    _seed_candle(
+        conn,
+        symbol="ADAUSDT",
+        ts=entry_ts - FOUR_H_MS,
+        open_=0.40,
+        high=0.41,
+        low=0.39,
+        close=0.40,
+        atr=0.02,
+    )
+    pos = FuturesPosition(
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("100"),
+        entry_price=Decimal("0.40"),
+        mark_price=Decimal("0.40"),
+        update_time_ms=entry_ts,
+    )
+    fake = FakeFutures(positions=[pos], marks={"ADAUSDT": Decimal("0.40")})
+    sent: list[str] = []
+    p1 = run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
+    assert any(a.get("action") == "no_stop" for a in p1["actions"])
+    assert len(sent) == 1
+    assert "ไม่มี stop order" in sent[0]
+    run_assist_watch(conn, futures=fake, now_ms_value=day + 60_000, send=lambda t: sent.append(t) or True)
+    assert len(sent) == 1
+    # Stop appears then disappears → re-arm (long closes with SELL stop).
+    fake.orders = [
+        {
+            "symbol": "ADAUSDT",
+            "side": "SELL",
+            "type": "STOP_MARKET",
+            "reduceOnly": True,
+            "positionSide": "BOTH",
+            "stopPrice": "0.37",
+        }
+    ]
+    run_assist_watch(conn, futures=fake, now_ms_value=day + 120_000, send=lambda t: sent.append(t) or True)
+    fake.orders = []
+    run_assist_watch(conn, futures=fake, now_ms_value=day + 180_000, send=lambda t: sent.append(t) or True)
+    assert len(sent) == 2
+    conn.close()
+
+
+def test_algo_stop_counts_as_protective_stop(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "algo.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    entry_ts = day - FOUR_H_MS
+    _seed_candle(
+        conn,
+        symbol="ADAUSDT",
+        ts=entry_ts - FOUR_H_MS,
+        open_=0.40,
+        high=0.41,
+        low=0.39,
+        close=0.40,
+        atr=0.02,
+    )
+    pos = FuturesPosition(
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.40"),
+        mark_price=Decimal("0.40"),
+        update_time_ms=entry_ts,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        algo_orders=[
+            {
+                "symbol": "ADAUSDT",
+                "side": "BUY",
+                "orderType": "STOP_MARKET",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+                "triggerPrice": "0.43",
+            }
+        ],
+    )
+    sent: list[str] = []
+    payload = run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
+    assert not any(a.get("action") == "no_stop" for a in payload["actions"])
+    assert sent == []
+    conn.close()
+
+
+def test_taken_links_signal_stop(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "taken.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    sized = size_signal(
+        symbol="ADAUSDT",
+        side="short",
+        entry=Decimal("0.40"),
+        stop=Decimal("0.43"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("1"),
+    )
+    assert sized is not None
+    sid = insert_signal(
+        conn,
+        sized,
+        status="sent",
+        created_at_ms=day - 60_000,
+        expires_at_ms=day + 3_600_000,
+        sent_at_ms=day - 60_000,
+    )
+    pos = FuturesPosition(
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.40"),
+        mark_price=Decimal("0.40"),
+        update_time_ms=day - 30_000,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[
+            {
+                "symbol": "ADAUSDT",
+                "side": "BUY",
+                "type": "STOP_MARKET",
+                "reduceOnly": True,
+                "stopPrice": "0.43",
+            }
+        ],
+    )
+    run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    row = get_watch_position(conn, "ADAUSDT", "BOTH")
+    assert row is not None
+    assert row["signal_id"] == sid
+    assert row["initial_stop_source"] == "signal"
+    assert float(row["initial_stop"]) == 0.43
+    status = conn.execute("SELECT status FROM assist_signal WHERE id=?", (sid,)).fetchone()[0]
+    assert status == "taken"
+    conn.close()
+
+
+def test_off_signal_stop_is_1_5_atr(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "atr.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    entry_ts = day - FOUR_H_MS
+    _seed_candle(
+        conn,
+        symbol="ADAUSDT",
+        ts=entry_ts - FOUR_H_MS,
+        open_=0.40,
+        high=0.41,
+        low=0.39,
+        close=0.40,
+        atr=0.02,
+    )
+    pos = FuturesPosition(
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-50"),
+        entry_price=Decimal("0.40"),
+        mark_price=Decimal("0.40"),
+        update_time_ms=entry_ts,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[
+            {
+                "symbol": "ADAUSDT",
+                "side": "BUY",
+                "type": "STOP_MARKET",
+                "reduceOnly": True,
+                "stopPrice": "0.43",
+            }
+        ],
+    )
+    run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    row = get_watch_position(conn, "ADAUSDT", "BOTH")
+    assert row is not None
+    assert row["initial_stop_source"] == "atr"
+    # short: entry + 1.5 * 0.02 = 0.43
+    assert abs(float(row["initial_stop"]) - 0.43) < 1e-9
+    conn.close()
+
+
+def test_move_stop_once_per_level(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "move.db")
+    day = _ms_bangkok(2026, 10, 27, 14, 0)
+    entry_ts = day - 2 * FOUR_H_MS
+    # Candle after entry with favorable move for long (>= 0.5R).
+    # entry 100, initial stop 90, R=10; high 106 → breakeven ~100.2
+    _seed_candle(
+        conn,
+        symbol="BTCUSDT",
+        ts=entry_ts,
+        open_=100,
+        high=106,
+        low=99,
+        close=105,
+        atr=6.67,
+    )
+    pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("105"),
+        update_time_ms=entry_ts,
+    )
+    # Link via signal stop 90
+    sized = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("90"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("0.001"),
+    )
+    assert sized is not None
+    insert_signal(
+        conn,
+        sized,
+        status="sent",
+        created_at_ms=entry_ts,
+        expires_at_ms=day + 3_600_000,
+        sent_at_ms=entry_ts,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[
+            {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "type": "STOP_MARKET",
+                "reduceOnly": True,
+                "stopPrice": "90",
+            }
+        ],
+        marks={"BTCUSDT": Decimal("105")},
+    )
+    sent: list[str] = []
+    run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
+    assert len(sent) == 1
+    assert "เลื่อน stop" in sent[0]
+    run_assist_watch(conn, futures=fake, now_ms_value=day + 60_000, send=lambda t: sent.append(t) or True)
+    assert len(sent) == 1
+    conn.close()
+
+
+def test_exit_on_flat_opposite_and_2r(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "exit.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    entry_ts = day - FOUR_H_MS
+    _seed_candle(
+        conn,
+        symbol="ADAUSDT",
+        ts=entry_ts - FOUR_H_MS,
+        open_=0.40,
+        high=0.41,
+        low=0.39,
+        close=0.40,
+        atr=0.02,
+    )
+    sized = size_signal(
+        symbol="ADAUSDT",
+        side="short",
+        entry=Decimal("0.40"),
+        stop=Decimal("0.43"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("1"),
+    )
+    assert sized is not None
+    insert_signal(
+        conn,
+        sized,
+        status="sent",
+        created_at_ms=entry_ts,
+        expires_at_ms=day + 3_600_000,
+        sent_at_ms=entry_ts,
+    )
+    stop_order = {
+        "symbol": "ADAUSDT",
+        "side": "BUY",
+        "type": "STOP_MARKET",
+        "reduceOnly": True,
+        "stopPrice": "0.43",
+    }
+
+    # Flat exit
+    _seed_analysis(conn, symbol="ADAUSDT", action="flat", confidence=0.9, invalidation=None, ts=day - 60_000)
+    pos = FuturesPosition(
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.40"),
+        mark_price=Decimal("0.39"),
+        update_time_ms=entry_ts,
+    )
+    fake = FakeFutures(positions=[pos], orders=[stop_order], marks={"ADAUSDT": Decimal("0.39")})
+    sent: list[str] = []
+    run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
+    assert any("FLAT" in t for t in sent)
+
+    # Opposite on a fresh symbol/position
+    conn2 = open_db(tmp_path / "exit2.db")
+    _seed_candle(
+        conn2,
+        symbol="DOGEUSDT",
+        ts=entry_ts - FOUR_H_MS,
+        open_=0.20,
+        high=0.21,
+        low=0.19,
+        close=0.20,
+        atr=0.01,
+    )
+    sized2 = size_signal(
+        symbol="DOGEUSDT",
+        side="long",
+        entry=Decimal("0.20"),
+        stop=Decimal("0.185"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("1"),
+    )
+    assert sized2 is not None
+    insert_signal(
+        conn2,
+        sized2,
+        status="sent",
+        created_at_ms=entry_ts,
+        expires_at_ms=day + 3_600_000,
+        sent_at_ms=entry_ts,
+    )
+    _seed_analysis(
+        conn2, symbol="DOGEUSDT", action="short", confidence=0.7, invalidation=0.22, ts=day - 60_000
+    )
+    pos2 = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("100"),
+        entry_price=Decimal("0.20"),
+        mark_price=Decimal("0.20"),
+        update_time_ms=entry_ts,
+    )
+    fake2 = FakeFutures(
+        positions=[pos2],
+        orders=[
+            {
+                "symbol": "DOGEUSDT",
+                "side": "SELL",
+                "type": "STOP_MARKET",
+                "reduceOnly": True,
+                "stopPrice": "0.185",
+            }
+        ],
+    )
+    sent2: list[str] = []
+    run_assist_watch(conn2, futures=fake2, now_ms_value=day, send=lambda t: sent2.append(t) or True)
+    assert any("กลับด้าน" in t for t in sent2)
+
+    # 2R target
+    conn3 = open_db(tmp_path / "exit3.db")
+    _seed_candle(
+        conn3,
+        symbol="XRPUSDT",
+        ts=entry_ts - FOUR_H_MS,
+        open_=2.5,
+        high=2.6,
+        low=2.4,
+        close=2.5,
+        atr=0.1,
+    )
+    sized3 = size_signal(
+        symbol="XRPUSDT",
+        side="long",
+        entry=Decimal("2.5"),
+        stop=Decimal("2.4"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("0.1"),
+    )
+    assert sized3 is not None
+    insert_signal(
+        conn3,
+        sized3,
+        status="sent",
+        created_at_ms=entry_ts,
+        expires_at_ms=day + 3_600_000,
+        sent_at_ms=entry_ts,
+    )
+    _seed_analysis(conn3, symbol="XRPUSDT", action="long", confidence=0.7, invalidation=2.4, ts=day - 60_000)
+    pos3 = FuturesPosition(
+        symbol="XRPUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("10"),
+        entry_price=Decimal("2.5"),
+        mark_price=Decimal("2.7"),  # +2R (R=0.1)
+        update_time_ms=entry_ts,
+    )
+    fake3 = FakeFutures(
+        positions=[pos3],
+        orders=[
+            {
+                "symbol": "XRPUSDT",
+                "side": "SELL",
+                "type": "STOP_MARKET",
+                "reduceOnly": True,
+                "stopPrice": "2.4",
+            }
+        ],
+        marks={"XRPUSDT": Decimal("2.7")},
+    )
+    sent3: list[str] = []
+    run_assist_watch(conn3, futures=fake3, now_ms_value=day, send=lambda t: sent3.append(t) or True)
+    assert any("2R" in t for t in sent3)
+    conn.close()
+    conn2.close()
+    conn3.close()
+
+
+def test_morning_drops_held_advice_when_position_closed(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "drop.db")
+    night = _ms_bangkok(2026, 10, 27, 0, 0)
+    morning = _ms_bangkok(2026, 10, 27, 8, 0)
+    entry_ts = night - FOUR_H_MS
+    _seed_candle(
+        conn,
+        symbol="ADAUSDT",
+        ts=entry_ts - FOUR_H_MS,
+        open_=0.40,
+        high=0.41,
+        low=0.39,
+        close=0.40,
+        atr=0.02,
+    )
+    sized = size_signal(
+        symbol="ADAUSDT",
+        side="short",
+        entry=Decimal("0.40"),
+        stop=Decimal("0.43"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("1"),
+    )
+    assert sized is not None
+    insert_signal(
+        conn,
+        sized,
+        status="sent",
+        created_at_ms=entry_ts,
+        expires_at_ms=morning + 3_600_000,
+        sent_at_ms=entry_ts,
+    )
+    _seed_analysis(
+        conn, symbol="ADAUSDT", action="flat", confidence=0.9, invalidation=None, ts=night - 60_000
+    )
+    pos = FuturesPosition(
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.40"),
+        mark_price=Decimal("0.39"),
+        update_time_ms=entry_ts,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[
+            {
+                "symbol": "ADAUSDT",
+                "side": "BUY",
+                "type": "STOP_MARKET",
+                "reduceOnly": True,
+                "stopPrice": "0.43",
+            }
+        ],
+    )
+    sent: list[str] = []
+    run_assist_watch(conn, futures=fake, now_ms_value=night, send=lambda t: sent.append(t) or True)
+    assert sent == []  # night hold
+    held = list_held_watch_advice(conn)
+    assert held
+    # Position closed by morning.
+    fake.positions = []
+    payload = run_assist_morning(
+        conn, futures=fake, now_ms_value=morning, send=lambda t: sent.append(t) or True
+    )
+    assert payload["watch_advice"]["dropped"]
+    assert sent == []
+    conn.close()
+
+
+def test_outside_universe_is_stored_without_advice(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "out.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    pos = FuturesPosition(
+        symbol="LTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("80"),
+        mark_price=Decimal("80"),
+        update_time_ms=day,
+    )
+    fake = FakeFutures(positions=[pos])
+    sent: list[str] = []
+    payload = run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
+    assert sent == []
+    assert any(a.get("action") == "outside_universe" for a in payload["actions"])
+    row = get_watch_position(conn, "LTCUSDT", "BOTH")
+    assert row is not None
+    assert int(row["in_universe"]) == 0
+    conn.close()

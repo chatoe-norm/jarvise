@@ -20,6 +20,7 @@ from jarvise.charts import export_candle_graphs
 from jarvise.disk import disk_edge_alerted, disk_free
 from jarvise.rag import doctrine_snippets, publish_redis_status
 from jarvise_assist.signals import run_assist_morning, run_assist_signals
+from jarvise_assist.watch import run_assist_watch
 from jarvise_ingest.db import (
     count_indicator_ready,
     count_market,
@@ -61,6 +62,7 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     "forward_h3": 300.0,
     "assist_signal": 300.0,
     "assist_morning": 180.0,
+    "assist_watch": 300.0,
     "weekly_report": 120.0,
 }
 # Single-flight lock TTLs (seconds): a crashed holder frees the lock automatically.
@@ -77,6 +79,7 @@ JOB_LOCK_TTL_S: dict[str, int] = {
     "forward_h3": 360,
     "assist_signal": 360,
     "assist_morning": 240,
+    "assist_watch": 360,
     "weekly_report": 180,
 }
 TIMEOUT_EXIT_CODE = 124
@@ -451,6 +454,41 @@ def run_assist_signal_job() -> tuple[int, dict[str, Any]]:
         at_ms = payload.get("at_ms")
         payload["at_ms"] = int(at_ms) if isinstance(at_ms, (int, float)) else now
         _publish_best_effort("jarvise:assist_signal:last", payload)
+        return (0 if payload.get("ok") else 1), payload
+
+
+def run_assist_watch_job() -> tuple[int, dict[str, Any]]:
+    """Read-only futures position watch every 5 minutes. Never places orders."""
+    with single_flight("assist_watch") as acquired:
+        if not acquired:
+            return 3, _running("assist_watch")
+        now = int(time.time() * 1000)
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        if not path.exists():
+            payload = {
+                "ok": False,
+                "error": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
+            _publish_best_effort("jarvise:assist_watch:last", payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            payload = run_assist_watch(conn, now_ms_value=now)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "paper_only": True,
+                "at_ms": now,
+            }
+        finally:
+            conn.close()
+        at_ms = payload.get("at_ms")
+        payload["at_ms"] = int(at_ms) if isinstance(at_ms, (int, float)) else now
+        _publish_best_effort("jarvise:assist_watch:last", payload)
         return (0 if payload.get("ok") else 1), payload
 
 
@@ -873,6 +911,7 @@ ROUTES = {
     ("POST", "/jobs/forward-h3"): "forward_h3",
     ("POST", "/jobs/assist-signal"): "assist_signal",
     ("POST", "/jobs/assist-morning"): "assist_morning",
+    ("POST", "/jobs/assist-watch"): "assist_watch",
     ("POST", "/jobs/weekly-report"): "weekly_report",
 }
 
@@ -938,6 +977,7 @@ class JobHandler(BaseHTTPRequestHandler):
             "forward_h3": run_forward_h3,
             "assist_signal": run_assist_signal_job,
             "assist_morning": run_assist_morning_job,
+            "assist_watch": run_assist_watch_job,
             "weekly_report": run_weekly_report,
         }
         runner = runners.get(action or "")
