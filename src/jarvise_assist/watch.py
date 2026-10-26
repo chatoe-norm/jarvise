@@ -50,6 +50,7 @@ from jarvise_notify.telegram import send_telegram_message
 from jarvise_paper.profit_lock import trail_stop_with_source
 
 FOUR_H_MS = 4 * 3_600_000
+ONE_H_MS = 3_600_000
 SendFn = Callable[[str], bool]
 
 
@@ -73,14 +74,19 @@ def candle_extremes_after_entry(
     *,
     entry_time_ms: int,
     now_ms: int,
+    bar_ms: int = ONE_H_MS,
 ) -> tuple[float | None, float | None]:
-    """Best high/low of 4h candles that closed after entry and by now."""
+    """Best high/low of bars opened at or after entry and closed by now.
+
+    Bars that opened before entry are excluded so pre-entry extremes cannot
+    trip breakeven / 1R trail advice (same leak class as replay PR #179).
+    """
     best_high: float | None = None
     best_low: float | None = None
     for row in candles:
         ts = int(row["timestamp"])
-        close_ms = ts + FOUR_H_MS
-        if close_ms <= int(entry_time_ms) or close_ms > int(now_ms):
+        close_ms = ts + int(bar_ms)
+        if ts < int(entry_time_ms) or close_ms > int(now_ms):
             continue
         high = row.get("high")
         low = row.get("low")
@@ -330,16 +336,18 @@ def _process_universe_position(
             if status == "sent":
                 set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=True)
             actions.append({"symbol": pos.symbol, "action": "no_stop", "status": status})
-        return
-
-    if stored.get("no_stop_latched"):
+    elif stored.get("no_stop_latched"):
         set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=False)
+
+    # Compare trail advice to the resting stop order, else the frozen initial stop.
+    compare_stop = protective if protective is not None else stop_dec
 
     mark = pos.mark_price if pos.mark_price > 0 else client.mark_price(pos.symbol)
     entry_time = int(stored.get("entry_time_ms") or now_ms)
-    since = min(entry_time, now_ms) - FOUR_H_MS
-    candles = load_candles_in_range(conn, pos.symbol, ASSIST_TIMEFRAME, since_ms=since, until_ms=int(now_ms))
-    best_low, best_high = candle_extremes_after_entry(candles, entry_time_ms=entry_time, now_ms=now_ms)
+    candles_1h = load_candles_in_range(conn, pos.symbol, "1h", since_ms=entry_time, until_ms=int(now_ms))
+    best_low, best_high = candle_extremes_after_entry(
+        candles_1h, entry_time_ms=entry_time, now_ms=now_ms, bar_ms=ONE_H_MS
+    )
     trail_pos = {
         "side": pos.side,
         "entry_price": float(pos.entry_price),
@@ -350,7 +358,7 @@ def _process_universe_position(
     if trail is not None:
         suggested, _source = trail
         suggested_d = Decimal(str(suggested))
-        tighter = suggested_d > protective if pos.side == "long" else suggested_d < protective
+        tighter = suggested_d > compare_stop if pos.side == "long" else suggested_d < compare_stop
         if tighter:
             text = format_move_stop_advice(symbol=pos.symbol, side=pos.side, stop=suggested_d)
             status = _emit_advice(
@@ -471,12 +479,13 @@ def flush_held_watch_advice(
                 trade_side=pos.side,
             )
             level = row.get("level")
-            if protective is None or level is None:
+            if level is None:
                 mark_watch_advice_dropped(conn, str(row["id"]))
                 dropped.append(str(row["id"]))
                 continue
+            compare_stop = protective if protective is not None else stop_dec
             suggested = Decimal(str(level))
-            still_tighter = suggested > protective if pos.side == "long" else suggested < protective
+            still_tighter = suggested > compare_stop if pos.side == "long" else suggested < compare_stop
             if not still_tighter:
                 mark_watch_advice_dropped(conn, str(row["id"]))
                 dropped.append(str(row["id"]))

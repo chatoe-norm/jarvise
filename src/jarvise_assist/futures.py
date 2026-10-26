@@ -148,22 +148,30 @@ def is_protective_stop(
     position_side: str,
     trade_side: str,
 ) -> bool:
-    """True when the order is a reduce-only / close stop on the closing side."""
+    """True when the order is a reduce-only / close stop on the closing side.
+
+    One-way (missing positionSide or BOTH): requires reduceOnly or closePosition.
+    Hedge (LONG/SHORT): matching positionSide + closing side is enough without reduceOnly.
+    """
     if order_type(order) not in STOP_ORDER_TYPES:
-        return False
-    reduce_only = bool(order.get("reduceOnly")) or str(order.get("closePosition") or "").lower() in {
-        "true",
-        "1",
-    }
-    if not reduce_only:
         return False
     close_side = "SELL" if trade_side == "long" else "BUY"
     if str(order.get("side") or "").upper() != close_side:
         return False
-    ops = str(order.get("positionSide") or "BOTH").upper()
-    if ops not in {"BOTH", position_side.upper()}:
+    if order_stop_price(order) is None:
         return False
-    return order_stop_price(order) is not None
+    ops = str(order.get("positionSide") or "BOTH").upper()
+    pos_side = position_side.upper()
+    reduce_only = bool(order.get("reduceOnly")) or str(order.get("closePosition") or "").lower() in {
+        "true",
+        "1",
+    }
+    if ops in {"LONG", "SHORT"}:
+        return ops == pos_side
+    # One-way: BOTH or missing.
+    if ops not in {"BOTH", pos_side}:
+        return False
+    return reduce_only
 
 
 def find_protective_stop(
