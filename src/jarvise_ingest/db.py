@@ -585,6 +585,98 @@ def _migrate_outcome_r(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "paper_decision_outcomes", "return_on_notional", "REAL")
 
 
+def _migrate_trade_assist(conn: sqlite3.Connection) -> None:
+    """Trade assistant tables. Never writes paper/live/approval rows."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            risk_pct REAL NOT NULL DEFAULT 2.0,
+            enabled INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.execute("INSERT OR IGNORE INTO assist_settings (id, risk_pct, enabled) VALUES (1, 2.0, 1)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_edge (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            futures_down_since_ms INTEGER,
+            futures_down_alerted INTEGER NOT NULL DEFAULT 0,
+            permission_error_reported INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO assist_edge (
+            id, futures_down_since_ms, futures_down_alerted, permission_error_reported
+        ) VALUES (1, NULL, 0, 0)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_signal (
+            id TEXT NOT NULL PRIMARY KEY,
+            analysis_id TEXT,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry REAL NOT NULL,
+            stop REAL NOT NULL,
+            target REAL NOT NULL,
+            qty REAL NOT NULL,
+            notional REAL NOT NULL,
+            leverage INTEGER NOT NULL,
+            loss_at_stop REAL NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            sent_at_ms INTEGER,
+            leverage_capped INTEGER NOT NULL DEFAULT 0,
+            uncapped_leverage INTEGER
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assist_signal_symbol_status ON assist_signal (symbol, status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assist_signal_status_created ON assist_signal (status, created_at_ms)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_track (
+            signal_id TEXT NOT NULL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry REAL NOT NULL,
+            stop REAL NOT NULL,
+            target REAL NOT NULL,
+            qty REAL NOT NULL,
+            sent_at_ms INTEGER NOT NULL,
+            exit_at_ms INTEGER,
+            exit_px REAL,
+            exit_reason TEXT,
+            gross_r REAL,
+            pnl_usdt REAL,
+            FOREIGN KEY (signal_id) REFERENCES assist_signal(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_position_seen (
+            symbol TEXT NOT NULL,
+            position_side TEXT NOT NULL,
+            qty REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (symbol, position_side)
+        )
+        """
+    )
+
+
 def _migrate_shadow_veto(conn: sqlite3.Connection) -> None:
     """Decision log for the counterfactual shadow track. Not market truth."""
     conn.execute(
@@ -695,6 +787,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (11, "shadow_veto", _migrate_shadow_veto, True),
     (12, "owner_decision_log", _migrate_owner_decision_log, True),
     (13, "outcome_r", _migrate_outcome_r, True),
+    (14, "trade_assist", _migrate_trade_assist, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
