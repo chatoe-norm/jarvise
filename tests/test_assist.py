@@ -1718,3 +1718,60 @@ def test_outside_universe_is_stored_without_advice(tmp_path: Path) -> None:
     assert row is not None
     assert int(row["in_universe"]) == 0
     conn.close()
+
+
+def test_unsent_held_or_expired_signal_does_not_block_resend(tmp_path: Path) -> None:
+    """Regression 2026-10-27: an idea the owner never saw must not count as same_idea."""
+    conn = open_db(tmp_path / "unsent.db")
+    night = _ms_bangkok(2026, 10, 27, 0, 25)
+    fake = FakeFutures(marks={"DOGEUSDT": Decimal("0.0800")}, steps={"DOGEUSDT": Decimal("1")})
+    bar = 4 * 3_600_000
+    _seed_analysis(
+        conn, symbol="DOGEUSDT", action="short", confidence=0.75, invalidation=0.0835, ts=night - bar - 60_000
+    )
+    _seed_analysis(
+        conn, symbol="DOGEUSDT", action="short", confidence=0.75, invalidation=0.0835, ts=night - 60_000
+    )
+    p0 = run_assist_signals(conn, futures=fake, now_ms_value=night, send=lambda _t: True)
+    assert [c["status"] for c in p0["created"]] == ["held"]
+    conn.execute("UPDATE assist_signal SET status='expired'")
+    conn.commit()
+
+    day = _ms_bangkok(2026, 10, 27, 8, 25)
+    _seed_analysis(
+        conn, symbol="DOGEUSDT", action="short", confidence=0.75, invalidation=0.0835, ts=day - 60_000
+    )
+    p1 = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    assert not any(s.get("reason") == "same_idea" for s in p1["skipped"])
+    assert [c["status"] for c in p1["created"]] == ["sent"]
+
+    # Once sent, the same idea is not repeated within 24 h.
+    later = day + bar
+    _seed_analysis(
+        conn, symbol="DOGEUSDT", action="short", confidence=0.75, invalidation=0.0835, ts=later - 60_000
+    )
+    p2 = run_assist_signals(conn, futures=fake, now_ms_value=later, send=lambda _t: True)
+    assert any(s.get("reason") == "same_idea" for s in p2["skipped"])
+
+
+def test_morning_batch_after_paper_run_sends_held_signal(tmp_path: Path) -> None:
+    """Regression 2026-10-27: at 08:00 the newest analysis is 9 h old (stale); at 08:20 it is fresh."""
+    conn = open_db(tmp_path / "morning_fresh.db")
+    held_at = _ms_bangkok(2026, 10, 27, 4, 25)  # 21:25 UTC
+    fake = FakeFutures(marks={"DOGEUSDT": Decimal("0.0800")}, steps={"DOGEUSDT": Decimal("1")})
+    bar_16 = _ms_bangkok(2026, 10, 26, 23, 0)  # 16:00 UTC bar, written by the 04:00 paper-run
+    _seed_analysis(conn, symbol="DOGEUSDT", action="short", confidence=0.75, invalidation=0.0835, ts=bar_16)
+    p0 = run_assist_signals(conn, futures=fake, now_ms_value=held_at, send=lambda _t: True)
+    assert [c["status"] for c in p0["created"]] == ["held"]
+
+    bar_20 = _ms_bangkok(2026, 10, 27, 3, 0)  # 20:00 UTC bar, written by the 08:00 paper-run
+    _seed_analysis(conn, symbol="DOGEUSDT", action="short", confidence=0.75, invalidation=0.0835, ts=bar_20)
+    sent: list[str] = []
+    p1 = run_assist_morning(
+        conn,
+        futures=fake,
+        now_ms_value=_ms_bangkok(2026, 10, 27, 8, 20),
+        send=lambda t: sent.append(t) or True,
+    )
+    assert len(p1["sent"]) == 1
+    assert sent and "DOGEUSDT" in sent[0]

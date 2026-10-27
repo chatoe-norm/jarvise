@@ -131,7 +131,7 @@ def test_jobs_workflows_send_token_placeholder() -> None:
         for node in morning["nodes"]
         if node.get("type") == "n8n-nodes-base.scheduleTrigger"
     )
-    assert morning_cron == "0 8 * * *"
+    assert morning_cron == "20 8 * * *"
     morning_timeout = next(
         node["parameters"]["options"]["timeout"]
         for node in morning["nodes"]
