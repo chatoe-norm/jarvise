@@ -493,7 +493,7 @@ def run_assist_watch_job() -> tuple[int, dict[str, Any]]:
 
 
 def run_assist_morning_job() -> tuple[int, dict[str, Any]]:
-    """08:00 Bangkok batch: send or expire held overnight signals."""
+    """08:20 Bangkok batch (after the 08:00 paper-run): send or expire held overnight signals."""
     with single_flight("assist_morning") as acquired:
         if not acquired:
             return 3, _running("assist_morning")

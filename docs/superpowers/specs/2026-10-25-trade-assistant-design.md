@@ -22,7 +22,7 @@ The reason is speed. Proving an autonomous edge takes months: the shadow-veto wi
    - **Move stop.** Use the same breakeven and 1R trail rule as the paper `profit_lock` (`trail_stop_with_source`), computed from the real entry.
    - **Exit now.** Send when the analyzer for that symbol turns `flat` or the opposite side, or when price reaches 2R.
    - **No stop order.** Send immediately, at any hour, when an open position has no stop order on Binance.
-5. **Night hold.** Hold messages created from 23:30 to 07:30 Asia/Bangkok and send one batch at 08:00 with only what is still valid. A signal is still valid when the latest analyzer row has the same side and price has not moved more than 0.3R past the entry toward the target. Exit and move-stop advice held overnight is re-checked against current price before sending. The "no stop order" warning is never held.
+5. **Night hold.** Hold messages created from 23:30 to 07:30 Asia/Bangkok and send one batch at 08:20, after the 08:00 paper-run has written fresh analysis, with only what is still valid. A signal is still valid when the latest analyzer row has the same side and price has not moved more than 0.3R past the entry toward the target. Exit and move-stop advice held overnight is re-checked against current price before sending. The "no stop order" warning is never held.
 6. **Telegram buttons.**
    - Under each new signal: one inline button, "⏭ ข้าม" (skip). It marks the signal skipped for the weekly summary.
    - A persistent reply keyboard with four buttons:
@@ -50,7 +50,7 @@ The reason is speed. Proving an autonomous edge takes months: the shadow-veto wi
 - A message that reads like a guarantee. Messages are numbers only. The weekly summary must show losses as plainly as wins.
 - Any write to Binance. A key with trading or withdrawal permission must be refused at startup, the same way `jarvise_exchange/permissions.py` refuses withdraw-scoped keys today.
 - Accepting a Telegram command from any chat other than the owner's.
-- A held night message sent at 08:00 with stale numbers.
+- A held night message sent at 08:20 with stale numbers.
 - Silent failure. If the futures API or the bot listener is down for more than 30 minutes, send one alert, and one more on recovery, using the edge-state pattern of PR #227.
 
 ## Constraints
@@ -86,7 +86,7 @@ The reason is speed. Proving an autonomous edge takes months: the shadow-veto wi
 
 ## Claude's calls (the owner may change these)
 
-- Target at 2R. The chase limit is 0.3R. The night window is 23:30–07:30 with the batch at 08:00 Bangkok.
+- Target at 2R. The chase limit is 0.3R. The night window is 23:30–07:30 with the batch at 08:20 Bangkok.
 - Signal expiry is the next 4h close.
 - The stop for an off-signal position is 1.5× ATR (4h) from the real entry.
 - The "no stop order" warning is never held overnight.

@@ -151,11 +151,14 @@ def recent_same_idea(
     now_ms: int,
     within_ms: int = SAME_IDEA_MS,
 ) -> bool:
-    """True when a sent/held/expired row for symbol+side exists within within_ms."""
+    """True when the owner already saw this idea (sent, taken, or skipped) within within_ms.
+
+    Held or expired rows never reached the owner, so they must not block a resend.
+    """
     row = conn.execute(
         """
         SELECT 1 FROM assist_signal
-        WHERE symbol=? AND side=? AND status IN ('sent', 'held', 'expired')
+        WHERE symbol=? AND side=? AND status IN ('sent', 'taken', 'skipped')
           AND created_at_ms >= ?
         LIMIT 1
         """,

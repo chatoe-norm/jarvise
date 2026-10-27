@@ -445,7 +445,7 @@ def run_assist_morning(
     now_ms_value: int | None = None,
     send: SendFn | None = None,
 ) -> dict[str, Any]:
-    """Re-check held signals at 08:00 Bangkok and send or expire."""
+    """Re-check held signals at 08:20 Bangkok (after the 08:00 paper-run writes fresh analysis) and send or expire."""
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     send_fn = send or send_telegram_message
     settings = ensure_settings(conn)
