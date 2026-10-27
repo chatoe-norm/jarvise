@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
@@ -263,3 +263,117 @@ def admit_signals(
         used = next_used
         slots += 1
     return admitted, rejected
+
+
+def shared_leverage_needed(
+    *,
+    total_notional: Decimal,
+    available_balance: Decimal,
+) -> int:
+    """Leverage so batch margin fits availableBalance with a 5% buffer."""
+    if available_balance <= 0:
+        return MAX_LEVERAGE + 1
+    denom = available_balance * Decimal("0.95")
+    if denom <= 0:
+        return MAX_LEVERAGE + 1
+    if total_notional <= 0:
+        return 1
+    return max(1, int(math.ceil(float(total_notional / denom))))
+
+
+def _shrink_for_max_leverage(
+    sized: SizedSignal,
+    *,
+    available_balance: Decimal,
+    uncapped: int,
+    max_leverage: int = MAX_LEVERAGE,
+) -> SizedSignal:
+    """Cap notional to availableBalance × max_leverage (existing leverage_capped rule)."""
+    max_notional = available_balance * Decimal(max_leverage) if available_balance > 0 else Decimal("0")
+    if max_notional <= 0 or sized.entry <= 0:
+        return replace(
+            sized,
+            leverage=max_leverage,
+            leverage_capped=True,
+            uncapped_leverage=max(sized.uncapped_leverage, uncapped),
+        )
+    if sized.notional <= max_notional:
+        return replace(
+            sized,
+            leverage=max_leverage,
+            leverage_capped=True,
+            uncapped_leverage=max(sized.uncapped_leverage, uncapped),
+        )
+    qty = max_notional / sized.entry
+    notional = qty * sized.entry
+    loss = qty * sized.r_distance
+    return replace(
+        sized,
+        qty=qty,
+        notional=notional,
+        leverage=max_leverage,
+        loss_at_stop=loss,
+        leverage_capped=True,
+        uncapped_leverage=max(sized.uncapped_leverage, uncapped),
+    )
+
+
+def assign_shared_leverage(
+    admitted: list[SignalCandidate],
+    *,
+    available_balance: Decimal,
+    max_leverage: int = MAX_LEVERAGE,
+) -> tuple[list[SignalCandidate], list[SignalCandidate]]:
+    """Assign one shared L after risk admission. Drop lowest-confidence on margin_cap.
+
+    ``L = max(1, ceil(sum(notional) / (availableBalance * 0.95)))``.
+    When ``L > max_leverage``, drop the lowest-confidence idea and recompute.
+    A lone survivor that still needs more than ``max_leverage`` is shrunk with
+    the ``leverage_capped`` rule (notional at most availableBalance × max).
+    """
+    survivors = list(admitted)
+    dropped: list[SignalCandidate] = []
+    while survivors:
+        total = sum((c.sized.notional for c in survivors), Decimal("0"))
+        leverage = shared_leverage_needed(
+            total_notional=total,
+            available_balance=available_balance,
+        )
+        if leverage <= max_leverage:
+            return (
+                [
+                    SignalCandidate(
+                        sized=replace(c.sized, leverage=leverage),
+                        confidence=c.confidence,
+                        symbol_rank=c.symbol_rank,
+                    )
+                    for c in survivors
+                ],
+                dropped,
+            )
+        if len(survivors) == 1:
+            only = survivors[0]
+            shrunk = _shrink_for_max_leverage(
+                only.sized,
+                available_balance=available_balance,
+                uncapped=leverage,
+                max_leverage=max_leverage,
+            )
+            return (
+                [
+                    SignalCandidate(
+                        sized=shrunk,
+                        confidence=only.confidence,
+                        symbol_rank=only.symbol_rank,
+                    )
+                ],
+                dropped,
+            )
+        # Drop lowest confidence; higher symbol_rank (worse) loses ties.
+        victim = min(
+            survivors,
+            key=lambda c: (c.confidence, -c.symbol_rank, c.sized.symbol),
+        )
+        survivors = [c for c in survivors if c is not victim]
+        dropped.append(victim)
+    return [], dropped

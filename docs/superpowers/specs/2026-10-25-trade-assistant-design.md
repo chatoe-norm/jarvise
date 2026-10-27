@@ -16,7 +16,7 @@ The reason is speed. Proving an autonomous edge takes months: the shadow-veto wi
    - the leverage needed;
    - the USDT lost if the stop is hit;
    - an expiry time.
-2. **Position size.** Size every trade from a risk-per-trade percentage the owner sets: default 2%, allowed range 0.5–15%. Ask for an extra confirmation above 5%. The account balance comes from a read-only Binance futures API key.
+2. **Position size.** Size every trade from a risk-per-trade percentage the owner sets: default 1%, allowed range 0.5–15%. Ask for an extra confirmation above 5%. The account balance comes from a read-only Binance futures API key.
 3. **Live position tracking.** Detect the owner's real futures positions from the API, with entry price, size, side, and whether a protective stop order exists. There is no "I entered" or "I exited" button.
 4. **Advice while a position is open.** This applies to positions opened from a signal and to positions the owner opened alone, as long as the symbol is one of the seven:
    - **Move stop.** Use the same breakeven and 1R trail rule as the paper `profit_lock` (`trail_stop_with_source`), computed from the real entry.
@@ -79,7 +79,7 @@ The reason is speed. Proving an autonomous edge takes months: the shadow-veto wi
 - Binance USDⓈ-M futures, traded by hand.
 - Jarvise picks the coins, from the seven current symbols.
 - Message style A: numbers only, no reasons and no stats on each signal.
-- Risk per trade is set by the owner, default 2%.
+- Risk per trade is set by the owner, default 1%.
 - The balance and the real positions come from a read-only API key. There are no "entered" or "exited" buttons.
 - The buttons are "skip", plus the four-button persistent menu.
 - Night messages are held for the morning.

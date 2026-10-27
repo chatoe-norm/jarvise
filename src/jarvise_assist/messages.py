@@ -52,13 +52,17 @@ def format_signal_message(
     base = _base_asset(sized.symbol)
     notional_s = _fmt_price(sized.notional.quantize(Decimal("0.01")))
     loss_s = _fmt_price(sized.loss_at_stop.quantize(Decimal("0.01")))
+    lev = max(1, int(sized.leverage))
+    margin = (sized.notional / Decimal(lev)).quantize(Decimal("0.01"))
+    margin_s = _fmt_price(margin)
     lines = [
         f"{emoji} {sized.symbol} · {side_label} (4h)",
         f"เข้า: {_fmt_price(sized.entry)}",
         f"Stop: {_fmt_price(sized.stop)} ({stop_sign}{float(stop_pct):.1f}%)",
         f"เป้า: {_fmt_price(sized.target)} (2R)",
         f"ขนาด: {_fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT",
-        f"Leverage ที่ต้องใช้: {sized.leverage}x (isolated)",
+        f"Leverage ที่ต้องใช้: {lev}x (isolated)",
+        f"margin ≈ {margin_s} USDT",
         f"ถ้าชน stop เสีย: {loss_s} USDT ({_fmt_price(loss_pct)}%)",
         f"หมดอายุ {exp_s}",
         "ตั้ง Stop-Market (Reduce-Only, trigger = Mark Price) ทันทีหลังเข้า",

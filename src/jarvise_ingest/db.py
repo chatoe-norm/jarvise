@@ -667,12 +667,12 @@ def _migrate_trade_assist(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS assist_settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            risk_pct REAL NOT NULL DEFAULT 2.0,
+            risk_pct REAL NOT NULL DEFAULT 1.0,
             enabled INTEGER NOT NULL DEFAULT 1
         )
         """
     )
-    conn.execute("INSERT OR IGNORE INTO assist_settings (id, risk_pct, enabled) VALUES (1, 2.0, 1)")
+    conn.execute("INSERT OR IGNORE INTO assist_settings (id, risk_pct, enabled) VALUES (1, 1.0, 1)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS assist_edge (
