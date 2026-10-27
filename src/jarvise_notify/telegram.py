@@ -22,31 +22,151 @@ def notify_configured() -> bool:
     return bool(token and chat)
 
 
+def send_message(
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+    client: httpx.Client | None = None,
+    chat_id: str | None = None,
+) -> int | None:
+    """POST sendMessage. Returns message_id on success, None on soft-fail."""
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat = (chat_id or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not token or not chat:
+        return None
+    url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+    body: dict[str, Any] = {
+        "chat_id": chat,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        body["reply_markup"] = reply_markup
+    own = client is None
+    http = client or httpx.Client(timeout=15.0)
+    try:
+        resp = http.post(url, json=body)
+        if resp.status_code != 200:
+            logger.warning("telegram send failed: status=%s", resp.status_code)
+            return None
+        data = resp.json()
+        if not data.get("ok"):
+            return None
+        result = data.get("result") or {}
+        mid = result.get("message_id")
+        return int(mid) if mid is not None else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram send soft-fail: %s", type(exc).__name__)
+        return None
+    finally:
+        if own:
+            http.close()
+
+
 def send_telegram_message(
     text: str,
     *,
     client: httpx.Client | None = None,
 ) -> bool:
     """POST sendMessage. Returns True on success. Soft-fail otherwise."""
+    return send_message(text, client=client) is not None
+
+
+def edit_message(
+    message_id: int,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+    client: httpx.Client | None = None,
+    chat_id: str | None = None,
+) -> bool:
+    """POST editMessageText. Soft-fail."""
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    chat = (chat_id or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     if not token or not chat:
         return False
-    url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+    url = f"{TELEGRAM_API}/bot{token}/editMessageText"
+    body: dict[str, Any] = {
+        "chat_id": chat,
+        "message_id": int(message_id),
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        body["reply_markup"] = reply_markup
     own = client is None
     http = client or httpx.Client(timeout=15.0)
     try:
-        resp = http.post(
-            url,
-            json={"chat_id": chat, "text": text, "disable_web_page_preview": True},
-        )
-        if resp.status_code != 200:
-            logger.warning("telegram send failed: status=%s", resp.status_code)
-            return False
-        return True
+        resp = http.post(url, json=body)
+        return resp.status_code == 200 and bool((resp.json() or {}).get("ok"))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("telegram send soft-fail: %s", type(exc).__name__)
+        logger.warning("telegram edit soft-fail: %s", type(exc).__name__)
         return False
+    finally:
+        if own:
+            http.close()
+
+
+def answer_callback(
+    callback_query_id: str,
+    *,
+    text: str | None = None,
+    client: httpx.Client | None = None,
+) -> bool:
+    """POST answerCallbackQuery. Soft-fail."""
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token or not callback_query_id:
+        return False
+    url = f"{TELEGRAM_API}/bot{token}/answerCallbackQuery"
+    body: dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text is not None:
+        body["text"] = text
+    own = client is None
+    http = client or httpx.Client(timeout=15.0)
+    try:
+        resp = http.post(url, json=body)
+        return resp.status_code == 200 and bool((resp.json() or {}).get("ok"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram answerCallback soft-fail: %s", type(exc).__name__)
+        return False
+    finally:
+        if own:
+            http.close()
+
+
+def get_updates(
+    *,
+    offset: int | None = None,
+    timeout: int = 25,
+    client: httpx.Client | None = None,
+) -> list[dict[str, Any]] | None:
+    """Long-poll getUpdates. Returns update list, or None on transport/API failure."""
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        return None
+    url = f"{TELEGRAM_API}/bot{token}/getUpdates"
+    params: dict[str, Any] = {"timeout": int(timeout)}
+    if offset is not None:
+        params["offset"] = int(offset)
+    own = client is None
+    # Client timeout must exceed the long-poll timeout.
+    http = client or httpx.Client(timeout=float(timeout) + 10.0)
+    try:
+        resp = http.get(url, params=params)
+        if resp.status_code == 429:
+            logger.warning("telegram getUpdates rate-limited")
+            return None
+        if resp.status_code != 200:
+            logger.warning("telegram getUpdates failed: status=%s", resp.status_code)
+            return None
+        data = resp.json()
+        if not data.get("ok"):
+            return None
+        result = data.get("result")
+        return list(result) if isinstance(result, list) else []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram getUpdates soft-fail: %s", type(exc).__name__)
+        return None
     finally:
         if own:
             http.close()

@@ -65,6 +65,7 @@ class FakeFutures:
         key_error: Exception | None = None,
         read_error: Exception | None = None,
         permission_on_balance: Exception | None = None,
+        income: list[dict[str, Any]] | None = None,
     ) -> None:
         self.balance = balance
         self.marks = marks or {}
@@ -79,6 +80,7 @@ class FakeFutures:
         self.key_error = key_error
         self.read_error = read_error
         self.permission_on_balance = permission_on_balance
+        self.income = list(income or [])
         self.api_key = "TEST_KEY_SHOULD_NEVER_APPEAR"
 
     def assert_key_safe(self) -> dict[str, Any]:
@@ -150,6 +152,23 @@ class FakeFutures:
 
     def all_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         return [*self.open_orders(symbol=symbol), *self.open_algo_orders(symbol=symbol)]
+
+    def income_history(
+        self,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        income_type: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        out = list(self.income)
+        if income_type:
+            out = [r for r in out if str(r.get("incomeType") or "") == income_type]
+        if start_ms is not None:
+            out = [r for r in out if int(r.get("time") or 0) >= int(start_ms)]
+        if end_ms is not None:
+            out = [r for r in out if int(r.get("time") or 0) <= int(end_ms)]
+        return out[:limit]
 
 
 def _seed_analysis(

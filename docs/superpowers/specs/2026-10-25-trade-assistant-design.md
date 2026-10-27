@@ -31,11 +31,12 @@ The reason is speed. Proving an autonomous edge takes months: the shadow-veto wi
      - "📊 ผลสัปดาห์นี้" (this week's results);
      - "⚙️ ตั้งความเสี่ยงต่อไม้ (ตอนนี้ X%)" (set risk per trade): opens a small choice of 1%, 2%, 3%, 5%, and Other.
    - If the owner sends a bare number after "Other", it sets the risk. The bot accepts input only from `TELEGRAM_CHAT_ID`.
-7. **Weekly summary.** Every Monday at 08:00 Bangkok, report two numbers, both in R and in USDT:
+7. **Weekly summary.** Every Monday at 08:30 Bangkok (`jrvsAssistWeekly1`, separate from the paper weekly report at 08:00), report two numbers, both in R and in USDT:
    - **All signals as if taken.** A virtual track of every sent signal: entry at signal price, resting stop fill, exit by the same rules as goal 4.
    - **The owner's real trades,** from realized PnL on closed positions.
 
    Report the counts of signals sent, skipped, and taken. The owner chose to see no statistics on each signal, so the weekly summary is where the honest track record lives.
+8. **Losing-streak pause.** At the start of watch, signal, and morning jobs: if the three latest non-zero `REALIZED_PNL` rows on the seven symbols are all negative, or week-to-date real net loss (realized + commission + funding) exceeds 6% of the reconstructed week-start USDT balance, pause new signals until the next 08:20 Asia/Bangkok and send one Telegram line. Watch still emits advice while paused. Signal and morning insert nothing and return `skipped: "streak_pause"`. Auto-resume sends one line when the pause expires; the menu toggle "open" clears the pause immediately without that line.
 
 ## Non-goals
 
@@ -91,7 +92,7 @@ The reason is speed. Proving an autonomous edge takes months: the shadow-veto wi
 - The stop for an off-signal position is 1.5× ATR (4h) from the real entry.
 - The "no stop order" warning is never held overnight.
 - Above 5% risk, the owner must confirm.
-- The weekly summary is on Monday at 08:00 and splits virtual results from real ones.
+- The weekly summary is on Monday at 08:30 and splits virtual results from real ones.
 - Leverage is shown as the minimum needed for the notional against the balance, rounded up to a whole number, never more than 5x. If more than 5x would be needed, the message says so and suggests a smaller size.
 - The balance is the USDT wallet balance of the futures account. Other assets are ignored.
 - Support both one-way and hedge position mode. In hedge mode, a long and a short on the same symbol are two positions.

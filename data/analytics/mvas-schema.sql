@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 15).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 16).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -329,7 +329,10 @@ CREATE TABLE IF NOT EXISTS paper_shadow_verdicts (
 CREATE TABLE IF NOT EXISTS assist_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     risk_pct REAL NOT NULL DEFAULT 2.0,
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    paused_until_ms INTEGER,
+    awaiting_risk TEXT,
+    pending_risk_pct REAL
 );
 
 CREATE TABLE IF NOT EXISTS assist_edge (
@@ -337,7 +340,12 @@ CREATE TABLE IF NOT EXISTS assist_edge (
     futures_down_since_ms INTEGER,
     futures_down_alerted INTEGER NOT NULL DEFAULT 0,
     permission_error_reported INTEGER NOT NULL DEFAULT 0,
-    key_unsafe_reported INTEGER NOT NULL DEFAULT 0
+    key_unsafe_reported INTEGER NOT NULL DEFAULT 0,
+    streak_anchor_ms INTEGER,
+    week_pause_id TEXT,
+    listener_down_since_ms INTEGER,
+    listener_down_alerted INTEGER NOT NULL DEFAULT 0,
+    resume_alerted INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS assist_signal (
@@ -357,7 +365,8 @@ CREATE TABLE IF NOT EXISTS assist_signal (
     status TEXT NOT NULL,
     sent_at_ms INTEGER,
     leverage_capped INTEGER NOT NULL DEFAULT 0,
-    uncapped_leverage INTEGER
+    uncapped_leverage INTEGER,
+    telegram_message_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_assist_signal_symbol_status
     ON assist_signal (symbol, status);
@@ -377,8 +386,16 @@ CREATE TABLE IF NOT EXISTS assist_track (
     exit_px REAL,
     exit_reason TEXT,
     gross_r REAL,
+    net_r REAL,
+    fee_usdt REAL,
     pnl_usdt REAL,
     FOREIGN KEY (signal_id) REFERENCES assist_signal(id)
+);
+
+CREATE TABLE IF NOT EXISTS assist_telegram (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_update_id INTEGER,
+    keyboard_sent INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS assist_position_seen (

@@ -12,19 +12,74 @@ _UNSET: object = object()
 
 
 def ensure_settings(conn: Any) -> dict[str, Any]:
-    row = conn.execute("SELECT risk_pct, enabled FROM assist_settings WHERE id=1").fetchone()
+    row = conn.execute(
+        """
+        SELECT risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct
+        FROM assist_settings WHERE id=1
+        """
+    ).fetchone()
     if row is None:
         conn.execute("INSERT INTO assist_settings (id, risk_pct, enabled) VALUES (1, 2.0, 1)")
         conn.commit()
-        return {"risk_pct": 2.0, "enabled": True}
-    return {"risk_pct": float(row[0]), "enabled": bool(int(row[1]))}
+        return {
+            "risk_pct": 2.0,
+            "enabled": True,
+            "paused_until_ms": None,
+            "awaiting_risk": None,
+            "pending_risk_pct": None,
+        }
+    # Older DBs before migration 16 may lack the trailing columns.
+    paused = row[2] if len(row) > 2 else None
+    awaiting = row[3] if len(row) > 3 else None
+    pending = row[4] if len(row) > 4 else None
+    return {
+        "risk_pct": float(row[0]),
+        "enabled": bool(int(row[1])),
+        "paused_until_ms": int(paused) if paused is not None else None,
+        "awaiting_risk": str(awaiting) if awaiting else None,
+        "pending_risk_pct": float(pending) if pending is not None else None,
+    }
+
+
+def write_settings(
+    conn: Any,
+    *,
+    risk_pct: float | None = None,
+    enabled: bool | None = None,
+    paused_until_ms: Any = _UNSET,
+    awaiting_risk: Any = _UNSET,
+    pending_risk_pct: Any = _UNSET,
+) -> None:
+    cur = ensure_settings(conn)
+    rp = float(cur["risk_pct"] if risk_pct is None else risk_pct)
+    en = int(cur["enabled"] if enabled is None else enabled)
+    paused = cur["paused_until_ms"] if paused_until_ms is _UNSET else paused_until_ms
+    awaiting = cur["awaiting_risk"] if awaiting_risk is _UNSET else awaiting_risk
+    pending = cur["pending_risk_pct"] if pending_risk_pct is _UNSET else pending_risk_pct
+    conn.execute(
+        """
+        INSERT INTO assist_settings (
+            id, risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct
+        ) VALUES (1, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            risk_pct=excluded.risk_pct,
+            enabled=excluded.enabled,
+            paused_until_ms=excluded.paused_until_ms,
+            awaiting_risk=excluded.awaiting_risk,
+            pending_risk_pct=excluded.pending_risk_pct
+        """,
+        (rp, en, paused, awaiting, pending),
+    )
+    conn.commit()
 
 
 def get_edge(conn: Any) -> dict[str, Any]:
     row = conn.execute(
         """
         SELECT futures_down_since_ms, futures_down_alerted,
-               permission_error_reported, key_unsafe_reported
+               permission_error_reported, key_unsafe_reported,
+               streak_anchor_ms, week_pause_id,
+               listener_down_since_ms, listener_down_alerted, resume_alerted
         FROM assist_edge WHERE id=1
         """
     ).fetchone()
@@ -43,13 +98,30 @@ def get_edge(conn: Any) -> dict[str, Any]:
             "futures_down_alerted": False,
             "permission_error_reported": False,
             "key_unsafe_reported": False,
+            "streak_anchor_ms": None,
+            "week_pause_id": None,
+            "listener_down_since_ms": None,
+            "listener_down_alerted": False,
+            "resume_alerted": False,
         }
-    key_unsafe = bool(int(row[3])) if len(row) > 3 and row[3] is not None else False
+
+    def _i(idx: int) -> Any:
+        return row[idx] if len(row) > idx else None
+
+    def _b(idx: int) -> bool:
+        raw = _i(idx)
+        return bool(int(raw)) if raw is not None else False
+
     return {
-        "futures_down_since_ms": row[0],
-        "futures_down_alerted": bool(int(row[1])),
-        "permission_error_reported": bool(int(row[2])),
-        "key_unsafe_reported": key_unsafe,
+        "futures_down_since_ms": _i(0),
+        "futures_down_alerted": _b(1),
+        "permission_error_reported": _b(2),
+        "key_unsafe_reported": _b(3),
+        "streak_anchor_ms": int(_i(4)) if _i(4) is not None else None,
+        "week_pause_id": str(_i(5)) if _i(5) else None,
+        "listener_down_since_ms": int(_i(6)) if _i(6) is not None else None,
+        "listener_down_alerted": _b(7),
+        "resume_alerted": _b(8),
     }
 
 
@@ -60,6 +132,11 @@ def write_edge(
     futures_down_alerted: bool | None = None,
     permission_error_reported: bool | None = None,
     key_unsafe_reported: bool | None = None,
+    streak_anchor_ms: Any = _UNSET,
+    week_pause_id: Any = _UNSET,
+    listener_down_since_ms: Any = _UNSET,
+    listener_down_alerted: bool | None = None,
+    resume_alerted: bool | None = None,
 ) -> None:
     cur = get_edge(conn)
     since = cur["futures_down_since_ms"] if futures_down_since_ms is _UNSET else futures_down_since_ms
@@ -72,19 +149,35 @@ def write_edge(
         else int(cur["permission_error_reported"])
     )
     unsafe = int(key_unsafe_reported) if key_unsafe_reported is not None else int(cur["key_unsafe_reported"])
+    streak = cur["streak_anchor_ms"] if streak_anchor_ms is _UNSET else streak_anchor_ms
+    week = cur["week_pause_id"] if week_pause_id is _UNSET else week_pause_id
+    listen_since = (
+        cur["listener_down_since_ms"] if listener_down_since_ms is _UNSET else listener_down_since_ms
+    )
+    listen_alerted = (
+        int(listener_down_alerted) if listener_down_alerted is not None else int(cur["listener_down_alerted"])
+    )
+    resume = int(resume_alerted) if resume_alerted is not None else int(cur["resume_alerted"])
     conn.execute(
         """
         INSERT INTO assist_edge (
             id, futures_down_since_ms, futures_down_alerted,
-            permission_error_reported, key_unsafe_reported
-        ) VALUES (1, ?, ?, ?, ?)
+            permission_error_reported, key_unsafe_reported,
+            streak_anchor_ms, week_pause_id,
+            listener_down_since_ms, listener_down_alerted, resume_alerted
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             futures_down_since_ms=excluded.futures_down_since_ms,
             futures_down_alerted=excluded.futures_down_alerted,
             permission_error_reported=excluded.permission_error_reported,
-            key_unsafe_reported=excluded.key_unsafe_reported
+            key_unsafe_reported=excluded.key_unsafe_reported,
+            streak_anchor_ms=excluded.streak_anchor_ms,
+            week_pause_id=excluded.week_pause_id,
+            listener_down_since_ms=excluded.listener_down_since_ms,
+            listener_down_alerted=excluded.listener_down_alerted,
+            resume_alerted=excluded.resume_alerted
         """,
-        (since, down_alerted, perm, unsafe),
+        (since, down_alerted, perm, unsafe, streak, week, listen_since, listen_alerted, resume),
     )
     conn.commit()
 
@@ -331,6 +424,77 @@ def mark_signal_taken(conn: Any, signal_id: str) -> None:
     conn.commit()
 
 
+def mark_signal_skipped(conn: Any, signal_id: str) -> bool:
+    """Set status=skipped when still sent or held. Returns True when a row changed."""
+    cur = conn.execute(
+        """
+        UPDATE assist_signal SET status='skipped'
+        WHERE id=? AND status IN ('sent', 'held')
+        """,
+        (signal_id,),
+    )
+    conn.commit()
+    return int(cur.rowcount or 0) > 0
+
+
+def set_signal_telegram_message_id(conn: Any, signal_id: str, message_id: int) -> None:
+    conn.execute(
+        "UPDATE assist_signal SET telegram_message_id=? WHERE id=?",
+        (int(message_id), signal_id),
+    )
+    conn.commit()
+
+
+def get_signal(conn: Any, signal_id: str) -> dict[str, Any] | None:
+    cur = conn.execute(
+        """
+        SELECT id, analysis_id, symbol, side, entry, stop, target, qty, notional,
+               leverage, loss_at_stop, created_at_ms, expires_at_ms, status, sent_at_ms,
+               leverage_capped, uncapped_leverage, telegram_message_id
+        FROM assist_signal WHERE id=?
+        """,
+        (signal_id,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_telegram_state(conn: Any) -> dict[str, Any]:
+    row = conn.execute("SELECT last_update_id, keyboard_sent FROM assist_telegram WHERE id=1").fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO assist_telegram (id, last_update_id, keyboard_sent) VALUES (1, NULL, 0)"
+        )
+        conn.commit()
+        return {"last_update_id": None, "keyboard_sent": False}
+    return {
+        "last_update_id": int(row[0]) if row[0] is not None else None,
+        "keyboard_sent": bool(int(row[1])),
+    }
+
+
+def write_telegram_state(
+    conn: Any,
+    *,
+    last_update_id: Any = _UNSET,
+    keyboard_sent: bool | None = None,
+) -> None:
+    cur = get_telegram_state(conn)
+    uid = cur["last_update_id"] if last_update_id is _UNSET else last_update_id
+    ks = int(cur["keyboard_sent"] if keyboard_sent is None else keyboard_sent)
+    conn.execute(
+        """
+        INSERT INTO assist_telegram (id, last_update_id, keyboard_sent)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            last_update_id=excluded.last_update_id,
+            keyboard_sent=excluded.keyboard_sent
+        """,
+        (uid, ks),
+    )
+    conn.commit()
+
+
 def list_active_idea_signals(
     conn: Any,
     *,
@@ -566,6 +730,89 @@ def mark_watch_advice_dropped(conn: Any, advice_id: str) -> None:
         (advice_id,),
     )
     conn.commit()
+
+
+def list_open_tracks(conn: Any) -> list[dict[str, Any]]:
+    cur = conn.execute(
+        """
+        SELECT t.signal_id, t.symbol, t.side, t.entry, t.stop, t.target, t.qty, t.sent_at_ms,
+               s.loss_at_stop
+        FROM assist_track t
+        JOIN assist_signal s ON s.id = t.signal_id
+        WHERE t.exit_at_ms IS NULL
+        ORDER BY t.sent_at_ms ASC
+        """
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def close_track(
+    conn: Any,
+    signal_id: str,
+    *,
+    exit_at_ms: int,
+    exit_px: float,
+    exit_reason: str,
+    gross_r: float,
+    net_r: float,
+    fee_usdt: float,
+    pnl_usdt: float,
+) -> None:
+    conn.execute(
+        """
+        UPDATE assist_track SET
+            exit_at_ms=?, exit_px=?, exit_reason=?,
+            gross_r=?, net_r=?, fee_usdt=?, pnl_usdt=?
+        WHERE signal_id=? AND exit_at_ms IS NULL
+        """,
+        (
+            int(exit_at_ms),
+            float(exit_px),
+            exit_reason,
+            float(gross_r),
+            float(net_r),
+            float(fee_usdt),
+            float(pnl_usdt),
+            signal_id,
+        ),
+    )
+    conn.commit()
+
+
+def list_closed_tracks_since(conn: Any, *, since_ms: int) -> list[dict[str, Any]]:
+    cur = conn.execute(
+        """
+        SELECT signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
+               exit_at_ms, exit_px, exit_reason, gross_r, net_r, fee_usdt, pnl_usdt
+        FROM assist_track
+        WHERE exit_at_ms IS NOT NULL AND exit_at_ms >= ?
+        ORDER BY exit_at_ms ASC
+        """,
+        (int(since_ms),),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def count_closed_tracks_all(conn: Any) -> int:
+    row = conn.execute("SELECT COUNT(*) FROM assist_track WHERE exit_at_ms IS NOT NULL").fetchone()
+    return int(row[0]) if row else 0
+
+
+def count_signals_since(conn: Any, *, since_ms: int) -> dict[str, int]:
+    cur = conn.execute(
+        """
+        SELECT status, COUNT(*) FROM assist_signal
+        WHERE created_at_ms >= ?
+        GROUP BY status
+        """,
+        (int(since_ms),),
+    )
+    out = {"sent": 0, "skipped": 0, "taken": 0, "held": 0, "expired": 0}
+    for status, n in cur.fetchall():
+        key = str(status)
+        if key in out:
+            out[key] = int(n)
+    return out
 
 
 def now_ms() -> int:
