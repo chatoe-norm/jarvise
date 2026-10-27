@@ -33,6 +33,7 @@ from jarvise_assist.sizing import (
     SignalCandidate,
     admit_signals,
     analysis_is_fresh,
+    assign_shared_leverage,
     below_min_notional,
     chase_exceeded,
     next_assist_run_ms,
@@ -293,7 +294,7 @@ def scan_signal_candidates(
     When ``persist`` is False, no rows are inserted and Telegram is not used.
     """
     settings = ensure_settings(conn)
-    balance = futures.usdt_wallet_balance()
+    balance, available = futures.usdt_wallet_and_available()
     positions = futures.position_risk()
     open_syms = {p.symbol for p in positions}
     try:
@@ -381,10 +382,17 @@ def scan_signal_candidates(
     admitted, rejected = admit_signals(existing=existing, candidates=candidates, balance=balance)
     for cand in rejected:
         skipped.append({"symbol": cand.sized.symbol, "reason": "risk_cap"})
+    admitted, margin_dropped = assign_shared_leverage(
+        admitted,
+        available_balance=available,
+    )
+    for cand in margin_dropped:
+        skipped.append({"symbol": cand.sized.symbol, "reason": "margin_cap"})
     return {
         "admitted": admitted,
         "skipped": skipped,
         "balance_usdt": float(balance),
+        "available_usdt": float(available),
         "positions": positions,
         "orders": orders,
         "persist": persist,
@@ -545,7 +553,7 @@ def run_assist_morning(
 
     try:
         client.assert_key_safe()
-        balance = client.usdt_wallet_balance()
+        balance, available = client.usdt_wallet_and_available()
         client.open_symbols()
         _handle_futures_ok(conn, send=send_fn)
     except FuturesKeyUnsafeError as exc:
@@ -571,6 +579,8 @@ def run_assist_morning(
     risk_pct = Decimal(str(settings["risk_pct"]))
     sent: list[str] = []
     expired: list[str] = list(expire_older_held_keep_newest(conn))
+    symbol_rank = {sym: i for i, sym in enumerate(ASSIST_SYMBOLS)}
+    morning_candidates: list[tuple[str, SignalCandidate]] = []
 
     for row in list_held_signals(conn):
         symbol = str(row["symbol"]).upper()
@@ -614,9 +624,38 @@ def run_assist_morning(
             mark_signal_expired(conn, str(row["id"]))
             expired.append(str(row["id"]))
             continue
-        expires = next_assist_run_ms(ts)
+        morning_candidates.append(
+            (
+                str(row["id"]),
+                SignalCandidate(
+                    sized=sized,
+                    confidence=float(analysis.get("confidence_score") or 0.0),
+                    symbol_rank=symbol_rank.get(symbol, 99),
+                ),
+            )
+        )
+
+    morning_sized = [c for _, c in morning_candidates]
+    admitted_morning, margin_dropped = assign_shared_leverage(
+        morning_sized,
+        available_balance=available,
+    )
+    dropped_set = set(margin_dropped)
+    for sid, cand in morning_candidates:
+        if cand in dropped_set:
+            mark_signal_expired(conn, sid)
+            expired.append(sid)
+
+    # Admitted rows are new SignalCandidate objects; pair by symbol (one held per symbol).
+    sized_by_symbol = {c.sized.symbol: c.sized for c in admitted_morning}
+    expires = next_assist_run_ms(ts)
+    for sid, cand in morning_candidates:
+        if cand in dropped_set:
+            continue
+        sized = sized_by_symbol.get(cand.sized.symbol)
+        if sized is None:
+            continue
         text = format_signal_message(sized, expires_at_ms=expires, balance=balance)
-        sid = str(row["id"])
         sent_ok, mid = _invoke_send(send_fn, text, reply_markup=skip_inline_keyboard(sid))
         if sent_ok:
             mark_signal_sent(conn, sid, sized, sent_at_ms=ts, expires_at_ms=expires)
@@ -637,6 +676,7 @@ def run_assist_morning(
             "sent": sent,
             "expired": expired,
             "balance_usdt": float(balance),
+            "available_usdt": float(available),
             "watch_advice": watch_flush,
         }
     )

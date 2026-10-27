@@ -16,7 +16,7 @@ def risk_button_label(risk_pct: float) -> str:
     return f"{BTN_RISK_PREFIX} (ตอนนี้ {pct}%)"
 
 
-def reply_keyboard(risk_pct: float = 2.0) -> dict[str, Any]:
+def reply_keyboard(risk_pct: float = 1.0) -> dict[str, Any]:
     return {
         "keyboard": [
             [{"text": BTN_POSITIONS}, {"text": BTN_ANYTHING}],

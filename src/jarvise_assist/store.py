@@ -19,10 +19,10 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
         """
     ).fetchone()
     if row is None:
-        conn.execute("INSERT INTO assist_settings (id, risk_pct, enabled) VALUES (1, 2.0, 1)")
+        conn.execute("INSERT INTO assist_settings (id, risk_pct, enabled) VALUES (1, 1.0, 1)")
         conn.commit()
         return {
-            "risk_pct": 2.0,
+            "risk_pct": 1.0,
             "enabled": True,
             "paused_until_ms": None,
             "awaiting_risk": None,

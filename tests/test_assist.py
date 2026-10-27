@@ -25,7 +25,9 @@ from jarvise_assist.signals import is_night_hold, run_assist_morning, run_assist
 from jarvise_assist.sizing import (
     ExistingIdea,
     SignalCandidate,
+    SizedSignal,
     admit_signals,
+    assign_shared_leverage,
     chase_exceeded,
     floor_to_step,
     next_4h_close_ms,
@@ -53,6 +55,7 @@ class FakeFutures:
         self,
         *,
         balance: Decimal = Decimal("1000"),
+        available: Decimal | None = None,
         marks: dict[str, Decimal] | None = None,
         steps: dict[str, Decimal] | None = None,
         min_qty: dict[str, Decimal] | None = None,
@@ -68,6 +71,7 @@ class FakeFutures:
         income: list[dict[str, Any]] | None = None,
     ) -> None:
         self.balance = balance
+        self.available = available
         self.marks = marks or {}
         self.steps = steps or {}
         self.min_qty = min_qty or {}
@@ -90,12 +94,19 @@ class FakeFutures:
             raise FuturesKeyUnsafeError("enableWithdrawals=true")
         return {"ok_for_assist": True}
 
-    def usdt_wallet_balance(self) -> Decimal:
+    def usdt_wallet_and_available(self) -> tuple[Decimal, Decimal]:
         if self.permission_on_balance:
             raise self.permission_on_balance
         if self.read_error:
             raise self.read_error
-        return self.balance
+        avail = self.balance if self.available is None else self.available
+        return self.balance, avail
+
+    def usdt_wallet_balance(self) -> Decimal:
+        return self.usdt_wallet_and_available()[0]
+
+    def usdt_available_balance(self) -> Decimal:
+        return self.usdt_wallet_and_available()[1]
 
     def open_symbols(self) -> set[str]:
         if self.read_error:
@@ -305,6 +316,7 @@ def test_format_signal_message_style_a() -> None:
     assert "Stop:" in text and "+" in text
     assert "(2R)" in text
     assert "isolated" in text
+    assert "margin ≈" in text
     assert "ตั้ง Stop-Market (Reduce-Only, trigger = Mark Price) ทันทีหลังเข้า" in text
     assert "หมดอายุ 20:00" in text
     assert "api_key" not in text.lower()
@@ -785,7 +797,7 @@ def test_migration_14_creates_assist_tables(tmp_path: Path) -> None:
         "assist_watch_advice",
     }
     settings = ensure_settings(conn)
-    assert settings["risk_pct"] == 2.0
+    assert settings["risk_pct"] == 1.0
     assert settings["enabled"] is True
     conn.close()
 
@@ -1794,3 +1806,134 @@ def test_morning_batch_after_paper_run_sends_held_signal(tmp_path: Path) -> None
     )
     assert len(p1["sent"]) == 1
     assert sent and "DOGEUSDT" in sent[0]
+
+
+def _candidate_with_notional(
+    *,
+    symbol: str,
+    notional: Decimal,
+    confidence: float,
+    symbol_rank: int,
+) -> SignalCandidate:
+    entry = Decimal("1")
+    stop = Decimal("0.9")
+    qty = notional / entry
+    return SignalCandidate(
+        sized=SizedSignal(
+            symbol=symbol,
+            side="long",
+            entry=entry,
+            stop=stop,
+            target=Decimal("1.2"),
+            qty=qty,
+            notional=notional,
+            leverage=1,
+            loss_at_stop=Decimal("1"),
+            risk_pct=Decimal("1"),
+            r_distance=entry - stop,
+            leverage_capped=False,
+            uncapped_leverage=1,
+            analysis_id=None,
+        ),
+        confidence=confidence,
+        symbol_rank=symbol_rank,
+    )
+
+
+def test_assign_shared_leverage_ada_doge_l2() -> None:
+    """ADA 69.39 + DOGE 100.32 on available 100 → shared L=2; margins sum under 100."""
+    ada = _candidate_with_notional(
+        symbol="ADAUSDT",
+        notional=Decimal("69.39"),
+        confidence=0.70,
+        symbol_rank=4,
+    )
+    doge = _candidate_with_notional(
+        symbol="DOGEUSDT",
+        notional=Decimal("100.32"),
+        confidence=0.72,
+        symbol_rank=5,
+    )
+    admitted, dropped = assign_shared_leverage(
+        [ada, doge],
+        available_balance=Decimal("100"),
+    )
+    assert dropped == []
+    assert len(admitted) == 2
+    assert {c.sized.leverage for c in admitted} == {2}
+    margins = sum((c.sized.notional / Decimal(c.sized.leverage) for c in admitted), Decimal("0"))
+    assert margins < Decimal("100")
+    assert margins == (Decimal("69.39") + Decimal("100.32")) / Decimal("2")
+
+
+def test_assign_shared_leverage_drops_margin_cap() -> None:
+    high = _candidate_with_notional(
+        symbol="BTCUSDT",
+        notional=Decimal("100"),
+        confidence=0.80,
+        symbol_rank=0,
+    )
+    low = _candidate_with_notional(
+        symbol="ETHUSDT",
+        notional=Decimal("80"),
+        confidence=0.60,
+        symbol_rank=1,
+    )
+    # available 30 → batch L=7; drop ETH; BTC alone needs L=4.
+    admitted, dropped = assign_shared_leverage(
+        [high, low],
+        available_balance=Decimal("30"),
+    )
+    assert len(dropped) == 1
+    assert dropped[0].sized.symbol == "ETHUSDT"
+    assert len(admitted) == 1
+    assert admitted[0].sized.symbol == "BTCUSDT"
+    assert admitted[0].sized.leverage == 4
+
+
+def test_assign_shared_leverage_lower_available_raises_l() -> None:
+    ada = _candidate_with_notional(
+        symbol="ADAUSDT",
+        notional=Decimal("69.39"),
+        confidence=0.70,
+        symbol_rank=4,
+    )
+    doge = _candidate_with_notional(
+        symbol="DOGEUSDT",
+        notional=Decimal("100.32"),
+        confidence=0.72,
+        symbol_rank=5,
+    )
+    full, _ = assign_shared_leverage([ada, doge], available_balance=Decimal("100"))
+    tight, _ = assign_shared_leverage([ada, doge], available_balance=Decimal("50"))
+    assert full[0].sized.leverage == 2
+    assert tight[0].sized.leverage > full[0].sized.leverage
+    assert {c.sized.leverage for c in tight} == {4}
+
+
+def test_shared_leverage_two_idea_telegram_text() -> None:
+    """Fixture: print the two-idea Telegram text for the report."""
+    ada = _candidate_with_notional(
+        symbol="ADAUSDT",
+        notional=Decimal("69.39"),
+        confidence=0.70,
+        symbol_rank=4,
+    )
+    doge = _candidate_with_notional(
+        symbol="DOGEUSDT",
+        notional=Decimal("100.32"),
+        confidence=0.72,
+        symbol_rank=5,
+    )
+    admitted, _ = assign_shared_leverage(
+        [ada, doge],
+        available_balance=Decimal("100"),
+    )
+    expires = _ms_bangkok(2026, 10, 27, 12, 25)
+    blocks = [format_signal_message(c.sized, expires_at_ms=expires, balance=Decimal("100")) for c in admitted]
+    text = "\n\n".join(blocks)
+    assert "ADAUSDT" in text and "DOGEUSDT" in text
+    assert text.count("Leverage ที่ต้องใช้: 2x (isolated)") == 2
+    assert "margin ≈" in text
+    # Visible in pytest -s / CI logs for the PR report.
+    print(text)

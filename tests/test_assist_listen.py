@@ -156,7 +156,7 @@ def test_risk_menu_confirms_above_5_and_rejects_out_of_range(tmp_path: Path) -> 
 
     bad = handle_risk_number(conn, "20", send=send)
     assert bad["rejected"] is True
-    assert ensure_settings(conn)["risk_pct"] == 2.0
+    assert ensure_settings(conn)["risk_pct"] == 1.0
 
     write_settings(conn, awaiting_risk="number")
     conf = handle_risk_number(conn, "7.5", send=send)
