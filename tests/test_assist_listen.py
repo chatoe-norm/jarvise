@@ -9,8 +9,9 @@ from typing import Any
 
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
+from jarvise_assist import listen as listen_mod
 from jarvise_assist.keyboard import BTN_ANYTHING, BTN_POSITIONS, BTN_TOGGLE, risk_button_label
-from jarvise_assist.listen import poll_once, process_update
+from jarvise_assist.listen import poll_once, process_update, start_listener_thread
 from jarvise_assist.menu import (
     handle_menu_text,
     handle_risk_callback,
@@ -538,4 +539,206 @@ def test_open_positions_menu_sample(tmp_path: Path) -> None:
     assert "BTCUSDT LONG" in text
     assert "PEPEUSDT · no data, no advice" in text
     assert risk_button_label(2.0).startswith("⚙️")
+    conn.close()
+
+
+def test_empty_chat_id_does_not_start_listener_and_ignores_updates(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    listen_mod._listener_started = False
+    assert start_listener_thread(db_path=tmp_path / "empty-chat.db") is None
+    assert listen_mod._listener_started is False
+
+    conn = open_db(tmp_path / "empty-chat.db")
+    sent, send = _send_capture()
+    msg = {"update_id": 1, "message": {"chat": {"id": 999}, "text": BTN_TOGGLE}}
+    assert process_update(conn, msg, send=send)["ignored"] == "no_owner_chat"
+    cb = {
+        "update_id": 2,
+        "callback_query": {
+            "id": "cq",
+            "data": "risk:2",
+            "message": {"chat": {"id": 999}, "message_id": 1},
+        },
+    }
+    assert process_update(conn, cb, send=send)["ignored"] == "no_owner_chat"
+    assert sent == []
+    conn.close()
+
+
+def _seed_calm_1h_bar(conn: Any, *, symbol: str, bar_ts: int) -> None:
+    """Bar that stays inside a 100/90 long stop and short of a 120 target."""
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "timestamp": bar_ts,
+                "symbol": symbol,
+                "timeframe": "1h",
+                "open": 100.0,
+                "high": 105.0,
+                "low": 95.0,
+                "close": 101.0,
+                "volume": 1.0,
+            }
+        ],
+    )
+
+
+def test_flat_analysis_available_before_bar_close_exits(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "asof-flat.db")
+    sent_at = _ms_bangkok(2026, 10, 27, 8, 0)
+    bar_ts = sent_at + 3_600_000
+    close_ms = bar_ts + 3_600_000
+    sized = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("90"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("0.001"),
+    )
+    assert sized is not None
+    sid = insert_signal(
+        conn, sized, status="sent", created_at_ms=sent_at, expires_at_ms=sent_at + 1, sent_at_ms=sent_at
+    )
+    _seed_calm_1h_bar(conn, symbol="BTCUSDT", bar_ts=bar_ts)
+    # Available exactly at bar close: timestamp + 5h == close_ms.
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="flat",
+        confidence=0.0,
+        invalidation=None,
+        ts=close_ms - 5 * 3_600_000,
+    )
+    resolved = resolve_open_tracks(conn, now_ms=close_ms)
+    assert resolved["n"] == 1
+    row = conn.execute("SELECT exit_reason FROM assist_track WHERE signal_id=?", (sid,)).fetchone()
+    assert row is not None and row[0] == "flat"
+
+    # One millisecond later: not yet available → no analysis exit.
+    conn2 = open_db(tmp_path / "asof-flat-late.db")
+    sid2 = insert_signal(
+        conn2, sized, status="sent", created_at_ms=sent_at, expires_at_ms=sent_at + 1, sent_at_ms=sent_at
+    )
+    _seed_calm_1h_bar(conn2, symbol="BTCUSDT", bar_ts=bar_ts)
+    _seed_analysis(
+        conn2,
+        symbol="BTCUSDT",
+        action="flat",
+        confidence=0.0,
+        invalidation=None,
+        ts=close_ms - 5 * 3_600_000 + 1,
+    )
+    assert resolve_open_tracks(conn2, now_ms=close_ms)["n"] == 0
+    open_row = conn2.execute("SELECT exit_at_ms FROM assist_track WHERE signal_id=?", (sid2,)).fetchone()
+    assert open_row is not None and open_row[0] is None
+    conn.close()
+    conn2.close()
+
+
+def test_historical_flat_exit_when_newest_analysis_is_long(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "asof-hist.db")
+    sent_at = _ms_bangkok(2026, 10, 27, 8, 0)
+    bar_ts = sent_at + 3_600_000
+    close_ms = bar_ts + 3_600_000
+    sized = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("90"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("0.001"),
+    )
+    assert sized is not None
+    sid = insert_signal(
+        conn, sized, status="sent", created_at_ms=sent_at, expires_at_ms=sent_at + 1, sent_at_ms=sent_at
+    )
+    _seed_calm_1h_bar(conn, symbol="BTCUSDT", bar_ts=bar_ts)
+    # Older flat is available at the bar close.
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="flat",
+        confidence=0.0,
+        invalidation=None,
+        ts=close_ms - 5 * 3_600_000,
+    )
+    # Newer long is the overall newest but not yet available (lookahead trap).
+    _seed_analysis(
+        conn,
+        symbol="BTCUSDT",
+        action="long",
+        confidence=0.8,
+        invalidation=90.0,
+        ts=close_ms - 5 * 3_600_000 + 60_000,
+    )
+    resolved = resolve_open_tracks(conn, now_ms=close_ms)
+    assert resolved["n"] == 1
+    row = conn.execute("SELECT exit_reason FROM assist_track WHERE signal_id=?", (sid,)).fetchone()
+    assert row is not None and row[0] == "flat"
+    conn.close()
+
+
+def test_split_fill_counts_as_one_loss(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "split.db")
+    now = _ms_bangkok(2026, 10, 27, 15, 0)
+    # Three fill legs of one stop-out within 120s — one close event, no streak.
+    income = [
+        {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "-2", "time": now - 2000},
+        {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "-2", "time": now - 1500},
+        {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "-1", "time": now - 1000},
+    ]
+    fake = FakeFutures(balance=Decimal("1000"), income=income)
+    sent, send = _send_capture()
+    r = evaluate_pause(conn, futures=fake, now_ms=now, send=send)
+    assert r.get("paused") is False
+    assert sent == []
+    conn.close()
+
+
+def test_three_separate_losing_trades_pause(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "sep.db")
+    now = _ms_bangkok(2026, 10, 27, 15, 0)
+    # Same symbol, more than 120s apart → three close events.
+    income = [
+        {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "-5", "time": now - 400_000},
+        {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "-4", "time": now - 250_000},
+        {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "-3", "time": now - 100_000},
+    ]
+    fake = FakeFutures(balance=Decimal("1000"), income=income)
+    sent, send = _send_capture()
+    r = evaluate_pause(conn, futures=fake, now_ms=now, send=send)
+    assert r["paused"] is True and r["reason"] == "streak"
+    assert STREAK_PAUSE_TEXT in sent[0]["text"]
+    conn.close()
+
+
+def test_midweek_transfer_does_not_change_loss_pct(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "xfer.db")
+    now = _ms_bangkok(2026, 10, 27, 18, 0)
+    # Without transfer: bal 1000, trading -70 → week start 1070, loss ~6.54%.
+    base_income = [{"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "-70", "time": now - 2000}]
+    with_xfer = [
+        *base_income,
+        {"symbol": "", "incomeType": "TRANSFER", "income": "50", "time": now - 1000},
+    ]
+    sent_a, send_a = _send_capture()
+    r_a = evaluate_pause(
+        conn, futures=FakeFutures(balance=Decimal("1000"), income=base_income), now_ms=now, send=send_a
+    )
+    assert r_a["paused"] is True and r_a["reason"] == "week_loss"
+    pct_a = float(r_a["loss_pct"])
+    write_settings(conn, paused_until_ms=None)
+    write_edge(conn, week_pause_id=None, resume_alerted=False)
+    sent_b, send_b = _send_capture()
+    # bal 1050 includes the +50 transfer; week start must still be 1070.
+    r_b = evaluate_pause(
+        conn, futures=FakeFutures(balance=Decimal("1050"), income=with_xfer), now_ms=now, send=send_b
+    )
+    assert r_b["paused"] is True and r_b["reason"] == "week_loss"
+    assert abs(float(r_b["loss_pct"]) - pct_a) < 1e-9
     conn.close()

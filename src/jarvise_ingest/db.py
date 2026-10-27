@@ -1972,6 +1972,35 @@ def load_latest_analysis(conn: sqlite3.Connection, symbol: str, timeframe: str) 
     return dict(row) if row is not None else None
 
 
+def load_analysis_available_at(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    asof_ms: int,
+    lag_ms: int,
+) -> dict | None:
+    """Newest analysis row that would have been published by asof_ms.
+
+    Analysis rows store the bar OPEN time. A 4h row becomes available about
+    lag_ms after that open (bar close + one hour for a 4h bar when lag_ms is 5h).
+    """
+    cur = conn.execute(
+        """
+        SELECT analysis_id, timestamp, symbol, timeframe, regime_state,
+               confidence_score, action, invalidation_price, size_pct_equity, thesis
+        FROM analysis_output
+        WHERE symbol=? AND timeframe=?
+          AND timestamp + ? <= ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), timeframe, int(lag_ms), int(asof_ms)),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
 def upsert_performance_risk_metrics(conn: sqlite3.Connection, row: dict) -> None:
     conn.execute(
         """

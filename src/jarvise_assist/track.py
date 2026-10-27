@@ -9,11 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 from jarvise_assist.store import close_track, list_open_tracks
-from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
+from jarvise_ingest.db import load_analysis_available_at, load_candles_in_range
 from jarvise_paper.profit_lock import trail_stop_with_source
 
 TRACK_TF = "1h"
 ANALYSIS_TF = "4h"
+# 4h bar open → available after close + ~1h (timestamp + 5h).
+ANALYSIS_LAG_MS = 5 * 3_600_000
 FEE_BPS_PER_SIDE = 4.0
 
 
@@ -47,13 +49,15 @@ def _analysis_exit_reason(
     side: str,
     asof_ms: int,
 ) -> str | None:
-    """flat or opposite on the newest 4h analysis at or before asof_ms."""
-    # load_latest_analysis is "latest stored"; filter by created/timestamp when present.
-    row = load_latest_analysis(conn, symbol, ANALYSIS_TF)
+    """flat or opposite on the newest 4h analysis available by asof_ms (no lookahead)."""
+    row = load_analysis_available_at(
+        conn,
+        symbol,
+        ANALYSIS_TF,
+        asof_ms=int(asof_ms),
+        lag_ms=ANALYSIS_LAG_MS,
+    )
     if row is None:
-        return None
-    ts = row.get("timestamp") or row.get("created_at_ms") or row.get("asof_ms")
-    if ts is not None and int(ts) > int(asof_ms):
         return None
     action = str(row.get("action") or "").lower()
     if action == "flat":

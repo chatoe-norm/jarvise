@@ -73,12 +73,14 @@ def process_update(
     answer_fn = answer or answer_callback
     edit_fn = edit or edit_message
     expected = owner_chat_id()
+    if not expected:
+        return {"ignored": "no_owner_chat"}
 
     callback = update.get("callback_query")
     if isinstance(callback, dict):
         msg = callback.get("message") or {}
         chat = (msg.get("chat") or {}).get("id")
-        if expected and str(chat) != expected:
+        if str(chat) != expected:
             return {"ignored": "foreign_chat"}
         data = str(callback.get("data") or "")
         cq_id = str(callback.get("id") or "")
@@ -105,7 +107,7 @@ def process_update(
     if not isinstance(message, dict):
         return {"ignored": "no_message"}
     chat = (message.get("chat") or {}).get("id")
-    if expected and str(chat) != expected:
+    if str(chat) != expected:
         return {"ignored": "foreign_chat"}
     text = str(message.get("text") or "")
     risk_num = handle_risk_number(conn, text, send=send_fn)
@@ -226,8 +228,11 @@ def listener_loop(
 
 
 def start_listener_thread(*, db_path: Path | str | None = None) -> threading.Thread | None:
-    """Start the daemon once. Returns the thread, or None if already started."""
+    """Start the daemon once. Returns the thread, or None if already started or chat id unset."""
     global _listener_started
+    if not owner_chat_id():
+        logger.warning("assist telegram listener not started: TELEGRAM_CHAT_ID is empty")
+        return None
     with _listener_lock:
         if _listener_started:
             return None

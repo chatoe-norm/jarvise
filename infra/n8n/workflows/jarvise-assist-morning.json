@@ -14,7 +14,7 @@
         }
       },
       "id": "cron-assist-morning",
-      "name": "Daily 08:00 Bangkok",
+      "name": "Daily 08:20 Bangkok",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [0, 0]
@@ -45,7 +45,7 @@
     }
   ],
   "connections": {
-    "Daily 08:00 Bangkok": {
+    "Daily 08:20 Bangkok": {
       "main": [
         [
           {

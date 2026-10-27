@@ -13,6 +13,16 @@ from jarvise_assist.store import ensure_settings, get_edge, write_edge, write_se
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 WEEK_LOSS_PCT = Decimal("6")
+CLOSE_EVENT_MERGE_MS = 120_000
+TRADING_INCOME_TYPES = frozenset({"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"})
+TRANSFER_INCOME_TYPES = frozenset(
+    {
+        "TRANSFER",
+        "INTERNAL_TRANSFER",
+        "CROSS_COLLATERAL_TRANSFER",
+        "STRATEGY_UMFUTURES_TRANSFER",
+    }
+)
 SendFn = Callable[..., Any]
 
 RESUME_TEXT = "▶️ กลับมาส่ง signal แล้ว"
@@ -105,6 +115,46 @@ def _net_income_usdt(rows: list[dict[str, Any]]) -> Decimal:
     return total
 
 
+def _close_events(
+    realized: list[dict[str, Any]],
+    *,
+    merge_ms: int = CLOSE_EVENT_MERGE_MS,
+) -> list[dict[str, Any]]:
+    """Group REALIZED_PNL rows into close events (same symbol within merge_ms)."""
+    by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for row in sorted(realized, key=lambda r: (str(r.get("symbol") or ""), int(r.get("time") or 0))):
+        sym = str(row.get("symbol") or "").upper()
+        by_symbol.setdefault(sym, []).append(row)
+
+    events: list[dict[str, Any]] = []
+    for sym, rows in by_symbol.items():
+        group: list[dict[str, Any]] = []
+        group_end = 0
+        for row in rows:
+            t = int(row.get("time") or 0)
+            if group and t - group_end > merge_ms:
+                events.append(
+                    {
+                        "symbol": sym,
+                        "sum": _net_income_usdt(group),
+                        "time": group_end,
+                    }
+                )
+                group = []
+            group.append(row)
+            group_end = t
+        if group:
+            events.append(
+                {
+                    "symbol": sym,
+                    "sum": _net_income_usdt(group),
+                    "time": group_end,
+                }
+            )
+    events.sort(key=lambda e: int(e["time"]))
+    return events
+
+
 def evaluate_pause(
     conn: Any,
     *,
@@ -130,13 +180,13 @@ def evaluate_pause(
         for r in _universe_income(income, income_type="REALIZED_PNL")
         if Decimal(str(r.get("income") or "0")) != 0
     ]
-    realized.sort(key=lambda r: int(r.get("time") or 0))
+    events = _close_events(realized)
 
-    # Three latest non-zero realized PnL all negative.
-    if len(realized) >= 3:
-        last3 = realized[-3:]
-        if all(Decimal(str(r.get("income") or "0")) < 0 for r in last3):
-            anchor = int(last3[-1].get("time") or now_ms)
+    # Three latest close events all negative (a split fill is one event).
+    if len(events) >= 3:
+        last3 = events[-3:]
+        if all(Decimal(str(e["sum"])) < 0 for e in last3):
+            anchor = int(last3[-1]["time"] or now_ms)
             if edge["streak_anchor_ms"] != anchor:
                 until = next_0820_bangkok_ms(now_ms)
                 write_settings(conn, paused_until_ms=until)
@@ -149,15 +199,15 @@ def evaluate_pause(
                     "anchor_ms": anchor,
                 }
 
-    # Week net loss > 6% of reconstructed week-start balance.
-    typed = [
-        r for r in income if str(r.get("incomeType") or "") in {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}
-    ]
-    week_net = _net_income_usdt(typed)
-    week_start_bal = balance - week_net
+    # Week trading net loss > 6% of reconstructed week-start balance.
+    trading = [r for r in income if str(r.get("incomeType") or "") in TRADING_INCOME_TYPES]
+    transfers = [r for r in income if str(r.get("incomeType") or "") in TRANSFER_INCOME_TYPES]
+    trading_net = _net_income_usdt(trading)
+    transfer_net = _net_income_usdt(transfers)
+    week_start_bal = balance - trading_net - transfer_net
     week_id = bangkok_week_id(now_ms)
-    if week_start_bal > 0 and week_net < 0:
-        loss_pct = (-week_net / week_start_bal) * Decimal("100")
+    if week_start_bal > 0 and trading_net < 0:
+        loss_pct = (-trading_net / week_start_bal) * Decimal("100")
         if loss_pct > WEEK_LOSS_PCT and edge["week_pause_id"] != week_id:
             until = next_0820_bangkok_ms(now_ms)
             write_settings(conn, paused_until_ms=until)
