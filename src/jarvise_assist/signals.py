@@ -294,13 +294,7 @@ def scan_signal_candidates(
     When ``persist`` is False, no rows are inserted and Telegram is not used.
     """
     settings = ensure_settings(conn)
-    if hasattr(futures, "usdt_wallet_and_available"):
-        balance, available = futures.usdt_wallet_and_available()
-    else:
-        balance = futures.usdt_wallet_balance()
-        available = (
-            futures.usdt_available_balance() if hasattr(futures, "usdt_available_balance") else balance
-        )
+    balance, available = futures.usdt_wallet_and_available()
     positions = futures.position_risk()
     open_syms = {p.symbol for p in positions}
     try:
@@ -559,13 +553,7 @@ def run_assist_morning(
 
     try:
         client.assert_key_safe()
-        if hasattr(client, "usdt_wallet_and_available"):
-            balance, available = client.usdt_wallet_and_available()
-        else:
-            balance = client.usdt_wallet_balance()
-            available = (
-                client.usdt_available_balance() if hasattr(client, "usdt_available_balance") else balance
-            )
+        balance, available = client.usdt_wallet_and_available()
         client.open_symbols()
         _handle_futures_ok(conn, send=send_fn)
     except FuturesKeyUnsafeError as exc:
