@@ -585,6 +585,36 @@ def _migrate_outcome_r(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "paper_decision_outcomes", "return_on_notional", "REAL")
 
 
+def _migrate_assist_listen(conn: sqlite3.Connection) -> None:
+    """Telegram listener, pause, and virtual-track fields. Never writes paper/live/approval."""
+    _add_column_if_missing(conn, "assist_settings", "paused_until_ms", "INTEGER")
+    _add_column_if_missing(conn, "assist_settings", "awaiting_risk", "TEXT")
+    _add_column_if_missing(conn, "assist_settings", "pending_risk_pct", "REAL")
+    _add_column_if_missing(conn, "assist_signal", "telegram_message_id", "INTEGER")
+    _add_column_if_missing(conn, "assist_track", "net_r", "REAL")
+    _add_column_if_missing(conn, "assist_track", "fee_usdt", "REAL")
+    for name, typ in (
+        ("streak_anchor_ms", "INTEGER"),
+        ("week_pause_id", "TEXT"),
+        ("listener_down_since_ms", "INTEGER"),
+        ("listener_down_alerted", "INTEGER NOT NULL DEFAULT 0"),
+        ("resume_alerted", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        _add_column_if_missing(conn, "assist_edge", name, typ)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_telegram (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_update_id INTEGER,
+            keyboard_sent INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO assist_telegram (id, last_update_id, keyboard_sent) VALUES (1, NULL, 0)"
+    )
+
+
 def _migrate_assist_watch(conn: sqlite3.Connection) -> None:
     """Position-watch state for trade assistant. Never writes paper/live/approval rows."""
     conn.execute(
@@ -838,6 +868,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (13, "outcome_r", _migrate_outcome_r, True),
     (14, "trade_assist", _migrate_trade_assist, True),
     (15, "assist_watch", _migrate_assist_watch, True),
+    (16, "assist_listen", _migrate_assist_listen, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -1936,6 +1967,35 @@ def load_latest_analysis(conn: sqlite3.Connection, symbol: str, timeframe: str) 
         LIMIT 1
         """,
         (symbol.upper(), timeframe),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def load_analysis_available_at(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    asof_ms: int,
+    lag_ms: int,
+) -> dict | None:
+    """Newest analysis row that would have been published by asof_ms.
+
+    Analysis rows store the bar OPEN time. A 4h row becomes available about
+    lag_ms after that open (bar close + one hour for a 4h bar when lag_ms is 5h).
+    """
+    cur = conn.execute(
+        """
+        SELECT analysis_id, timestamp, symbol, timeframe, regime_state,
+               confidence_score, action, invalidation_price, size_pct_equity, thesis
+        FROM analysis_output
+        WHERE symbol=? AND timeframe=?
+          AND timestamp + ? <= ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), timeframe, int(lag_ms), int(asof_ms)),
     )
     row = cur.fetchone()
     return dict(row) if row is not None else None

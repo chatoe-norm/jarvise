@@ -19,8 +19,10 @@ from urllib.parse import parse_qs
 from jarvise.charts import export_candle_graphs
 from jarvise.disk import disk_edge_alerted, disk_free
 from jarvise.rag import doctrine_snippets, publish_redis_status
+from jarvise_assist.listen import start_listener_thread
 from jarvise_assist.signals import run_assist_morning, run_assist_signals
 from jarvise_assist.watch import run_assist_watch
+from jarvise_assist.weekly import run_assist_weekly
 from jarvise_ingest.db import (
     count_indicator_ready,
     count_market,
@@ -63,6 +65,7 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     "assist_signal": 300.0,
     "assist_morning": 180.0,
     "assist_watch": 300.0,
+    "assist_weekly": 180.0,
     "weekly_report": 120.0,
 }
 # Single-flight lock TTLs (seconds): a crashed holder frees the lock automatically.
@@ -80,6 +83,7 @@ JOB_LOCK_TTL_S: dict[str, int] = {
     "assist_signal": 360,
     "assist_morning": 240,
     "assist_watch": 360,
+    "assist_weekly": 240,
     "weekly_report": 180,
 }
 TIMEOUT_EXIT_CODE = 124
@@ -527,6 +531,41 @@ def run_assist_morning_job() -> tuple[int, dict[str, Any]]:
         return (0 if payload.get("ok") else 1), payload
 
 
+def run_assist_weekly_job() -> tuple[int, dict[str, Any]]:
+    """Monday 08:30 Bangkok assist weekly summary. Never places orders."""
+    with single_flight("assist_weekly") as acquired:
+        if not acquired:
+            return 3, _running("assist_weekly")
+        now = int(time.time() * 1000)
+        raw = os.environ.get("JARVISE_DB") or "data/analytics/jarvise.db"
+        path = Path(raw)
+        if not path.exists():
+            payload = {
+                "ok": False,
+                "error": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
+            _publish_best_effort("jarvise:assist_weekly:last", payload)
+            return 1, payload
+        conn = open_db(path)
+        try:
+            payload = run_assist_weekly(conn, now_ms_value=now)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "paper_only": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "at_ms": now,
+            }
+        finally:
+            conn.close()
+        at_ms = payload.get("at_ms")
+        payload["at_ms"] = int(at_ms) if isinstance(at_ms, (int, float)) else now
+        _publish_best_effort("jarvise:assist_weekly:last", payload)
+        return (0 if payload.get("ok") else 1), payload
+
+
 def run_shadow_veto() -> tuple[int, dict[str, Any]]:
     """Update the counterfactual track and request on-time verdicts. Does not fill or approve."""
     if kill_switch_engaged():
@@ -912,6 +951,7 @@ ROUTES = {
     ("POST", "/jobs/assist-signal"): "assist_signal",
     ("POST", "/jobs/assist-morning"): "assist_morning",
     ("POST", "/jobs/assist-watch"): "assist_watch",
+    ("POST", "/jobs/assist-weekly"): "assist_weekly",
     ("POST", "/jobs/weekly-report"): "weekly_report",
 }
 
@@ -978,6 +1018,7 @@ class JobHandler(BaseHTTPRequestHandler):
             "assist_signal": run_assist_signal_job,
             "assist_morning": run_assist_morning_job,
             "assist_watch": run_assist_watch_job,
+            "assist_weekly": run_assist_weekly_job,
             "weekly_report": run_weekly_report,
         }
         runner = runners.get(action or "")
@@ -1014,6 +1055,8 @@ def serve(host: str = "0.0.0.0", port: int = 8090) -> None:
 
 
 def main() -> None:
+    # Daemon thread: long-poll Telegram inside jobs (single SQLite writer process).
+    start_listener_thread()
     port = int(os.environ.get("JOBS_PORT", "8090"))
     serve(port=port)
 

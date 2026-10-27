@@ -18,6 +18,7 @@ from jarvise_assist.futures import (
     build_futures_client,
     find_protective_stop,
 )
+from jarvise_assist.keyboard import skip_inline_keyboard
 from jarvise_assist.messages import (
     format_futures_down_alert,
     format_futures_recovered_alert,
@@ -25,6 +26,7 @@ from jarvise_assist.messages import (
     format_permission_error_alert,
     format_signal_message,
 )
+from jarvise_assist.pause import evaluate_pause, is_paused, maybe_auto_resume
 from jarvise_assist.sizing import (
     IDEA_LOOKBACK_MS,
     ExistingIdea,
@@ -51,14 +53,36 @@ from jarvise_assist.store import (
     now_ms,
     previous_analysis_action,
     recent_same_idea,
+    set_signal_telegram_message_id,
     write_edge,
 )
 from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
-from jarvise_notify.telegram import send_telegram_message
+from jarvise_notify.telegram import send_message
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 FUTURES_DOWN_ALERT_MS = 30 * 60 * 1000
-SendFn = Callable[[str], bool]
+SendFn = Callable[..., Any]
+
+
+def _invoke_send(
+    send: SendFn,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+) -> tuple[bool, int | None]:
+    try:
+        result = send(text, reply_markup=reply_markup)
+    except TypeError:
+        result = send(text)
+    if isinstance(result, bool):
+        return result, None
+    if isinstance(result, int):
+        return True, result
+    return False, None
+
+
+def _default_send(text: str, *, reply_markup: dict[str, Any] | None = None) -> int | None:
+    return send_message(text, reply_markup=reply_markup)
 
 
 def is_night_hold(*, now_ms: int) -> bool:
@@ -257,60 +281,27 @@ def build_existing_ideas(
     return ideas
 
 
-def run_assist_signals(
+def scan_signal_candidates(
     conn: Any,
     *,
-    futures: BinanceFuturesClient | None = None,
-    now_ms_value: int | None = None,
-    send: SendFn | None = None,
+    futures: BinanceFuturesClient,
+    now_ms: int,
+    persist: bool = True,
 ) -> dict[str, Any]:
-    """Scan seven symbols and send or hold new signals."""
-    ts = int(now_ms_value if now_ms_value is not None else now_ms())
-    send_fn = send or send_telegram_message
+    """Shared scan for signal job and the anything-now menu.
+
+    When ``persist`` is False, no rows are inserted and Telegram is not used.
+    """
     settings = ensure_settings(conn)
-    if not settings["enabled"]:
-        return _strip_secrets(
-            {
-                "ok": True,
-                "skipped": "assist_disabled",
-                "paper_only": True,
-                "at_ms": ts,
-            }
-        )
-
-    client = futures if futures is not None else build_futures_client()
-    if client is None:
-        return _strip_secrets(
-            {
-                "ok": False,
-                "error": "no_binance_auth",
-                "paper_only": True,
-                "at_ms": ts,
-            }
-        )
-
+    balance = futures.usdt_wallet_balance()
+    positions = futures.position_risk()
+    open_syms = {p.symbol for p in positions}
     try:
-        client.assert_key_safe()
-    except FuturesKeyUnsafeError as exc:
-        return _strip_secrets(_alert_key_unsafe(conn, send=send_fn, detail=str(exc), now=ts))
-
-    try:
-        balance = client.usdt_wallet_balance()
-        positions = client.position_risk()
-        open_syms = {p.symbol for p in positions}
-        try:
-            orders = client.all_open_orders()
-        except AttributeError:
-            orders = [*client.open_orders(), *client.open_algo_orders()]
-        recovered = _handle_futures_ok(conn, send=send_fn)
-    except FuturesPermissionError as exc:
-        return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
-    except Exception as exc:  # noqa: BLE001 — surface as futures down, not a crash
-        return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
+        orders = futures.all_open_orders()
+    except AttributeError:
+        orders = [*futures.open_orders(), *futures.open_algo_orders()]
 
     risk_pct = Decimal(str(settings["risk_pct"]))
-    night = is_night_hold(now_ms=ts)
-    created: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     candidates: list[SignalCandidate] = []
     symbol_rank = {sym: i for i, sym in enumerate(ASSIST_SYMBOLS)}
@@ -323,20 +314,20 @@ def run_assist_signals(
         if analysis is None or not passes_signal_floor(analysis):
             skipped.append({"symbol": symbol, "reason": "floor"})
             continue
-        if not analysis_is_fresh(analysis, now_ms=ts):
+        if not analysis_is_fresh(analysis, now_ms=now_ms):
             skipped.append({"symbol": symbol, "reason": "stale_analysis"})
             continue
         side = str(analysis["action"]).lower()
-        if _same_idea_skip(conn, symbol=symbol, side=side, now_ms=ts):
+        if _same_idea_skip(conn, symbol=symbol, side=side, now_ms=now_ms):
             skipped.append({"symbol": symbol, "reason": "same_idea"})
             continue
         try:
-            mark = client.mark_price(symbol)
-            if hasattr(client, "symbol_filters"):
-                filters = client.symbol_filters(symbol)
+            mark = futures.mark_price(symbol)
+            if hasattr(futures, "symbol_filters"):
+                filters = futures.symbol_filters(symbol)
             else:
                 filters = SymbolFilters(
-                    step_size=client.step_size(symbol),
+                    step_size=futures.step_size(symbol),
                     min_qty=Decimal("0"),
                     min_notional=Decimal("0"),
                 )
@@ -385,12 +376,93 @@ def run_assist_signals(
         orders=orders,
         balance=balance,
         risk_pct=risk_pct,
-        now_ms=ts,
+        now_ms=now_ms,
     )
     admitted, rejected = admit_signals(existing=existing, candidates=candidates, balance=balance)
     for cand in rejected:
         skipped.append({"symbol": cand.sized.symbol, "reason": "risk_cap"})
+    return {
+        "admitted": admitted,
+        "skipped": skipped,
+        "balance_usdt": float(balance),
+        "positions": positions,
+        "orders": orders,
+        "persist": persist,
+    }
 
+
+def run_assist_signals(
+    conn: Any,
+    *,
+    futures: BinanceFuturesClient | None = None,
+    now_ms_value: int | None = None,
+    send: SendFn | None = None,
+) -> dict[str, Any]:
+    """Scan seven symbols and send or hold new signals."""
+    ts = int(now_ms_value if now_ms_value is not None else now_ms())
+    send_fn = send or _default_send
+    settings = ensure_settings(conn)
+    if not settings["enabled"]:
+        return _strip_secrets(
+            {
+                "ok": True,
+                "skipped": "assist_disabled",
+                "paper_only": True,
+                "at_ms": ts,
+            }
+        )
+
+    maybe_auto_resume(conn, now_ms=ts, send=send_fn)
+    settings = ensure_settings(conn)
+
+    client = futures if futures is not None else build_futures_client()
+    if client is None:
+        return _strip_secrets(
+            {
+                "ok": False,
+                "error": "no_binance_auth",
+                "paper_only": True,
+                "at_ms": ts,
+            }
+        )
+
+    try:
+        client.assert_key_safe()
+        client.usdt_wallet_balance()
+        recovered = _handle_futures_ok(conn, send=send_fn)
+    except FuturesKeyUnsafeError as exc:
+        return _strip_secrets(_alert_key_unsafe(conn, send=send_fn, detail=str(exc), now=ts))
+    except FuturesPermissionError as exc:
+        return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
+    except Exception as exc:  # noqa: BLE001 — surface as futures down, not a crash
+        return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
+
+    pause_info = evaluate_pause(conn, futures=client, now_ms=ts, send=send_fn)
+    settings = ensure_settings(conn)
+    if is_paused(settings, now_ms=ts) or pause_info.get("paused"):
+        return _strip_secrets(
+            {
+                "ok": True,
+                "skipped": "streak_pause",
+                "paper_only": True,
+                "at_ms": ts,
+                "pause": pause_info,
+                "futures_recovered": recovered,
+            }
+        )
+
+    try:
+        scanned = scan_signal_candidates(conn, futures=client, now_ms=ts, persist=True)
+    except FuturesPermissionError as exc:
+        return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
+    except Exception as exc:  # noqa: BLE001
+        return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
+
+    balance = Decimal(str(scanned["balance_usdt"]))
+    night = is_night_hold(now_ms=ts)
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = list(scanned["skipped"])
+    admitted: list[SignalCandidate] = list(scanned["admitted"])
     expires = next_assist_run_ms(ts)
     for cand in admitted:
         sized = cand.sized
@@ -406,23 +478,21 @@ def run_assist_signals(
             created.append({"id": sid, "symbol": symbol, "status": "held"})
             continue
         text = format_signal_message(sized, expires_at_ms=expires, balance=balance)
-        sent_ok = send_fn(text)
         sid = insert_signal(
             conn,
             sized,
-            status="sent" if sent_ok else "held",
+            status="held",
             created_at_ms=ts,
             expires_at_ms=expires,
-            sent_at_ms=ts if sent_ok else None,
         )
-        created.append(
-            {
-                "id": sid,
-                "symbol": symbol,
-                "status": "sent" if sent_ok else "held",
-                "telegram": sent_ok,
-            }
-        )
+        sent_ok, mid = _invoke_send(send_fn, text, reply_markup=skip_inline_keyboard(sid))
+        if sent_ok:
+            mark_signal_sent(conn, sid, sized, sent_at_ms=ts, expires_at_ms=expires)
+            if mid is not None:
+                set_signal_telegram_message_id(conn, sid, mid)
+            created.append({"id": sid, "symbol": symbol, "status": "sent", "telegram": True})
+        else:
+            created.append({"id": sid, "symbol": symbol, "status": "held", "telegram": False})
 
     return _strip_secrets(
         {
@@ -447,7 +517,7 @@ def run_assist_morning(
 ) -> dict[str, Any]:
     """Re-check held signals at 08:20 Bangkok (after the 08:00 paper-run writes fresh analysis) and send or expire."""
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
-    send_fn = send or send_telegram_message
+    send_fn = send or _default_send
     settings = ensure_settings(conn)
     if not settings["enabled"]:
         return _strip_secrets(
@@ -458,6 +528,9 @@ def run_assist_morning(
                 "at_ms": ts,
             }
         )
+
+    maybe_auto_resume(conn, now_ms=ts, send=send_fn)
+    settings = ensure_settings(conn)
 
     client = futures if futures is not None else build_futures_client()
     if client is None:
@@ -481,6 +554,19 @@ def run_assist_morning(
         return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
     except Exception as exc:  # noqa: BLE001
         return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
+
+    pause_info = evaluate_pause(conn, futures=client, now_ms=ts, send=send_fn)
+    settings = ensure_settings(conn)
+    if is_paused(settings, now_ms=ts) or pause_info.get("paused"):
+        return _strip_secrets(
+            {
+                "ok": True,
+                "skipped": "streak_pause",
+                "paper_only": True,
+                "at_ms": ts,
+                "pause": pause_info,
+            }
+        )
 
     risk_pct = Decimal(str(settings["risk_pct"]))
     sent: list[str] = []
@@ -530,9 +616,13 @@ def run_assist_morning(
             continue
         expires = next_assist_run_ms(ts)
         text = format_signal_message(sized, expires_at_ms=expires, balance=balance)
-        if send_fn(text):
-            mark_signal_sent(conn, str(row["id"]), sized, sent_at_ms=ts, expires_at_ms=expires)
-            sent.append(str(row["id"]))
+        sid = str(row["id"])
+        sent_ok, mid = _invoke_send(send_fn, text, reply_markup=skip_inline_keyboard(sid))
+        if sent_ok:
+            mark_signal_sent(conn, sid, sized, sent_at_ms=ts, expires_at_ms=expires)
+            if mid is not None:
+                set_signal_telegram_message_id(conn, sid, mid)
+            sent.append(sid)
 
     # Late import: watch.py imports alert helpers from this module.
     from jarvise_assist.watch import flush_held_watch_advice

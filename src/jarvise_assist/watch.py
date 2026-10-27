@@ -21,6 +21,7 @@ from jarvise_assist.messages import (
     format_move_stop_advice,
     format_no_stop_warning,
 )
+from jarvise_assist.pause import evaluate_pause, maybe_auto_resume
 from jarvise_assist.signals import (
     _alert_key_unsafe,
     _alert_permission,
@@ -51,7 +52,7 @@ from jarvise_paper.profit_lock import trail_stop_with_source
 
 FOUR_H_MS = 4 * 3_600_000
 ONE_H_MS = 3_600_000
-SendFn = Callable[[str], bool]
+SendFn = Callable[..., Any]
 
 
 def approx_r_multiple(
@@ -511,6 +512,8 @@ def run_assist_watch(
     if not settings["enabled"]:
         return _strip_secrets({"ok": True, "skipped": "assist_disabled", "paper_only": True, "at_ms": ts})
 
+    maybe_auto_resume(conn, now_ms=ts, send=send_fn)
+
     client = futures if futures is not None else build_futures_client()
     if client is None:
         return _strip_secrets({"ok": False, "error": "no_binance_auth", "paper_only": True, "at_ms": ts})
@@ -532,6 +535,9 @@ def run_assist_watch(
         return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
     except Exception as exc:  # noqa: BLE001
         return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
+
+    # Pause may engage here; watch still emits advice for open positions.
+    pause_info = evaluate_pause(conn, futures=client, now_ms=ts, send=send_fn)
 
     night = is_night_hold(now_ms=ts)
     actions: list[dict[str, Any]] = []
@@ -562,5 +568,6 @@ def run_assist_watch(
             "actions": actions,
             "closed": [{"symbol": s, "position_side": p} for s, p in closed],
             "futures_recovered": recovered,
+            "pause": pause_info,
         }
     )

@@ -25,6 +25,7 @@ PREMIUM_INDEX_PATH = "/fapi/v1/premiumIndex"
 EXCHANGE_INFO_PATH = "/fapi/v1/exchangeInfo"
 OPEN_ORDERS_PATH = "/fapi/v1/openOrders"
 OPEN_ALGO_ORDERS_PATH = "/fapi/v1/openAlgoOrders"
+INCOME_PATH = "/fapi/v1/income"
 
 # Binance codes that mean the key cannot use this endpoint.
 PERMISSION_ERROR_CODES = frozenset({-2014, -2015, -1022})
@@ -342,6 +343,25 @@ class BinanceFuturesClient:
 
     def all_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         return [*self.open_orders(symbol=symbol), *self.open_algo_orders(symbol=symbol)]
+
+    def income_history(
+        self,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        income_type: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Signed GET /fapi/v1/income. Read-only; never places orders."""
+        params: dict[str, Any] = {"limit": int(limit)}
+        if start_ms is not None:
+            params["startTime"] = int(start_ms)
+        if end_ms is not None:
+            params["endTime"] = int(end_ms)
+        if income_type:
+            params["incomeType"] = income_type
+        payload = self._signed_get(INCOME_PATH, params, provider="binance_fapi_income")
+        return list(payload) if isinstance(payload, list) else []
 
 
 def build_futures_client(*, client: httpx.Client | None = None) -> BinanceFuturesClient | None:

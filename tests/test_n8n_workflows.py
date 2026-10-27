@@ -132,6 +132,10 @@ def test_jobs_workflows_send_token_placeholder() -> None:
         if node.get("type") == "n8n-nodes-base.scheduleTrigger"
     )
     assert morning_cron == "20 8 * * *"
+    morning_name = next(
+        node["name"] for node in morning["nodes"] if node.get("type") == "n8n-nodes-base.scheduleTrigger"
+    )
+    assert morning_name == "Daily 08:20 Bangkok"
     morning_timeout = next(
         node["parameters"]["options"]["timeout"]
         for node in morning["nodes"]
@@ -157,6 +161,22 @@ def test_jobs_workflows_send_token_placeholder() -> None:
     )
     assert watch_timeout >= 360000
     assert watch_timeout >= JOB_TIMEOUTS_S["assist_watch"] * 1000
+    assist_weekly = json.loads((WORKFLOWS / "jarvise-assist-weekly.json").read_text(encoding="utf-8"))
+    assert assist_weekly["id"] == "jrvsAssistWeekly1"
+    assert assist_weekly["settings"]["timezone"] == "Asia/Bangkok"
+    assist_weekly_cron = next(
+        node["parameters"]["rule"]["interval"][0]["expression"]
+        for node in assist_weekly["nodes"]
+        if node.get("type") == "n8n-nodes-base.scheduleTrigger"
+    )
+    assert assist_weekly_cron == "30 8 * * 1"
+    assist_weekly_timeout = next(
+        node["parameters"]["options"]["timeout"]
+        for node in assist_weekly["nodes"]
+        if node.get("type") == "n8n-nodes-base.httpRequest"
+    )
+    assert assist_weekly_timeout >= JOB_TIMEOUTS_S["assist_weekly"] * 1000
+    assert "jarvise-assist-weekly.json" in callers
     script = (ROOT / "infra" / "docker" / "render-n8n-jobs-workflows.sh").read_text(encoding="utf-8")
     assert "JARVISE_JOBS_TOKEN" in script
     assert "jarvise-live-reconcile.json" in script

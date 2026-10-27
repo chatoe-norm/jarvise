@@ -1,0 +1,74 @@
+{
+  "id": "jrvsAssistWeekly1",
+  "name": "Jarvise assist weekly",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 8 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "cron-assist-weekly",
+      "name": "Monday 08:30 Bangkok",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://jobs:8090/jobs/assist-weekly",
+        "options": {
+          "timeout": 240000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
+        }
+      },
+      "id": "http-assist-weekly",
+      "name": "POST assist weekly",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "notes": "Assist virtual track + futures income summary. Separate from jrvsWeeklyReport1 at 08:00. Never places orders."
+    }
+  ],
+  "connections": {
+    "Monday 08:30 Bangkok": {
+      "main": [
+        [
+          {
+            "node": "POST assist weekly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Bangkok"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "import": "Render __JARVISE_JOBS_TOKEN__ with infra/docker/render-n8n-jobs-workflows.sh before import. Do not commit a real token. Do not import until the owner asks."
+    }
+  },
+  "pinData": {},
+  "active": false
+}
