@@ -12,6 +12,7 @@ import typer
 from jarvise import __version__
 from jarvise import config as store
 from jarvise.charts import analytics_db_path, export_candle_graphs
+from jarvise_assist.explore import run_explore_cli
 from jarvise_exchange.cli import exchange_app
 from jarvise_ingest.db_cli import db_app
 from jarvise_ingest.universe_cli import universe_app
@@ -507,6 +508,25 @@ def rag_refresh(
     emit(steps, output)
     if not steps.get("ok"):
         raise typer.Exit(code=2)
+
+
+assist_app = typer.Typer(
+    name="assist",
+    help="Trade assistant. Advice only; never places orders.",
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    pretty_exceptions_show_locals=False,
+)
+app.add_typer(assist_app, name="assist")
+
+
+@assist_app.command("explore")
+def assist_explore(
+    json_output: Annotated[bool, typer.Option("--json", help="Print the job JSON.")] = False,
+) -> None:
+    """Refresh explore candles and analysis. Sends nothing and places no orders."""
+    raise typer.Exit(run_explore_cli(json_output=json_output))
 
 
 report_app = typer.Typer(help="Read-only owner reports. No orders.")

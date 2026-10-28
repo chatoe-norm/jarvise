@@ -585,6 +585,19 @@ def _migrate_outcome_r(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "paper_decision_outcomes", "return_on_notional", "REAL")
 
 
+def _migrate_assist_explore(conn: sqlite3.Connection) -> None:
+    """Owner explore-list membership. Candles and analysis stay in assist-explore.db."""
+    _add_column_if_missing(conn, "assist_settings", "awaiting_explore", "INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_explore_symbols (
+            symbol TEXT NOT NULL PRIMARY KEY,
+            added_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+
+
 def _migrate_assist_listen(conn: sqlite3.Connection) -> None:
     """Telegram listener, pause, and virtual-track fields. Never writes paper/live/approval."""
     _add_column_if_missing(conn, "assist_settings", "paused_until_ms", "INTEGER")
@@ -869,6 +882,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (14, "trade_assist", _migrate_trade_assist, True),
     (15, "assist_watch", _migrate_assist_watch, True),
     (16, "assist_listen", _migrate_assist_listen, True),
+    (17, "assist_explore", _migrate_assist_explore, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

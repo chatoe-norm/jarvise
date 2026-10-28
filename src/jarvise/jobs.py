@@ -19,6 +19,7 @@ from urllib.parse import parse_qs
 from jarvise.charts import export_candle_graphs
 from jarvise.disk import disk_edge_alerted, disk_free
 from jarvise.rag import doctrine_snippets, publish_redis_status
+from jarvise_assist.explore import execute_explore
 from jarvise_assist.listen import start_listener_thread
 from jarvise_assist.signals import run_assist_morning, run_assist_signals
 from jarvise_assist.watch import run_assist_watch
@@ -63,6 +64,7 @@ JOB_TIMEOUTS_S: dict[str, float] = {
     "shadow_veto": 300.0,
     "forward_h3": 300.0,
     "assist_signal": 300.0,
+    "assist_explore": 300.0,
     "assist_morning": 180.0,
     "assist_watch": 300.0,
     "assist_weekly": 180.0,
@@ -81,6 +83,7 @@ JOB_LOCK_TTL_S: dict[str, int] = {
     "shadow_veto": 300,
     "forward_h3": 360,
     "assist_signal": 360,
+    "assist_explore": 360,
     "assist_morning": 240,
     "assist_watch": 360,
     "assist_weekly": 240,
@@ -423,6 +426,37 @@ def run_forward_h3() -> tuple[int, dict[str, Any]]:
             }
         payload["at_ms"] = int(payload.get("at_ms") or now)
         _publish_best_effort(FORWARD_H3_REDIS_KEY, payload)
+        return (0 if payload.get("ok") else 1), payload
+
+
+def run_assist_explore_job() -> tuple[int, dict[str, Any]]:
+    """Write explore candles and analysis. Sends nothing and places no orders."""
+    with single_flight("assist_explore") as acquired:
+        if not acquired:
+            return 3, _running("assist_explore")
+        now = int(time.time() * 1000)
+        path = _analytics_db_path()
+        if not path.exists():
+            payload = {
+                "ok": False,
+                "error": "no_database",
+                "paper_only": True,
+                "at_ms": now,
+            }
+            _publish_best_effort("jarvise:assist_explore:last", payload)
+            return 1, payload
+        try:
+            payload = execute_explore(main_path=path, now_ms_value=now)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "paper_only": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "at_ms": now,
+            }
+        at_ms = payload.get("at_ms")
+        payload["at_ms"] = int(at_ms) if isinstance(at_ms, (int, float)) else now
+        _publish_best_effort("jarvise:assist_explore:last", payload)
         return (0 if payload.get("ok") else 1), payload
 
 
@@ -948,6 +982,7 @@ ROUTES = {
     ("POST", "/jobs/news-reaction"): "news_reaction",
     ("POST", "/jobs/shadow-veto"): "shadow_veto",
     ("POST", "/jobs/forward-h3"): "forward_h3",
+    ("POST", "/jobs/assist-explore"): "assist_explore",
     ("POST", "/jobs/assist-signal"): "assist_signal",
     ("POST", "/jobs/assist-morning"): "assist_morning",
     ("POST", "/jobs/assist-watch"): "assist_watch",
@@ -1015,6 +1050,7 @@ class JobHandler(BaseHTTPRequestHandler):
             "news_reaction": run_news_reaction,
             "shadow_veto": run_shadow_veto,
             "forward_h3": run_forward_h3,
+            "assist_explore": run_assist_explore_job,
             "assist_signal": run_assist_signal_job,
             "assist_morning": run_assist_morning_job,
             "assist_watch": run_assist_watch_job,

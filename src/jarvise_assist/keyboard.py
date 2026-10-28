@@ -9,6 +9,8 @@ BTN_ANYTHING = "🔎 ตอนนี้มีเหรียญไหนน่�
 BTN_WEEKLY = "📊 ผลสัปดาห์นี้"
 BTN_RISK_PREFIX = "⚙️ ตั้งความเสี่ยงต่อไม้"
 BTN_TOGGLE = "⏸ หยุด / ▶️ เปิด ผู้ช่วย"
+BTN_EXPLORE = "🧪 เหรียญทดลอง"
+EXPLORE_RM_PREFIX = "explore:rm:"
 
 
 def risk_button_label(risk_pct: float) -> str:
@@ -22,9 +24,18 @@ def reply_keyboard(risk_pct: float = 1.0) -> dict[str, Any]:
             [{"text": BTN_POSITIONS}, {"text": BTN_ANYTHING}],
             [{"text": BTN_WEEKLY}, {"text": risk_button_label(risk_pct)}],
             [{"text": BTN_TOGGLE}],
+            [{"text": BTN_EXPLORE}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
+    }
+
+
+def explore_remove_keyboard(symbols: list[str]) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": f"ลบ {symbol}", "callback_data": f"{EXPLORE_RM_PREFIX}{symbol}"}] for symbol in symbols
+        ]
     }
 
 

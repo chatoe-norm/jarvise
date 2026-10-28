@@ -116,13 +116,28 @@ def test_jobs_workflows_send_token_placeholder() -> None:
         if node.get("type") == "n8n-nodes-base.scheduleTrigger"
     )
     assert assist_cron == "25 0,4,8,12,16,20 * * *"
-    assist_timeout = next(
-        node["parameters"]["options"]["timeout"]
-        for node in assist["nodes"]
-        if node.get("type") == "n8n-nodes-base.httpRequest"
-    )
+
+    def _job_timeout(url_part: str) -> int:
+        return next(
+            node["parameters"]["options"]["timeout"]
+            for node in assist["nodes"]
+            if node.get("type") == "n8n-nodes-base.httpRequest"
+            and url_part in str((node.get("parameters") or {}).get("url"))
+        )
+
+    assist_timeout = _job_timeout("/jobs/assist-signal")
     assert assist_timeout >= 360000
     assert assist_timeout >= JOB_TIMEOUTS_S["assist_signal"] * 1000
+    explore_timeout = _job_timeout("/jobs/assist-explore")
+    assert explore_timeout >= JOB_TIMEOUTS_S["assist_explore"] * 1000
+    explore_node = next(
+        node
+        for node in assist["nodes"]
+        if "/jobs/assist-explore" in str((node.get("parameters") or {}).get("url"))
+    )
+    assert explore_node.get("onError") == "continueRegularOutput"
+    assert assist["connections"]["After paper-run slots"]["main"][0][0]["node"] == "POST assist explore"
+    assert assist["connections"]["POST assist explore"]["main"][0][0]["node"] == "POST assist signal"
     morning = json.loads((WORKFLOWS / "jarvise-assist-morning.json").read_text(encoding="utf-8"))
     assert morning["id"] == "jrvsAssistMorning1"
     assert morning["settings"]["timezone"] == "Asia/Bangkok"
