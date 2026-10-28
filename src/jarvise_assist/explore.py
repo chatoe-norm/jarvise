@@ -187,7 +187,8 @@ def seed_explore_symbol(
 
 def _kline_serves(symbol: str, fetch: FetchFn) -> bool:
     try:
-        candles = fetch(symbol, ASSIST_TIMEFRAME, 1)
+        # Limit 2: the newest kline is always still open and fetch_klines drops it.
+        candles = fetch(symbol, ASSIST_TIMEFRAME, 2)
     except Exception:  # noqa: BLE001 — a missing symbol is a rejection, not a crash
         logger.warning("assist explore kline probe failed for %s", symbol)
         return False
