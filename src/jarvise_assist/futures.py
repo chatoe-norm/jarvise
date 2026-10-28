@@ -199,6 +199,26 @@ def find_protective_stop(
     return min(prices)
 
 
+def _exchange_symbol_row(payload: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    sym = symbol.upper()
+    for row in payload.get("symbols") or []:
+        if isinstance(row, dict) and str(row.get("symbol") or "").upper() == sym:
+            return row
+    return None
+
+
+def public_exchange_symbol(symbol: str, *, client: httpx.Client | None = None) -> dict[str, Any] | None:
+    """Public USD-M exchangeInfo row. No API key and no order."""
+    payload = get_json(
+        f"{FAPI_BASE}{EXCHANGE_INFO_PATH}",
+        client=client,
+        provider="binance_fapi_exchange_info",
+    )
+    if not isinstance(payload, dict):
+        return None
+    return _exchange_symbol_row(payload, symbol)
+
+
 class BinanceFuturesClient:
     """Read-only USDⓈ-M client. No POST/PUT/DELETE order methods."""
 
@@ -312,32 +332,34 @@ class BinanceFuturesClient:
         self._exchange_info = payload
         return payload
 
+    def exchange_symbol(self, symbol: str) -> dict[str, Any] | None:
+        """Public exchangeInfo row, or None when Binance has no such symbol."""
+        return _exchange_symbol_row(self._load_exchange_info(), symbol)
+
     def symbol_filters(self, symbol: str) -> SymbolFilters:
         sym = symbol.upper()
         cached = self._filters.get(sym)
         if cached is not None:
             return cached
-        payload = self._load_exchange_info()
-        for row in payload.get("symbols") or []:
-            if str(row.get("symbol") or "").upper() != sym:
-                continue
-            step = Decimal("1")
-            min_qty = Decimal("0")
-            min_notional = Decimal("0")
-            for filt in row.get("filters") or []:
-                ftype = str(filt.get("filterType") or "")
-                if ftype == "LOT_SIZE":
-                    step = Decimal(str(filt.get("stepSize") or "1"))
-                    min_qty = Decimal(str(filt.get("minQty") or "0"))
-                elif ftype in {"MIN_NOTIONAL", "NOTIONAL"}:
-                    raw = filt.get("notional")
-                    if raw is None:
-                        raw = filt.get("minNotional")
-                    min_notional = Decimal(str(raw or "0"))
-            filters = SymbolFilters(step_size=step, min_qty=min_qty, min_notional=min_notional)
-            self._filters[sym] = filters
-            return filters
-        raise ValueError(f"exchangeInfo missing for {symbol}")
+        row = self.exchange_symbol(sym)
+        if row is None:
+            raise ValueError(f"exchangeInfo missing for {symbol}")
+        step = Decimal("1")
+        min_qty = Decimal("0")
+        min_notional = Decimal("0")
+        for filt in row.get("filters") or []:
+            ftype = str(filt.get("filterType") or "")
+            if ftype == "LOT_SIZE":
+                step = Decimal(str(filt.get("stepSize") or "1"))
+                min_qty = Decimal(str(filt.get("minQty") or "0"))
+            elif ftype in {"MIN_NOTIONAL", "NOTIONAL"}:
+                raw = filt.get("notional")
+                if raw is None:
+                    raw = filt.get("minNotional")
+                min_notional = Decimal(str(raw or "0"))
+        filters = SymbolFilters(step_size=step, min_qty=min_qty, min_notional=min_notional)
+        self._filters[sym] = filters
+        return filters
 
     def step_size(self, symbol: str) -> Decimal:
         return self.symbol_filters(symbol).step_size

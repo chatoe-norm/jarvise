@@ -14,7 +14,8 @@ _UNSET: object = object()
 def ensure_settings(conn: Any) -> dict[str, Any]:
     row = conn.execute(
         """
-        SELECT risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct
+        SELECT risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct,
+               awaiting_explore
         FROM assist_settings WHERE id=1
         """
     ).fetchone()
@@ -27,17 +28,20 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
             "paused_until_ms": None,
             "awaiting_risk": None,
             "pending_risk_pct": None,
+            "awaiting_explore": False,
         }
     # Older DBs before migration 16 may lack the trailing columns.
     paused = row[2] if len(row) > 2 else None
     awaiting = row[3] if len(row) > 3 else None
     pending = row[4] if len(row) > 4 else None
+    exploring = row[5] if len(row) > 5 else 0
     return {
         "risk_pct": float(row[0]),
         "enabled": bool(int(row[1])),
         "paused_until_ms": int(paused) if paused is not None else None,
         "awaiting_risk": str(awaiting) if awaiting else None,
         "pending_risk_pct": float(pending) if pending is not None else None,
+        "awaiting_explore": bool(int(exploring or 0)),
     }
 
 
@@ -49,6 +53,7 @@ def write_settings(
     paused_until_ms: Any = _UNSET,
     awaiting_risk: Any = _UNSET,
     pending_risk_pct: Any = _UNSET,
+    awaiting_explore: Any = _UNSET,
 ) -> None:
     cur = ensure_settings(conn)
     rp = float(cur["risk_pct"] if risk_pct is None else risk_pct)
@@ -56,19 +61,22 @@ def write_settings(
     paused = cur["paused_until_ms"] if paused_until_ms is _UNSET else paused_until_ms
     awaiting = cur["awaiting_risk"] if awaiting_risk is _UNSET else awaiting_risk
     pending = cur["pending_risk_pct"] if pending_risk_pct is _UNSET else pending_risk_pct
+    exploring = cur["awaiting_explore"] if awaiting_explore is _UNSET else bool(awaiting_explore)
     conn.execute(
         """
         INSERT INTO assist_settings (
-            id, risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct
-        ) VALUES (1, ?, ?, ?, ?, ?)
+            id, risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct,
+            awaiting_explore
+        ) VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             risk_pct=excluded.risk_pct,
             enabled=excluded.enabled,
             paused_until_ms=excluded.paused_until_ms,
             awaiting_risk=excluded.awaiting_risk,
-            pending_risk_pct=excluded.pending_risk_pct
+            pending_risk_pct=excluded.pending_risk_pct,
+            awaiting_explore=excluded.awaiting_explore
         """,
-        (rp, en, paused, awaiting, pending),
+        (rp, en, paused, awaiting, pending, int(bool(exploring))),
     )
     conn.commit()
 
@@ -841,3 +849,22 @@ def count_signals_since(conn: Any, *, since_ms: int) -> dict[str, int]:
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def list_explore_symbols(conn: Any) -> list[str]:
+    rows = conn.execute("SELECT symbol FROM assist_explore_symbols ORDER BY added_at_ms, symbol").fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def insert_explore_symbol(conn: Any, symbol: str, added_at_ms: int) -> None:
+    conn.execute(
+        "INSERT INTO assist_explore_symbols (symbol, added_at_ms) VALUES (?, ?)",
+        (symbol, int(added_at_ms)),
+    )
+    conn.commit()
+
+
+def delete_explore_symbol(conn: Any, symbol: str) -> bool:
+    cur = conn.execute("DELETE FROM assist_explore_symbols WHERE symbol=?", (symbol,))
+    conn.commit()
+    return cur.rowcount > 0

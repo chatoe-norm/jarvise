@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
+from jarvise_assist.explore import render_explore_message
 from jarvise_assist.futures import (
     BinanceFuturesClient,
     build_futures_client,
@@ -15,6 +16,7 @@ from jarvise_assist.futures import (
 )
 from jarvise_assist.keyboard import (
     BTN_ANYTHING,
+    BTN_EXPLORE,
     BTN_POSITIONS,
     BTN_RISK_PREFIX,
     BTN_TOGGLE,
@@ -64,6 +66,8 @@ def match_menu_label(text: str) -> str | None:
         return "risk"
     if raw == BTN_TOGGLE:
         return "toggle"
+    if raw == BTN_EXPLORE:
+        return "explore"
     return None
 
 
@@ -78,6 +82,8 @@ def handle_menu_text(
     kind = match_menu_label(text)
     if kind is None:
         return {"handled": False}
+    if kind != "explore" and ensure_settings(conn).get("awaiting_explore"):
+        write_settings(conn, awaiting_explore=False)
     send_fn = send or (lambda t, **kw: send_message(t, reply_markup=kw.get("reply_markup")) is not None)
     if kind == "positions":
         body = render_open_positions(conn, futures=futures, now_ms=now_ms)
@@ -100,6 +106,11 @@ def handle_menu_text(
         settings = ensure_settings(conn)
         send_fn(body, reply_markup=reply_keyboard(settings["risk_pct"]))
         return {"handled": True, "kind": kind, "text": body}
+    if kind == "explore":
+        write_settings(conn, awaiting_explore=True, awaiting_risk=None, pending_risk_pct=None)
+        explore_body, explore_markup = render_explore_message(conn)
+        send_fn(explore_body, reply_markup=explore_markup)
+        return {"handled": True, "kind": kind, "text": explore_body}
     return {"handled": False}
 
 

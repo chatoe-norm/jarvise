@@ -17,12 +17,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from jarvise_assist.futures import build_futures_client
-from jarvise_assist.keyboard import reply_keyboard
+from jarvise_assist.explore import remove_explore_symbol, submit_explore_symbol
+from jarvise_assist.futures import build_futures_client, public_exchange_symbol
+from jarvise_assist.keyboard import EXPLORE_RM_PREFIX, reply_keyboard
 from jarvise_assist.menu import (
     handle_menu_text,
     handle_risk_callback,
     handle_risk_number,
+    match_menu_label,
 )
 from jarvise_assist.store import (
     ensure_settings,
@@ -35,6 +37,7 @@ from jarvise_assist.store import (
     write_telegram_state,
 )
 from jarvise_ingest.db import open_db
+from jarvise_ingest.providers.binance_klines import fetch_klines
 from jarvise_notify.telegram import (
     answer_callback,
     edit_message,
@@ -66,6 +69,8 @@ def process_update(
     edit: Callable[..., Any] | None = None,
     futures: Any = None,
     now_ms_value: int | None = None,
+    explore_lookup: Callable[[str], dict[str, Any] | None] | None = None,
+    explore_fetch: Callable[[str, str, int], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Handle one Telegram update. Ignores foreign chats with no reply."""
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
@@ -87,6 +92,11 @@ def process_update(
         if data.startswith("risk:") or data.startswith("risk_yes:") or data == "risk_no":
             answer_fn(cq_id)
             return handle_risk_callback(conn, data, send=send_fn)
+        if data.startswith(EXPLORE_RM_PREFIX):
+            answer_fn(cq_id)
+            result = remove_explore_symbol(conn, data.removeprefix(EXPLORE_RM_PREFIX))
+            send_fn(result["text"], reply_markup=result.get("reply_markup"))
+            return result
         row = get_signal(conn, data) if data else None
         if row is not None:
             signal_id = data
@@ -113,8 +123,36 @@ def process_update(
     risk_num = handle_risk_number(conn, text, send=send_fn)
     if risk_num.get("handled"):
         return risk_num
+    if ensure_settings(conn).get("awaiting_explore") and match_menu_label(text) is None:
+        lookup = explore_lookup or _explore_lookup(futures)
+        fetch = explore_fetch or fetch_klines
+        result = submit_explore_symbol(
+            conn,
+            text,
+            lookup=lookup,
+            fetch=fetch,
+            now_ms_value=ts,
+        )
+        send_fn(result["text"], reply_markup=result.get("reply_markup"))
+        return result
     client = futures if futures is not None else build_futures_client()
     return handle_menu_text(conn, text, futures=client, now_ms=ts, send=send_fn)
+
+
+def _explore_lookup(futures: Any) -> Callable[[str], dict[str, Any] | None]:
+    client = futures if futures is not None else build_futures_client()
+
+    def lookup(symbol: str) -> dict[str, Any] | None:
+        try:
+            if client is None:
+                return public_exchange_symbol(symbol)
+            row = client.exchange_symbol(symbol)
+        except Exception:  # noqa: BLE001 — a bad lookup is a Thai rejection, not a listener crash
+            logger.warning("assist explore exchangeInfo lookup failed for %s", symbol)
+            return None
+        return row if isinstance(row, dict) else None
+
+    return lookup
 
 
 def _signal_text_fallback(row: dict[str, Any]) -> str:

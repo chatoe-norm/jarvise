@@ -22,6 +22,31 @@
     {
       "parameters": {
         "method": "POST",
+        "url": "http://jobs:8090/jobs/assist-explore",
+        "options": {
+          "timeout": 90000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Jarvise-Token",
+              "value": "__JARVISE_JOBS_TOKEN__"
+            }
+          ]
+        }
+      },
+      "id": "http-assist-explore",
+      "name": "POST assist explore",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "onError": "continueRegularOutput",
+      "notes": "Writes explore candles and analysis only. Sends nothing. A failure still continues to the signal node."
+    },
+    {
+      "parameters": {
+        "method": "POST",
         "url": "http://jobs:8090/jobs/assist-signal",
         "options": {
           "timeout": 360000
@@ -40,12 +65,23 @@
       "name": "POST assist signal",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [260, 0],
+      "position": [520, 0],
       "notes": "Read-only futures advice. Never places orders. Owner quiet mode does not suppress."
     }
   ],
   "connections": {
     "After paper-run slots": {
+      "main": [
+        [
+          {
+            "node": "POST assist explore",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST assist explore": {
       "main": [
         [
           {

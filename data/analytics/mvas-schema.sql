@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 16).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 17).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -332,7 +332,8 @@ CREATE TABLE IF NOT EXISTS assist_settings (
     enabled INTEGER NOT NULL DEFAULT 1,
     paused_until_ms INTEGER,
     awaiting_risk TEXT,
-    pending_risk_pct REAL
+    pending_risk_pct REAL,
+    awaiting_explore INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS assist_edge (
@@ -438,3 +439,9 @@ CREATE TABLE IF NOT EXISTS assist_watch_advice (
 );
 CREATE INDEX IF NOT EXISTS idx_assist_watch_advice_pos
     ON assist_watch_advice (symbol, position_side, kind, status);
+
+-- Explore membership only. Candles and analysis live in assist-explore.db.
+CREATE TABLE IF NOT EXISTS assist_explore_symbols (
+    symbol TEXT NOT NULL PRIMARY KEY,
+    added_at_ms INTEGER NOT NULL
+);
