@@ -51,6 +51,8 @@ ON_DEMAND_REASON_TH: dict[str, str] = {
     "risk_cap": "เต็มเพดานความเสี่ยง",
     "below_min_notional": "ไม้เล็กกว่าขั้นต่ำ",
     "margin_cap": "margin ไม่พอ",
+    "size_failed": "คำนวณขนาดไม้ไม่ได้",
+    "same_idea": "ส่งไปแล้วใน 24 ชม.",
 }
 
 
@@ -183,6 +185,8 @@ def render_open_positions(
 
 def _reason_line(symbol: str, reason: str) -> str:
     label = ON_DEMAND_REASON_TH.get(reason)
+    if label is None and reason.startswith("mark:"):
+        label = "อ่านราคาไม่ได้"
     if label is None:
         return f"{symbol} {reason}"
     return f"{symbol} {label}"

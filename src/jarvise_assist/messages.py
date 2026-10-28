@@ -9,6 +9,7 @@ from jarvise_assist.sizing import SizedSignal
 
 # Asia/Bangkok has no DST; avoid the tzdata package on Windows.
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+STOP_INSTRUCTION = "ตั้ง Stop-Market (Reduce-Only, trigger = Mark Price) ทันทีหลังเข้า"
 
 
 def _fmt_price(value: Decimal) -> str:
@@ -61,15 +62,16 @@ def format_signal_message(
         f"Stop: {_fmt_price(sized.stop)} ({stop_sign}{float(stop_pct):.1f}%)",
         f"เป้า: {_fmt_price(sized.target)} (2R)",
         f"ขนาด: {_fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT",
-        f"Leverage ที่ต้องใช้: {lev}x (isolated)",
+        f"Leverage ที่ต้องใช้: {lev}x (isolated — บัญชีต้องเป็น Single-Asset ไม่ใช่ Multi-Assets)",
         f"margin ≈ {margin_s} USDT",
         f"ถ้าชน stop เสีย: {loss_s} USDT ({_fmt_price(loss_pct)}%)",
         f"หมดอายุ {exp_s}",
-        "ตั้ง Stop-Market (Reduce-Only, trigger = Mark Price) ทันทีหลังเข้า",
+        STOP_INSTRUCTION,
+        "ตั้ง TP/SL ที่เดียว (ใน order หรือ Position TP/SL) — ตั้งทั้งสองที่จะได้ stop 2 ตัว",
     ]
     if sized.leverage_capped:
         lines.insert(
-            -1,
+            lines.index(STOP_INSTRUCTION),
             f"ขนาดเต็มต้องใช้ {sized.uncapped_leverage}x — ลดเป็น {sized.leverage}x แล้ว",
         )
     return "\n".join(lines)
