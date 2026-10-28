@@ -260,6 +260,30 @@ def recent_same_idea(
     return row is not None
 
 
+def latest_seen_idea(
+    conn: Any,
+    *,
+    symbol: str,
+    side: str,
+    now_ms: int,
+    within_ms: int = SAME_IDEA_MS,
+) -> dict[str, Any] | None:
+    """Newest sent/taken/skipped row for symbol+side within within_ms, or None."""
+    cur = conn.execute(
+        """
+        SELECT id, symbol, side, entry, stop, target, created_at_ms, sent_at_ms, status
+        FROM assist_signal
+        WHERE symbol=? AND side=? AND status IN ('sent', 'taken', 'skipped')
+          AND created_at_ms >= ?
+        ORDER BY COALESCE(sent_at_ms, created_at_ms) DESC, created_at_ms DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), side.lower(), int(now_ms) - int(within_ms)),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
 def previous_analysis_action(
     conn: Any,
     *,

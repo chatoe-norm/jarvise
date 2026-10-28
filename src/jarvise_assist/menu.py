@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -25,17 +26,30 @@ from jarvise_assist.keyboard import (
 from jarvise_assist.messages import format_signal_message
 from jarvise_assist.pause import clear_pause_manual, format_paused_until, is_paused
 from jarvise_assist.signals import scan_signal_candidates
-from jarvise_assist.sizing import next_assist_run_ms
+from jarvise_assist.sizing import chase_exceeded, next_assist_run_ms
 from jarvise_assist.store import (
     ensure_settings,
     find_linkable_signal,
     get_watch_position,
+    latest_seen_idea,
     write_settings,
 )
 from jarvise_assist.weekly import run_assist_weekly
 from jarvise_notify.telegram import send_message
 
 SendFn = Callable[..., Any]
+
+BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+
+ON_DEMAND_REASON_TH: dict[str, str] = {
+    "flat": "ไม่มีแนวโน้ม",
+    "low_confidence": "ความมั่นใจต่ำ",
+    "stale_analysis": "ข้อมูลยังไม่อัปเดต",
+    "open_position": "ถืออยู่แล้ว",
+    "risk_cap": "เต็มเพดานความเสี่ยง",
+    "below_min_notional": "ไม้เล็กกว่าขั้นต่ำ",
+    "margin_cap": "margin ไม่พอ",
+}
 
 
 def match_menu_label(text: str) -> str | None:
@@ -156,6 +170,49 @@ def render_open_positions(
     return "\n".join(lines)
 
 
+def _reason_line(symbol: str, reason: str) -> str:
+    label = ON_DEMAND_REASON_TH.get(reason)
+    if label is None:
+        return f"{symbol} {reason}"
+    return f"{symbol} {label}"
+
+
+def _format_sent_at_line(seen: dict[str, Any]) -> str:
+    raw = seen.get("sent_at_ms")
+    if raw is None:
+        raw = seen.get("created_at_ms")
+    when_ms = int(raw or 0)
+    when = datetime.fromtimestamp(when_ms / 1000.0, tz=BANGKOK)
+    return f"ส่งแล้วเมื่อ {when.strftime('%H:%M')}"
+
+
+def _render_on_demand_idea(
+    conn: Any,
+    cand: Any,
+    *,
+    now_ms: int,
+    expires_at_ms: int,
+    balance: Decimal,
+) -> str:
+    sized = cand.sized
+    seen = latest_seen_idea(conn, symbol=sized.symbol, side=sized.side, now_ms=now_ms)
+    if seen is not None:
+        entry = Decimal(str(seen["entry"]))
+        stop = Decimal(str(seen["stop"]))
+        if chase_exceeded(side=sized.side, entry=entry, stop=stop, mark=sized.entry):
+            return f"{sized.symbol} ราคาวิ่งไปแล้ว — ไม่แนะนำไล่"
+        body = format_signal_message(sized, expires_at_ms=expires_at_ms, balance=balance)
+        return f"{body}\n{_format_sent_at_line(seen)}"
+    return format_signal_message(sized, expires_at_ms=expires_at_ms, balance=balance)
+
+
+def render_empty_on_demand(skipped: list[dict[str, Any]]) -> str:
+    """One Thai reason line per universe symbol when nothing is admitted."""
+    by_symbol = {str(row.get("symbol") or "").upper(): str(row.get("reason") or "") for row in skipped}
+    lines = [_reason_line(sym, by_symbol.get(sym) or "flat") for sym in ASSIST_SYMBOLS]
+    return "\n".join(lines)
+
+
 def render_anything_now(
     conn: Any,
     *,
@@ -171,15 +228,30 @@ def render_anything_now(
     if client is None:
         return "อ่าน futures ไม่ได้"
     try:
-        result = scan_signal_candidates(conn, futures=client, now_ms=now_ms, persist=False)
+        result = scan_signal_candidates(
+            conn,
+            futures=client,
+            now_ms=now_ms,
+            persist=False,
+            on_demand=True,
+        )
     except Exception:  # noqa: BLE001
         return "อ่าน futures ไม่ได้"
     admitted = result.get("admitted") or []
     if not admitted:
-        return "ตอนนี้ไม่มี"
+        return render_empty_on_demand(list(result.get("skipped") or []))
     balance = Decimal(str(result.get("balance_usdt") or 0))
     expires = next_assist_run_ms(now_ms)
-    blocks = [format_signal_message(c.sized, expires_at_ms=expires, balance=balance) for c in admitted]
+    blocks = [
+        _render_on_demand_idea(
+            conn,
+            cand,
+            now_ms=now_ms,
+            expires_at_ms=expires,
+            balance=balance,
+        )
+        for cand in admitted
+    ]
     return "\n\n".join(blocks)
 
 

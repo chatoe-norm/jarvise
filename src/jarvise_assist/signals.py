@@ -241,6 +241,18 @@ def _stop_for_open_position(
     return pos.entry_price + dist
 
 
+def _floor_skip_reason(analysis: dict[str, Any] | None) -> str:
+    """Map a failed floor gate to flat vs low_confidence for owner-facing copy."""
+    if analysis is None:
+        return "flat"
+    action = str(analysis.get("action") or "").lower()
+    if action not in {"long", "short"}:
+        return "flat"
+    if analysis.get("invalidation_price") is None:
+        return "flat"
+    return "low_confidence"
+
+
 def build_existing_ideas(
     conn: Any,
     *,
@@ -249,8 +261,13 @@ def build_existing_ideas(
     balance: Decimal,
     risk_pct: Decimal,
     now_ms: int,
+    include_sent_held: bool = True,
 ) -> list[ExistingIdea]:
-    """Open universe positions plus recent sent/held signals not already open."""
+    """Open universe positions plus recent sent/held signals not already open.
+
+    When ``include_sent_held`` is False (on-demand menu), only open positions
+    occupy risk slots so a prior push does not hide a still-valid idea.
+    """
     ideas: list[ExistingIdea] = []
     open_keys: set[tuple[str, str]] = set()
     for pos in positions:
@@ -267,18 +284,19 @@ def build_existing_ideas(
             risk_pct=risk_pct,
         )
         ideas.append(ExistingIdea(symbol=pos.symbol, side=trade_side, risk_usdt=risk))
-    for row in list_active_idea_signals(conn, now_ms=now_ms, within_ms=IDEA_LOOKBACK_MS):
-        key = (str(row["symbol"]).upper(), str(row["side"]).lower())
-        if key in open_keys:
-            continue
-        ideas.append(
-            ExistingIdea(
-                symbol=key[0],
-                side=key[1],
-                risk_usdt=Decimal(str(row["loss_at_stop"])),
+    if include_sent_held:
+        for row in list_active_idea_signals(conn, now_ms=now_ms, within_ms=IDEA_LOOKBACK_MS):
+            key = (str(row["symbol"]).upper(), str(row["side"]).lower())
+            if key in open_keys:
+                continue
+            ideas.append(
+                ExistingIdea(
+                    symbol=key[0],
+                    side=key[1],
+                    risk_usdt=Decimal(str(row["loss_at_stop"])),
+                )
             )
-        )
-        open_keys.add(key)
+            open_keys.add(key)
     return ideas
 
 
@@ -288,10 +306,12 @@ def scan_signal_candidates(
     futures: BinanceFuturesClient,
     now_ms: int,
     persist: bool = True,
+    on_demand: bool = False,
 ) -> dict[str, Any]:
     """Shared scan for signal job and the anything-now menu.
 
     When ``persist`` is False, no rows are inserted and Telegram is not used.
+    When ``on_demand`` is True, skip push dedupe (same_idea and sent/held risk slots).
     """
     settings = ensure_settings(conn)
     balance, available = futures.usdt_wallet_and_available()
@@ -313,13 +333,13 @@ def scan_signal_candidates(
             continue
         analysis = load_latest_analysis(conn, symbol, ASSIST_TIMEFRAME)
         if analysis is None or not passes_signal_floor(analysis):
-            skipped.append({"symbol": symbol, "reason": "floor"})
+            skipped.append({"symbol": symbol, "reason": _floor_skip_reason(analysis)})
             continue
         if not analysis_is_fresh(analysis, now_ms=now_ms):
             skipped.append({"symbol": symbol, "reason": "stale_analysis"})
             continue
         side = str(analysis["action"]).lower()
-        if _same_idea_skip(conn, symbol=symbol, side=side, now_ms=now_ms):
+        if not on_demand and _same_idea_skip(conn, symbol=symbol, side=side, now_ms=now_ms):
             skipped.append({"symbol": symbol, "reason": "same_idea"})
             continue
         try:
@@ -378,6 +398,7 @@ def scan_signal_candidates(
         balance=balance,
         risk_pct=risk_pct,
         now_ms=now_ms,
+        include_sent_held=not on_demand,
     )
     admitted, rejected = admit_signals(existing=existing, candidates=candidates, balance=balance)
     for cand in rejected:
@@ -396,6 +417,7 @@ def scan_signal_candidates(
         "positions": positions,
         "orders": orders,
         "persist": persist,
+        "on_demand": on_demand,
     }
 
 

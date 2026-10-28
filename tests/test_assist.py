@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import (
     FuturesKeyUnsafeError,
     FuturesPermissionError,
@@ -15,6 +16,7 @@ from jarvise_assist.futures import (
     SymbolFilters,
     audit_key_for_assist,
 )
+from jarvise_assist.menu import render_anything_now
 from jarvise_assist.messages import (
     format_exit_advice,
     format_move_stop_advice,
@@ -366,8 +368,8 @@ def test_floor_blocks_flat_and_low_conf(tmp_path: Path) -> None:
     payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=capture)
     assert sent == []
     reasons = {s["symbol"]: s["reason"] for s in payload["skipped"]}
-    assert reasons.get("ETHUSDT") == "floor"
-    assert reasons.get("SOLUSDT") == "floor"
+    assert reasons.get("ETHUSDT") == "flat"
+    assert reasons.get("SOLUSDT") == "low_confidence"
     conn.close()
 
 
@@ -1937,3 +1939,98 @@ def test_shared_leverage_two_idea_telegram_text() -> None:
     assert "margin ≈" in text
     # Visible in pytest -s / CI logs for the PR report.
     print(text)
+
+
+def _seed_sent_ada_short(
+    conn: Any,
+    *,
+    sent_at_ms: int,
+    entry: Decimal = Decimal("0.40"),
+    stop: Decimal = Decimal("0.42"),
+) -> str:
+    sized = size_signal(
+        symbol="ADAUSDT",
+        side="short",
+        entry=entry,
+        stop=stop,
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert sized is not None
+    expires = next_assist_run_ms(sent_at_ms)
+    return insert_signal(
+        conn,
+        sized,
+        status="sent",
+        created_at_ms=sent_at_ms,
+        expires_at_ms=expires,
+        sent_at_ms=sent_at_ms,
+    )
+
+
+def test_on_demand_shows_same_idea_with_sent_at(tmp_path: Path) -> None:
+    """ADA short 0.75, sent 20:59, fresh bar: on demand shows it; push still same_idea."""
+    conn = open_db(tmp_path / "ondemand_ada.db")
+    now = _ms_bangkok(2026, 10, 28, 10, 0)
+    sent_at = _ms_bangkok(2026, 10, 27, 20, 59)
+    analysis_ts = now - 7 * 3_600_000
+    _seed_analysis(
+        conn,
+        symbol="ADAUSDT",
+        action="short",
+        confidence=0.75,
+        invalidation=0.42,
+        ts=analysis_ts,
+    )
+    _seed_sent_ada_short(conn, sent_at_ms=sent_at)
+    before = conn.execute("SELECT COUNT(*) FROM assist_signal").fetchone()[0]
+    fake = FakeFutures(marks={"ADAUSDT": Decimal("0.40")}, steps={"ADAUSDT": Decimal("1")})
+
+    text = render_anything_now(conn, futures=fake, now_ms=now)
+    print(text)
+    assert "ADAUSDT" in text
+    assert "SHORT" in text
+    assert "ส่งแล้วเมื่อ 20:59" in text
+    assert "ราคาวิ่งไปแล้ว" not in text
+    after = conn.execute("SELECT COUNT(*) FROM assist_signal").fetchone()[0]
+    assert after == before
+
+    push = run_assist_signals(conn, futures=fake, now_ms_value=now, send=lambda _t: True)
+    assert any(s.get("symbol") == "ADAUSDT" and s.get("reason") == "same_idea" for s in push["skipped"])
+    conn.close()
+
+
+def test_on_demand_chase_shows_do_not_chase(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "ondemand_chase.db")
+    now = _ms_bangkok(2026, 10, 28, 10, 0)
+    sent_at = _ms_bangkok(2026, 10, 27, 20, 59)
+    analysis_ts = now - 7 * 3_600_000
+    _seed_analysis(
+        conn,
+        symbol="ADAUSDT",
+        action="short",
+        confidence=0.75,
+        invalidation=0.42,
+        ts=analysis_ts,
+    )
+    _seed_sent_ada_short(conn, sent_at_ms=sent_at, entry=Decimal("0.40"), stop=Decimal("0.42"))
+    # Short chase: mark < entry - 0.3R; R=0.02 → mark < 0.394.
+    fake = FakeFutures(marks={"ADAUSDT": Decimal("0.39")}, steps={"ADAUSDT": Decimal("1")})
+    text = render_anything_now(conn, futures=fake, now_ms=now)
+    assert text == "ADAUSDT ราคาวิ่งไปแล้ว — ไม่แนะนำไล่"
+    assert "เข้า:" not in text
+    conn.close()
+
+
+def test_on_demand_all_flat_lists_seven_reasons(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "ondemand_flat.db")
+    now = _ms_bangkok(2026, 10, 28, 10, 0)
+    fake = FakeFutures()
+    text = render_anything_now(conn, futures=fake, now_ms=now)
+    print(text)
+    lines = text.splitlines()
+    assert len(lines) == 7
+    assert lines == [f"{sym} ไม่มีแนวโน้ม" for sym in ASSIST_SYMBOLS]
+    assert conn.execute("SELECT COUNT(*) FROM assist_signal").fetchone()[0] == 0
+    conn.close()
