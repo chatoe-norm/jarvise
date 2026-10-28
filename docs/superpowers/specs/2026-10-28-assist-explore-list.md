@@ -25,7 +25,7 @@ Live stays off. The assistant never places orders. No new env vars. `ASSIST_SYMB
 
 ## D2 (later, not this PR)
 
-Signal scan, position watch, virtual track, and the Monday summary section. Ranking and the shared risk budget from decision (b). Message label from decision (d).
+Signal scan, position watch, virtual track, and the Monday summary section. Ranking and the shared risk budget from decision (b). Message label from decision (d). Explore signals are not sent while the kill switch is engaged, or while core signals are held for a market-safety reason, because explore analysis skips market safety.
 
 ## Tests
 

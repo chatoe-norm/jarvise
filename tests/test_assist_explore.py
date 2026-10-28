@@ -9,6 +9,7 @@ import pytest
 
 from jarvise_assist import ASSIST_TIMEFRAME
 from jarvise_assist.explore import (
+    EXPLORE_BUDGET_S,
     REASON_CONTRACT,
     REASON_CORE,
     REASON_DUP,
@@ -16,6 +17,8 @@ from jarvise_assist.explore import (
     REASON_FULL,
     REASON_KLINE,
     REASON_UNKNOWN,
+    REFRESH_LIMIT,
+    SEED_LIMIT,
     execute_explore,
     explore_db_path,
     latest_explore_analysis,
@@ -27,7 +30,12 @@ from jarvise_assist.explore import (
 from jarvise_assist.keyboard import BTN_EXPLORE, EXPLORE_RM_PREFIX, reply_keyboard
 from jarvise_assist.listen import process_update
 from jarvise_assist.store import ensure_settings, insert_explore_symbol, list_explore_symbols
-from jarvise_ingest.db import load_latest_candle, open_db, upsert_market_technicals
+from jarvise_ingest.db import (
+    load_latest_candle,
+    open_db,
+    upsert_analysis_output,
+    upsert_market_technicals,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -363,3 +371,106 @@ def test_mtf_fetches_htf_and_execute_uses_the_sibling_file(
     assert _count(main, "analysis_output", "LINKUSDT") == 0
     explore.close()
     main.close()
+
+
+def _analysis(symbol: str, timestamp: int) -> dict[str, Any]:
+    return {
+        "analysis_id": f"{symbol}-{timestamp}",
+        "timestamp": timestamp,
+        "symbol": symbol,
+        "timeframe": "4h",
+        "regime_state": "range",
+        "confidence_score": 0.1,
+        "action": "flat",
+        "invalidation_price": None,
+        "size_pct_equity": 0.0,
+        "thesis": "test",
+    }
+
+
+def test_budget_skips_symbols_not_yet_started(tmp_path: Path) -> None:
+    main, explore = _pair(tmp_path)
+    insert_explore_symbol(main, "LINKUSDT", 1)
+    insert_explore_symbol(main, "AVAXUSDT", 2)
+    insert_explore_symbol(main, "DOTUSDT", 3)
+    clock = {"t": 0.0}
+    called: list[str] = []
+
+    def fetch(symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+        called.append(symbol)
+        clock["t"] = EXPLORE_BUDGET_S + 1
+        return _candles(symbol, interval, min(limit, 4))
+
+    payload = run_assist_explore(
+        main,
+        explore,
+        fetch=fetch,
+        now_ms_value=1_800_000_000_000,
+        clock=lambda: clock["t"],
+    )
+    assert called == ["LINKUSDT"]
+    assert payload["wrote"] == ["LINKUSDT"]
+    assert payload["failed"] == [
+        {"symbol": "AVAXUSDT", "error": "budget"},
+        {"symbol": "DOTUSDT", "error": "budget"},
+    ]
+    main.close()
+    explore.close()
+
+
+def test_remove_deletes_only_explore_rows_for_that_symbol(tmp_path: Path) -> None:
+    main, explore = _pair(tmp_path)
+    insert_explore_symbol(main, "LINKUSDT", 1)
+    insert_explore_symbol(main, "AVAXUSDT", 2)
+    link = _candles("LINKUSDT", "4h", 1)
+    avax = _candles("AVAXUSDT", "4h", 1)
+    upsert_market_technicals(main, link)
+    upsert_market_technicals(explore, link)
+    upsert_market_technicals(explore, avax)
+    upsert_analysis_output(main, _analysis("LINKUSDT", link[0]["timestamp"]))
+    upsert_analysis_output(explore, _analysis("LINKUSDT", link[0]["timestamp"]))
+    upsert_analysis_output(explore, _analysis("AVAXUSDT", avax[0]["timestamp"]))
+    explore.close()
+
+    removed = remove_explore_symbol(main, "LINKUSDT")
+    assert removed["symbol"] == "LINKUSDT"
+    assert list_explore_symbols(main) == ["AVAXUSDT"]
+
+    explore = open_db(explore_db_path(tmp_path / "jarvise.db"))
+    assert _count(explore, "market_technicals", "LINKUSDT") == 0
+    assert _count(explore, "analysis_output", "LINKUSDT") == 0
+    assert _count(explore, "market_technicals", "AVAXUSDT") == 1
+    assert _count(explore, "analysis_output", "AVAXUSDT") == 1
+    assert _count(main, "market_technicals", "LINKUSDT") == 1
+    assert _count(main, "analysis_output", "LINKUSDT") == 1
+    explore.close()
+    main.close()
+
+
+def test_missing_or_stale_series_fetches_seed_limit(tmp_path: Path) -> None:
+    main, explore = _pair(tmp_path)
+    insert_explore_symbol(main, "LINKUSDT", 1)
+    insert_explore_symbol(main, "AVAXUSDT", 2)
+    insert_explore_symbol(main, "DOTUSDT", 3)
+    step = 14_400_000
+    stale_ts = 1_700_000_000_000
+    now = stale_ts + (REFRESH_LIMIT + 1) * step
+    fresh_ts = now - 10 * step
+    upsert_market_technicals(explore, _candles("AVAXUSDT", "4h", 1))
+    fresh = _candles("DOTUSDT", "4h", 1)
+    fresh[0]["timestamp"] = fresh_ts
+    upsert_market_technicals(explore, fresh)
+    seen: list[tuple[str, int]] = []
+
+    def fetch(symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+        seen.append((symbol, limit))
+        return _candles(symbol, interval, 3)
+
+    run_assist_explore(main, explore, fetch=fetch, now_ms_value=now)
+    assert seen == [
+        ("LINKUSDT", SEED_LIMIT),
+        ("AVAXUSDT", SEED_LIMIT),
+        ("DOTUSDT", REFRESH_LIMIT),
+    ]
+    main.close()
+    explore.close()

@@ -24,7 +24,7 @@
         "method": "POST",
         "url": "http://jobs:8090/jobs/assist-explore",
         "options": {
-          "timeout": 360000
+          "timeout": 90000
         },
         "sendHeaders": true,
         "headerParameters": {

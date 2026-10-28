@@ -6,9 +6,12 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from jarvise_analyze.engine import (
     CONFIDENCE_THRESHOLD,
@@ -34,12 +37,15 @@ from jarvise_ingest.db import (
 )
 from jarvise_ingest.providers.binance_klines import fetch_klines
 from jarvise_ingest.series import recompute_indicators
+from jarvise_ingest.timeframes import INTERVAL_MS
 
 logger = logging.getLogger(__name__)
 
 EXPLORE_LIMIT = 10
 SEED_LIMIT = 1000
 REFRESH_LIMIT = 200
+EXPLORE_BUDGET_S = 60.0
+KLINE_TIMEOUT_S = 10.0
 
 REASON_FORMAT = "พิมพ์สัญลักษณ์เช่น LINKUSDT"
 REASON_CORE = "เหรียญนี้อยู่ในชุดหลักแล้ว"
@@ -120,6 +126,45 @@ def _store_bars(conn: sqlite3.Connection, candles: list[dict[str, Any]]) -> None
     recompute_indicators(conn, symbol, timeframe)
 
 
+def _bind_fetch(fetch: FetchFn) -> tuple[FetchFn, httpx.Client | None]:
+    """Use a 10s client for the real kline source. Injected fetches stay untouched."""
+    if fetch is not fetch_klines:
+        return fetch, None
+    client = httpx.Client(timeout=KLINE_TIMEOUT_S)
+
+    def bound(symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+        return fetch_klines(symbol, interval, limit, client=client)
+
+    return bound, client
+
+
+def _close_client(client: httpx.Client | None) -> None:
+    if client is not None:
+        client.close()
+
+
+def _fetch_limit(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    now_ms_value: int,
+) -> int:
+    candle = load_latest_candle(conn, symbol, timeframe)
+    if candle is None:
+        return SEED_LIMIT
+    newest = int(candle["timestamp"])
+    horizon = int(now_ms_value) - REFRESH_LIMIT * INTERVAL_MS[timeframe]
+    if newest < horizon:
+        return SEED_LIMIT
+    return REFRESH_LIMIT
+
+
+def _delete_symbol_rows(conn: sqlite3.Connection, symbol: str) -> None:
+    conn.execute("DELETE FROM market_technicals WHERE symbol=?", (symbol,))
+    conn.execute("DELETE FROM analysis_output WHERE symbol=?", (symbol,))
+    conn.commit()
+
+
 def _fetch_into(
     conn: sqlite3.Connection,
     symbol: str,
@@ -172,24 +217,30 @@ def submit_explore_symbol(
     reason = contract_rejection(lookup(symbol))
     if reason is not None:
         return _reject(reason)
-    if not _kline_serves(symbol, fetch):
-        return _reject(REASON_KLINE)
-
-    added = int(now_ms_value if now_ms_value is not None else now_ms())
-    insert_explore_symbol(conn, symbol, added)
-    own = explore_conn is None
-    explore = explore_conn
+    fetch_fn, client = _bind_fetch(fetch)
     try:
-        if explore is None:
-            explore = open_db(explore_db_path(connection_path(conn)))
-        seed_explore_symbol(explore, symbol, fetch=fetch)
-    except Exception:  # noqa: BLE001 — roll the membership back; the owner can retry
-        logger.warning("assist explore seed failed for %s", symbol, exc_info=True)
-        delete_explore_symbol(conn, symbol)
-        return _reject(REASON_KLINE)
+        if not _kline_serves(symbol, fetch_fn):
+            return _reject(REASON_KLINE)
+
+        added = int(now_ms_value if now_ms_value is not None else now_ms())
+        insert_explore_symbol(conn, symbol, added)
+        own = explore_conn is None
+        explore = explore_conn
+        try:
+            if explore is None:
+                explore = open_db(explore_db_path(connection_path(conn)))
+            seed_explore_symbol(explore, symbol, fetch=fetch_fn)
+        except Exception:  # noqa: BLE001 — roll the membership back; the owner can retry
+            logger.warning("assist explore seed failed for %s", symbol, exc_info=True)
+            delete_explore_symbol(conn, symbol)
+            if explore is not None:
+                _delete_symbol_rows(explore, symbol)
+            return _reject(REASON_KLINE)
+        finally:
+            if own and explore is not None:
+                explore.close()
     finally:
-        if own and explore is not None:
-            explore.close()
+        _close_client(client)
 
     text, markup = render_explore_message(conn)
     return {
@@ -201,10 +252,25 @@ def submit_explore_symbol(
     }
 
 
-def remove_explore_symbol(conn: sqlite3.Connection, symbol: str) -> dict[str, Any]:
-    delete_explore_symbol(conn, symbol.upper())
+def remove_explore_symbol(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    explore_conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    sym = symbol.upper()
+    delete_explore_symbol(conn, sym)
+    own = explore_conn is None
+    explore = explore_conn
+    try:
+        if explore is None:
+            explore = open_db(explore_db_path(connection_path(conn)))
+        _delete_symbol_rows(explore, sym)
+    finally:
+        if own and explore is not None:
+            explore.close()
     text, markup = render_explore_message(conn)
-    return {"handled": True, "ok": True, "text": text, "reply_markup": markup, "symbol": symbol.upper()}
+    return {"handled": True, "ok": True, "text": text, "reply_markup": markup, "symbol": sym}
 
 
 def _reject(reason: str) -> dict[str, Any]:
@@ -234,21 +300,32 @@ def run_assist_explore(
     *,
     fetch: FetchFn = fetch_klines,
     now_ms_value: int | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
     """Refresh explore candles and analysis. Never sends, never touches the kill switch."""
     at_ms = int(now_ms_value if now_ms_value is not None else now_ms())
+    tick = clock or time.monotonic
+    started = tick()
     wrote: list[str] = []
     failed: list[dict[str, str]] = []
-    for symbol in list_explore_symbols(conn):
-        try:
-            for timeframe in _timeframes():
-                _fetch_into(explore_conn, symbol, timeframe, REFRESH_LIMIT, fetch)
-            _write_analysis(explore_conn, symbol)
-        except Exception as exc:  # noqa: BLE001 — one coin must not stop the others or the signal job
-            logger.warning("assist explore skip %s: %s", symbol, exc)
-            failed.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
-            continue
-        wrote.append(symbol)
+    fetch_fn, client = _bind_fetch(fetch)
+    try:
+        for symbol in list_explore_symbols(conn):
+            if tick() - started >= EXPLORE_BUDGET_S:
+                failed.append({"symbol": symbol, "error": "budget"})
+                continue
+            try:
+                for timeframe in _timeframes():
+                    limit = _fetch_limit(explore_conn, symbol, timeframe, at_ms)
+                    _fetch_into(explore_conn, symbol, timeframe, limit, fetch_fn)
+                _write_analysis(explore_conn, symbol)
+            except Exception as exc:  # noqa: BLE001 — one coin must not stop the others or the signal job
+                logger.warning("assist explore skip %s: %s", symbol, exc)
+                failed.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            wrote.append(symbol)
+    finally:
+        _close_client(client)
     return {
         "ok": True,
         "paper_only": True,
