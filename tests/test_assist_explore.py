@@ -80,6 +80,34 @@ def _fetch_n(n: int):
     return fetch
 
 
+def _fetch_like_binance(n: int):
+    """Like fetch_klines: the newest of `limit` rows is still open and dropped."""
+
+    def fetch(symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+        closed = _candles(symbol, interval, min(limit, n + 1))[:-1]
+        if not closed:
+            raise RuntimeError(f"binance returned no closed candles for {symbol}")
+        return closed
+
+    return fetch
+
+
+def test_kline_probe_survives_the_open_candle(tmp_path: Path) -> None:
+    main, explore = _pair(tmp_path)
+    added = submit_explore_symbol(
+        main,
+        "LINKUSDT",
+        lookup=lambda symbol: _perp(symbol),
+        fetch=_fetch_like_binance(5),
+        now_ms_value=10,
+        explore_conn=explore,
+    )
+    assert added["ok"] is True, added["text"]
+    assert list_explore_symbols(main) == ["LINKUSDT"]
+    main.close()
+    explore.close()
+
+
 def _pair(tmp_path: Path):
     main = open_db(tmp_path / "jarvise.db")
     explore = open_db(explore_db_path(tmp_path / "jarvise.db"))
