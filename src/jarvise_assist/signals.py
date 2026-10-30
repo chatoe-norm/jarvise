@@ -531,6 +531,7 @@ def run_assist_signals(
             "at_ms": ts,
             "night_hold": night,
             "balance_usdt": float(balance),
+            "available_usdt": scanned.get("available_usdt"),
             "created": created,
             "skipped": skipped,
             "futures_recovered": recovered,

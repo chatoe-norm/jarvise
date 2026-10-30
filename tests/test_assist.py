@@ -16,7 +16,7 @@ from jarvise_assist.futures import (
     SymbolFilters,
     audit_key_for_assist,
 )
-from jarvise_assist.menu import render_anything_now
+from jarvise_assist.menu import render_anything_now, render_empty_on_demand
 from jarvise_assist.messages import (
     format_exit_advice,
     format_move_stop_advice,
@@ -575,6 +575,7 @@ def test_same_idea_skips_then_allows_after_24h_or_side_change(tmp_path: Path) ->
     _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=t0 - 60_000)
     p0 = run_assist_signals(conn, futures=fake, now_ms_value=t0, send=lambda _t: True)
     assert len(p0["created"]) == 1
+    assert p0["available_usdt"] is not None  # handoff 2026-10-28 §3.3: payload carries availableBalance
 
     t1 = t0 + 4 * 3_600_000
     _seed_analysis(
@@ -1935,7 +1936,7 @@ def test_shared_leverage_two_idea_telegram_text() -> None:
     blocks = [format_signal_message(c.sized, expires_at_ms=expires, balance=Decimal("100")) for c in admitted]
     text = "\n\n".join(blocks)
     assert "ADAUSDT" in text and "DOGEUSDT" in text
-    assert text.count("Leverage ที่ต้องใช้: 2x (isolated)") == 2
+    assert text.count("Leverage ที่ต้องใช้: 2x (isolated") == 2
     assert "margin ≈" in text
     # Visible in pytest -s / CI logs for the PR report.
     print(text)
@@ -2034,3 +2035,54 @@ def test_on_demand_all_flat_lists_seven_reasons(tmp_path: Path) -> None:
     assert lines == [f"{sym} ไม่มีแนวโน้ม" for sym in ASSIST_SYMBOLS]
     assert conn.execute("SELECT COUNT(*) FROM assist_signal").fetchone()[0] == 0
     conn.close()
+
+
+def test_signal_message_warns_margin_mode_and_duplicate_tp_sl() -> None:
+    """Owner's first trade, 2026-10-28: Multi-Assets blocked Isolated; order TP/SL plus Position TP/SL made 2 stops."""
+    sized = size_signal(
+        symbol="ADAUSDT",
+        side="short",
+        entry=Decimal("0.2065"),
+        stop=Decimal("0.2129"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert sized is not None
+    text = format_signal_message(
+        sized, expires_at_ms=_ms_bangkok(2026, 10, 28, 12, 25), balance=Decimal("100")
+    )
+    assert "Single-Asset" in text and "Multi-Assets" in text
+    assert "trigger = Mark Price" in text
+    assert "stop 2 ตัว" in text
+
+
+def test_capped_leverage_note_sits_before_stop_instruction() -> None:
+    sized = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("99.9"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("0.001"),
+    )
+    assert sized is not None and sized.leverage_capped
+    lines = format_signal_message(
+        sized, expires_at_ms=_ms_bangkok(2026, 10, 28, 12, 25), balance=Decimal("100")
+    ).split("\n")
+    stop_i = next(i for i, line in enumerate(lines) if line.startswith("ตั้ง Stop-Market"))
+    assert lines[stop_i - 1].startswith("ขนาดเต็มต้องใช้")
+    assert lines[-1].startswith("ตั้ง TP/SL ที่เดียว")
+
+
+def test_on_demand_reason_lines_are_thai_for_size_and_mark_errors() -> None:
+    text = render_empty_on_demand(
+        [
+            {"symbol": "BTCUSDT", "reason": "size_failed"},
+            {"symbol": "ETHUSDT", "reason": "mark:ReadTimeout"},
+        ]
+    )
+    assert "BTCUSDT คำนวณขนาดไม้ไม่ได้" in text
+    assert "ETHUSDT อ่านราคาไม่ได้" in text
+    assert "size_failed" not in text and "ReadTimeout" not in text
