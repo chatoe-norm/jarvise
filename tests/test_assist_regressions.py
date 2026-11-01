@@ -529,3 +529,80 @@ def test_trailing_stop_protects_without_using_activate_price() -> None:
         )
         == "full"
     )
+
+
+def test_morning_position_risk_error_returns_futures_down(tmp_path: Path) -> None:
+    """position_risk failures after wallet/open_symbols must not raise out of morning."""
+
+    class _PositionRiskDown(FakeFutures):
+        def position_risk(self, *, symbol: str | None = None) -> list[FuturesPosition]:
+            raise RuntimeError("positionRisk unavailable")
+
+    conn = open_db(tmp_path / "morning_down.db")
+    morning = _ms_bangkok(2026, 11, 1, 8, 20)
+    fake = _PositionRiskDown(balance=Decimal("1000"))
+    payload = run_assist_morning(conn, futures=fake, now_ms_value=morning, send=lambda _t: True)
+    assert payload["ok"] is False
+    assert payload["error"] == "futures_unavailable"
+    assert payload["detail"] == "RuntimeError"
+    conn.close()
+
+
+def test_partial_then_none_sends_missing_once(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "partial_then_none.db")
+    t1 = _ms_bangkok(2026, 11, 1, 12, 0)
+    _seed_candle(
+        conn,
+        symbol="DOGEUSDT",
+        ts=t1 - 2 * FOUR_H_MS,
+        open_=0.08,
+        high=0.081,
+        low=0.079,
+        close=0.08,
+        atr=0.002,
+    )
+    _seed_analysis(conn, symbol="DOGEUSDT", action="flat", confidence=0.9, invalidation=None, ts=t1 - 60_000)
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-676"),
+        entry_price=Decimal("0.08"),
+        mark_price=Decimal("0.08"),
+        update_time_ms=t1 - 600_000,
+    )
+    partial = {
+        "symbol": "DOGEUSDT",
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "stopPrice": "0.083",
+        "origQty": "300",
+    }
+    sent: list[str] = []
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[pos], orders=[partial], steps={"DOGEUSDT": Decimal("1")}),
+        now_ms_value=t1,
+        send=lambda t: sent.append(t) or True,
+    )
+    assert any("คุมแค่ 300/676" in t for t in sent)
+    n_partial = len(sent)
+    # Stop disappears: coverage none → missing warning once.
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[pos], orders=[], steps={"DOGEUSDT": Decimal("1")}),
+        now_ms_value=t1 + 300_000,
+        send=lambda t: sent.append(t) or True,
+    )
+    missing = [t for t in sent[n_partial:] if "ไม่มี stop" in t]
+    assert len(missing) == 1
+    n_after_missing = len(sent)
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[pos], orders=[], steps={"DOGEUSDT": Decimal("1")}),
+        now_ms_value=t1 + 600_000,
+        send=lambda t: sent.append(t) or True,
+    )
+    assert not any("ไม่มี stop" in t for t in sent[n_after_missing:])
+    conn.close()

@@ -594,6 +594,11 @@ def run_assist_morning(
         client.assert_key_safe()
         balance, available = client.usdt_wallet_and_available()
         client.open_symbols()
+        open_positions = client.position_risk()
+        try:
+            open_orders = client.all_open_orders()
+        except AttributeError:
+            open_orders = [*client.open_orders(), *client.open_algo_orders()]
         _handle_futures_ok(conn, send=send_fn)
     except FuturesKeyUnsafeError as exc:
         return _strip_secrets(_alert_key_unsafe(conn, send=send_fn, detail=str(exc), now=ts))
@@ -621,12 +626,7 @@ def run_assist_morning(
     symbol_rank = {sym: i for i, sym in enumerate(ASSIST_SYMBOLS)}
     morning_candidates: list[tuple[str, SignalCandidate]] = []
     filters_by_symbol: dict[str, SymbolFilters] = {}
-    open_positions = client.position_risk()
     open_syms = {p.symbol.upper() for p in open_positions}
-    try:
-        open_orders = client.all_open_orders()
-    except AttributeError:
-        open_orders = [*client.open_orders(), *client.open_algo_orders()]
 
     for row in list_held_signals(conn):
         symbol = str(row["symbol"]).upper()

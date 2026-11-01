@@ -40,6 +40,7 @@ from jarvise_assist.store import (
     find_linkable_signal,
     get_watch_position,
     insert_watch_advice,
+    latest_no_stop_reason,
     list_held_watch_advice,
     mark_signal_taken,
     mark_watch_advice_dropped,
@@ -357,6 +358,14 @@ def _process_universe_position(
         trade_side=pos.side,
     )
     if coverage in {"none", "partial"}:
+        no_stop_reason = "partial" if coverage == "partial" else "missing"
+        # One latch bit for both reasons: clear when coverage flips so the
+        # other warning can fire once (partial → missing or the reverse).
+        if stored.get("no_stop_latched"):
+            prior = latest_no_stop_reason(conn, pos.symbol, pos.position_side)
+            if prior is not None and prior != no_stop_reason:
+                set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=False)
+                stored["no_stop_latched"] = 0
         if not stored.get("no_stop_latched"):
             if coverage == "partial":
                 covered = protective_stop_covered_qty(
@@ -372,10 +381,8 @@ def _process_universe_position(
                     position_qty=pos.qty,
                     stop=stop_dec,
                 )
-                no_stop_reason = "partial"
             else:
                 text = format_no_stop_warning(symbol=pos.symbol, side=pos.side, stop=stop_dec)
-                no_stop_reason = "missing"
             # Never hold no-stop overnight.
             status = _emit_advice(
                 conn,
