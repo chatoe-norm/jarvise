@@ -661,6 +661,24 @@ def set_watch_no_stop_latched(conn: Any, symbol: str, position_side: str, *, lat
     conn.commit()
 
 
+def latest_no_stop_reason(conn: Any, symbol: str, position_side: str) -> str | None:
+    """Most recent sent/held no-stop reason for this position, or None."""
+    row = conn.execute(
+        """
+        SELECT reason FROM assist_watch_advice
+        WHERE symbol=? AND position_side=? AND kind='no_stop'
+          AND status IN ('sent', 'held')
+        ORDER BY created_at_ms DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), position_side.upper()),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row["reason"] if hasattr(row, "keys") else row[0]
+    return str(raw) if raw is not None else None
+
+
 def mark_watch_positions_closed(
     conn: Any, *, open_keys: set[tuple[str, str]], now_ms: int
 ) -> list[tuple[str, str]]:
