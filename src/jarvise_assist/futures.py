@@ -36,6 +36,7 @@ STOP_ORDER_TYPES = frozenset(
         "STOP_MARKET",
         "STOP_LOSS",
         "STOP_LOSS_LIMIT",
+        "TRAILING_STOP_MARKET",
     }
 )
 
@@ -124,9 +125,19 @@ def _is_permission_failure(exc: BaseException) -> bool:
     return False
 
 
+def order_type(order: dict[str, Any]) -> str:
+    return str(order.get("type") or order.get("orderType") or "").upper()
+
+
 def order_stop_price(order: dict[str, Any]) -> Decimal | None:
-    """Stop / trigger price from a regular or algo order row."""
-    for key in ("stopPrice", "triggerPrice", "activatePrice"):
+    """Stop / trigger price from a regular or algo order row.
+
+    ``TRAILING_STOP_MARKET`` never uses ``activatePrice`` as the stop level.
+    """
+    keys: tuple[str, ...] = ("stopPrice", "triggerPrice")
+    if order_type(order) != "TRAILING_STOP_MARKET":
+        keys = (*keys, "activatePrice")
+    for key in keys:
         raw = order.get(key)
         if raw is None or str(raw) in {"", "0", "0.0", "0.00000000"}:
             continue
@@ -139,8 +150,32 @@ def order_stop_price(order: dict[str, Any]) -> Decimal | None:
     return None
 
 
-def order_type(order: dict[str, Any]) -> str:
-    return str(order.get("type") or order.get("orderType") or "").upper()
+def _close_position_true(order: dict[str, Any]) -> bool:
+    raw = order.get("closePosition")
+    if raw is True:
+        return True
+    return str(raw or "").lower() in {"true", "1"}
+
+
+def order_stop_qty(order: dict[str, Any]) -> Decimal | None:
+    """Stop size. ``None`` when the quantity field is absent (treat as full cover)."""
+    has_field = False
+    for key in ("origQty", "quantity"):
+        if key not in order:
+            continue
+        has_field = True
+        raw = order.get(key)
+        if raw is None or str(raw) in {"", "0", "0.0", "0.00000000"}:
+            continue
+        try:
+            qty = Decimal(str(raw))
+        except Exception:  # noqa: BLE001
+            continue
+        if qty > 0:
+            return qty
+    if not has_field:
+        return None
+    return Decimal("0")
 
 
 def is_protective_stop(
@@ -153,20 +188,19 @@ def is_protective_stop(
 
     One-way (missing positionSide or BOTH): requires reduceOnly or closePosition.
     Hedge (LONG/SHORT): matching positionSide + closing side is enough without reduceOnly.
+    Trailing stops count even when there is no comparable stop price.
     """
-    if order_type(order) not in STOP_ORDER_TYPES:
+    otype = order_type(order)
+    if otype not in STOP_ORDER_TYPES:
         return False
     close_side = "SELL" if trade_side == "long" else "BUY"
     if str(order.get("side") or "").upper() != close_side:
         return False
-    if order_stop_price(order) is None:
+    if order_stop_price(order) is None and otype != "TRAILING_STOP_MARKET":
         return False
     ops = str(order.get("positionSide") or "BOTH").upper()
     pos_side = position_side.upper()
-    reduce_only = bool(order.get("reduceOnly")) or str(order.get("closePosition") or "").lower() in {
-        "true",
-        "1",
-    }
+    reduce_only = bool(order.get("reduceOnly")) or _close_position_true(order)
     if ops in {"LONG", "SHORT"}:
         return ops == pos_side
     # One-way: BOTH or missing.
@@ -182,7 +216,11 @@ def find_protective_stop(
     position_side: str,
     trade_side: str,
 ) -> Decimal | None:
-    """Best (tightest for the side) protective stop price, or None."""
+    """Best (tightest for the side) protective stop price, or None.
+
+    Trailing stops without a usable stop price are skipped here; they still
+    count toward :func:`protective_stop_coverage`.
+    """
     prices: list[Decimal] = []
     for order in orders:
         if str(order.get("symbol") or "").upper() != symbol.upper():
@@ -197,6 +235,67 @@ def find_protective_stop(
     if trade_side == "long":
         return max(prices)
     return min(prices)
+
+
+def protective_stop_coverage(
+    orders: list[dict[str, Any]],
+    *,
+    symbol: str,
+    position_side: str,
+    trade_side: str,
+    position_qty: Decimal,
+    step_size: Decimal,
+) -> str:
+    """``none`` / ``partial`` / ``full`` for reduce-only stops on this position.
+
+    ``closePosition`` or a missing quantity field means full coverage (today's
+    behaviour). Otherwise the sum of stop sizes must reach position qty within
+    one lot step.
+    """
+    covered = Decimal("0")
+    saw_protective = False
+    for order in orders:
+        if str(order.get("symbol") or "").upper() != symbol.upper():
+            continue
+        if not is_protective_stop(order, position_side=position_side, trade_side=trade_side):
+            continue
+        saw_protective = True
+        if _close_position_true(order):
+            return "full"
+        qty = order_stop_qty(order)
+        if qty is None:
+            return "full"
+        covered += qty
+    if not saw_protective:
+        return "none"
+    if position_qty <= 0:
+        return "full"
+    step = step_size if step_size > 0 else Decimal("0")
+    if covered + step >= position_qty:
+        return "full"
+    if covered > 0:
+        return "partial"
+    return "none"
+
+
+def protective_stop_covered_qty(
+    orders: list[dict[str, Any]],
+    *,
+    symbol: str,
+    position_side: str,
+    trade_side: str,
+) -> Decimal:
+    """Sum of known stop quantities for display; zero when none or unknown."""
+    total = Decimal("0")
+    for order in orders:
+        if str(order.get("symbol") or "").upper() != symbol.upper():
+            continue
+        if not is_protective_stop(order, position_side=position_side, trade_side=trade_side):
+            continue
+        qty = order_stop_qty(order)
+        if qty is not None:
+            total += qty
+    return total
 
 
 def _exchange_symbol_row(payload: dict[str, Any], symbol: str) -> dict[str, Any] | None:

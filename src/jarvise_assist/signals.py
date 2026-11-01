@@ -620,16 +620,34 @@ def run_assist_morning(
     expired: list[str] = list(expire_older_held_keep_newest(conn))
     symbol_rank = {sym: i for i, sym in enumerate(ASSIST_SYMBOLS)}
     morning_candidates: list[tuple[str, SignalCandidate]] = []
+    filters_by_symbol: dict[str, SymbolFilters] = {}
+    open_positions = client.position_risk()
+    open_syms = {p.symbol.upper() for p in open_positions}
+    try:
+        open_orders = client.all_open_orders()
+    except AttributeError:
+        open_orders = [*client.open_orders(), *client.open_algo_orders()]
 
     for row in list_held_signals(conn):
         symbol = str(row["symbol"]).upper()
         side = str(row["side"]).lower()
         entry0 = Decimal(str(row["entry"]))
         stop0 = Decimal(str(row["stop"]))
+        if symbol in open_syms:
+            mark_signal_expired(conn, str(row["id"]))
+            expired.append(str(row["id"]))
+            continue
         analysis = load_latest_analysis(conn, symbol, ASSIST_TIMEFRAME)
         try:
             mark = client.mark_price(symbol)
-            step = client.step_size(symbol)
+            if hasattr(client, "symbol_filters"):
+                filters = client.symbol_filters(symbol)
+            else:
+                filters = SymbolFilters(
+                    step_size=client.step_size(symbol),
+                    min_qty=Decimal("0"),
+                    min_notional=Decimal("0"),
+                )
         except Exception:  # noqa: BLE001
             mark_signal_expired(conn, str(row["id"]))
             expired.append(str(row["id"]))
@@ -656,13 +674,14 @@ def run_assist_morning(
             stop=new_stop,
             balance=balance,
             risk_pct=risk_pct,
-            step_size=step,
+            step_size=filters.step_size,
             analysis_id=str(analysis.get("analysis_id") or row.get("analysis_id") or "") or None,
         )
         if sized is None:
             mark_signal_expired(conn, str(row["id"]))
             expired.append(str(row["id"]))
             continue
+        filters_by_symbol[symbol] = filters
         morning_candidates.append(
             (
                 str(row["id"]),
@@ -674,9 +693,26 @@ def run_assist_morning(
             )
         )
 
+    # Only open positions consume the 2-idea / 4% caps (held peers do not).
+    existing = build_existing_ideas(
+        conn,
+        positions=open_positions,
+        orders=open_orders,
+        balance=balance,
+        risk_pct=risk_pct,
+        now_ms=ts,
+        include_sent_held=False,
+    )
     morning_sized = [c for _, c in morning_candidates]
+    admitted, risk_rejected = admit_signals(existing=existing, candidates=morning_sized, balance=balance)
+    rejected_set = set(risk_rejected)
+    for sid, cand in morning_candidates:
+        if cand in rejected_set:
+            mark_signal_expired(conn, sid)
+            expired.append(sid)
+
     admitted_morning, margin_dropped = assign_shared_leverage(
-        morning_sized,
+        admitted,
         available_balance=available,
     )
     dropped_set = set(margin_dropped)
@@ -685,11 +721,33 @@ def run_assist_morning(
             mark_signal_expired(conn, sid)
             expired.append(sid)
 
-    # Admitted rows are new SignalCandidate objects; pair by symbol (one held per symbol).
+    # Margin shrink can push size under the exchange minimum (same as scan).
+    still_ok: list[SignalCandidate] = []
+    min_notional_syms: set[str] = set()
+    for cand in admitted_morning:
+        flt = filters_by_symbol.get(cand.sized.symbol)
+        if flt is not None and below_min_notional(
+            qty=cand.sized.qty,
+            notional=cand.sized.notional,
+            min_qty=flt.min_qty,
+            min_notional=flt.min_notional,
+        ):
+            min_notional_syms.add(cand.sized.symbol)
+            continue
+        still_ok.append(cand)
+    admitted_morning = still_ok
+    for sid, cand in morning_candidates:
+        if cand.sized.symbol in min_notional_syms:
+            mark_signal_expired(conn, sid)
+            expired.append(sid)
+
+    # Admitted rows may be new SignalCandidate objects; pair by symbol (one held per symbol).
     sized_by_symbol = {c.sized.symbol: c.sized for c in admitted_morning}
     expires = next_assist_run_ms(ts)
     for sid, cand in morning_candidates:
-        if cand in dropped_set:
+        if cand in rejected_set or cand in dropped_set:
+            continue
+        if cand.sized.symbol in min_notional_syms:
             continue
         sized = sized_by_symbol.get(cand.sized.symbol)
         if sized is None:
