@@ -8,7 +8,6 @@ from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import BinanceFuturesClient, build_futures_client
-from jarvise_assist.pause import monday_bangkok_ms
 from jarvise_assist.store import (
     count_closed_tracks_all,
     count_signals_since,
@@ -21,6 +20,7 @@ from jarvise_notify.telegram import send_telegram_message
 SendFn = Callable[..., Any]
 INCOME_TYPES = frozenset({"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"})
 EDGE_SAMPLE_MIN = 30
+WEEK_MS = 7 * 24 * 3_600_000
 
 
 def format_weekly_summary(
@@ -31,7 +31,7 @@ def format_weekly_summary(
     closed_all: int,
 ) -> str:
     lines = [
-        "📊 ผลสัปดาห์นี้ (assist)",
+        "📊 ผล 7 วันที่ผ่านมา (assist)",
         (
             f"สัญญาณ: ส่ง {counts.get('sent', 0)} · "
             f"ข้าม {counts.get('skipped', 0)} · "
@@ -121,7 +121,9 @@ def run_assist_weekly(
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     send_fn = send or send_telegram_message
     resolve_open_tracks(conn, now_ms=ts)
-    week_start = monday_bangkok_ms(ts)
+    # The job runs Monday 08:30. "Since this Monday 00:00" would cover 8.5 hours,
+    # so report the full seven days before the run.
+    week_start = ts - WEEK_MS
     counts = count_signals_since(conn, since_ms=week_start)
     # Count "sent" as rows that left as sent (created this week with status sent/taken/skipped).
     # Use status counts; also add taken/skipped that were created as sent.
