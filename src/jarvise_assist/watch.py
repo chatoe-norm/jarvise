@@ -43,6 +43,7 @@ from jarvise_assist.store import (
     mark_watch_advice_sent,
     mark_watch_positions_closed,
     now_ms,
+    reset_watch_position,
     set_watch_no_stop_latched,
     upsert_watch_position,
 )
@@ -121,6 +122,7 @@ def _emit_advice(
     now_ms: int,
     send: SendFn,
     hold_ok: bool,
+    since_ms: int | None = None,
 ) -> str:
     """Send or hold; return status sent/held/skipped."""
     if advice_already_sent(
@@ -130,6 +132,7 @@ def _emit_advice(
         kind=kind,
         reason=reason,
         level=level,
+        since_ms=since_ms,
     ):
         return "skipped"
     if night and hold_ok:
@@ -185,6 +188,13 @@ def _ensure_watch_row(
     in_universe: bool,
 ) -> dict[str, Any]:
     existing = get_watch_position(conn, pos.symbol, pos.position_side)
+    if existing is not None and (
+        existing.get("closed_at_ms") is not None or str(existing.get("side") or "") != pos.side
+    ):
+        # A new trade on the same symbol: never reuse the old stop, entry time,
+        # signal link or no-stop latch.
+        reset_watch_position(conn, pos.symbol, pos.position_side)
+        existing = None
     entry_time = pos.update_time_ms
     if entry_time is None:
         entry_time = int(existing["entry_time_ms"]) if existing and existing.get("entry_time_ms") else now_ms
@@ -310,6 +320,7 @@ def _process_universe_position(
         actions.append({"symbol": pos.symbol, "action": "no_initial_stop"})
         return
     stop_dec = Decimal(str(initial_stop))
+    since = int(stored["entry_time_ms"]) if stored.get("entry_time_ms") else None
     protective = find_protective_stop(
         orders,
         symbol=pos.symbol,
@@ -333,6 +344,7 @@ def _process_universe_position(
                 now_ms=now_ms,
                 send=send,
                 hold_ok=False,
+                since_ms=since,
             )
             if status == "sent":
                 set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=True)
@@ -375,6 +387,7 @@ def _process_universe_position(
                 now_ms=now_ms,
                 send=send,
                 hold_ok=True,
+                since_ms=since,
             )
             actions.append(
                 {
@@ -410,6 +423,7 @@ def _process_universe_position(
             now_ms=now_ms,
             send=send,
             hold_ok=True,
+            since_ms=since,
         )
         actions.append({"symbol": pos.symbol, "action": "exit", "reason": reason, "status": status})
 

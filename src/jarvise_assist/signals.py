@@ -326,6 +326,7 @@ def scan_signal_candidates(
     skipped: list[dict[str, Any]] = []
     candidates: list[SignalCandidate] = []
     symbol_rank = {sym: i for i, sym in enumerate(ASSIST_SYMBOLS)}
+    filters_by_symbol: dict[str, SymbolFilters] = {}
 
     for symbol in ASSIST_SYMBOLS:
         if symbol in open_syms:
@@ -383,6 +384,7 @@ def scan_signal_candidates(
                 }
             )
             continue
+        filters_by_symbol[symbol] = filters
         candidates.append(
             SignalCandidate(
                 sized=sized,
@@ -409,6 +411,20 @@ def scan_signal_candidates(
     )
     for cand in margin_dropped:
         skipped.append({"symbol": cand.sized.symbol, "reason": "margin_cap"})
+    # A margin shrink can push the size under the exchange minimum.
+    still_ok: list[SignalCandidate] = []
+    for cand in admitted:
+        flt = filters_by_symbol.get(cand.sized.symbol)
+        if flt is not None and below_min_notional(
+            qty=cand.sized.qty,
+            notional=cand.sized.notional,
+            min_qty=flt.min_qty,
+            min_notional=flt.min_notional,
+        ):
+            skipped.append({"symbol": cand.sized.symbol, "reason": "below_min_notional"})
+            continue
+        still_ok.append(cand)
+    admitted = still_ok
     return {
         "admitted": admitted,
         "skipped": skipped,

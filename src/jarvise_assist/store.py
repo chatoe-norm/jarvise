@@ -622,6 +622,24 @@ def get_watch_position(conn: Any, symbol: str, position_side: str) -> dict[str, 
     return dict(row) if row is not None else None
 
 
+def reset_watch_position(conn: Any, symbol: str, position_side: str) -> None:
+    """Forget a finished position so a new one on the same key starts clean.
+
+    Drops its held advice too; sent advice stays as history and is ignored by
+    ``advice_already_sent(since_ms=entry_time)`` for the new position.
+    """
+    key = (symbol.upper(), position_side.upper())
+    conn.execute("DELETE FROM assist_watch_position WHERE symbol=? AND position_side=?", key)
+    conn.execute(
+        """
+        UPDATE assist_watch_advice SET status='dropped'
+        WHERE symbol=? AND position_side=? AND status='held'
+        """,
+        key,
+    )
+    conn.commit()
+
+
 def set_watch_no_stop_latched(conn: Any, symbol: str, position_side: str, *, latched: bool) -> None:
     conn.execute(
         """
@@ -678,12 +696,18 @@ def advice_already_sent(
     kind: str,
     reason: str | None = None,
     level: float | None = None,
+    since_ms: int | None = None,
 ) -> bool:
     sql = """
         SELECT 1 FROM assist_watch_advice
         WHERE symbol=? AND position_side=? AND kind=? AND status IN ('sent', 'held')
     """
     params: list[Any] = [symbol.upper(), position_side.upper(), kind]
+    if since_ms is not None:
+        # Only advice for the current position counts; an earlier trade on the
+        # same symbol must not silence it.
+        sql += " AND created_at_ms >= ?"
+        params.append(int(since_ms))
     if reason is not None:
         sql += " AND reason=?"
         params.append(reason)
