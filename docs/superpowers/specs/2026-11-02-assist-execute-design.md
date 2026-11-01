@@ -1,6 +1,6 @@
 # Trade assistant: one-tap execution with owner confirm
 
-Date: 2026-11-02. Status: draft for owner approval.
+Date: 2026-11-02. Status: approved by the owner on 2026-11-02.
 Builds on `2026-10-25-trade-assistant-design.md` (signals, watch, sizing, menu).
 
 ## 1. Intent
