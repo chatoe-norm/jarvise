@@ -1,7 +1,7 @@
 # PROJECT_CONTEXT.md — Jarvise
 
 **Purpose:** single source of truth against context drift. Read this before proposing or writing any code.
-**Generated:** 2026-09-25; **status refreshed:** 2026-10-17 (handoff sync; table rows below dated 2026-10-07 unless noted — see §6 for PRs #138–#178; latest handoff `docs/handoff/2026-10-17-cursor-claude-handoff.md`).
+**Generated:** 2026-09-25; **status refreshed:** 2026-11-01 (table rows below dated 2026-10-07 unless noted — see §6 for PRs #138–#248; latest handoff `docs/handoff/2026-10-28-evening-handoff.md`).
 **Snapshot:** MVP ladder **P0–P4-C (gated)** + paper excellence **Tier 0–2** on `main`. Runtime cut over to Hostinger KVM **`1811101`** (Tailscale `100.89.171.36`). Live kill-switch flatten ([PR #111](https://github.com/chatoe-norm/jarvise/pull/111)) **dormant** while `JARVISE_LIVE_TRADING=false`. Opt-in `paper_liquid` ([PR #112](https://github.com/chatoe-norm/jarvise/pull/112)); VPS ingest BTC/ETH/SOL/BNB. OpenClaw **repo + host** pin `2026.9.8` ([PR #114](https://github.com/chatoe-norm/jarvise/pull/114); host env bumped 2026-10-07). Docs cutover SoT ([PR #115](https://github.com/chatoe-norm/jarvise/pull/115)) Deploy green on `srv1811101`. **Coverage:** intelligence + paper autotrade + Approve→live *door* — **not** P5. **Doctrine MVP:** still waiting on ~10+ closed `auto_*`. **Next:** sample paper EV → optional checklist live smoke → stabilize P4-C → only then P5.
 **Maintenance rule:** update §3 (status) and §5 (next steps) whenever a roadmap phase or PR lands. Doctrine/preference changes go to `AGENTS.md` first, then here.
 
@@ -11,7 +11,7 @@
 |------|--------|
 | Ladder | **P0–P4-C (gated)** on `main` + paper excellence Tier 0–2 (#60, #83). Flatten #111 dormant. |
 | Autotrade coverage | **Paper + gated Approve path: yes.** **Unattended live (P5): no** — see §5.1. |
-| Live trading | **Off** — flag `JARVISE_LIVE_TRADING=false`. Kill-switch flatten code present; no venue HTTP while flag off. |
+| Live trading | **Off** — flag `JARVISE_LIVE_TRADING=false`. Kill-switch flatten code present; no venue HTTP while flag off. Jarvise autotrade stays paper-only. The owner trades Binance USDⓈ-M futures **by hand** from Telegram advice (see "Trade assistant" below); Jarvise sends no orders and refuses any key with trade or withdraw permission. |
 | Shipped UX | Command Dashboard SPA (`web/`: Home / Paper / Decisions / Exchange / Ops) + FastAPI JSON; approval-first Home; confidence ladders + Exchange dust/Earn labels (#92). |
 | Paper path | `paper run` → enqueue → manual Approve **or** auto-decide (+ soft EV gate) → paper fill when flag off. |
 | Paper universe | Default `paper_core` (BTC+ETH). VPS opt-in `paper_liquid` (BTC/ETH/SOL/BNB) + matching ingest (#112). |
@@ -21,7 +21,7 @@
 | Next | Prove auto-decide EV via closed `auto_*`; optional checklist live enable; stabilize before P5. Host reboot still pending owner OK (`REBOOT_REQUIRED` after 2026-10-07 apt). |
 | Paper EV sampling | **2026-10-17 (live audit):** closed `auto_claude` **n=10** (gate ~8 reached), EV **−0.65**/trade, win rate 20%; soft EV gate **blocking** auto-decide as designed. Ledger 18 closed, equity $9,986.59. Floors/formula unchanged. Cap on VPS **4** (repo default 2). Live stays false. Replay stop leak fixed (replay-only); the corrected pre-registered grid still fails (MTF on × trail OOS EV −0.625 < 0); the IS entry-gate audit found no gate that improves total PnL, so the analyzer is unchanged. Exit study (#181): regime exit and 1R-only trail failed the pre-registered BTC/ETH cell and the SOL/BNB confirmation (IS EV < 0); the study is closed, production exits unchanged. Daily long-only study (#182, owner research unlock 2026-10-17): trend_long and donchian_long on 1d failed the pre-registered three-window rule (each positive in one window only); the study is closed, production analyze_snapshot unchanged. Historical data before 2026-10-17 is spent for this question; further signal tests need forward data. |
 | Universe (VPS, 2026-10-17) | Ingest health covers **7** symbols (BTC/ETH/SOL/BNB + ADA/DOGE/XRP added via Ops Universe) under `paper_liquid`. Owner to confirm intended. |
-| Open ops (2026-10-17) | Exchange `/api/exchange` → `error: auth` (Binance rejects the read key; likely IP whitelist still on the old host, needs `76.13.218.48`). News headlines fixed in #178 (GDELT + Google News fallback, n8n `jrvsNewsReact0749` 07:30/19:30 ICT). OpenClaw `ingest` digest still stale since 2026-10-14 (not investigated). Dependabot #169–#175 unmerged (#170 zod 4 is major). |
+| Open ops (2026-11-01) | **Resolved 2026-10-26:** the Exchange `error: auth` was a missing Ed25519 PEM (`/opt/jarvise/secrets/`, cause unknown); spot balance sync was dead 2026-10-06 → 2026-10-26. Fixed with the new read-only key "Jarvise-2" (IP-locked to `76.13.218.48`). **Still open:** OpenClaw `ingest` digest stale since 2026-10-14 (not re-checked); Dependabot #247, #249–#253 unmerged (batch them into one PR). News headlines: #178 (GDELT + Google News fallback, n8n `jrvsNewsReact0749` 07:30/19:30 ICT). **Do not put `COINGLASS_API_KEY` on the VPS**: the plan answers "Upgrade plan", the OI/funding paths are stale, and a failed derivatives fetch engages the kill-switch with no Binance fallback. |
 | Risk | Per-order + portfolio book caps (open/gross/symbol/bucket) + market safety; timeout → FLAT (paper). |
 | Obs | `GET /metrics` (web + jobs); compose profile `obs` optional on VPS (Prometheus `:9090` + Grafana `:3000`, Tailscale-bound, 256m). |
 | P4-C | Implemented: Approve → caps → `jarvise_trade` MARKET POST → `live_orders`; no paper mirror when live. |
@@ -29,6 +29,11 @@
 | Host | KVM `1811101` / Tailscale `100.89.171.36` / runner `srv1811101`. Ubuntu 24.04 apt upgraded 2026-10-07 (Docker **29.8.2** / Compose **v5.6.0**). Co-tenant LearningYard. Former `1269762` = T4Trip only (Jarvise fully wiped). |
 | VPS | healthz `{"ok":true,"paper_only":true}` (checked 2026-10-07). Last **green** Deploy: `#115` on `srv1811101`. Live flag stays false. |
 | Since 2026-10-07 (#138–#165) | Profit lock + two-stage breakeven & outcome memory (#138/#144); dashboard UI/UX + mobile PWA (#145/#147/#148); OpenClaw guardrails/skills (#146); dynamic Altseason + de-duplicated F&G modal (#162/#163); tactical post-mortem generator + recursive RAG sync (#164); multi-tier OpenRouter model routing + semi-dynamic Market Context PWA (#165). OpenClaw compose defaults now **4g / 2.0 CPU / `NODE_OPTIONS=3072`**. Details: `docs/handoff/2026-10-17-claude-handoff.md`. |
+| Since 2026-10-24 (#223–#248) | Measurement fixes: true R (`r_multiple` = PnL ÷ stop risk, migration 13, #223) and resting-stop fills in paper and replay (#225; the old fill rule had added about 44% of the ledger loss). Safety: risk monitor skips MTM and stops on stale candles, measured from candle close, with edge alerts (#226/#227); disk-free alert (#228). Experiments: forward test H3 (#229/#230) and the shadow-veto window (below). Trade assistant (#231/#232/#234/#235/#238/#239/#245) and explore list D1 (#242/#243). Dependency batches (#224, #241, #248). Details: `docs/handoff/2026-10-27-claude-handoff.md`, `docs/handoff/2026-10-28-evening-handoff.md`. |
+| Paper status (2026-11-01) | Auto-decide **off** and the EV gate **latched** (n=10, EV −0.648). Paper equity **$9,988.11**, no open paper position. The 2026-10-24 re-run of the frozen grid with the corrected stop fill still fails (decision cell MTF on × trail: IS −0.247 / OOS −0.280); `donchian_long` + trail was ≥ 0 in all three windows only after the fact, so it is a forward hypothesis (H3), not a result. See `docs/research/2026-10-25-stop-fill-audit.md`. |
+| Forward test H3 (2026-11-01) | Daily replay of `donchian_long` + trail on 1d over 7 symbols from 2026-10-26, on an isolated copy of the ledger (job `forward-h3`). **Day 6: 0 closed trades**; equal-weight buy-and-hold −4.4% over the same days (report only). Pass needs ≥ 20 closed trades and EV ≥ 0; the window ends at 20 trades or 2027-02-23. Rule: `docs/research/2026-10-25-donchian-trail-forward.md`. Frozen while it runs: `strategies.py`, `replay.py`, `stops.py`, `profit_lock.py`, `jarvise_paper/engine.py`. |
+| Shadow veto (2026-11-01) | **Day 14:** 9 scored entries, all `no_objection`, 0 vetoes, mean net R −0.155. The pass rule needs ≥ 10 vetoes, so the window cannot pass at this rate. Checkpoints: day 30 ≈ 2026-11-17, day 60 ≈ 2026-12-17 (a 30-day extension needs the owner). |
+| Trade assistant (2026-11-01) | Telegram advice for the owner's **manual** Binance USDⓈ-M futures trades (package `src/jarvise_assist/`). Read-only Ed25519 key "Jarvise-2"; no orders. Seven symbols; signals every 4 h at :25 Bangkok with night hold 23:30–07:30 and a batch at 08:20; sizing by risk % (live setting **1%**), at most 2 open ideas and 4% total risk, one shared leverage ≤ 5x within `availableBalance`; position watch every 5 min (no-stop warning, move-stop, exit); Telegram listener with skip button and 5-button menu; Monday 08:30 weekly summary; losing-streak pause (3 losses in a row or a week loss above 6% pauses new signals until 08:20). Explore list D1 (owner-added coins: AAVE, AVAX, BCH, LINK, NEAR, SUI) is data and analysis only. First real trades: ADA short entered 2026-10-28 and DOGE short later; wallet 100.02 USDT, 28.69 available. Over the six days to 2026-11-01 the account's income was REALIZED_PNL +0.04, COMMISSION −0.05, FUNDING +0.03 USDT. Virtual track: 6 sent ideas, 5 resolved, mean net R −0.285 (n=5, too small to read). Design: `docs/superpowers/specs/2026-10-25-trade-assistant-design.md`. |
 
 ---
 
@@ -186,7 +191,9 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 
 **Agent surface**: Cursor skills `.cursor/skills/jarvise-notebook`, `.cursor/skills/jarvise-binance-intel`, `.cursor/skills/jarvise-eterna`, `.cursor/skills/jarvise-ux-ui`; MCP example `mcp/jarvise-mcp.json.example` (Gemini Notebook, optional TradingView research MCP, OpenClaw with execution tools disabled); `scripts/ask-repo.ts` (secondary).
 
-**Verification snapshot (2026-10-03):** local pytest ~**380** passed at Tier 2 implement; [PR #83](https://github.com/chatoe-norm/jarvise/pull/83) merged; VPS Deploy green with healthz `{"ok":true,"paper_only":true}`. Operational DB is on the VPS.
+**Trade assistant** (`src/jarvise_assist/`, advice only, no orders): `futures.py` (read-only signed GETs, key-permission audit), `sizing.py` (risk-based size, 2R target, shared leverage, risk cap), `signals.py` (signal and morning batch), `watch.py` (position watch), `listen.py` / `menu.py` / `keyboard.py` (Telegram long-poll, menu, risk setting), `pause.py`, `track.py`, `weekly.py`; explore list D1. Jobs: `assist-signal`, `assist-morning`, `assist-watch`, `assist-weekly`, `assist-explore`. Migrations 14–17.
+
+**Verification snapshot (2026-11-01):** full local pytest **745 passed, 1 skipped** on `main` (`749f1e0`); VPS HEAD `749f1e0`, healthz `{"ok":true,"paper_only":true}`, disk 34% used; `SCHEMA_VERSION` **17**. (Earlier: 2026-10-03, ~380 passed at Tier 2 implement, [PR #83](https://github.com/chatoe-norm/jarvise/pull/83).) Operational DB is on the VPS.
 
 ### 3.3 Partially built
 
@@ -200,6 +207,8 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - **OpenClaw paper-only**: `OPENCLAW_PAPER_ONLY` is a convention enforced by config/docs, not by Python code.
 - **Doctrine text:** local extracts aligned 2026-10-01 with AGENTS worldwide venue policy (Binance = first adapter). Notebook sources may still need a later refresh.
 - **Live enablement**: code present but flag off; trade keys unset; no withdraw; ops checklist before turning on.
+- **Performance gate data**: `performance_risk_metrics` is written but `expected_value_ev`, `sharpe_ratio`, and `max_drawdown_pct` were NULL on 124–125 of 125 rows (checked 2026-10-24 on the 2026-10-17 ledger copy; not re-checked on the live DB). EV, win rate, and drawdown are available from `jarvise paper metrics`, but not from this table.
+- **Futures live path**: the live submit code is spot, long only. There is no futures order code, by design, while the owner trades futures by hand.
 
 ### 3.4 Missing entirely
 
@@ -209,6 +218,7 @@ Per doctrine these are **context that lowers/raises confidence or vetoes**, neve
 - **Broker equity live** (paper Stooq only).
 - **Real second-venue REST** balances/orders (Eterna remains fixture/blocker; Binance is the only live-capable adapter, still gated).
 - **Multi-venue routing** / smart order routing.
+- **Explore list D2**: signals, position watch, virtual track, and the weekly summary for the owner-added explore coins. Must not send explore signals while the kill-switch is engaged or core signals are held for a market-safety reason, because explore analysis skips market safety. Claude writes the prompt when the owner asks.
 
 ---
 
@@ -363,6 +373,23 @@ Paper-EV ladder (2026-10-03). **n8n does not auto-complete step 3.**
 
 **Step-3 status snapshot (2026-10-13):** Closed trades **11**, all losses, EV about **−$2.26**. `auto_claude` **n=8**, EV about **−$2.05** (stops included). Open: ETH short and SOL short. VPS: `paper_liquid`; `JARVISE_MAX_OPEN_POSITIONS=4`; `JARVISE_ANALYZE_MTF=false`; `JARVISE_LIVE_TRADING=false`. BTC and ETH **1d** history was 209 bars with EMA200 withheld; backfilled from 2021-01-01 to **2111** bars, 0 gaps. Latest daily read after that backfill: BTC `trend_up` / long / confidence **0.65** (close 81850, EMA200 about 75530); ETH `trend_up` / flat / confidence **0.50**. MTF stays off until about **10** closed `auto_*`. A negative EV at that N still does not loosen the 0.55/0.70 floors.
 
+**Snapshot (2026-11-01):** auto-decide stays off and the EV gate stays latched (n=10, EV −0.648) until the shadow-veto window resolves. Do not reset the latch.
+
+**Checkpoints** (do not change the frozen rules in between):
+
+| Date (about) | What | Command (jobs container) |
+| --- | --- | --- |
+| 2026-11-02 08:30 | First weekly assist summary (Telegram) | arrives on its own |
+| 2026-11-17 | Shadow-veto window, day 30 | `jarvise paper shadow-veto score --json` |
+| 2026-11-25 | Forward H3, first look | `jarvise paper forward-h3 score --json` |
+| 2026-12-17 | Shadow-veto window, day 60 (an extension needs the owner) | same score command |
+
+**Owner actions open:**
+
+- Keep a stop (Stop-Market, Reduce-Only, Mark Price) on every futures position. The watch warns when one is missing.
+- Merge the dependabot batch (#247, #249–#253) as one PR when the assistant is quiet.
+- Decide whether to ask for explore list D2.
+
 ### Post-MVP backlog (do not start without a roadmap update)
 
 P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (ETF flows, netflow) and ADX/volume analyzer inputs; broker equity live; real second-venue REST (beyond Eterna fixture); multi-venue routing; public HTTPS UI; Python-enforced `OPENCLAW_PAPER_ONLY`.
@@ -394,6 +421,13 @@ P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (ETF fl
 - **2026-10-17** — Deferred items: [PR #176](https://github.com/chatoe-norm/jarvise/pull/176) point-in-time universe remove/reset (`delisted_at`, no row deletes), per-symbol sync/backfill results (`synced/warnings/failed`), lazy routes (first-load JS 1,007 → 437 KB). [PR #177](https://github.com/chatoe-norm/jarvise/pull/177) `web` gets the same paper universe/timeframe env as `jobs`. [PR #178](https://github.com/chatoe-norm/jarvise/pull/178) news headlines: parenthesized + paced GDELT queries, Google News RSS fallback, `POST /jobs/news-reaction` + n8n `jrvsNewsReact0749`. Live stays false; floors/formula unchanged.
 - **2026-10-17** — Replay stop leak fixed (replay-only); the corrected pre-registered grid still fails (MTF on × trail OOS EV −0.625 < 0); the IS entry-gate audit found no gate that improves total PnL, so the analyzer is unchanged. See `docs/research/2026-10-17-ledger-cause-and-replay.md`.
 
+- **2026-10-24** — True R (#223, migration 13) and dependency bumps (#224). Audit of the paper ledger: the old stop fill added about 44% of the loss. Resting-stop fill in paper and replay (#225); the frozen 10-17 grid and the daily long-only study were re-run with it and still fail. Research notes `docs/research/2026-10-25-stop-fill-audit.md` and `docs/research/2026-10-25-donchian-trail-forward.md`.
+- **2026-10-25** — Risk monitor skips stale candles, measured from candle close, with edge alerts (#226/#227). Disk-free alert (#228). The 2026-10-06 outage was a full VPS disk (kill-switch reason "database or disk is full"). Forward test H3 job (#229/#230).
+- **2026-10-26** — Spot sync found dead since 2026-10-06 (missing PEM); new read-only key "Jarvise-2". Futures activated on the master account. Trade assistant PR A and PR B (#231/#232).
+- **2026-10-27** — Assistant fixes: morning batch moved to 08:20 and `same_idea` counting only delivered ideas (#234); PR C with listener, menu, weekly summary, and losing-streak pause (#235); shared batch leverage and 1% default risk (#238). AGENTS memory and handoff (#233/#236/#240).
+- **2026-10-28** — On-demand button shows ideas push-dedupe had hidden (#239); explore list D1 (#242/#243); dependency batch (#241); first real futures trade (ADA short); message follow-ups on margin mode and double TP/SL (#245). Handoffs `docs/handoff/2026-10-28-mac-handoff.md` and `docs/handoff/2026-10-28-evening-handoff.md`.
+- **2026-10-31** — `joserfc` bump for a CVE (#248).
+
 Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature has landed via spec/plan first.
 
 ---
@@ -415,7 +449,11 @@ Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature 
 - `docs/superpowers/specs/2026-09-23-p4-manual-approval-paper-slice-design.md` + plans — **P4-B shipped**
 - `docs/superpowers/specs/2026-09-26-paper-jobs-24h-design.md` + plans — **shipped** (paper-run / paper-expire jobs + n8n)
 - `docs/superpowers/specs/2026-09-27-p4c-live-submit-design.md` + `plans/2026-10-01-p4c-live-submit.md` — **P4-C shipped gated off**
-- `docs/handoff/2026-10-17-claude-handoff.md` — latest development handover (PRs #162–#165, architecture, quality gates)
+- `docs/handoff/2026-10-28-evening-handoff.md` — **latest handoff** (PRs #239–#243, the first real futures trade, open items); read after `2026-10-28-mac-handoff.md` (Mac setup, PRs #234–#238) and `2026-10-27-claude-handoff.md` (PRs #223–#233, key findings)
+- `docs/superpowers/specs/2026-10-25-trade-assistant-design.md` and `docs/superpowers/specs/2026-10-28-assist-explore-list.md` — futures trade assistant and explore list (D1 shipped, D2 not started)
+- `docs/research/2026-10-25-stop-fill-audit.md` — stop fills past −1R, the full-disk outage, and the grid re-runs with the corrected fill
+- `docs/research/2026-10-25-donchian-trail-forward.md` — frozen rule for forward test H3
+- `docs/handoff/2026-10-17-claude-handoff.md` — earlier development handover (PRs #162–#165, architecture, quality gates)
 - `docs/handoff/2026-10-17-cursor-claude-handoff.md` — 2026-10-17 Cursor/Claude handoff (PRs #166–#178)
 - `docs/research/2026-10-17-ledger-cause-and-replay.md` — replay stop leak fixed (replay-only); the corrected pre-registered grid still fails (MTF on × trail OOS EV −0.625 < 0); the IS entry-gate audit found no gate that improves total PnL, so the analyzer is unchanged. Research overlay only.
 - `docs/research/antigravity-sync-plan.md` — model-routing + Market Context blueprint (shipped in #165)
@@ -423,4 +461,4 @@ Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature 
 - `docs/exchange/eterna-for-jarvise.md` — Eterna research overlay + VenueClient stub status (T2.5)
 - `docs/ux-ui/shadcn-for-jarvise.md` — shadcn → Command Dashboard SPA (`web/`)
 - `docs/deploy/hostinger-vps.md`, `docs/deploy/ops.md` — VPS bring-up and kill-switch ops
-- `data/analytics/mvas-schema.sql` — full SQLite schema (`user_version` 7)
+- `data/analytics/mvas-schema.sql` — full SQLite schema (`user_version` 17)
