@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
+from jarvise_assist.execute import execution_buttons_enabled
 from jarvise_assist.explore import render_explore_message
 from jarvise_assist.futures import (
     BinanceFuturesClient,
@@ -21,6 +22,7 @@ from jarvise_assist.keyboard import (
     BTN_RISK_PREFIX,
     BTN_TOGGLE,
     BTN_WEEKLY,
+    anything_now_keyboard,
     reply_keyboard,
     risk_choice_keyboard,
     risk_confirm_keyboard,
@@ -92,8 +94,8 @@ def handle_menu_text(
         send_fn(body)
         return {"handled": True, "kind": kind, "text": body}
     if kind == "anything":
-        body = render_anything_now(conn, futures=futures, now_ms=now_ms)
-        send_fn(body)
+        body, markup = render_anything_now(conn, futures=futures, now_ms=now_ms)
+        send_fn(body, reply_markup=markup)
         return {"handled": True, "kind": kind, "text": body}
     if kind == "weekly":
         payload = run_assist_weekly(conn, futures=futures, now_ms_value=now_ms, send=send_fn)
@@ -233,15 +235,15 @@ def render_anything_now(
     *,
     futures: BinanceFuturesClient | None = None,
     now_ms: int,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     settings = ensure_settings(conn)
     if not settings["enabled"]:
-        return "ผู้ช่วยปิดอยู่"
+        return "ผู้ช่วยปิดอยู่", None
     if is_paused(settings, now_ms=now_ms):
-        return format_paused_until(int(settings["paused_until_ms"]))
+        return format_paused_until(int(settings["paused_until_ms"])), None
     client = futures if futures is not None else build_futures_client()
     if client is None:
-        return "อ่าน futures ไม่ได้"
+        return "อ่าน futures ไม่ได้", None
     try:
         result = scan_signal_candidates(
             conn,
@@ -251,10 +253,10 @@ def render_anything_now(
             on_demand=True,
         )
     except Exception:  # noqa: BLE001
-        return "อ่าน futures ไม่ได้"
+        return "อ่าน futures ไม่ได้", None
     admitted = result.get("admitted") or []
     if not admitted:
-        return render_empty_on_demand(list(result.get("skipped") or []))
+        return render_empty_on_demand(list(result.get("skipped") or [])), None
     balance = Decimal(str(result.get("balance_usdt") or 0))
     expires = next_assist_run_ms(now_ms)
     blocks = [
@@ -267,7 +269,10 @@ def render_anything_now(
         )
         for cand in admitted
     ]
-    return "\n\n".join(blocks)
+    markup = None
+    if execution_buttons_enabled(conn):
+        markup = anything_now_keyboard([(c.sized.symbol, c.sized.side) for c in admitted])
+    return "\n\n".join(blocks), markup
 
 
 def handle_risk_callback(

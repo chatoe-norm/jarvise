@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 17).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 18).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -445,3 +445,33 @@ CREATE TABLE IF NOT EXISTS assist_explore_symbols (
     symbol TEXT NOT NULL PRIMARY KEY,
     added_at_ms INTEGER NOT NULL
 );
+
+-- Owner-confirm assist execution intents and write logs (migration 18).
+CREATE TABLE IF NOT EXISTS assist_exec_intent (
+    id TEXT NOT NULL PRIMARY KEY,
+    kind TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    preview_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    result_text TEXT,
+    telegram_message_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_assist_exec_intent_status
+    ON assist_exec_intent (status, expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS assist_exec_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    intent_id TEXT NOT NULL,
+    step TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    client_order_id TEXT,
+    http_status INTEGER,
+    binance_code INTEGER,
+    order_or_algo_id TEXT,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assist_exec_log_intent
+    ON assist_exec_log (intent_id, created_at_ms);

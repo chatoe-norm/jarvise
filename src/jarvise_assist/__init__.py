@@ -1,4 +1,4 @@
-"""Trade assistant: Telegram futures advice only. Never places orders."""
+"""Trade assistant: Telegram futures advice; orders only after owner confirm when gated."""
 
 from __future__ import annotations
 

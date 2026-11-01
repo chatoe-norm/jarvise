@@ -78,6 +78,7 @@ class SymbolFilters:
     step_size: Decimal
     min_qty: Decimal
     min_notional: Decimal
+    tick_size: Decimal = Decimal("0.01")
 
 
 def audit_key_for_assist(perms: dict[str, Any]) -> dict[str, Any]:
@@ -446,6 +447,7 @@ class BinanceFuturesClient:
         step = Decimal("1")
         min_qty = Decimal("0")
         min_notional = Decimal("0")
+        tick_size = Decimal("0.01")
         for filt in row.get("filters") or []:
             ftype = str(filt.get("filterType") or "")
             if ftype == "LOT_SIZE":
@@ -456,7 +458,14 @@ class BinanceFuturesClient:
                 if raw is None:
                     raw = filt.get("minNotional")
                 min_notional = Decimal(str(raw or "0"))
-        filters = SymbolFilters(step_size=step, min_qty=min_qty, min_notional=min_notional)
+            elif ftype == "PRICE_FILTER":
+                tick_size = Decimal(str(filt.get("tickSize") or "0.01"))
+        filters = SymbolFilters(
+            step_size=step,
+            min_qty=min_qty,
+            min_notional=min_notional,
+            tick_size=tick_size,
+        )
         self._filters[sym] = filters
         return filters
 
