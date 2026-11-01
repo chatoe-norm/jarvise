@@ -105,6 +105,23 @@ def format_no_stop_warning(*, symbol: str, side: str, stop: Decimal) -> str:
     )
 
 
+def format_partial_stop_warning(
+    *,
+    symbol: str,
+    side: str,
+    covered: Decimal,
+    position_qty: Decimal,
+    stop: Decimal,
+) -> str:
+    side_label = "LONG" if side.lower() == "long" else "SHORT"
+    covered_s = _fmt_qty(covered)
+    qty_s = _fmt_qty(position_qty)
+    return (
+        f"⚠️ {symbol.upper()} {side_label} stop คุมแค่ {covered_s}/{qty_s} — "
+        f"ตั้ง stop ให้ครบทั้งไม้ (Reduce-Only, Mark Price) ที่ {_fmt_price(stop)}"
+    )
+
+
 def format_move_stop_advice(*, symbol: str, side: str, stop: Decimal) -> str:
     side_l = side.lower()
     emoji = "↗️" if side_l == "long" else "↘️"

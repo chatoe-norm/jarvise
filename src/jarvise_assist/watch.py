@@ -15,11 +15,14 @@ from jarvise_assist.futures import (
     FuturesPosition,
     build_futures_client,
     find_protective_stop,
+    protective_stop_coverage,
+    protective_stop_covered_qty,
 )
 from jarvise_assist.messages import (
     format_exit_advice,
     format_move_stop_advice,
     format_no_stop_warning,
+    format_partial_stop_warning,
 )
 from jarvise_assist.pause import evaluate_pause, maybe_auto_resume
 from jarvise_assist.signals import (
@@ -180,6 +183,17 @@ def _emit_advice(
     return "failed"
 
 
+def _entry_shifted(existing: dict[str, Any], pos: FuturesPosition) -> bool:
+    """True when Binance entryPrice moved more than 0.05% (add or reopen)."""
+    raw = existing.get("entry")
+    if raw is None:
+        return False
+    stored = Decimal(str(raw))
+    if stored <= 0:
+        return False
+    return abs(pos.entry_price - stored) / stored > Decimal("0.0005")
+
+
 def _ensure_watch_row(
     conn: Any,
     pos: FuturesPosition,
@@ -189,10 +203,13 @@ def _ensure_watch_row(
 ) -> dict[str, Any]:
     existing = get_watch_position(conn, pos.symbol, pos.position_side)
     if existing is not None and (
-        existing.get("closed_at_ms") is not None or str(existing.get("side") or "") != pos.side
+        existing.get("closed_at_ms") is not None
+        or str(existing.get("side") or "") != pos.side
+        or (existing.get("closed_at_ms") is None and _entry_shifted(existing, pos))
     ):
         # A new trade on the same symbol: never reuse the old stop, entry time,
-        # signal link or no-stop latch.
+        # signal link or no-stop latch. Entry shift >0.05% is add/reopen
+        # (partial closes keep Binance entryPrice).
         reset_watch_position(conn, pos.symbol, pos.position_side)
         existing = None
     entry_time = pos.update_time_ms
@@ -321,22 +338,51 @@ def _process_universe_position(
         return
     stop_dec = Decimal(str(initial_stop))
     since = int(stored["entry_time_ms"]) if stored.get("entry_time_ms") else None
+    try:
+        step = client.step_size(pos.symbol)
+    except Exception:  # noqa: BLE001
+        step = Decimal("0")
+    coverage = protective_stop_coverage(
+        orders,
+        symbol=pos.symbol,
+        position_side=pos.position_side,
+        trade_side=pos.side,
+        position_qty=pos.qty,
+        step_size=step,
+    )
     protective = find_protective_stop(
         orders,
         symbol=pos.symbol,
         position_side=pos.position_side,
         trade_side=pos.side,
     )
-    if protective is None:
+    if coverage in {"none", "partial"}:
         if not stored.get("no_stop_latched"):
-            text = format_no_stop_warning(symbol=pos.symbol, side=pos.side, stop=stop_dec)
+            if coverage == "partial":
+                covered = protective_stop_covered_qty(
+                    orders,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    trade_side=pos.side,
+                )
+                text = format_partial_stop_warning(
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    covered=covered,
+                    position_qty=pos.qty,
+                    stop=stop_dec,
+                )
+                no_stop_reason = "partial"
+            else:
+                text = format_no_stop_warning(symbol=pos.symbol, side=pos.side, stop=stop_dec)
+                no_stop_reason = "missing"
             # Never hold no-stop overnight.
             status = _emit_advice(
                 conn,
                 symbol=pos.symbol,
                 position_side=pos.position_side,
                 kind="no_stop",
-                reason="missing",
+                reason=no_stop_reason,
                 level=float(stop_dec),
                 approx_r=None,
                 text=text,
@@ -348,7 +394,14 @@ def _process_universe_position(
             )
             if status == "sent":
                 set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=True)
-            actions.append({"symbol": pos.symbol, "action": "no_stop", "status": status})
+            actions.append(
+                {
+                    "symbol": pos.symbol,
+                    "action": "no_stop",
+                    "status": status,
+                    "reason": no_stop_reason,
+                }
+            )
     elif stored.get("no_stop_latched"):
         set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=False)
 
