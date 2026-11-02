@@ -112,6 +112,11 @@ def resolve_trade_auth() -> BinanceAuth | None:
     key_path = (os.environ.get("BINANCE_TRADE_PRIVATE_KEY_PATH") or "").strip()
     if not key_path:
         return None
+    read_key = (os.environ.get("BINANCE_API_KEY") or "").strip()
+    read_path = (os.environ.get("BINANCE_API_PRIVATE_KEY_PATH") or "").strip()
+    if (read_key and api_key == read_key) or (read_path and key_path == read_path):
+        logger.error("trade key reuses the read-only BINANCE_API_* key; refusing to trade")
+        return None
     path = Path(key_path)
     if not path.is_file():
         raise FileNotFoundError(f"BINANCE_TRADE_PRIVATE_KEY_PATH not found: {key_path}")

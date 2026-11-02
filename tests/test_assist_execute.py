@@ -141,6 +141,19 @@ def test_assist_execute_mode_defaults_off(monkeypatch: pytest.MonkeyPatch) -> No
     assert assist_execute_mode() == "testnet"
 
 
+@pytest.mark.parametrize("same", ["key", "pem"])
+def test_trade_key_that_reuses_read_key_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same: str
+) -> None:
+    pem = tmp_path / "k.pem"
+    pem.write_text("not a real key", encoding="utf-8")
+    monkeypatch.setenv("BINANCE_TRADE_API_KEY", "T" * 64)
+    monkeypatch.setenv("BINANCE_TRADE_PRIVATE_KEY_PATH", str(pem))
+    monkeypatch.setenv("BINANCE_API_KEY", "T" * 64 if same == "key" else "R" * 64)
+    monkeypatch.setenv("BINANCE_API_PRIVATE_KEY_PATH", str(pem) if same == "pem" else "/other.pem")
+    assert build_trade_client() is None
+
+
 def test_off_mode_callback_replies_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "off")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
