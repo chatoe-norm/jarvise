@@ -95,8 +95,12 @@ re-checks live state, so an old message never acts on old numbers.
 
 - The callback comes from the owner chat id. The listener already fails closed
   on any other chat. Keep it that way.
-- The execution flag is on (§9), and the kill switch is off. If Redis cannot be
-  read, treat the kill switch as on, the same fail-closed rule as the jobs.
+- The execution flag is on (§9). The kill switch blocks **entry only**; move
+  stop and exit stay available because they reduce risk. If Redis cannot be
+  read, treat the kill switch as on for entry, the same fail-closed rule as
+  the jobs.
+- Night-held advice is sent without execution buttons (this version does not
+  attach move/exit intents to a night flush).
 - The trade key passes its safety check (§8).
 - The account is in one-way mode, and Multi-Assets mode is off. If either is
   wrong, reply with what to change and do nothing.

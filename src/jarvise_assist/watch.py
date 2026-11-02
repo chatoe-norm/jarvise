@@ -14,7 +14,6 @@ from jarvise_assist.execute import (
     assist_execute_mode,
     build_trade_client,
     cancel_jv_orders_for_symbol,
-    execution_buttons_enabled,
 )
 from jarvise_assist.futures import (
     BinanceFuturesClient,
@@ -452,7 +451,20 @@ def _process_universe_position(
         if tighter:
             text = format_move_stop_advice(symbol=pos.symbol, side=pos.side, stop=suggested_d)
             move_markup = None
-            if execution_buttons_enabled(conn) and not night:
+            # Buttons/intents only in live daytime sends that will not dedupe-skip.
+            if (
+                assist_execute_mode() == "live"
+                and not night
+                and not advice_already_sent(
+                    conn,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    kind="move_stop",
+                    reason=_source,
+                    level=float(suggested_d),
+                    since_ms=since,
+                )
+            ):
                 intent_id = insert_exec_intent(
                     conn,
                     kind="move_stop",
@@ -501,7 +513,19 @@ def _process_universe_position(
         r_mult = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
         text = format_exit_advice(symbol=pos.symbol, side=pos.side, reason=reason, approx_r=r_mult)
         exit_markup = None
-        if execution_buttons_enabled(conn) and not night:
+        if (
+            assist_execute_mode() == "live"
+            and not night
+            and not advice_already_sent(
+                conn,
+                symbol=pos.symbol,
+                position_side=pos.position_side,
+                kind="exit",
+                reason=reason,
+                level=None,
+                since_ms=since,
+            )
+        ):
             intent_id = insert_exec_intent(
                 conn,
                 kind="exit",
@@ -677,7 +701,7 @@ def run_assist_watch(
         )
     closed = mark_watch_positions_closed(conn, open_keys=open_keys, now_ms=ts)
     orphan_cancelled: list[dict[str, str]] = []
-    if closed and assist_execute_mode() != "off":
+    if closed and assist_execute_mode() == "live":
         trade = build_trade_client()
         if trade is not None:
             for sym, _ps in closed:
