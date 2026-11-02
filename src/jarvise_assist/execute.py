@@ -679,6 +679,20 @@ def _msg_close_yourself(symbol: str) -> str:
     return f"⚠️ วาง stop ไม่ได้และปิด {symbol.upper()} เองทันที"
 
 
+def _msg_check_now(symbol: str) -> str:
+    return f"⚠️ ไม่แน่ใจผลคำสั่ง — เปิด Binance เช็ค {symbol.upper()} ทันทีว่ามีไม้และ stop ครบไหม"
+
+
+def _safe_find_algo(trade: BinanceTradeClient, *, symbol: str, client_id: str) -> dict[str, Any] | None:
+    """Lookup after an unknown result. A failed lookup counts as not found, so the
+    caller retries or closes instead of escaping with a filled, unprotected position."""
+    try:
+        return trade.find_algo_by_client_id(symbol=symbol, client_id=client_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("algo lookup failed for %s", client_id)
+        return None
+
+
 def _existing_ideas_from_trade(
     conn: Any,
     trade: BinanceTradeClient,
@@ -1140,7 +1154,11 @@ def run_entry_sequence(
         if recovered is not None and Decimal(str(recovered.get("executedQty") or "0")) > 0:
             fill = recovered
         else:
-            pos_fill = _fill_from_position(trade, symbol=symbol)
+            try:
+                pos_fill = _fill_from_position(trade, symbol=symbol)
+            except Exception:  # noqa: BLE001
+                logger.exception("position read failed after unknown market result")
+                return _msg_check_now(symbol)
             if pos_fill is None:
                 return "เข้าไม้ไม่สำเร็จ"
             fill = {
@@ -1198,7 +1216,7 @@ def run_entry_sequence(
             )
             # Unknown result: the stop may already exist under this clientAlgoId.
             if not _is_clear_rejection(exc):
-                found = trade.find_algo_by_client_id(symbol=symbol, client_id=scid)
+                found = _safe_find_algo(trade, symbol=symbol, client_id=scid)
                 if found is not None:
                     stop_ok = True
                     break
@@ -1250,7 +1268,7 @@ def run_entry_sequence(
             binance_code=code,
         )
         if not _is_clear_rejection(exc):
-            found_tp = trade.find_algo_by_client_id(symbol=symbol, client_id=tcid)
+            found_tp = _safe_find_algo(trade, symbol=symbol, client_id=tcid)
             if found_tp is None:
                 tp_note = f"\n{MSG_TP_KEEP}"
         else:
@@ -1382,7 +1400,7 @@ def run_move_stop_sequence(
             binance_code=code,
         )
         if not _is_clear_rejection(exc):
-            found = trade.find_algo_by_client_id(symbol=symbol, client_id=cid)
+            found = _safe_find_algo(trade, symbol=symbol, client_id=cid)
             if found is not None:
                 placed = True
         if not placed:
@@ -1751,7 +1769,8 @@ def handle_exec_callback(
             return _finish_send(result)
         except Exception:  # noqa: BLE001
             logger.exception("exec callback failed after claim intent_id=%s", intent_id)
-            text = MSG_HANDLER_ERROR
+            # An entry or exit may have reached Binance; tell the owner to look.
+            text = MSG_HANDLER_ERROR if prefix == "ms:" else _msg_check_now(str(intent["symbol"]))
             finish_exec_intent(conn, intent_id, status="failed", result_text=text)
             send(text)
             return {"ok": False, "reason": "handler_error"}

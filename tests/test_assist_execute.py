@@ -15,7 +15,6 @@ from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 from jarvise_assist.execute import (
     MSG_ALREADY_CLOSED,
     MSG_EXPIRED,
-    MSG_HANDLER_ERROR,
     MSG_KILL,
     MSG_MARK_PASSED,
     MSG_OFF,
@@ -766,6 +765,37 @@ def test_stop_timeout_with_algo_present_no_second_stop_or_close(
     conn.close()
 
 
+def test_stop_timeout_and_lookup_timeout_retries_instead_of_escaping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Network down during the stop step must not escape with a filled, unprotected position.
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "sl_lookup_to.db")
+    intent_id = _entry_intent(conn)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("POST", "/fapi/v1/marginType"): (200, {"msg": "ok"}),
+        ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
+        ("POST", "/fapi/v1/order"): [
+            (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08"}),
+        ],
+        ("POST", "/fapi/v1/algoOrder"): [
+            httpx.TimeoutException("timeout"),
+            (200, {"algoId": 11}),  # stop retry
+            (200, {"algoId": 12}),  # TP
+        ],
+        ("GET", "/fapi/v1/openAlgoOrders"): [httpx.ConnectError("down")],
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    result = run_entry_sequence(conn, intent_id, trade=trade)
+    assert result.startswith("✅")
+    algo_posts = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+    assert len(algo_posts) == 3
+    conn.close()
+
+
 def test_stop_fails_close_fails_close_yourself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "sl_cls.db")
@@ -856,7 +886,7 @@ def test_guard_exception_leaves_intent_failed(tmp_path: Path, monkeypatch: pytes
     row = get_exec_intent(conn, intent_id)
     assert row is not None
     assert row["status"] == "failed"
-    assert MSG_HANDLER_ERROR in sent
+    assert any("DOGEUSDT" in t and "เช็ค" in t for t in sent)
     conn.close()
 
 
