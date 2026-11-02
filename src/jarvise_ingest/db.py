@@ -628,6 +628,53 @@ def _migrate_assist_listen(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_assist_execute(conn: sqlite3.Connection) -> None:
+    """Owner-confirm execution intents and write logs. Separate from paper/live ledgers."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_exec_intent (
+            id TEXT NOT NULL PRIMARY KEY,
+            kind TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            preview_json TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            result_text TEXT,
+            telegram_message_id INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_exec_intent_status
+        ON assist_exec_intent (status, expires_at_ms)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_exec_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            intent_id TEXT NOT NULL,
+            step TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            client_order_id TEXT,
+            http_status INTEGER,
+            binance_code INTEGER,
+            order_or_algo_id TEXT,
+            created_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_exec_log_intent
+        ON assist_exec_log (intent_id, created_at_ms)
+        """
+    )
+
+
 def _migrate_assist_watch(conn: sqlite3.Connection) -> None:
     """Position-watch state for trade assistant. Never writes paper/live/approval rows."""
     conn.execute(
@@ -883,6 +930,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (15, "assist_watch", _migrate_assist_watch, True),
     (16, "assist_listen", _migrate_assist_listen, True),
     (17, "assist_explore", _migrate_assist_explore, True),
+    (18, "assist_execute", _migrate_assist_execute, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

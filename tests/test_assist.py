@@ -1988,7 +1988,7 @@ def test_on_demand_shows_same_idea_with_sent_at(tmp_path: Path) -> None:
     before = conn.execute("SELECT COUNT(*) FROM assist_signal").fetchone()[0]
     fake = FakeFutures(marks={"ADAUSDT": Decimal("0.40")}, steps={"ADAUSDT": Decimal("1")})
 
-    text = render_anything_now(conn, futures=fake, now_ms=now)
+    text, _markup = render_anything_now(conn, futures=fake, now_ms=now)
     print(text)
     assert "ADAUSDT" in text
     assert "SHORT" in text
@@ -2018,7 +2018,7 @@ def test_on_demand_chase_shows_do_not_chase(tmp_path: Path) -> None:
     _seed_sent_ada_short(conn, sent_at_ms=sent_at, entry=Decimal("0.40"), stop=Decimal("0.42"))
     # Short chase: mark < entry - 0.3R; R=0.02 → mark < 0.394.
     fake = FakeFutures(marks={"ADAUSDT": Decimal("0.39")}, steps={"ADAUSDT": Decimal("1")})
-    text = render_anything_now(conn, futures=fake, now_ms=now)
+    text, _markup = render_anything_now(conn, futures=fake, now_ms=now)
     assert text == "ADAUSDT ราคาวิ่งไปแล้ว — ไม่แนะนำไล่"
     assert "เข้า:" not in text
     conn.close()
@@ -2028,7 +2028,7 @@ def test_on_demand_all_flat_lists_seven_reasons(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "ondemand_flat.db")
     now = _ms_bangkok(2026, 10, 28, 10, 0)
     fake = FakeFutures()
-    text = render_anything_now(conn, futures=fake, now_ms=now)
+    text, _markup = render_anything_now(conn, futures=fake, now_ms=now)
     print(text)
     lines = text.splitlines()
     assert len(lines) == 7

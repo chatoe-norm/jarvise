@@ -9,6 +9,7 @@ from typing import Any
 
 from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_assist import ASSIST_SYMBOLS, ASSIST_TIMEFRAME
+from jarvise_assist.execute import execution_buttons_enabled
 from jarvise_assist.futures import (
     BinanceFuturesClient,
     FuturesKeyUnsafeError,
@@ -531,7 +532,8 @@ def run_assist_signals(
             created_at_ms=ts,
             expires_at_ms=expires,
         )
-        sent_ok, mid = _invoke_send(send_fn, text, reply_markup=skip_inline_keyboard(sid))
+        markup = skip_inline_keyboard(sid, entry=execution_buttons_enabled(conn))
+        sent_ok, mid = _invoke_send(send_fn, text, reply_markup=markup)
         if sent_ok:
             mark_signal_sent(conn, sid, sized, sent_at_ms=ts, expires_at_ms=expires)
             if mid is not None:
@@ -753,7 +755,8 @@ def run_assist_morning(
         if sized is None:
             continue
         text = format_signal_message(sized, expires_at_ms=expires, balance=balance)
-        sent_ok, mid = _invoke_send(send_fn, text, reply_markup=skip_inline_keyboard(sid))
+        markup = skip_inline_keyboard(sid, entry=execution_buttons_enabled(conn))
+        sent_ok, mid = _invoke_send(send_fn, text, reply_markup=markup)
         if sent_ok:
             mark_signal_sent(conn, sid, sized, sent_at_ms=ts, expires_at_ms=expires)
             if mid is not None:

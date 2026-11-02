@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any
@@ -910,3 +911,165 @@ def delete_explore_symbol(conn: Any, symbol: str) -> bool:
     cur = conn.execute("DELETE FROM assist_explore_symbols WHERE symbol=?", (symbol,))
     conn.commit()
     return cur.rowcount > 0
+
+
+def insert_exec_intent(
+    conn: Any,
+    *,
+    kind: str,
+    symbol: str,
+    side: str,
+    preview: dict[str, Any],
+    created_at_ms: int,
+    expires_at_ms: int,
+    telegram_message_id: int | None = None,
+) -> str:
+    intent_id = f"aei_{uuid.uuid4().hex[:16]}"
+    conn.execute(
+        """
+        INSERT INTO assist_exec_intent (
+            id, kind, symbol, side, preview_json, created_at_ms, expires_at_ms,
+            status, result_text, telegram_message_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'preview', NULL, ?)
+        """,
+        (
+            intent_id,
+            kind,
+            symbol.upper(),
+            side.lower(),
+            json.dumps(preview, separators=(",", ":"), default=str),
+            int(created_at_ms),
+            int(expires_at_ms),
+            telegram_message_id,
+        ),
+    )
+    conn.commit()
+    return intent_id
+
+
+def get_exec_intent(conn: Any, intent_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, kind, symbol, side, preview_json, created_at_ms, expires_at_ms,
+               status, result_text, telegram_message_id
+        FROM assist_exec_intent WHERE id=?
+        """,
+        (intent_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    data = (
+        dict(row)
+        if hasattr(row, "keys")
+        else {
+            "id": row[0],
+            "kind": row[1],
+            "symbol": row[2],
+            "side": row[3],
+            "preview_json": row[4],
+            "created_at_ms": row[5],
+            "expires_at_ms": row[6],
+            "status": row[7],
+            "result_text": row[8],
+            "telegram_message_id": row[9],
+        }
+    )
+    raw = data.get("preview_json")
+    try:
+        data["preview"] = json.loads(str(raw or "{}"))
+    except Exception:  # noqa: BLE001
+        data["preview"] = {}
+    return data
+
+
+def claim_exec_intent(conn: Any, intent_id: str) -> bool:
+    """Atomic preview → confirmed. True only for the caller that won the race."""
+    cur = conn.execute(
+        """
+        UPDATE assist_exec_intent SET status='confirmed'
+        WHERE id=? AND status='preview'
+        """,
+        (intent_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def finish_exec_intent(
+    conn: Any,
+    intent_id: str,
+    *,
+    status: str,
+    result_text: str,
+    telegram_message_id: int | None = None,
+) -> None:
+    if telegram_message_id is not None:
+        conn.execute(
+            """
+            UPDATE assist_exec_intent
+            SET status=?, result_text=?, telegram_message_id=?
+            WHERE id=?
+            """,
+            (status, result_text, int(telegram_message_id), intent_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE assist_exec_intent SET status=?, result_text=? WHERE id=?
+            """,
+            (status, result_text, intent_id),
+        )
+    conn.commit()
+
+
+def set_exec_intent_message_id(conn: Any, intent_id: str, message_id: int) -> None:
+    conn.execute(
+        "UPDATE assist_exec_intent SET telegram_message_id=? WHERE id=?",
+        (int(message_id), intent_id),
+    )
+    conn.commit()
+
+
+def cancel_exec_intent(conn: Any, intent_id: str) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE assist_exec_intent SET status='cancelled'
+        WHERE id=? AND status='preview'
+        """,
+        (intent_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def insert_exec_log(
+    conn: Any,
+    *,
+    intent_id: str,
+    step: str,
+    endpoint: str,
+    client_order_id: str | None = None,
+    http_status: int | None = None,
+    binance_code: int | None = None,
+    order_or_algo_id: str | None = None,
+    created_at_ms: int | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO assist_exec_log (
+            intent_id, step, endpoint, client_order_id, http_status,
+            binance_code, order_or_algo_id, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            intent_id,
+            step,
+            endpoint,
+            client_order_id,
+            http_status,
+            binance_code,
+            order_or_algo_id,
+            int(created_at_ms if created_at_ms is not None else now_ms()),
+        ),
+    )
+    conn.commit()

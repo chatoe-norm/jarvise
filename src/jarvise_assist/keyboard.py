@@ -39,9 +39,47 @@ def explore_remove_keyboard(symbols: list[str]) -> dict[str, Any]:
     }
 
 
-def skip_inline_keyboard(signal_id: str) -> dict[str, Any]:
+def skip_inline_keyboard(signal_id: str, *, entry: bool = False) -> dict[str, Any]:
     # callback_data is the assist_signal.id (Telegram limit 64 bytes; our ids fit).
-    return {"inline_keyboard": [[{"text": "⏭ ข้าม", "callback_data": signal_id}]]}
+    row: list[dict[str, str]] = [{"text": "⏭ ข้าม", "callback_data": signal_id}]
+    if entry:
+        row.insert(0, {"text": "เข้าไม้", "callback_data": f"ec:{signal_id}"})
+    return {"inline_keyboard": [row]}
+
+
+def coin_entry_keyboard(symbol: str, side: str) -> dict[str, Any]:
+    side_code = "l" if side.lower() == "long" else "s"
+    label = f"{symbol.upper()} {'LONG' if side_code == 'l' else 'SHORT'}"
+    return {"inline_keyboard": [[{"text": label, "callback_data": f"ec:{symbol.upper()}:{side_code}"}]]}
+
+
+def anything_now_keyboard(ideas: list[tuple[str, str]]) -> dict[str, Any]:
+    """One button per admitted (symbol, side)."""
+    rows = []
+    for symbol, side in ideas:
+        side_code = "l" if side.lower() == "long" else "s"
+        label = f"{symbol.upper()} {'LONG' if side_code == 'l' else 'SHORT'}"
+        rows.append([{"text": label, "callback_data": f"ec:{symbol.upper()}:{side_code}"}])
+    return {"inline_keyboard": rows}
+
+
+def entry_confirm_keyboard(intent_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ ยืนยันเข้าไม้", "callback_data": f"ey:{intent_id}"},
+                {"text": "✖️ ยกเลิก", "callback_data": f"en:{intent_id}"},
+            ]
+        ]
+    }
+
+
+def move_stop_keyboard(intent_id: str) -> dict[str, Any]:
+    return {"inline_keyboard": [[{"text": "✅ เลื่อนให้", "callback_data": f"ms:{intent_id}"}]]}
+
+
+def exit_confirm_keyboard(intent_id: str) -> dict[str, Any]:
+    return {"inline_keyboard": [[{"text": "✅ ปิดไม้", "callback_data": f"xx:{intent_id}"}]]}
 
 
 def risk_choice_keyboard() -> dict[str, Any]:

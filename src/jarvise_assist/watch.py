@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
 from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_assist import ASSIST_SYMBOLS, ASSIST_TIMEFRAME
+from jarvise_assist.execute import (
+    PREVIEW_TTL_MS,
+    assist_execute_mode,
+    build_trade_client,
+    cancel_jv_orders_for_symbol,
+)
 from jarvise_assist.futures import (
     BinanceFuturesClient,
     FuturesKeyUnsafeError,
@@ -18,6 +25,7 @@ from jarvise_assist.futures import (
     protective_stop_coverage,
     protective_stop_covered_qty,
 )
+from jarvise_assist.keyboard import exit_confirm_keyboard, move_stop_keyboard
 from jarvise_assist.messages import (
     format_exit_advice,
     format_move_stop_advice,
@@ -39,6 +47,7 @@ from jarvise_assist.store import (
     ensure_settings,
     find_linkable_signal,
     get_watch_position,
+    insert_exec_intent,
     insert_watch_advice,
     latest_no_stop_reason,
     list_held_watch_advice,
@@ -54,6 +63,8 @@ from jarvise_assist.store import (
 from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
 from jarvise_notify.telegram import send_telegram_message
 from jarvise_paper.profit_lock import trail_stop_with_source
+
+logger = logging.getLogger(__name__)
 
 FOUR_H_MS = 4 * 3_600_000
 ONE_H_MS = 3_600_000
@@ -127,6 +138,7 @@ def _emit_advice(
     send: SendFn,
     hold_ok: bool,
     since_ms: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
 ) -> str:
     """Send or hold; return status sent/held/skipped."""
     if advice_already_sent(
@@ -152,7 +164,11 @@ def _emit_advice(
             created_at_ms=now_ms,
         )
         return "held"
-    if send(text):
+    try:
+        sent_ok = bool(send(text, reply_markup=reply_markup) if reply_markup is not None else send(text))
+    except TypeError:
+        sent_ok = bool(send(text))
+    if sent_ok:
         insert_watch_advice(
             conn,
             symbol=symbol,
@@ -434,6 +450,31 @@ def _process_universe_position(
         tighter = suggested_d > compare_stop if pos.side == "long" else suggested_d < compare_stop
         if tighter:
             text = format_move_stop_advice(symbol=pos.symbol, side=pos.side, stop=suggested_d)
+            move_markup = None
+            # Buttons/intents only in live daytime sends that will not dedupe-skip.
+            if (
+                assist_execute_mode() == "live"
+                and not night
+                and not advice_already_sent(
+                    conn,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    kind="move_stop",
+                    reason=_source,
+                    level=float(suggested_d),
+                    since_ms=since,
+                )
+            ):
+                intent_id = insert_exec_intent(
+                    conn,
+                    kind="move_stop",
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    preview={"stop": str(suggested_d), "qty": str(pos.qty)},
+                    created_at_ms=now_ms,
+                    expires_at_ms=now_ms + PREVIEW_TTL_MS,
+                )
+                move_markup = move_stop_keyboard(intent_id)
             status = _emit_advice(
                 conn,
                 symbol=pos.symbol,
@@ -448,6 +489,7 @@ def _process_universe_position(
                 send=send,
                 hold_ok=True,
                 since_ms=since,
+                reply_markup=move_markup,
             )
             actions.append(
                 {
@@ -470,6 +512,30 @@ def _process_universe_position(
     if reason is not None:
         r_mult = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
         text = format_exit_advice(symbol=pos.symbol, side=pos.side, reason=reason, approx_r=r_mult)
+        exit_markup = None
+        if (
+            assist_execute_mode() == "live"
+            and not night
+            and not advice_already_sent(
+                conn,
+                symbol=pos.symbol,
+                position_side=pos.position_side,
+                kind="exit",
+                reason=reason,
+                level=None,
+                since_ms=since,
+            )
+        ):
+            intent_id = insert_exec_intent(
+                conn,
+                kind="exit",
+                symbol=pos.symbol,
+                side=pos.side,
+                preview={"qty": str(pos.qty)},
+                created_at_ms=now_ms,
+                expires_at_ms=now_ms + PREVIEW_TTL_MS,
+            )
+            exit_markup = exit_confirm_keyboard(intent_id)
         status = _emit_advice(
             conn,
             symbol=pos.symbol,
@@ -484,6 +550,7 @@ def _process_universe_position(
             send=send,
             hold_ok=True,
             since_ms=since,
+            reply_markup=exit_markup,
         )
         actions.append({"symbol": pos.symbol, "action": "exit", "reason": reason, "status": status})
 
@@ -633,6 +700,18 @@ def run_assist_watch(
             actions=actions,
         )
     closed = mark_watch_positions_closed(conn, open_keys=open_keys, now_ms=ts)
+    orphan_cancelled: list[dict[str, str]] = []
+    if closed and assist_execute_mode() == "live":
+        trade = build_trade_client()
+        if trade is not None:
+            for sym, _ps in closed:
+                try:
+                    ids = cancel_jv_orders_for_symbol(trade, sym)
+                except Exception:  # noqa: BLE001
+                    logger.exception("orphan jv- cancel failed for %s", sym)
+                    ids = []
+                for algo_id in ids:
+                    orphan_cancelled.append({"symbol": sym, "algo_id": algo_id})
     return _strip_secrets(
         {
             "ok": True,
@@ -641,6 +720,7 @@ def run_assist_watch(
             "night_hold": night,
             "actions": actions,
             "closed": [{"symbol": s, "position_side": p} for s, p in closed],
+            "orphan_cancelled": orphan_cancelled,
             "futures_recovered": recovered,
             "pause": pause_info,
         }
