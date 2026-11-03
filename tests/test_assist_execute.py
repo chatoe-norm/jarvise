@@ -23,7 +23,6 @@ from jarvise_assist.execute import (
     MSG_STOP_CLOSED,
     BinanceTradeClient,
     TradeClientError,
-    _msg_check_now,
     assist_execute_mode,
     build_trade_client,
     cancel_jv_orders_for_symbol,
@@ -1916,7 +1915,7 @@ def test_ec_preview_connect_error_replies_retry(tmp_path: Path, monkeypatch: pyt
     conn.close()
 
 
-def test_ey_stop_connect_error_after_fill_says_check_not_retry(
+def test_ey_stop_connect_error_after_fill_emergency_closes_not_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
@@ -1968,14 +1967,16 @@ def test_ey_stop_connect_error_after_fill_says_check_not_retry(
         trade=trade,
         now_ms_value=now,
     )
-    expect = _msg_check_now("DOGEUSDT")
+    # A filled entry whose stop cannot be placed (network) is closed reduce-only,
+    # never left open without a stop, and never answered with "retry".
     assert out["ok"] is False
-    assert sent[-1] == expect
-    assert "เช็ค" in sent[-1]
-    assert "ลองใหม่" not in sent[-1]
+    expect = sent[-1]
+    assert expect.startswith(MSG_STOP_CLOSED)
+    assert "ลองใหม่" not in expect
     assert get_exec_intent(conn, intent_id)["status"] == "failed"
     markets = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
-    assert len(markets) == 1
+    assert len(markets) == 2  # entry + emergency close
+    assert markets[1][2].get("reduceOnly") == "true"
     again = handle_exec_callback(
         conn,
         f"ey:{intent_id}",
@@ -1988,7 +1989,7 @@ def test_ey_stop_connect_error_after_fill_says_check_not_retry(
     assert again.get("replay") is True
     assert sent[-1] == expect
     markets = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
-    assert len(markets) == 1
+    assert len(markets) == 2
     conn.close()
 
 

@@ -1290,7 +1290,6 @@ def run_entry_sequence(
 
     stop_ok = False
     stop_err: str | None = None
-    stop_exc: BaseException | None = None
     for attempt in range(2):
         scid = client_order_id(intent_id, f"sl{attempt}")
         try:
@@ -1319,7 +1318,6 @@ def run_entry_sequence(
             stop_ok = True
             break
         except Exception as exc:  # noqa: BLE001
-            stop_exc = exc
             stop_err = str(exc)
             code = exc.binance_code if isinstance(exc, TradeClientError) else None
             _log_write(
@@ -1341,11 +1339,9 @@ def run_entry_sequence(
                 break
 
     if not stop_ok:
-        # Both stop attempts failed on the network. The entry may be open and the
-        # stop may already exist. Do not emergency-close; the confirm handler
-        # tells the owner to check Binance.
-        if isinstance(stop_exc, (httpx.HTTPError, ProviderError)):
-            raise stop_exc
+        # No stop confirmed (a stop that did land was found by _safe_find_algo above).
+        # Network errors included: close reduce-only rather than leave a filled,
+        # unprotected position while the owner may not be watching.
         closed = _emergency_close_verified(
             trade,
             conn=conn,
