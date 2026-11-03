@@ -59,7 +59,7 @@ from jarvise_assist.store import (
 from jarvise_exchange.binance_spot import (
     BinanceAuth,
     load_private_key_pem,
-    signature_for_query,
+    sign_payload,
 )
 from jarvise_ingest.db import load_latest_analysis
 from jarvise_risk.caps import kill_switch_state
@@ -214,8 +214,9 @@ class BinanceTradeClient:
         merged = {k: v for k, v in params.items() if v is not None}
         merged["timestamp"] = int(time.time() * 1000)
         query = urlencode(merged)
-        signature = signature_for_query(self._auth, query)
-        merged["signature"] = signature
+        # Raw signature: httpx encodes params once. signature_for_query is already
+        # percent-encoded for Ed25519 and would be encoded twice (sapi rejects, -1022).
+        merged["signature"] = sign_payload(self._auth, query)
         return merged
 
     def _headers(self) -> dict[str, str]:
