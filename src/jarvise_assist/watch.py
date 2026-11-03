@@ -706,7 +706,7 @@ def run_assist_watch(
         if trade is not None:
             for sym, _ps in closed:
                 try:
-                    ids = cancel_jv_orders_for_symbol(trade, sym)
+                    ids, _ok = cancel_jv_orders_for_symbol(trade, sym)
                 except Exception:  # noqa: BLE001
                     logger.exception("orphan jv- cancel failed for %s", sym)
                     ids = []

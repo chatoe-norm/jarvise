@@ -521,6 +521,12 @@ class BinanceTradeClient:
             {"symbol": symbol.upper(), "algoId": algo_id},
         )
 
+    def cancel_algo_by_client_id(self, *, symbol: str, client_algo_id: str) -> Any:
+        return self.signed_delete(
+            "/fapi/v1/algoOrder",
+            {"symbol": symbol.upper(), "clientAlgoId": client_algo_id},
+        )
+
     def realized_pnl_for_order(self, *, symbol: str, order_id: Any) -> Decimal:
         trades = self.signed_get(
             "/fapi/v1/userTrades",
@@ -649,6 +655,38 @@ def _fill_from_position(
     return pos.qty, pos.entry_price
 
 
+def _emergency_close_step(attempt: int) -> str:
+    return "emergency_close" if attempt == 0 else f"emergency_close_{attempt + 1}"
+
+
+def _emergency_close_query_step(attempt: int) -> str:
+    return "emergency_close_query" if attempt == 0 else f"emergency_close_query_{attempt + 1}"
+
+
+def _position_gone(trade: BinanceTradeClient, *, symbol: str) -> bool | None:
+    """True when flat, False when still open, None when the check failed."""
+    try:
+        return len(trade.position_risk(symbol=symbol)) == 0
+    except Exception:  # noqa: BLE001
+        logger.exception("position check failed during emergency close for %s", symbol)
+        return None
+
+
+def _cls_filled(trade: BinanceTradeClient, *, symbol: str, client_id: str) -> bool | None:
+    """True when executedQty > 0, False when not filled, None when the check failed."""
+    try:
+        order = trade.query_order_by_client_id(symbol=symbol, client_id=client_id)
+        return Decimal(str(order.get("executedQty") or "0")) > 0
+    except TradeClientError as exc:
+        if exc.binance_code == -2013:
+            return False
+        logger.warning("cls query failed for %s: %s", client_id, type(exc).__name__)
+        return None
+    except Exception:  # noqa: BLE001
+        logger.exception("cls query failed for %s", client_id)
+        return None
+
+
 def _emergency_close_verified(
     trade: BinanceTradeClient,
     *,
@@ -657,63 +695,186 @@ def _emergency_close_verified(
     symbol: str,
     side: str,
     qty: Decimal,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """True only when the close filled or the position is gone."""
+    """True only when the close filled or the position is gone. Up to 3 reduceOnly attempts."""
     ccid = client_order_id(intent_id, "cls")
     close_side = _closing_side(side)
-    try:
-        fill = trade.market_order(
-            symbol=symbol,
-            side=close_side,
-            qty=qty,
-            reduce_only=True,
-            client_id=ccid,
-        )
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step="emergency_close",
-            endpoint="/fapi/v1/order",
-            client_order_id=ccid,
-            http_status=200,
-            order_or_algo_id=str(fill.get("orderId") or ""),
-        )
-        if Decimal(str(fill.get("executedQty") or "0")) > 0:
-            return True
-    except Exception as exc:  # noqa: BLE001
-        code = exc.binance_code if isinstance(exc, TradeClientError) else None
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step="emergency_close",
-            endpoint="/fapi/v1/order",
-            client_order_id=ccid,
-            http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
-            binance_code=code,
-        )
-        if not _is_clear_rejection(exc):
-            recovered = _query_fill_after_unknown(
-                trade,
-                symbol=symbol,
-                client_id=ccid,
-                conn=conn,
-                intent_id=intent_id,
-                step="emergency_close_query",
-            )
-            if recovered is not None and Decimal(str(recovered.get("executedQty") or "0")) > 0:
+    backoffs = (1.0, 2.0)
+    for attempt in range(3):
+        if attempt > 0:
+            sleep(backoffs[attempt - 1])
+            gone = _position_gone(trade, symbol=symbol)
+            if gone is True:
                 return True
-    try:
-        return len(trade.position_risk(symbol=symbol)) == 0
-    except Exception:  # noqa: BLE001
-        return False
+            filled = _cls_filled(trade, symbol=symbol, client_id=ccid)
+            if filled is True and _position_gone(trade, symbol=symbol) is True:
+                return True
+            # Resend only when the position is still open and cls is not filled.
+            # A failed check (None) is not confirmed — skip the resend this round.
+            if gone is not False or filled is not False:
+                continue
+        step = _emergency_close_step(attempt)
+        query_step = _emergency_close_query_step(attempt)
+        try:
+            fill = trade.market_order(
+                symbol=symbol,
+                side=close_side,
+                qty=qty,
+                reduce_only=True,
+                client_id=ccid,
+            )
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step=step,
+                endpoint="/fapi/v1/order",
+                client_order_id=ccid,
+                http_status=200,
+                order_or_algo_id=str(fill.get("orderId") or ""),
+            )
+            if Decimal(str(fill.get("executedQty") or "0")) > 0:
+                return True
+        except Exception as exc:  # noqa: BLE001
+            code = exc.binance_code if isinstance(exc, TradeClientError) else None
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step=step,
+                endpoint="/fapi/v1/order",
+                client_order_id=ccid,
+                http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+                binance_code=code,
+            )
+            if not _is_clear_rejection(exc):
+                recovered = _query_fill_after_unknown(
+                    trade,
+                    symbol=symbol,
+                    client_id=ccid,
+                    conn=conn,
+                    intent_id=intent_id,
+                    step=query_step,
+                )
+                if recovered is not None and Decimal(str(recovered.get("executedQty") or "0")) > 0:
+                    return True
+        if _position_gone(trade, symbol=symbol) is True:
+            return True
+    return False
 
 
-def _msg_close_yourself(symbol: str) -> str:
-    return f"⚠️ วาง stop ไม่ได้และปิด {symbol.upper()} เองทันที"
+def _msg_close_unconfirmed(
+    symbol: str,
+    side: str,
+    *,
+    qty: Decimal,
+    stop: Decimal,
+) -> str:
+    side_l = "LONG" if side == "long" else "SHORT"
+    return (
+        f"🚨 ไม้ {symbol.upper()} {side_l} เปิดอยู่ ยังไม่มี stop และปิดไม่ได้ — เข้า Binance ปิดทันที\n"
+        f"qty {qty} · stop {stop}"
+    )
 
 
 def _msg_check_now(symbol: str) -> str:
     return f"⚠️ ไม่แน่ใจผลคำสั่ง — เปิด Binance เช็ค {symbol.upper()} ทันทีว่ามีไม้และ stop ครบไหม"
+
+
+def _cancel_algo_client_ok(
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    client_algo_id: str,
+    conn: Any,
+    intent_id: str,
+    step: str,
+) -> bool:
+    """True when cancelled or already gone (-2011 / -2013)."""
+    try:
+        trade.cancel_algo_by_client_id(symbol=symbol, client_algo_id=client_algo_id)
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step=step,
+            endpoint="/fapi/v1/algoOrder",
+            client_order_id=client_algo_id,
+            http_status=200,
+        )
+        return True
+    except TradeClientError as exc:
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step=step,
+            endpoint="/fapi/v1/algoOrder",
+            client_order_id=client_algo_id,
+            http_status=exc.http_status,
+            binance_code=exc.binance_code,
+        )
+        if exc.binance_code in {-2011, -2013}:
+            return True
+        logger.warning(
+            "direct algo cancel failed %s %s: %s",
+            symbol,
+            client_algo_id,
+            type(exc).__name__,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "direct algo cancel failed %s %s: %s",
+            symbol,
+            client_algo_id,
+            type(exc).__name__,
+        )
+        return False
+
+
+def _orphan_cancel_after_close(
+    trade: BinanceTradeClient,
+    *,
+    conn: Any,
+    intent_id: str,
+    symbol: str,
+) -> bool:
+    """List-cancel jv- orders, then always try sl0/sl1 by clientAlgoId. True when all ok."""
+    all_ok = True
+    list_failed = False
+    try:
+        _cancelled, list_ok = cancel_jv_orders_for_symbol(trade, symbol)
+        if not list_ok:
+            all_ok = False
+    except Exception as exc:  # noqa: BLE001
+        list_failed = True
+        logger.warning("orphan list cancel failed %s: %s", symbol, type(exc).__name__)
+    _log_write(
+        conn,
+        intent_id=intent_id,
+        step="orphan_cancel",
+        endpoint="/fapi/v1/openAlgoOrders",
+        client_order_id=None,
+    )
+    direct_ok = True
+    for tag in ("sl0", "sl1"):
+        cid = client_order_id(intent_id, tag)
+        if not _cancel_algo_client_ok(
+            trade,
+            symbol=symbol,
+            client_algo_id=cid,
+            conn=conn,
+            intent_id=intent_id,
+            step="orphan_cancel",
+        ):
+            direct_ok = False
+            all_ok = False
+    # When the list call fails, direct sl0/sl1 cancels are the fallback confirmation.
+    if list_failed:
+        return direct_ok
+    return all_ok
+
+
+def _orphan_cancel_warning(symbol: str) -> str:
+    return f"⚠️ ยกเลิก stop ค้างไม่ได้ — เช็ก Open Orders ของ {symbol.upper()}"
 
 
 def _safe_find_algo(trade: BinanceTradeClient, *, symbol: str, client_id: str) -> dict[str, Any] | None:
@@ -1058,11 +1219,17 @@ def create_entry_preview(
             now_ms_value=ts,
             read_mark=read_mark,
         )
+        if sized is None:
+            return {"ok": False, "reason": reason or "flat", "text": _reason_th(reason or "flat")}
+        balance, _ = client.usdt_wallet_and_available()
+        tick_size: Decimal | None = None
+        try:
+            tick_size = client.symbol_filters(symbol).tick_size
+        except Exception:  # noqa: BLE001
+            tick_size = None
     except (httpx.HTTPError, ProviderError) as exc:
         logger.warning("entry preview network error %s", type(exc).__name__)
         return {"ok": False, "reason": "binance_unreachable", "text": MSG_BINANCE_RETRY}
-    if sized is None:
-        return {"ok": False, "reason": reason or "flat", "text": _reason_th(reason or "flat")}
     expires = ts + PREVIEW_TTL_MS
     seen = latest_seen_idea(conn, symbol=symbol, side=side, now_ms=ts)
     seen_entry = Decimal(str(seen["entry"])) if seen is not None else None
@@ -1076,12 +1243,6 @@ def create_entry_preview(
         created_at_ms=ts,
         expires_at_ms=expires,
     )
-    balance, _ = client.usdt_wallet_and_available()
-    tick_size: Decimal | None = None
-    try:
-        tick_size = client.symbol_filters(symbol).tick_size
-    except Exception:  # noqa: BLE001
-        tick_size = None
     text = format_signal_message(
         sized,
         expires_at_ms=expires,
@@ -1184,6 +1345,7 @@ def run_entry_sequence(
     intent_id: str,
     *,
     trade: BinanceTradeClient,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     intent = get_exec_intent(conn, intent_id)
     if intent is None:
@@ -1201,11 +1363,20 @@ def run_entry_sequence(
     open_side = _opening_side(side)
     close_side = _closing_side(side)
 
+    # Clear stale jv- stop/TP before opening (never blocks the entry).
+    try:
+        cancel_jv_orders_for_symbol(trade, symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pre-market jv- cancel failed %s: %s", symbol, type(exc).__name__)
+
     try:
         trade.set_isolated(symbol)
         _log_write(
             conn, intent_id=intent_id, step="marginType", endpoint="/fapi/v1/marginType", http_status=200
         )
+    except (httpx.HTTPError, ProviderError) as exc:
+        logger.warning("pre-market marginType network error %s", type(exc).__name__)
+        return MSG_BINANCE_NOT_SENT
     except TradeClientError as exc:
         _log_write(
             conn,
@@ -1221,6 +1392,9 @@ def run_entry_sequence(
     try:
         trade.set_leverage(symbol, leverage)
         _log_write(conn, intent_id=intent_id, step="leverage", endpoint="/fapi/v1/leverage", http_status=200)
+    except (httpx.HTTPError, ProviderError) as exc:
+        logger.warning("pre-market leverage network error %s", type(exc).__name__)
+        return MSG_BINANCE_NOT_SENT
     except TradeClientError as exc:
         _log_write(
             conn,
@@ -1335,11 +1509,57 @@ def run_entry_sequence(
                 if found is not None:
                     stop_ok = True
                     break
+                # sl0 may still be landing — wait once and look again before sl1.
+                if attempt == 0:
+                    sleep(1)
+                    found = _safe_find_algo(trade, symbol=symbol, client_id=scid)
+                    if found is not None:
+                        stop_ok = True
+                        break
             if isinstance(exc, TradeClientError) and exc.binance_code == -2021:
                 break
 
     if not stop_ok:
-        # No stop confirmed (a stop that did land was found by _safe_find_algo above).
+        # Final confirm: either stop may have landed after an unknown result.
+        sl0_id = client_order_id(intent_id, "sl0")
+        sl1_id = client_order_id(intent_id, "sl1")
+        found_sl0 = _safe_find_algo(trade, symbol=symbol, client_id=sl0_id)
+        found_sl1 = _safe_find_algo(trade, symbol=symbol, client_id=sl1_id)
+        if found_sl0 is not None or found_sl1 is not None:
+            stop_ok = True
+            if found_sl0 is not None and found_sl1 is not None:
+                algo_id = found_sl1.get("algoId")
+                if algo_id is not None:
+                    try:
+                        trade.cancel_algo(symbol=symbol, algo_id=algo_id)
+                        _log_write(
+                            conn,
+                            intent_id=intent_id,
+                            step="dup_stop_cancel",
+                            endpoint="/fapi/v1/algoOrder",
+                            client_order_id=sl1_id,
+                            http_status=200,
+                            order_or_algo_id=str(algo_id),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "dup stop cancel failed %s: %s",
+                            sl1_id,
+                            type(exc).__name__,
+                        )
+                        _log_write(
+                            conn,
+                            intent_id=intent_id,
+                            step="dup_stop_cancel",
+                            endpoint="/fapi/v1/algoOrder",
+                            client_order_id=sl1_id,
+                            http_status=(exc.http_status if isinstance(exc, TradeClientError) else None),
+                            binance_code=(exc.binance_code if isinstance(exc, TradeClientError) else None),
+                            order_or_algo_id=str(algo_id),
+                        )
+
+    if not stop_ok:
+        # No stop confirmed (a stop that did land was found by lookup above).
         # Network errors included: close reduce-only rather than leave a filled,
         # unprotected position while the owner may not be watching.
         closed = _emergency_close_verified(
@@ -1349,10 +1569,15 @@ def run_entry_sequence(
             symbol=symbol,
             side=side,
             qty=exec_qty,
+            sleep=sleep,
         )
         if closed:
-            return f"{MSG_STOP_CLOSED} ({stop_err or 'stop failed'})"
-        return _msg_close_yourself(symbol)
+            cancel_ok = _orphan_cancel_after_close(trade, conn=conn, intent_id=intent_id, symbol=symbol)
+            text = f"{MSG_STOP_CLOSED} ({stop_err or 'stop failed'})"
+            if not cancel_ok:
+                text = f"{text}\n{_orphan_cancel_warning(symbol)}"
+            return text
+        return _msg_close_unconfirmed(symbol, side, qty=exec_qty, stop=stop)
 
     tp_note = ""
     tcid = client_order_id(intent_id, "tp")
@@ -1730,9 +1955,14 @@ def run_exit_sequence(
     return f"✅ ปิด {symbol} @ {avg} · PnL {pnl_s} USDT"
 
 
-def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> list[str]:
-    """Cancel leftover jv- reduce-only algo orders after a natural close."""
+def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> tuple[list[str], bool]:
+    """Cancel leftover jv- reduce-only algo orders. Never touches non-jv ids.
+
+    Returns (cancelled_algo_ids, all_confirmed). Unknown-order (-2011/-2013) counts
+    as confirmed. Any other failure logs the exception class and is not confirmed.
+    """
     cancelled: list[str] = []
+    all_ok = True
     for order in trade.open_algo_orders(symbol=symbol):
         cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
         if not cid.startswith("jv-"):
@@ -1743,9 +1973,25 @@ def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> list[
         try:
             trade.cancel_algo(symbol=symbol, algo_id=algo_id)
             cancelled.append(str(algo_id))
-        except TradeClientError:
-            logger.warning("orphan cancel failed %s %s", symbol, algo_id)
-    return cancelled
+        except TradeClientError as exc:
+            if exc.binance_code in {-2011, -2013}:
+                continue
+            all_ok = False
+            logger.warning(
+                "orphan cancel failed %s %s: %s",
+                symbol,
+                algo_id,
+                type(exc).__name__,
+            )
+        except Exception as exc:  # noqa: BLE001
+            all_ok = False
+            logger.warning(
+                "orphan cancel failed %s %s: %s",
+                symbol,
+                algo_id,
+                type(exc).__name__,
+            )
+    return cancelled, all_ok
 
 
 def handle_exec_callback(
@@ -1893,6 +2139,8 @@ def handle_exec_callback(
             logger.warning("exec pre-order network error %s", type(exc).__name__)
             text = MSG_BINANCE_NOT_SENT
             finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+            if mid is not None and prefix == "ey:":
+                edit(int(mid), text, reply_markup={"inline_keyboard": []})
             send(text)
             return {"ok": False, "reason": "binance_unreachable"}
 
@@ -1901,6 +2149,9 @@ def handle_exec_callback(
             finish_exec_intent(conn, intent_id, status=status, result_text=result)
             if mid is not None and markup is None and prefix == "ey:":
                 edit(int(mid), result, reply_markup={"inline_keyboard": []})
+                # Telegram does not notify on edits — send a new message for failures.
+                if not result.startswith("✅"):
+                    send(result)
             elif markup is not None:
                 send(result, reply_markup=markup)
             else:
@@ -1909,12 +2160,22 @@ def handle_exec_callback(
 
         try:
             if prefix == "ey:":
-                guard = _confirm_guards_entry(conn, intent, client, now_ms_value=ts)
+                try:
+                    guard = _confirm_guards_entry(conn, intent, client, now_ms_value=ts)
+                except (httpx.HTTPError, ProviderError) as exc:
+                    logger.warning("confirm guards network error %s", type(exc).__name__)
+                    text = MSG_BINANCE_NOT_SENT
+                    finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+                    if mid is not None:
+                        edit(int(mid), text, reply_markup={"inline_keyboard": []})
+                    send(text)
+                    return {"ok": False, "reason": "binance_unreachable"}
                 if guard:
                     text = _reason_th(guard)
                     finish_exec_intent(conn, intent_id, status="failed", result_text=text)
                     if mid is not None:
                         edit(int(mid), text, reply_markup={"inline_keyboard": []})
+                        send(text)
                     else:
                         send(text)
                     return {"ok": False, "reason": guard}
