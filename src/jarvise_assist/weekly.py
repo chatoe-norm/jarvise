@@ -53,7 +53,8 @@ def format_weekly_summary(
             f"{_signed(total_usdt)} USDT"
         )
         lines.append(
-            f"ปิดที่ stop {int(virtual.get('exit_stop') or 0)} · "
+            f"ปิดที่ stop เดิม {int(virtual.get('exit_stop_original') or 0)} · "
+            f"stop ที่เลื่อนแล้ว {int(virtual.get('exit_stop_trailed') or 0)} · "
             f"ถึง 2R {int(virtual.get('exit_target_2r') or 0)} · "
             f"ปิดตามสัญญาณ {int(virtual.get('exit_analysis') or 0)}"
         )
@@ -87,7 +88,8 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "total_r": 0.0,
             "mean_r": 0.0,
             "total_usdt": 0.0,
-            "exit_stop": 0,
+            "exit_stop_original": 0,
+            "exit_stop_trailed": 0,
             "exit_target_2r": 0,
             "exit_analysis": 0,
         }
@@ -95,13 +97,18 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
     pnls = [float(r.get("pnl_usdt") or 0.0) for r in rows]
     wins = sum(1 for x in nets if x > 0)
     total_r = sum(nets)
-    exit_stop = 0
+    exit_stop_original = 0
+    exit_stop_trailed = 0
     exit_target = 0
     exit_analysis = 0
     for row in rows:
         reason = str(row.get("exit_reason") or "").lower()
         if reason == "stop":
-            exit_stop += 1
+            gross = float(row.get("gross_r") or 0.0)
+            if gross > 0:
+                exit_stop_trailed += 1
+            else:
+                exit_stop_original += 1
         elif reason == "target_2r":
             exit_target += 1
         elif reason in ANALYSIS_EXIT_REASONS:
@@ -112,7 +119,8 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "total_r": total_r,
         "mean_r": total_r / len(rows),
         "total_usdt": sum(pnls),
-        "exit_stop": exit_stop,
+        "exit_stop_original": exit_stop_original,
+        "exit_stop_trailed": exit_stop_trailed,
         "exit_target_2r": exit_target,
         "exit_analysis": exit_analysis,
     }

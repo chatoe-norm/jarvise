@@ -231,12 +231,17 @@ def render_open_positions(
             r_s = _signed_r_one(r_mult)
         else:
             r_s = "R unknown"
-        lines.append(f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} · ≈ {r_s}")
+        lines.append(f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s}")
 
         if stop_info is None:
             lines.append("ยังไม่มี stop")
         else:
             prot = float(stop_info.price)
+            stop_trig = trigger_label(stop_info.working_type)
+            if stop_trig is not None:
+                lines.append(f"stop ที่ตั้งไว้ {fmt_price(stop_info.price)} · trigger {stop_trig}")
+            else:
+                lines.append(f"stop ที่ตั้งไว้ {fmt_price(stop_info.price)}")
             if pos.side == "long":
                 lock_usdt = (prot - entry) * qty
             else:

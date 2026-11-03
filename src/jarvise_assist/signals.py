@@ -797,7 +797,8 @@ def run_assist_morning(
         first = first_send_by_symbol.get(sized.symbol)
         if first is not None:
             text = (
-                f"{text}\nส่งครั้งแรก: เข้า {fmt_price(Decimal(str(first['entry'])))} · "
+                f"{text}\nไอเดียเดิม (พักไว้ช่วงกลางคืน): เข้า "
+                f"{fmt_price(Decimal(str(first['entry'])))} · "
                 f"{fmt_qty(Decimal(str(first['qty'])))}"
             )
         markup = skip_inline_keyboard(sid, entry=execution_buttons_enabled(conn))
