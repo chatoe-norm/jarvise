@@ -16,6 +16,8 @@ Capital isolation first — do **not** trade from the main account.
    - `BINANCE_TRADE_API_KEY`
    - `BINANCE_TRADE_API_SECRET` **or** `BINANCE_TRADE_PRIVATE_KEY_PATH`
 
+The VPS `BINANCE_TRADE_*` values today are the **assist futures** key and are composed into **jobs only**. Enabling live spot later needs a **separate spot** key wired explicitly into the **web** service. Do not point web at the assist futures key.
+
 ## 2. Audit on VPS
 
 ```bash

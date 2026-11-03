@@ -35,3 +35,19 @@ def test_jobs_receives_every_env_var_the_assist_reads() -> None:
     jobs = _service_env((ROOT / "docker-compose.yml").read_text(encoding="utf-8"), "jobs")
     missing = sorted(read - set(jobs))
     assert not missing, f"jobs service is missing {missing}"
+
+
+def test_assist_trade_key_env_is_jobs_only() -> None:
+    """Futures assist trade key must not be forwarded into the web container."""
+    trade_keys = (
+        "BINANCE_TRADE_API_KEY",
+        "BINANCE_TRADE_API_SECRET",
+        "BINANCE_TRADE_PRIVATE_KEY_PATH",
+        "BINANCE_TRADE_PRIVATE_KEY_PASSPHRASE",
+    )
+    text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    web = _service_env(text, "web")
+    jobs = _service_env(text, "jobs")
+    for key in trade_keys:
+        assert key in jobs, f"jobs service is missing {key}"
+        assert key not in web, f"web service must not receive {key}"
