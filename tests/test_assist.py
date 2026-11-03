@@ -2010,7 +2010,8 @@ def test_on_demand_shows_same_idea_with_sent_at(tmp_path: Path) -> None:
     print(text)
     assert "ADAUSDT" in text
     assert "SHORT" in text
-    assert "ส่งแล้วเมื่อ 20:59" in text
+    assert "ไอเดียที่ส่งล่าสุด (20:59)" in text
+    assert "ส่งแล้วเมื่อ" not in text
     assert "ราคาวิ่งไปแล้ว" not in text
     after = conn.execute("SELECT COUNT(*) FROM assist_signal").fetchone()[0]
     assert after == before
@@ -2094,6 +2095,34 @@ def test_capped_leverage_note_sits_before_stop_instruction() -> None:
     assert lines[-1].startswith("ตั้ง TP/SL ที่เดียว")
 
 
+def test_prior_idea_omits_missing_time_and_non_positive_stop() -> None:
+    from jarvise_assist.messages import format_prior_idea_line
+
+    missing = format_prior_idea_line(
+        label="ไอเดียที่ส่งล่าสุด",
+        entry=Decimal("0.0800"),
+        stop=Decimal("0"),
+        qty=Decimal("759"),
+        sent_at_ms=None,
+        with_time=True,
+    )
+    assert missing.startswith("ไอเดียที่ส่งล่าสุด:")
+    assert "(" not in missing
+    assert "stop" not in missing
+    assert "759" in missing
+    zero_time = format_prior_idea_line(
+        label="ไอเดียที่ส่งล่าสุด",
+        entry=Decimal("0.0800"),
+        stop=Decimal("0.07616"),
+        qty=Decimal("10"),
+        sent_at_ms=0,
+        with_time=True,
+    )
+    assert "07:00" not in zero_time
+    assert "(00:" not in zero_time
+    assert "stop 0.07616" in zero_time
+
+
 def test_on_demand_reason_lines_are_thai_for_size_and_mark_errors() -> None:
     text = render_empty_on_demand(
         [
@@ -2159,7 +2188,7 @@ def test_on_demand_requote_caps_qty_at_first_sent(tmp_path: Path) -> None:
         steps={"ADAUSDT": Decimal("1")},
     )
     text, _ = render_anything_now(conn, futures=fake, now_ms=now)
-    assert "ไอเดียแรก (20:59): เข้า" in text
+    assert "ไอเดียที่ส่งล่าสุด (20:59): เข้า" in text
     assert "stop 0.0835" in text
     assert f"· {first_qty:g}" in text or f"· {int(first_qty)}" in text
     assert "ส่งครั้งแรก:" not in text

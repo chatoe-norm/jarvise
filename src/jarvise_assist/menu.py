@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -15,6 +14,8 @@ from jarvise_assist.futures import (
     build_futures_client,
     find_protective_stop_info,
     find_take_profit_info,
+    protective_stop_coverage,
+    protective_stop_covered_qty,
     trigger_label,
 )
 from jarvise_assist.keyboard import (
@@ -53,7 +54,7 @@ from jarvise_notify.telegram import send_message
 
 SendFn = Callable[..., Any]
 
-BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+_NO_STOP_LINE = "⚠️ ยังไม่มี stop — ตั้ง Stop-Market (Reduce-Only, Mark) ทันที"
 RISK_MIN_PCT = 0.5
 RISK_MAX_PCT = 3.0
 RISK_CONFIRM_ABOVE = 2.0
@@ -176,6 +177,25 @@ def _signed_r_two(value: float) -> str:
     return f"{rounded:.2f}R"
 
 
+def _price_text(value: Decimal | float, tick: Decimal | None) -> str:
+    dec = value if isinstance(value, Decimal) else Decimal(str(value))
+    if tick is not None and tick > 0:
+        return _fmt_price_tick(dec, tick)
+    return fmt_price(dec)
+
+
+def _step_and_tick(client: Any, symbol: str) -> tuple[Decimal, Decimal | None]:
+    try:
+        filters = client.symbol_filters(symbol)
+    except Exception:  # noqa: BLE001
+        return Decimal("0"), None
+    return filters.step_size, filters.tick_size
+
+
+def _partial_stop_line(covered: Decimal, qty: Decimal) -> str:
+    return f"⚠️ stop ครอบแค่ {fmt_qty(covered)}/{fmt_qty(qty)}"
+
+
 def render_open_positions(
     conn: Any,
     *,
@@ -195,8 +215,27 @@ def render_open_positions(
     lines = ["📋 ไม้ที่ถืออยู่"]
     for pos in positions:
         sym = pos.symbol
+        step, tick = _step_and_tick(client, sym)
+        coverage = protective_stop_coverage(
+            orders,
+            symbol=sym,
+            position_side=pos.position_side,
+            trade_side=pos.side,
+            position_qty=pos.qty,
+            step_size=step,
+        )
+        covered = protective_stop_covered_qty(
+            orders,
+            symbol=sym,
+            position_side=pos.position_side,
+            trade_side=pos.side,
+        )
         if sym not in ASSIST_SYMBOLS:
             lines.append(f"{sym} · no data, no advice")
+            if coverage == "none":
+                lines.append(_NO_STOP_LINE)
+            elif coverage == "partial":
+                lines.append(_partial_stop_line(covered, pos.qty))
             continue
         watch = get_watch_position(conn, sym, pos.position_side)
         linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
@@ -225,51 +264,55 @@ def render_open_positions(
         entry = float(pos.entry_price)
         mark = float(pos.mark_price)
         qty = float(pos.qty)
-        tick: Decimal | None = None
-        try:
-            tick = client.symbol_filters(sym).tick_size
-        except Exception:  # noqa: BLE001
-            tick = None
-        if tick is not None and tick > 0:
-            mark_s = _fmt_price_tick(pos.mark_price, tick)
-            liq_s = (
-                _fmt_price_tick(pos.liquidation_price, tick)
-                if pos.liquidation_price is not None and pos.liquidation_price > 0
-                else None
-            )
-        else:
-            mark_s = fmt_price(pos.mark_price)
-            liq_s = (
-                fmt_price(pos.liquidation_price)
-                if pos.liquidation_price is not None and pos.liquidation_price > 0
-                else None
-            )
+        mark_s = _price_text(pos.mark_price, tick)
+        liq_s = (
+            _price_text(pos.liquidation_price, tick)
+            if pos.liquidation_price is not None and pos.liquidation_price > 0
+            else None
+        )
         lines.append(f"{sym} {side_l}")
-        lines.append(f"qty {fmt_qty(pos.qty)} · เข้า {fmt_price(pos.entry_price)} · mark {mark_s}")
+        lines.append(f"qty {fmt_qty(pos.qty)} · เข้า {_price_text(pos.entry_price, tick)} · mark {mark_s}")
         if pos.side == "long":
             unreal_usdt = (mark - entry) * qty
         else:
             unreal_usdt = (entry - mark) * qty
-        risk = abs(entry - suggested) if suggested is not None else 0.0
+        r_note = ""
+        if suggested is not None:
+            risk = abs(entry - suggested)
+        elif stop_info is not None:
+            placed = float(stop_info.price)
+            loss_side = (pos.side == "long" and placed < entry) or (pos.side == "short" and placed > entry)
+            if loss_side:
+                risk = abs(entry - placed)
+                r_note = " (จาก stop จริง)"
+            else:
+                risk = 0.0
+        else:
+            risk = 0.0
         if risk > 0:
             if pos.side == "long":
                 r_mult = (mark - entry) / risk
             else:
                 r_mult = (entry - mark) / risk
-            r_s = _signed_r_one(r_mult)
+            r_s = _signed_r_one(r_mult) + r_note
         else:
             r_s = "R unknown"
         lines.append(f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s}")
 
-        if stop_info is None:
-            lines.append("ยังไม่มี stop")
+        if coverage == "none":
+            lines.append(_NO_STOP_LINE)
+        elif stop_info is None:
+            lines.append("stop แบบ trailing")
+            if coverage == "partial":
+                lines.append(_partial_stop_line(covered, pos.qty))
         else:
             prot = float(stop_info.price)
             stop_trig = trigger_label(stop_info.working_type)
+            stop_px = _price_text(stop_info.price, tick)
             if stop_trig is not None:
-                lines.append(f"stop ที่ตั้งไว้ {fmt_price(stop_info.price)} · trigger {stop_trig}")
+                lines.append(f"stop ที่ตั้งไว้ {stop_px} · trigger {stop_trig}")
             else:
-                lines.append(f"stop ที่ตั้งไว้ {fmt_price(stop_info.price)}")
+                lines.append(f"stop ที่ตั้งไว้ {stop_px}")
             if pos.side == "long":
                 lock_usdt = (prot - entry) * qty
             else:
@@ -280,15 +323,15 @@ def render_open_positions(
             else:
                 lock_r_s = "R unknown"
             lines.append(f"ถ้าโดน stop: ล็อก ≈ {lock_r_s} ({_signed_usdt(lock_usdt)} USDT)")
+            if coverage == "partial":
+                lines.append(_partial_stop_line(covered, pos.qty))
 
-        if suggested is None:
-            lines.append("stop แนะนำไม่มี")
-        else:
-            lines.append(f"stop แนะนำ {suggested:g} ({src})")
+        if suggested is not None:
+            lines.append(f"stop แนะนำ {_price_text(suggested, tick)} ({src})")
 
         if tp_info is not None:
             tp_trig = trigger_label(tp_info.working_type) or "?"
-            lines.append(f"TP {fmt_price(tp_info.price)} · trigger {tp_trig}")
+            lines.append(f"TP {_price_text(tp_info.price, tick)} · trigger {tp_trig}")
             if (
                 stop_info is not None
                 and stop_info.working_type is not None
@@ -312,28 +355,19 @@ def _reason_line(symbol: str, reason: str) -> str:
     return f"{symbol} {label}"
 
 
-def _format_sent_at_line(seen: dict[str, Any]) -> str:
-    raw = seen.get("sent_at_ms")
-    if raw is None:
-        raw = seen.get("created_at_ms")
-    when_ms = int(raw or 0)
-    when = datetime.fromtimestamp(when_ms / 1000.0, tz=BANGKOK)
-    return f"ส่งแล้วเมื่อ {when.strftime('%H:%M')}"
-
-
 def _format_first_send_line(seen: dict[str, Any], *, tick_size: Decimal | None = None) -> str:
     entry = Decimal(str(seen.get("entry") or "0"))
     stop = Decimal(str(seen.get("stop") or "0"))
     qty = Decimal(str(seen.get("qty") or "0"))
     raw = seen.get("sent_at_ms")
-    if raw is None:
+    if not raw:
         raw = seen.get("created_at_ms")
     return format_prior_idea_line(
-        label="ไอเดียแรก",
+        label="ไอเดียที่ส่งล่าสุด",
         entry=entry,
         stop=stop,
         qty=qty,
-        sent_at_ms=int(raw or 0),
+        sent_at_ms=int(raw) if raw else None,
         tick_size=tick_size,
         with_time=True,
     )
@@ -371,7 +405,7 @@ def _render_on_demand_idea(
             tick_size=tick_size,
             account_config=account_config,
         )
-        return f"{body}\n{_format_sent_at_line(seen)}\n{_format_first_send_line(seen, tick_size=tick_size)}"
+        return f"{body}\n{_format_first_send_line(seen, tick_size=tick_size)}"
     return format_signal_message(
         sized,
         expires_at_ms=expires_at_ms,

@@ -39,7 +39,6 @@ from jarvise_assist.sizing import (
     chase_exceeded,
     passes_signal_floor,
     round_level_to_tick,
-    round_to_tick,
     size_signal,
 )
 from jarvise_assist.store import (
@@ -62,6 +61,7 @@ from jarvise_exchange.binance_spot import (
     sign_payload,
 )
 from jarvise_ingest.db import load_latest_analysis
+from jarvise_ingest.http import ProviderError
 from jarvise_risk.caps import kill_switch_state
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,8 @@ MSG_CANCELLED = "ยกเลิกแล้ว"
 MSG_STOP_CLOSED = "วาง stop ไม่ได้ — ปิดไม้แล้วเพื่อความปลอดภัย"
 MSG_TP_KEEP = "เข้าแล้วและมี stop — วาง TP ไม่ได้ ตั้งเองได้"
 MSG_HANDLER_ERROR = "ทำคำสั่งไม่สำเร็จ — ลองใหม่หรือปิดเอง"
+MSG_BINANCE_RETRY = "อ่าน Binance ไม่ได้ — ลองใหม่อีกครั้ง"
+MSG_BINANCE_NOT_SENT = "อ่าน Binance ไม่ได้ — ยังไม่ได้ส่งคำสั่ง กดเหรียญใหม่เพื่อดู preview ใหม่"
 
 _TRADE_AUTH_REASON_TH: dict[str, str] = {
     "no_key": MSG_NO_TRADE_KEY,
@@ -1036,25 +1038,29 @@ def create_entry_preview(
             "text": trade_auth_reason_th(auth_reason),
         }
     try:
-        client.assert_trade_key_safe()
-        client.assert_account_modes()
-    except TradeClientError as exc:
-        msg = str(exc) if str(exc) in {MSG_ONE_WAY, MSG_MULTI_ASSETS} else MSG_KEY_REFUSED
-        return {"ok": False, "reason": "key_refused", "text": msg}
-    read_mark = None
-    if assist_execute_mode() == "testnet" and read_futures is not None:
         try:
-            read_mark = read_futures.mark_price(symbol)
-        except Exception:  # noqa: BLE001
-            read_mark = None
-    sized, reason = size_for_execution(
-        conn,
-        trade=client,
-        symbol=symbol,
-        side=side,
-        now_ms_value=ts,
-        read_mark=read_mark,
-    )
+            client.assert_trade_key_safe()
+            client.assert_account_modes()
+        except TradeClientError as exc:
+            msg = str(exc) if str(exc) in {MSG_ONE_WAY, MSG_MULTI_ASSETS} else MSG_KEY_REFUSED
+            return {"ok": False, "reason": "key_refused", "text": msg}
+        read_mark = None
+        if assist_execute_mode() == "testnet" and read_futures is not None:
+            try:
+                read_mark = read_futures.mark_price(symbol)
+            except Exception:  # noqa: BLE001
+                read_mark = None
+        sized, reason = size_for_execution(
+            conn,
+            trade=client,
+            symbol=symbol,
+            side=side,
+            now_ms_value=ts,
+            read_mark=read_mark,
+        )
+    except (httpx.HTTPError, ProviderError) as exc:
+        logger.warning("entry preview network error %s", type(exc).__name__)
+        return {"ok": False, "reason": "binance_unreachable", "text": MSG_BINANCE_RETRY}
     if sized is None:
         return {"ok": False, "reason": reason or "flat", "text": _reason_th(reason or "flat")}
     expires = ts + PREVIEW_TTL_MS
@@ -1190,8 +1196,8 @@ def run_entry_sequence(
     target = Decimal(str(preview["target"]))
     leverage = int(preview["leverage"])
     filters = trade.symbol_filters(symbol)
-    stop = round_to_tick(stop, filters.tick_size)
-    target = round_to_tick(target, filters.tick_size)
+    stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
+    target = round_level_to_tick(target, filters.tick_size, side=side, kind="target")
     open_side = _opening_side(side)
     close_side = _closing_side(side)
 
@@ -1284,6 +1290,7 @@ def run_entry_sequence(
 
     stop_ok = False
     stop_err: str | None = None
+    stop_exc: BaseException | None = None
     for attempt in range(2):
         scid = client_order_id(intent_id, f"sl{attempt}")
         try:
@@ -1312,6 +1319,7 @@ def run_entry_sequence(
             stop_ok = True
             break
         except Exception as exc:  # noqa: BLE001
+            stop_exc = exc
             stop_err = str(exc)
             code = exc.binance_code if isinstance(exc, TradeClientError) else None
             _log_write(
@@ -1333,6 +1341,11 @@ def run_entry_sequence(
                 break
 
     if not stop_ok:
+        # Both stop attempts failed on the network. The entry may be open and the
+        # stop may already exist. Do not emergency-close; the confirm handler
+        # tells the owner to check Binance.
+        if isinstance(stop_exc, (httpx.HTTPError, ProviderError)):
+            raise stop_exc
         closed = _emergency_close_verified(
             trade,
             conn=conn,
@@ -1880,6 +1893,12 @@ def handle_exec_callback(
             finish_exec_intent(conn, intent_id, status="failed", result_text=text)
             send(text)
             return {"ok": False, "reason": "key"}
+        except (httpx.HTTPError, ProviderError) as exc:
+            logger.warning("exec pre-order network error %s", type(exc).__name__)
+            text = MSG_BINANCE_NOT_SENT
+            finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+            send(text)
+            return {"ok": False, "reason": "binance_unreachable"}
 
         def _finish_send(result: str, *, markup: dict[str, Any] | None = None) -> dict[str, Any]:
             status = "done" if result.startswith("✅") else "failed"

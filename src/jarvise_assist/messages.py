@@ -59,11 +59,14 @@ def format_prior_idea_line(
         entry_s = fmt_price(entry)
         stop_s = fmt_price(stop)
     qty_s = fmt_qty(qty)
-    if with_time:
-        when_ms = int(sent_at_ms or 0)
-        hhmm = datetime.fromtimestamp(when_ms / 1000.0, tz=BANGKOK).strftime("%H:%M")
-        return f"{label} ({hhmm}): เข้า {entry_s} · stop {stop_s} · {qty_s}"
-    return f"{label}: เข้า {entry_s} · stop {stop_s} · {qty_s}"
+    head = label
+    if with_time and sent_at_ms:
+        hhmm = datetime.fromtimestamp(int(sent_at_ms) / 1000.0, tz=BANGKOK).strftime("%H:%M")
+        head = f"{label} ({hhmm})"
+    body = f"เข้า {entry_s}"
+    if stop > 0:
+        body = f"{body} · stop {stop_s}"
+    return f"{head}: {body} · {qty_s}"
 
 
 def fmt_qty(value: Decimal) -> str:
