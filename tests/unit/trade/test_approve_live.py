@@ -91,7 +91,7 @@ def test_approve_live_missing_keys_fails_closed(tmp_path: Path, monkeypatch: pyt
     result = approve_approval(conn, row["id"], kill_switch=False, now_ms=2_000)
     assert result["ok"] is False
     assert result["paper_only"] is False
-    assert "missing" in (result["error"] or "").lower()
+    assert result["error"] == "missing BINANCE_TRADE_API_KEY credentials"
     assert get_approval(conn, row["id"])["status"] == "failed"
     assert list_paper_orders(conn) == []
 
