@@ -1826,3 +1826,33 @@ def test_size_for_execution_split_reasons(tmp_path: Path, monkeypatch: pytest.Mo
     assert sized3 is None and reason3 == "size_failed"
     conn.close()
     bad_stop_conn.close()
+
+
+def test_trade_client_ed25519_signature_encoded_once() -> None:
+    """Regression: sapi returned -1022 because the Ed25519 signature was percent-encoded twice."""
+    import base64
+    from urllib.parse import parse_qsl
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    key = Ed25519PrivateKey.generate()
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(
+            200, json={"enableFutures": True, "enableWithdrawals": False, "ipRestrict": True}
+        )
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    trade = BinanceTradeClient(BinanceAuth(api_key="TRADE_KEY_TEST", private_key=key), client=http)
+    reset_trade_key_cache()
+    assert trade.assert_trade_key_safe(mode="live") == {"ok": True}
+    reset_trade_key_cache()
+
+    raw_query = seen[0].query.decode()
+    assert "%25" not in raw_query  # no double encoding
+    pairs = parse_qsl(raw_query, keep_blank_values=True)  # one decode, as the server does
+    signature = dict(pairs)["signature"]
+    payload = "&".join(f"{k}={v}" for k, v in pairs if k != "signature")
+    key.public_key().verify(base64.b64decode(signature), payload.encode())
