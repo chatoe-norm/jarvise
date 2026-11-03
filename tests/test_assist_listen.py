@@ -616,6 +616,8 @@ def test_open_positions_menu_sample(tmp_path: Path) -> None:
     )
     fake = FakeFutures(
         positions=[pos, other],
+        ticks={"BTCUSDT": Decimal("1"), "PEPEUSDT": Decimal("0.00000001")},
+        steps={"BTCUSDT": Decimal("0.001"), "PEPEUSDT": Decimal("1")},
         orders=[
             {
                 "symbol": "BTCUSDT",
@@ -703,6 +705,220 @@ def test_open_positions_mark_falls_back_when_filters_fail(tmp_path: Path) -> Non
     conn.close()
 
 
+def test_open_positions_stop_coverage_samples(tmp_path: Path) -> None:
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / "cov.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    tick = {"DOGEUSDT": Decimal("0.00001"), "BTCUSDT": Decimal("0.1"), "PEPEUSDT": Decimal("0.00000001")}
+
+    def render(pos: FuturesPosition, orders: list[dict[str, Any]]) -> str:
+        fake = FakeFutures(positions=[pos], orders=orders, ticks=tick, steps={"DOGEUSDT": Decimal("1")})
+        return render_open_positions(conn, futures=fake, now_ms=day)
+
+    full = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("259"),
+        entry_price=Decimal("0.07527"),
+        mark_price=Decimal("0.07543"),
+        update_time_ms=day,
+        liquidation_price=Decimal("0.06000"),
+    )
+    full_text = render(
+        full,
+        [
+            {
+                "symbol": "DOGEUSDT",
+                "type": "STOP_MARKET",
+                "side": "SELL",
+                "triggerPrice": "0.07400",
+                "origQty": "259",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+                "workingType": "MARK_PRICE",
+            }
+        ],
+    )
+    assert "stop ที่ตั้งไว้ 0.07400 · trigger Mark" in full_text
+    assert "⚠️ ยังไม่มี stop" not in full_text
+
+    trail = render(
+        full,
+        [
+            {
+                "symbol": "DOGEUSDT",
+                "type": "TRAILING_STOP_MARKET",
+                "side": "SELL",
+                "origQty": "259",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+            }
+        ],
+    )
+    assert "stop แบบ trailing" in trail
+    assert "ถ้าโดน stop" not in trail
+
+    partial = render(
+        full,
+        [
+            {
+                "symbol": "DOGEUSDT",
+                "type": "STOP_MARKET",
+                "side": "SELL",
+                "triggerPrice": "0.19710",
+                "origQty": "100",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+                "workingType": "MARK_PRICE",
+            }
+        ],
+    )
+    assert "stop ที่ตั้งไว้ 0.19710" in partial
+    assert "⚠️ stop ครอบแค่ 100/259" in partial
+
+    none = render(full, [])
+    assert "⚠️ ยังไม่มี stop — ตั้ง Stop-Market (Reduce-Only, Mark) ทันที" in none
+    assert "stop แนะนำไม่มี" not in none
+
+    outsider = FuturesPosition(
+        symbol="PEPEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1000"),
+        entry_price=Decimal("0.00001"),
+        mark_price=Decimal("0.00001"),
+        update_time_ms=day,
+    )
+    bare = render(outsider, [])
+    assert "PEPEUSDT · no data, no advice" in bare
+    assert "⚠️ ยังไม่มี stop — ตั้ง Stop-Market (Reduce-Only, Mark) ทันที" in bare
+    assert "mark " not in bare
+
+    covered_out = render(
+        outsider,
+        [
+            {
+                "symbol": "PEPEUSDT",
+                "type": "STOP_MARKET",
+                "side": "SELL",
+                "stopPrice": "0.000009",
+                "origQty": "1000",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+            }
+        ],
+    )
+    assert "PEPEUSDT · no data, no advice" in covered_out
+    assert "⚠️" not in covered_out
+    conn.close()
+
+
+def test_suggested_stop_uses_tick_not_sig_digits(tmp_path: Path) -> None:
+    from jarvise_assist.futures import FuturesPosition
+    from jarvise_assist.store import upsert_watch_position
+
+    conn = open_db(tmp_path / "sug.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+
+    def one(symbol: str, entry: str, stop: str, tick: str) -> str:
+        upsert_watch_position(
+            conn,
+            {
+                "symbol": symbol,
+                "position_side": "BOTH",
+                "side": "long",
+                "entry": float(entry),
+                "qty": 1.0,
+                "in_universe": 1,
+                "signal_id": None,
+                "initial_stop": float(stop),
+                "initial_stop_source": "freeze",
+                "entry_time_ms": day,
+                "no_stop_latched": 0,
+                "last_seen_ms": day,
+                "closed_at_ms": None,
+            },
+        )
+        pos = FuturesPosition(
+            symbol=symbol,
+            position_side="BOTH",
+            position_amt=Decimal("1"),
+            entry_price=Decimal(entry),
+            mark_price=Decimal(entry),
+            update_time_ms=day,
+        )
+        fake = FakeFutures(
+            positions=[pos],
+            orders=[
+                {
+                    "symbol": symbol,
+                    "type": "STOP_MARKET",
+                    "side": "SELL",
+                    "stopPrice": stop,
+                    "origQty": "1",
+                    "reduceOnly": True,
+                    "positionSide": "BOTH",
+                    "workingType": "MARK_PRICE",
+                }
+            ],
+            ticks={symbol: Decimal(tick)},
+            steps={symbol: Decimal("0.001")},
+        )
+        return render_open_positions(conn, futures=fake, now_ms=day)
+
+    btc = one("BTCUSDT", "105000", "104523.4", "0.1")
+    assert "stop แนะนำ 104523.4 (freeze)" in btc
+    assert "104523 " not in btc
+    assert "e-05" not in btc
+    tiny = one("DOGEUSDT", "0.00002000", "0.00001234", "0.00000001")
+    assert "stop แนะนำ 0.00001234 (freeze)" in tiny
+    assert "e-05" not in tiny
+    conn.close()
+
+
+def test_r_falls_back_to_loss_side_placed_stop(tmp_path: Path) -> None:
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / "rbase.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+
+    def render(stop: str) -> str:
+        pos = FuturesPosition(
+            symbol="BTCUSDT",
+            position_side="BOTH",
+            position_amt=Decimal("1"),
+            entry_price=Decimal("100"),
+            mark_price=Decimal("105"),
+            update_time_ms=day,
+        )
+        fake = FakeFutures(
+            positions=[pos],
+            orders=[
+                {
+                    "symbol": "BTCUSDT",
+                    "type": "STOP_MARKET",
+                    "side": "SELL",
+                    "stopPrice": stop,
+                    "origQty": "1",
+                    "reduceOnly": True,
+                    "positionSide": "BOTH",
+                    "workingType": "MARK_PRICE",
+                }
+            ],
+            ticks={"BTCUSDT": Decimal("0.1")},
+            steps={"BTCUSDT": Decimal("0.001")},
+        )
+        return render_open_positions(conn, futures=fake, now_ms=day)
+
+    loss = render("90")
+    assert "(จาก stop จริง)" in loss
+    assert "R unknown" not in loss
+    profit = render("110")
+    assert "R unknown" in profit
+    assert "จาก stop จริง" not in profit
+    conn.close()
+
+
 def test_signed_usdt_and_r_drop_minus_on_rounded_zero() -> None:
     assert _signed_usdt(-0.0026) == "0.00"
     assert _signed_usdt(0.004) == "0.00"
@@ -712,6 +928,11 @@ def test_signed_usdt_and_r_drop_minus_on_rounded_zero() -> None:
     assert _signed_r_one(0.04) == "0.0R"
     assert _signed_r_one(-1.2) == "-1.2R"
     assert _signed_r_one(1.2) == "+1.2R"
+    from jarvise_assist.menu import _signed_r_two
+
+    assert _signed_r_two(-0.004) == "0.00R"
+    assert _signed_r_two(0.004) == "0.00R"
+    assert _signed_r_two(-1.2) == "-1.20R"
 
 
 def test_open_positions_lock_r_vs_unrealized_and_trigger_mismatch(tmp_path: Path) -> None:
@@ -750,6 +971,8 @@ def test_open_positions_lock_r_vs_unrealized_and_trigger_mismatch(tmp_path: Path
     )
     fake = FakeFutures(
         positions=[pos],
+        ticks={"ADAUSDT": Decimal("0.0001")},
+        steps={"ADAUSDT": Decimal("1")},
         orders=[
             {
                 "symbol": "ADAUSDT",

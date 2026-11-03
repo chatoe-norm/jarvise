@@ -14,6 +14,8 @@ from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist.execute import (
     MSG_ALREADY_CLOSED,
+    MSG_BINANCE_NOT_SENT,
+    MSG_BINANCE_RETRY,
     MSG_EXPIRED,
     MSG_KILL,
     MSG_MARK_PASSED,
@@ -21,6 +23,7 @@ from jarvise_assist.execute import (
     MSG_STOP_CLOSED,
     BinanceTradeClient,
     TradeClientError,
+    _msg_check_now,
     assist_execute_mode,
     build_trade_client,
     cancel_jv_orders_for_symbol,
@@ -35,6 +38,7 @@ from jarvise_assist.execute import (
 )
 from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.listen import process_update
+from jarvise_assist.sizing import round_level_to_tick
 from jarvise_assist.store import (
     claim_exec_intent,
     finish_exec_intent,
@@ -1856,3 +1860,185 @@ def test_trade_client_ed25519_signature_encoded_once() -> None:
     signature = dict(pairs)["signature"]
     payload = "&".join(f"{k}={v}" for k, v in pairs if k != "signature")
     key.public_key().verify(base64.b64decode(signature), payload.encode())
+
+
+def test_on_tick_stop_and_target_unchanged_for_long_and_short() -> None:
+    tick = Decimal("0.00001")
+    cases = (
+        ("long", Decimal("0.07600"), Decimal("0.08400")),
+        ("short", Decimal("0.08400"), Decimal("0.07600")),
+    )
+    for side, stop, target in cases:
+        assert round_level_to_tick(stop, tick, side=side, kind="stop") == stop
+        assert round_level_to_tick(target, tick, side=side, kind="target") == target
+
+
+def _send_box() -> tuple[list[str], Any]:
+    sent: list[str] = []
+
+    def send(text: str, **_kwargs: Any) -> bool:
+        sent.append(text)
+        return True
+
+    return sent, send
+
+
+def test_ec_preview_connect_error_replies_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "ec-net.db")
+    transport = RecordingTransport({})
+    trade = _client(transport)
+
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise httpx.ConnectError("down")
+
+    trade.assert_trade_key_safe = boom  # type: ignore[method-assign]
+    sent, send = _send_box()
+    out = handle_exec_callback(
+        conn,
+        "ec:DOGEUSDT:s",
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=_ms_bangkok(2026, 11, 2, 8, 20),
+    )
+    assert out["ok"] is False
+    assert sent == [MSG_BINANCE_RETRY]
+    assert "ลองใหม่" in MSG_BINANCE_RETRY
+    claimed = conn.execute("SELECT status FROM assist_exec_intent WHERE status='confirmed'").fetchall()
+    assert claimed == []
+    assert [m for m, _p, _q in transport.calls if m == "POST"] == []
+    conn.close()
+
+
+def test_ey_stop_connect_error_after_fill_says_check_not_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    reset_trade_key_cache()
+    conn = open_db(tmp_path / "ey-stop.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    _seed_doge_short(conn, ts=bar)
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+
+    def stop_boom(_clean: dict[str, Any]) -> None:
+        raise httpx.ConnectError("stop down")
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("POST", "/fapi/v1/marginType"): (200, {"code": 200, "msg": "success"}),
+        ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
+        ("POST", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("POST", "/fapi/v1/algoOrder"): stop_boom,
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
+    assert preview["ok"] is True
+    intent_id = str(preview["intent_id"])
+    sent, send = _send_box()
+    out = handle_exec_callback(
+        conn,
+        f"ey:{intent_id}",
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now,
+    )
+    expect = _msg_check_now("DOGEUSDT")
+    assert out["ok"] is False
+    assert sent[-1] == expect
+    assert "เช็ค" in sent[-1]
+    assert "ลองใหม่" not in sent[-1]
+    assert get_exec_intent(conn, intent_id)["status"] == "failed"
+    markets = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
+    assert len(markets) == 1
+    again = handle_exec_callback(
+        conn,
+        f"ey:{intent_id}",
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now,
+    )
+    assert again.get("replay") is True
+    assert sent[-1] == expect
+    markets = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
+    assert len(markets) == 1
+    conn.close()
+
+
+def test_ey_preorder_connect_error_fails_without_orders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "ey-pre.db")
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "1", "stop": "0.07", "target": "0.09", "entry": "0.08", "leverage": 1},
+        created_at_ms=now,
+        expires_at_ms=now + 120_000,
+    )
+    transport = RecordingTransport({})
+    trade = _client(transport, base="https://fapi.binance.com")
+
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise httpx.ConnectError("down")
+
+    trade.assert_trade_key_safe = boom  # type: ignore[method-assign]
+    sent, send = _send_box()
+    out = handle_exec_callback(
+        conn,
+        f"ey:{intent_id}",
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now,
+    )
+    assert out["ok"] is False
+    assert sent == [MSG_BINANCE_NOT_SENT]
+    assert "ลองใหม่" not in MSG_BINANCE_NOT_SENT
+    assert get_exec_intent(conn, intent_id)["status"] == "failed"
+    assert [c for c in transport.calls if c[0] == "POST"] == []
+    again = handle_exec_callback(
+        conn,
+        f"ey:{intent_id}",
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now,
+    )
+    assert again.get("replay") is True
+    assert sent[-1] == MSG_BINANCE_NOT_SENT
+    assert [c for c in transport.calls if c[0] == "POST"] == []
+    conn.close()
