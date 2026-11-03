@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -13,7 +14,7 @@ import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 from urllib.parse import parse_qs
 
 from jarvise.charts import export_candle_graphs
@@ -1090,7 +1091,20 @@ def serve(host: str = "0.0.0.0", port: int = 8090) -> None:
     ThreadingHTTPServer((host, port), JobHandler).serve_forever()
 
 
+def configure_process_logging(*, stream: TextIO | None = None) -> None:
+    """Send jarvise_assist INFO+ to stdout so docker compose logs jobs shows execute/listener."""
+    log = logging.getLogger("jarvise_assist")
+    if any(isinstance(h, logging.StreamHandler) for h in log.handlers):
+        return
+    handler = logging.StreamHandler(stream if stream is not None else sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+
+
 def main() -> None:
+    configure_process_logging()
     # Daemon thread: long-poll Telegram inside jobs (single SQLite writer process).
     start_listener_thread()
     port = int(os.environ.get("JOBS_PORT", "8090"))

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
-from io import BytesIO
+from io import BytesIO, StringIO
 
 from jarvise.jobs import (
     HTF_BACKFILL_SINCE,
     JobHandler,
+    configure_process_logging,
     ema200_warmup_bars,
     htf_needs_history_backfill,
     ingest_timeframe_args,
@@ -20,6 +22,25 @@ from jarvise.jobs import (
     run_weekly_report,
 )
 from jarvise_ingest.db import open_db
+
+
+def test_configure_process_logging_emits_assist_info_to_stream() -> None:
+    stream = StringIO()
+    log = logging.getLogger("jarvise_assist")
+    prior_handlers = list(log.handlers)
+    prior_level = log.level
+    prior_propagate = log.propagate
+    try:
+        log.handlers.clear()
+        configure_process_logging(stream=stream)
+        logging.getLogger("jarvise_assist.execute").info("entry fill price source=test")
+        assert "entry fill price source=test" in stream.getvalue()
+        assert "jarvise_assist.execute" in stream.getvalue()
+    finally:
+        log.handlers.clear()
+        log.handlers.extend(prior_handlers)
+        log.setLevel(prior_level)
+        log.propagate = prior_propagate
 
 
 def test_jobs_import_without_fastapi() -> None:

@@ -41,6 +41,31 @@ def _fmt_price_tick(value: Decimal, tick: Decimal) -> str:
     return format(shown, f".{decimals}f")
 
 
+def format_prior_idea_line(
+    *,
+    label: str,
+    entry: Decimal,
+    stop: Decimal,
+    qty: Decimal,
+    sent_at_ms: int | None = None,
+    tick_size: Decimal | None = None,
+    with_time: bool = False,
+) -> str:
+    """Owner line citing a prior idea (on-demand re-quote or morning hold)."""
+    if tick_size is not None and tick_size > 0:
+        entry_s = _fmt_price_tick(entry, tick_size)
+        stop_s = _fmt_price_tick(stop, tick_size)
+    else:
+        entry_s = fmt_price(entry)
+        stop_s = fmt_price(stop)
+    qty_s = fmt_qty(qty)
+    if with_time:
+        when_ms = int(sent_at_ms or 0)
+        hhmm = datetime.fromtimestamp(when_ms / 1000.0, tz=BANGKOK).strftime("%H:%M")
+        return f"{label} ({hhmm}): เข้า {entry_s} · stop {stop_s} · {qty_s}"
+    return f"{label}: เข้า {entry_s} · stop {stop_s} · {qty_s}"
+
+
 def fmt_qty(value: Decimal) -> str:
     text = format(value.normalize(), "f")
     if "." in text:

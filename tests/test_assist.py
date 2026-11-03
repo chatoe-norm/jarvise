@@ -434,8 +434,10 @@ def test_night_hold_then_morning_send(tmp_path: Path) -> None:
     assert len(sent) == 1
     assert "DOGEUSDT" in sent[0]
     assert "0.083" in sent[0]  # newest invalidation in message
-    assert "ไอเดียเดิม (พักไว้ช่วงกลางคืน):" in sent[0]
+    assert "ไอเดียเดิม (พักไว้ช่วงกลางคืน): เข้า" in sent[0]
+    assert "stop 0.0835" in sent[0]  # first held idea stop
     assert "ส่งครั้งแรก:" not in sent[0]
+    assert "ไอเดียแรก" not in sent[0]
     assert list_held_signals(conn) == []
     conn.close()
 
@@ -2157,8 +2159,10 @@ def test_on_demand_requote_caps_qty_at_first_sent(tmp_path: Path) -> None:
         steps={"ADAUSDT": Decimal("1")},
     )
     text, _ = render_anything_now(conn, futures=fake, now_ms=now)
-    assert "ส่งครั้งแรก:" in text
+    assert "ไอเดียแรก (20:59): เข้า" in text
+    assert "stop 0.0835" in text
     assert f"· {first_qty:g}" in text or f"· {int(first_qty)}" in text
+    assert "ส่งครั้งแรก:" not in text
     # Sized line uses capped qty.
     assert f"ขนาด: {fmt_qty_local(first_qty)}" in text or f"ขนาด: {first_qty:g}" in text
     conn.close()

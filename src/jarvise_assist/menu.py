@@ -30,8 +30,10 @@ from jarvise_assist.keyboard import (
     risk_confirm_keyboard,
 )
 from jarvise_assist.messages import (
+    _fmt_price_tick,
     fmt_price,
     fmt_qty,
+    format_prior_idea_line,
     format_signal_message,
     safe_symbol_configs,
 )
@@ -148,21 +150,30 @@ def toggle_enabled(conn: Any) -> str:
 
 
 def _signed_usdt(value: float) -> str:
-    if value > 0:
-        return f"+{value:.2f}"
-    return f"{value:.2f}"
+    rounded = round(value, 2)
+    if rounded == 0:
+        return "0.00"
+    if rounded > 0:
+        return f"+{rounded:.2f}"
+    return f"{rounded:.2f}"
 
 
 def _signed_r_one(value: float) -> str:
-    if value > 0:
-        return f"+{value:.1f}R"
-    return f"{value:.1f}R"
+    rounded = round(value, 1)
+    if rounded == 0:
+        return "0.0R"
+    if rounded > 0:
+        return f"+{rounded:.1f}R"
+    return f"{rounded:.1f}R"
 
 
 def _signed_r_two(value: float) -> str:
-    if value > 0:
-        return f"+{value:.2f}R"
-    return f"{value:.2f}R"
+    rounded = round(value, 2)
+    if rounded == 0:
+        return "0.00R"
+    if rounded > 0:
+        return f"+{rounded:.2f}R"
+    return f"{rounded:.2f}R"
 
 
 def render_open_positions(
@@ -214,10 +225,27 @@ def render_open_positions(
         entry = float(pos.entry_price)
         mark = float(pos.mark_price)
         qty = float(pos.qty)
+        tick: Decimal | None = None
+        try:
+            tick = client.symbol_filters(sym).tick_size
+        except Exception:  # noqa: BLE001
+            tick = None
+        if tick is not None and tick > 0:
+            mark_s = _fmt_price_tick(pos.mark_price, tick)
+            liq_s = (
+                _fmt_price_tick(pos.liquidation_price, tick)
+                if pos.liquidation_price is not None and pos.liquidation_price > 0
+                else None
+            )
+        else:
+            mark_s = fmt_price(pos.mark_price)
+            liq_s = (
+                fmt_price(pos.liquidation_price)
+                if pos.liquidation_price is not None and pos.liquidation_price > 0
+                else None
+            )
         lines.append(f"{sym} {side_l}")
-        lines.append(
-            f"qty {fmt_qty(pos.qty)} · เข้า {fmt_price(pos.entry_price)} · mark {fmt_price(pos.mark_price)}"
-        )
+        lines.append(f"qty {fmt_qty(pos.qty)} · เข้า {fmt_price(pos.entry_price)} · mark {mark_s}")
         if pos.side == "long":
             unreal_usdt = (mark - entry) * qty
         else:
@@ -270,8 +298,8 @@ def render_open_positions(
                 stop_trig = trigger_label(stop_info.working_type) or stop_info.working_type
                 lines.append(f"⚠️ stop กับ TP คนละ trigger ({stop_trig} / {tp_trig})")
 
-        if pos.liquidation_price is not None and pos.liquidation_price > 0:
-            lines.append(f"liquidation {fmt_price(pos.liquidation_price)}")
+        if liq_s is not None:
+            lines.append(f"liquidation {liq_s}")
     return "\n".join(lines)
 
 
@@ -293,10 +321,22 @@ def _format_sent_at_line(seen: dict[str, Any]) -> str:
     return f"ส่งแล้วเมื่อ {when.strftime('%H:%M')}"
 
 
-def _format_first_send_line(seen: dict[str, Any]) -> str:
+def _format_first_send_line(seen: dict[str, Any], *, tick_size: Decimal | None = None) -> str:
     entry = Decimal(str(seen.get("entry") or "0"))
+    stop = Decimal(str(seen.get("stop") or "0"))
     qty = Decimal(str(seen.get("qty") or "0"))
-    return f"ส่งครั้งแรก: เข้า {fmt_price(entry)} · {fmt_qty(qty)}"
+    raw = seen.get("sent_at_ms")
+    if raw is None:
+        raw = seen.get("created_at_ms")
+    return format_prior_idea_line(
+        label="ไอเดียแรก",
+        entry=entry,
+        stop=stop,
+        qty=qty,
+        sent_at_ms=int(raw or 0),
+        tick_size=tick_size,
+        with_time=True,
+    )
 
 
 def _render_on_demand_idea(
@@ -331,7 +371,7 @@ def _render_on_demand_idea(
             tick_size=tick_size,
             account_config=account_config,
         )
-        return f"{body}\n{_format_sent_at_line(seen)}\n{_format_first_send_line(seen)}"
+        return f"{body}\n{_format_sent_at_line(seen)}\n{_format_first_send_line(seen, tick_size=tick_size)}"
     return format_signal_message(
         sized,
         expires_at_ms=expires_at_ms,
