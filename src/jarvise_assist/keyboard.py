@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 BTN_POSITIONS = "📋 ไม้ที่ถืออยู่"
@@ -11,6 +12,8 @@ BTN_RISK_PREFIX = "⚙️ ตั้งความเสี่ยงต่อไ
 BTN_TOGGLE = "⏸ หยุด / ▶️ เปิด ผู้ช่วย"
 BTN_EXPLORE = "🧪 เหรียญทดลอง"
 EXPLORE_RM_PREFIX = "explore:rm:"
+
+RISK_CHOICE_PCTS: tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
 
 
 def risk_button_label(risk_pct: float) -> str:
@@ -82,14 +85,23 @@ def exit_confirm_keyboard(intent_id: str) -> dict[str, Any]:
     return {"inline_keyboard": [[{"text": "✅ ปิดไม้", "callback_data": f"xx:{intent_id}"}]]}
 
 
-def risk_choice_keyboard() -> dict[str, Any]:
+def _risk_choice_label(pct: float, balance: Decimal | None) -> str:
+    pct_s = f"{pct:g}"
+    if balance is None or balance <= 0:
+        return f"{pct_s}%"
+    usdt = (balance * Decimal(str(pct)) / Decimal("100")).quantize(Decimal("0.01"))
+    return f"{pct_s}% · {usdt} USDT"
+
+
+def risk_choice_keyboard(*, balance: Decimal | None = None) -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "1%", "callback_data": "risk:1"},
-                {"text": "2%", "callback_data": "risk:2"},
-                {"text": "3%", "callback_data": "risk:3"},
-                {"text": "5%", "callback_data": "risk:5"},
+                {
+                    "text": _risk_choice_label(pct, balance),
+                    "callback_data": f"risk:{pct:g}",
+                }
+                for pct in RISK_CHOICE_PCTS
             ],
             [{"text": "อื่นๆ", "callback_data": "risk:other"}],
         ]

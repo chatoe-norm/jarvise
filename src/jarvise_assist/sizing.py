@@ -68,6 +68,58 @@ def floor_to_step(qty: Decimal, step: Decimal) -> Decimal:
     return steps * step
 
 
+def round_to_tick(price: Decimal, tick: Decimal) -> Decimal:
+    if tick <= 0:
+        return price
+    steps = (price / tick).to_integral_value(rounding=ROUND_DOWN)
+    return steps * tick
+
+
+def cap_requote_qty(
+    sized: SizedSignal,
+    *,
+    first_qty: Decimal | None,
+    first_loss: Decimal | None,
+    balance: Decimal,
+) -> SizedSignal:
+    """Cap a re-quote so qty never grows past the first sent idea.
+
+    Prefer first_qty when positive; otherwise scale so loss_at_stop stays at
+    or under first_loss. Never raises qty. Entry, stop, and target stay put.
+    """
+    step = sized.step_size if sized.step_size is not None and sized.step_size > 0 else Decimal("1")
+    cap: Decimal | None = None
+    if first_qty is not None and first_qty > 0:
+        cap = floor_to_step(first_qty, step)
+    elif first_loss is not None and first_loss > 0:
+        r = abs(sized.entry - sized.stop)
+        if r > 0:
+            cap = floor_to_step(first_loss / r, step)
+    if cap is None or sized.qty <= cap:
+        return sized
+    qty = cap
+    if qty <= 0:
+        return sized
+    notional = qty * sized.entry
+    r = abs(sized.entry - sized.stop)
+    loss = qty * r
+    if balance > 0:
+        uncapped = int(math.ceil(float(notional / balance)))
+    else:
+        uncapped = sized.uncapped_leverage
+    leverage_capped = uncapped > MAX_LEVERAGE
+    leverage = MAX_LEVERAGE if leverage_capped else max(1, uncapped)
+    return replace(
+        sized,
+        qty=qty,
+        notional=notional,
+        loss_at_stop=loss,
+        leverage=leverage,
+        leverage_capped=leverage_capped,
+        uncapped_leverage=uncapped,
+    )
+
+
 def passes_signal_floor(analysis: dict[str, Any]) -> bool:
     """Same effective gate as stored analyzer rows for the approval queue (0.55)."""
     action = str(analysis.get("action") or "").lower()

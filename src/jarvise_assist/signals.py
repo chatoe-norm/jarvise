@@ -19,13 +19,16 @@ from jarvise_assist.futures import (
     build_futures_client,
     find_protective_stop,
 )
-from jarvise_assist.keyboard import skip_inline_keyboard
+from jarvise_assist.keyboard import reply_keyboard, skip_inline_keyboard
 from jarvise_assist.messages import (
+    fmt_price,
+    fmt_qty,
     format_futures_down_alert,
     format_futures_recovered_alert,
     format_key_unsafe_alert,
     format_permission_error_alert,
     format_signal_message,
+    safe_symbol_configs,
 )
 from jarvise_assist.pause import evaluate_pause, is_paused, maybe_auto_resume
 from jarvise_assist.sizing import (
@@ -36,6 +39,7 @@ from jarvise_assist.sizing import (
     analysis_is_fresh,
     assign_shared_leverage,
     below_min_notional,
+    cap_requote_qty,
     chase_exceeded,
     next_assist_run_ms,
     passes_signal_floor,
@@ -43,6 +47,7 @@ from jarvise_assist.sizing import (
     size_signal,
 )
 from jarvise_assist.store import (
+    clamp_stored_risk_pct,
     ensure_settings,
     expire_older_held_keep_newest,
     find_linkable_signal,
@@ -461,6 +466,7 @@ def run_assist_signals(
 
     maybe_auto_resume(conn, now_ms=ts, send=send_fn)
     settings = ensure_settings(conn)
+    clamp_stored_risk_pct(conn, send=send_fn, reply_keyboard_fn=reply_keyboard)
 
     client = futures if futures is not None else build_futures_client()
     if client is None:
@@ -511,6 +517,7 @@ def run_assist_signals(
     skipped: list[dict[str, Any]] = list(scanned["skipped"])
     admitted: list[SignalCandidate] = list(scanned["admitted"])
     expires = next_assist_run_ms(ts)
+    configs = safe_symbol_configs(client)
     for cand in admitted:
         sized = cand.sized
         symbol = sized.symbol
@@ -524,7 +531,18 @@ def run_assist_signals(
             )
             created.append({"id": sid, "symbol": symbol, "status": "held"})
             continue
-        text = format_signal_message(sized, expires_at_ms=expires, balance=balance)
+        tick: Decimal | None = None
+        try:
+            tick = client.symbol_filters(symbol).tick_size
+        except Exception:  # noqa: BLE001
+            tick = None
+        text = format_signal_message(
+            sized,
+            expires_at_ms=expires,
+            balance=balance,
+            tick_size=tick,
+            account_config=configs.get(symbol),
+        )
         sid = insert_signal(
             conn,
             sized,
@@ -580,6 +598,8 @@ def run_assist_morning(
 
     maybe_auto_resume(conn, now_ms=ts, send=send_fn)
     settings = ensure_settings(conn)
+    clamp_stored_risk_pct(conn, send=send_fn, reply_keyboard_fn=reply_keyboard)
+    settings = ensure_settings(conn)
 
     client = futures if futures is not None else build_futures_client()
     if client is None:
@@ -628,6 +648,7 @@ def run_assist_morning(
     symbol_rank = {sym: i for i, sym in enumerate(ASSIST_SYMBOLS)}
     morning_candidates: list[tuple[str, SignalCandidate]] = []
     filters_by_symbol: dict[str, SymbolFilters] = {}
+    first_send_by_symbol: dict[str, dict[str, Any]] = {}
     open_syms = {p.symbol.upper() for p in open_positions}
 
     for row in list_held_signals(conn):
@@ -683,7 +704,16 @@ def run_assist_morning(
             mark_signal_expired(conn, str(row["id"]))
             expired.append(str(row["id"]))
             continue
+        first_qty = Decimal(str(row["qty"])) if row.get("qty") is not None else None
+        first_loss = Decimal(str(row["loss_at_stop"])) if row.get("loss_at_stop") is not None else None
+        sized = cap_requote_qty(
+            sized,
+            first_qty=first_qty,
+            first_loss=first_loss,
+            balance=balance,
+        )
         filters_by_symbol[symbol] = filters
+        first_send_by_symbol[symbol] = {"entry": entry0, "qty": first_qty or Decimal("0")}
         morning_candidates.append(
             (
                 str(row["id"]),
@@ -746,6 +776,7 @@ def run_assist_morning(
     # Admitted rows may be new SignalCandidate objects; pair by symbol (one held per symbol).
     sized_by_symbol = {c.sized.symbol: c.sized for c in admitted_morning}
     expires = next_assist_run_ms(ts)
+    configs = safe_symbol_configs(client)
     for sid, cand in morning_candidates:
         if cand in rejected_set or cand in dropped_set:
             continue
@@ -754,7 +785,21 @@ def run_assist_morning(
         sized = sized_by_symbol.get(cand.sized.symbol)
         if sized is None:
             continue
-        text = format_signal_message(sized, expires_at_ms=expires, balance=balance)
+        flt = filters_by_symbol.get(sized.symbol)
+        tick = flt.tick_size if flt is not None else None
+        text = format_signal_message(
+            sized,
+            expires_at_ms=expires,
+            balance=balance,
+            tick_size=tick,
+            account_config=configs.get(sized.symbol),
+        )
+        first = first_send_by_symbol.get(sized.symbol)
+        if first is not None:
+            text = (
+                f"{text}\nส่งครั้งแรก: เข้า {fmt_price(Decimal(str(first['entry'])))} · "
+                f"{fmt_qty(Decimal(str(first['qty'])))}"
+            )
         markup = skip_inline_keyboard(sid, entry=execution_buttons_enabled(conn))
         sent_ok, mid = _invoke_send(send_fn, text, reply_markup=markup)
         if sent_ok:

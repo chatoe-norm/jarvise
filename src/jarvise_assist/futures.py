@@ -26,6 +26,9 @@ EXCHANGE_INFO_PATH = "/fapi/v1/exchangeInfo"
 OPEN_ORDERS_PATH = "/fapi/v1/openOrders"
 OPEN_ALGO_ORDERS_PATH = "/fapi/v1/openAlgoOrders"
 INCOME_PATH = "/fapi/v1/income"
+SYMBOL_CONFIG_PATH = "/fapi/v1/symbolConfig"
+
+TP_ORDER_TYPES = frozenset({"TAKE_PROFIT", "TAKE_PROFIT_MARKET"})
 
 # Binance codes that mean the key cannot use this endpoint.
 PERMISSION_ERROR_CODES = frozenset({-2014, -2015, -1022})
@@ -57,6 +60,7 @@ class FuturesPosition:
     entry_price: Decimal
     mark_price: Decimal
     update_time_ms: int | None = None
+    liquidation_price: Decimal | None = None
 
     @property
     def side(self) -> str:
@@ -71,6 +75,25 @@ class FuturesPosition:
     @property
     def qty(self) -> Decimal:
         return abs(self.position_amt)
+
+
+@dataclass(frozen=True)
+class SymbolAccountConfig:
+    symbol: str
+    leverage: int
+    margin_type: str
+
+
+@dataclass(frozen=True)
+class ProtectiveOrderInfo:
+    price: Decimal
+    working_type: str | None
+
+
+@dataclass(frozen=True)
+class TakeProfitOrderInfo:
+    price: Decimal
+    working_type: str | None
 
 
 @dataclass(frozen=True)
@@ -210,6 +233,52 @@ def is_protective_stop(
     return reduce_only
 
 
+def order_working_type(order: dict[str, Any]) -> str | None:
+    raw = order.get("workingType")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return str(raw).upper()
+
+
+def trigger_label(working_type: str | None) -> str | None:
+    if working_type is None:
+        return None
+    wt = working_type.upper()
+    if wt == "MARK_PRICE":
+        return "Mark"
+    if wt == "CONTRACT_PRICE":
+        return "Last"
+    return wt
+
+
+def find_protective_stop_info(
+    orders: list[dict[str, Any]],
+    *,
+    symbol: str,
+    position_side: str,
+    trade_side: str,
+) -> ProtectiveOrderInfo | None:
+    """Tightest protective stop with its workingType, or None."""
+    best: ProtectiveOrderInfo | None = None
+    for order in orders:
+        if str(order.get("symbol") or "").upper() != symbol.upper():
+            continue
+        if not is_protective_stop(order, position_side=position_side, trade_side=trade_side):
+            continue
+        px = order_stop_price(order)
+        if px is None:
+            continue
+        info = ProtectiveOrderInfo(price=px, working_type=order_working_type(order))
+        if best is None:
+            best = info
+            continue
+        if trade_side == "long" and info.price > best.price:
+            best = info
+        elif trade_side == "short" and info.price < best.price:
+            best = info
+    return best
+
+
 def find_protective_stop(
     orders: list[dict[str, Any]],
     *,
@@ -222,20 +291,67 @@ def find_protective_stop(
     Trailing stops without a usable stop price are skipped here; they still
     count toward :func:`protective_stop_coverage`.
     """
-    prices: list[Decimal] = []
+    info = find_protective_stop_info(
+        orders,
+        symbol=symbol,
+        position_side=position_side,
+        trade_side=trade_side,
+    )
+    return info.price if info is not None else None
+
+
+def is_take_profit_order(
+    order: dict[str, Any],
+    *,
+    position_side: str,
+    trade_side: str,
+) -> bool:
+    """True when the order is a reduce-only take-profit on the closing side."""
+    otype = order_type(order)
+    if otype not in TP_ORDER_TYPES:
+        return False
+    close_side = "SELL" if trade_side == "long" else "BUY"
+    if str(order.get("side") or "").upper() != close_side:
+        return False
+    if order_stop_price(order) is None:
+        return False
+    ops = str(order.get("positionSide") or "BOTH").upper()
+    pos_side = position_side.upper()
+    reduce_only = bool(order.get("reduceOnly")) or _close_position_true(order)
+    if ops in {"LONG", "SHORT"}:
+        return ops == pos_side
+    if ops not in {"BOTH", pos_side}:
+        return False
+    return reduce_only
+
+
+def find_take_profit_info(
+    orders: list[dict[str, Any]],
+    *,
+    symbol: str,
+    position_side: str,
+    trade_side: str,
+) -> TakeProfitOrderInfo | None:
+    """Best (nearest) reduce-only take-profit with workingType, or None."""
+    best: TakeProfitOrderInfo | None = None
     for order in orders:
         if str(order.get("symbol") or "").upper() != symbol.upper():
             continue
-        if not is_protective_stop(order, position_side=position_side, trade_side=trade_side):
+        if not is_take_profit_order(order, position_side=position_side, trade_side=trade_side):
             continue
         px = order_stop_price(order)
-        if px is not None:
-            prices.append(px)
-    if not prices:
-        return None
-    if trade_side == "long":
-        return max(prices)
-    return min(prices)
+        if px is None:
+            continue
+        info = TakeProfitOrderInfo(price=px, working_type=order_working_type(order))
+        if best is None:
+            best = info
+            continue
+        # Nearest TP to the position: long prefers lowest TP; short prefers highest.
+        if trade_side == "long" and info.price < best.price:
+            best = info
+        elif trade_side == "short" and info.price > best.price:
+            best = info
+    return best
 
 
 def protective_stop_coverage(
@@ -400,6 +516,15 @@ class BinanceFuturesClient:
                 continue
             update_raw = row.get("updateTime")
             update_ms = int(update_raw) if update_raw not in (None, "") else None
+            liq_raw = row.get("liquidationPrice")
+            liq: Decimal | None = None
+            if liq_raw not in (None, "", "0", "0.0", "0.00000000"):
+                try:
+                    liq_val = Decimal(str(liq_raw))
+                except Exception:  # noqa: BLE001
+                    liq_val = Decimal("0")
+                if liq_val > 0:
+                    liq = liq_val
             out.append(
                 FuturesPosition(
                     symbol=str(row.get("symbol") or "").upper(),
@@ -408,6 +533,7 @@ class BinanceFuturesClient:
                     entry_price=Decimal(str(row.get("entryPrice") or "0")),
                     mark_price=Decimal(str(row.get("markPrice") or "0")),
                     update_time_ms=update_ms,
+                    liquidation_price=liq,
                 )
             )
         return out
@@ -505,6 +631,25 @@ class BinanceFuturesClient:
             params["incomeType"] = income_type
         payload = self._signed_get(INCOME_PATH, params, provider="binance_fapi_income")
         return list(payload) if isinstance(payload, list) else []
+
+    def symbol_config(self) -> dict[str, SymbolAccountConfig]:
+        """Signed GET /fapi/v1/symbolConfig. Read-only; never changes leverage."""
+        payload = self._signed_get(SYMBOL_CONFIG_PATH, provider="binance_fapi_symbol_config")
+        rows = list(payload) if isinstance(payload, list) else []
+        out: dict[str, SymbolAccountConfig] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("symbol") or "").upper()
+            if not sym:
+                continue
+            try:
+                lev = int(row.get("leverage") or 0)
+            except (TypeError, ValueError):
+                lev = 0
+            margin = str(row.get("marginType") or "").upper()
+            out[sym] = SymbolAccountConfig(symbol=sym, leverage=lev, margin_type=margin)
+        return out
 
 
 def build_futures_client(*, client: httpx.Client | None = None) -> BinanceFuturesClient | None:
