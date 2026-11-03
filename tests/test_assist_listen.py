@@ -647,7 +647,8 @@ def test_open_positions_menu_sample(tmp_path: Path) -> None:
     assert "ถ้าโดน stop: ล็อก ≈" in text
     assert "TP 120 · trigger Mark" in text
     assert "liquidation 80" in text
-    assert "PEPEUSDT · no data, no advice" in text
+    assert "PEPEUSDT LONG · qty 1000 · no data, no advice" in text
+    assert "(ก่อนค่าธรรมเนียม)" in text
     assert risk_button_label(2.0).startswith("⚙️")
     conn.close()
 
@@ -776,6 +777,9 @@ def test_open_positions_stop_coverage_samples(tmp_path: Path) -> None:
     )
     assert "stop ที่ตั้งไว้ 0.19710" in partial
     assert "⚠️ stop ครอบแค่ 100/259" in partial
+    assert "+12.18 USDT" in partial
+    assert "อีก 159 ไม่มี stop" in partial
+    assert "(ก่อนค่าธรรมเนียม)" in partial
 
     none = render(full, [])
     assert "⚠️ ยังไม่มี stop — ตั้ง Stop-Market (Reduce-Only, Mark) ทันที" in none
@@ -790,7 +794,7 @@ def test_open_positions_stop_coverage_samples(tmp_path: Path) -> None:
         update_time_ms=day,
     )
     bare = render(outsider, [])
-    assert "PEPEUSDT · no data, no advice" in bare
+    assert "PEPEUSDT LONG · qty 1000 · no data, no advice" in bare
     assert "⚠️ ยังไม่มี stop — ตั้ง Stop-Market (Reduce-Only, Mark) ทันที" in bare
     assert "mark " not in bare
 
@@ -808,7 +812,7 @@ def test_open_positions_stop_coverage_samples(tmp_path: Path) -> None:
             }
         ],
     )
-    assert "PEPEUSDT · no data, no advice" in covered_out
+    assert "PEPEUSDT LONG · qty 1000 · no data, no advice" in covered_out
     assert "⚠️" not in covered_out
     conn.close()
 

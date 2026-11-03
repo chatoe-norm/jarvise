@@ -230,8 +230,9 @@ def render_open_positions(
             position_side=pos.position_side,
             trade_side=pos.side,
         )
+        side_l = "LONG" if pos.side == "long" else "SHORT"
         if sym not in ASSIST_SYMBOLS:
-            lines.append(f"{sym} · no data, no advice")
+            lines.append(f"{sym} {side_l} · qty {fmt_qty(pos.qty)} · no data, no advice")
             if coverage == "none":
                 lines.append(_NO_STOP_LINE)
             elif coverage == "partial":
@@ -260,10 +261,10 @@ def render_open_positions(
             position_side=pos.position_side,
             trade_side=pos.side,
         )
-        side_l = "LONG" if pos.side == "long" else "SHORT"
         entry = float(pos.entry_price)
         mark = float(pos.mark_price)
         qty = float(pos.qty)
+        covered_qty = float(min(covered, pos.qty))
         mark_s = _price_text(pos.mark_price, tick)
         liq_s = (
             _price_text(pos.liquidation_price, tick)
@@ -297,7 +298,7 @@ def render_open_positions(
             r_s = _signed_r_one(r_mult) + r_note
         else:
             r_s = "R unknown"
-        lines.append(f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s}")
+        lines.append(f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s} (ก่อนค่าธรรมเนียม)")
 
         if coverage == "none":
             lines.append(_NO_STOP_LINE)
@@ -313,16 +314,21 @@ def render_open_positions(
                 lines.append(f"stop ที่ตั้งไว้ {stop_px} · trigger {stop_trig}")
             else:
                 lines.append(f"stop ที่ตั้งไว้ {stop_px}")
+            lock_qty = covered_qty if coverage == "partial" else qty
             if pos.side == "long":
-                lock_usdt = (prot - entry) * qty
+                lock_usdt = (prot - entry) * lock_qty
             else:
-                lock_usdt = (entry - prot) * qty
-            if risk > 0 and qty > 0:
-                lock_r = lock_usdt / (qty * risk)
+                lock_usdt = (entry - prot) * lock_qty
+            if risk > 0 and lock_qty > 0:
+                lock_r = lock_usdt / (lock_qty * risk)
                 lock_r_s = _signed_r_two(lock_r)
             else:
                 lock_r_s = "R unknown"
-            lines.append(f"ถ้าโดน stop: ล็อก ≈ {lock_r_s} ({_signed_usdt(lock_usdt)} USDT)")
+            lock_line = f"ถ้าโดน stop: ล็อก ≈ {lock_r_s} ({_signed_usdt(lock_usdt)} USDT) (ก่อนค่าธรรมเนียม)"
+            if coverage == "partial":
+                uncovered = pos.qty - min(covered, pos.qty)
+                lock_line = f"{lock_line} · อีก {fmt_qty(uncovered)} ไม่มี stop"
+            lines.append(lock_line)
             if coverage == "partial":
                 lines.append(_partial_stop_line(covered, pos.qty))
 
