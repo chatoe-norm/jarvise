@@ -759,6 +759,7 @@ _REASON_TH: dict[str, str] = {
     "below_min_notional": "ไม้เล็กกว่าขั้นต่ำ",
     "margin_cap": "margin ไม่พอ",
     "size_failed": "คำนวณขนาดไม้ไม่ได้",
+    "balance_zero": "ยอด USDT ในบัญชีเป็น 0",
     "same_idea": "ส่งไปแล้วใน 24 ชม.",
     "kill_switch": MSG_KILL,
     "key_refused": MSG_KEY_REFUSED,
@@ -780,7 +781,24 @@ _REASON_TH: dict[str, str] = {
 
 
 def _reason_th(reason: str) -> str:
+    if reason.startswith("fapi_read_failed:"):
+        step = reason.split(":", 1)[1] or "?"
+        return f"อ่านบัญชีไม่ได้ ({step})"
     return _REASON_TH.get(reason, reason)
+
+
+def _positive_fill_price(payload: dict[str, Any] | None) -> Decimal | None:
+    """avgPrice/price from a fill or order query; None when missing or <= 0."""
+    if not payload:
+        return None
+    for key in ("avgPrice", "price"):
+        raw = payload.get(key)
+        if raw in (None, ""):
+            continue
+        price = Decimal(str(raw))
+        if price > 0:
+            return price
+    return None
 
 
 def _closing_side(trade_side: str) -> str:
@@ -855,13 +873,32 @@ def size_for_execution(
     if not analysis_is_fresh(analysis, now_ms=now_ms_value):
         return None, "stale_analysis"
     mode = assist_execute_mode()
+
+    def _fapi_step(step: str, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("size_for_execution fapi step=%s type=%s", step, type(exc).__name__)
+            raise
+
     try:
-        mark = trade.mark_price(symbol)
-        filters = trade.symbol_filters(symbol)
-        positions = trade.position_risk()
-        balance, available = trade.usdt_wallet_and_available()
+        mark = _fapi_step("mark", lambda: trade.mark_price(symbol))
     except Exception:  # noqa: BLE001
-        return None, "size_failed"
+        return None, "fapi_read_failed:mark"
+    try:
+        filters = _fapi_step("filters", lambda: trade.symbol_filters(symbol))
+    except Exception:  # noqa: BLE001
+        return None, "fapi_read_failed:filters"
+    try:
+        positions = _fapi_step("positions", lambda: trade.position_risk())
+    except Exception:  # noqa: BLE001
+        return None, "fapi_read_failed:positions"
+    try:
+        balance, available = _fapi_step("balance", lambda: trade.usdt_wallet_and_available())
+    except Exception:  # noqa: BLE001
+        return None, "fapi_read_failed:balance"
+    if balance <= 0:
+        return None, "balance_zero"
     if any(p.symbol == symbol.upper() for p in positions):
         return None, "open_position"
     stop = Decimal(str(analysis["invalidation_price"]))
@@ -1240,9 +1277,34 @@ def run_entry_sequence(
 
     assert fill is not None
     exec_qty = Decimal(str(fill.get("executedQty") or "0"))
-    avg = Decimal(str(fill.get("avgPrice") or fill.get("price") or "0"))
+    avg = _positive_fill_price(fill)
     if exec_qty <= 0:
         return _reason_th("zero_fill")
+
+    # RESULT can return avgPrice "0.000000" (truthy string → Decimal 0). Recover before text/watch.
+    if avg is None:
+        queried = _query_fill_after_unknown(
+            trade,
+            symbol=symbol,
+            client_id=cid,
+            conn=conn,
+            intent_id=intent_id,
+            step="entry_price_query",
+        )
+        avg = _positive_fill_price(queried)
+        if avg is not None:
+            logger.info("entry fill price source=order_query intent_id=%s", intent_id)
+        else:
+            try:
+                pos_fill = _fill_from_position(trade, symbol=symbol)
+            except Exception:  # noqa: BLE001
+                logger.exception("position read failed while resolving entry price")
+                pos_fill = None
+            if pos_fill is not None and pos_fill[1] > 0:
+                avg = pos_fill[1]
+                logger.info("entry fill price source=position_risk intent_id=%s", intent_id)
+            else:
+                logger.info("entry fill price source=unknown intent_id=%s", intent_id)
 
     stop_ok = False
     stop_err: str | None = None
@@ -1346,6 +1408,7 @@ def run_entry_sequence(
             tp_note = f"\n{MSG_TP_KEEP}"
 
     # Live-only: link watch / mark signal taken. Testnet must not touch live watch.
+    # Never write entry=0 when fill price is still unknown.
     if assist_execute_mode() == "live":
         signal_id = preview.get("signal_id")
         if signal_id:
@@ -1353,43 +1416,51 @@ def run_entry_sequence(
                 mark_signal_taken(conn, str(signal_id))
             except Exception:  # noqa: BLE001
                 logger.exception("mark_signal_taken failed")
-        try:
-            conn.execute(
-                """
-                INSERT INTO assist_watch_position (
-                    symbol, position_side, side, entry, qty, in_universe,
-                    signal_id, initial_stop, initial_stop_source, entry_time_ms,
-                    no_stop_latched, last_seen_ms, closed_at_ms
-                ) VALUES (?, 'BOTH', ?, ?, ?, 1, ?, ?, 'signal', ?, 0, ?, NULL)
-                ON CONFLICT(symbol, position_side) DO UPDATE SET
-                    side=excluded.side,
-                    entry=excluded.entry,
-                    qty=excluded.qty,
-                    signal_id=COALESCE(excluded.signal_id, assist_watch_position.signal_id),
-                    initial_stop=excluded.initial_stop,
-                    initial_stop_source='signal',
-                    entry_time_ms=excluded.entry_time_ms,
-                    no_stop_latched=0,
-                    last_seen_ms=excluded.last_seen_ms,
-                    closed_at_ms=NULL
-                """,
-                (
-                    symbol,
-                    side,
-                    float(avg),
-                    float(exec_qty),
-                    str(signal_id) if signal_id else None,
-                    float(stop),
-                    int(now_ms()),
-                    int(now_ms()),
-                ),
+        if avg is not None and avg > 0:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO assist_watch_position (
+                        symbol, position_side, side, entry, qty, in_universe,
+                        signal_id, initial_stop, initial_stop_source, entry_time_ms,
+                        no_stop_latched, last_seen_ms, closed_at_ms
+                    ) VALUES (?, 'BOTH', ?, ?, ?, 1, ?, ?, 'signal', ?, 0, ?, NULL)
+                    ON CONFLICT(symbol, position_side) DO UPDATE SET
+                        side=excluded.side,
+                        entry=excluded.entry,
+                        qty=excluded.qty,
+                        signal_id=COALESCE(excluded.signal_id, assist_watch_position.signal_id),
+                        initial_stop=excluded.initial_stop,
+                        initial_stop_source='signal',
+                        entry_time_ms=excluded.entry_time_ms,
+                        no_stop_latched=0,
+                        last_seen_ms=excluded.last_seen_ms,
+                        closed_at_ms=NULL
+                    """,
+                    (
+                        symbol,
+                        side,
+                        float(avg),
+                        float(exec_qty),
+                        str(signal_id) if signal_id else None,
+                        float(stop),
+                        int(now_ms()),
+                        int(now_ms()),
+                    ),
+                )
+                conn.commit()
+            except Exception:  # noqa: BLE001
+                logger.exception("watch link after entry failed")
+        else:
+            logger.warning(
+                "skip assist_watch_position insert: entry price unknown intent_id=%s",
+                intent_id,
             )
-            conn.commit()
-        except Exception:  # noqa: BLE001
-            logger.exception("watch link after entry failed")
 
-    loss = abs(avg - stop) * exec_qty
     side_l = "LONG" if side == "long" else "SHORT"
+    if avg is None or avg <= 0:
+        return f"✅ เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\nstop {stop} · TP {target}{tp_note}"
+    loss = abs(avg - stop) * exec_qty
     return (
         f"✅ เข้า {symbol} {side_l}\n"
         f"fill {avg} × {exec_qty}\n"
@@ -1582,7 +1653,21 @@ def run_exit_sequence(
             }
 
     assert fill is not None
-    avg = Decimal(str(fill.get("avgPrice") or fill.get("price") or "0"))
+    avg = _positive_fill_price(fill)
+    if avg is None:
+        queried = _query_fill_after_unknown(
+            trade,
+            symbol=symbol,
+            client_id=cid,
+            conn=conn,
+            intent_id=intent_id,
+            step="exit_price_query",
+        )
+        avg = _positive_fill_price(queried)
+        if avg is not None:
+            logger.info("exit fill price source=order_query intent_id=%s", intent_id)
+        else:
+            logger.info("exit fill price source=unknown intent_id=%s", intent_id)
     pnl = Decimal("0")
     try:
         order_id = fill.get("orderId")
@@ -1628,7 +1713,10 @@ def run_exit_sequence(
                 binance_code=exc.binance_code,
                 order_or_algo_id=str(algo_id),
             )
-    return f"✅ ปิด {symbol} @ {avg} · PnL {pnl.quantize(Decimal('0.01'))} USDT"
+    pnl_s = pnl.quantize(Decimal("0.01"))
+    if avg is None or avg <= 0:
+        return f"✅ ปิด {symbol} · PnL {pnl_s} USDT"
+    return f"✅ ปิด {symbol} @ {avg} · PnL {pnl_s} USDT"
 
 
 def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> list[str]:
