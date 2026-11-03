@@ -13,6 +13,8 @@ from jarvise_assist import listen as listen_mod
 from jarvise_assist.keyboard import BTN_ANYTHING, BTN_POSITIONS, BTN_TOGGLE, risk_button_label
 from jarvise_assist.listen import poll_once, process_update, start_listener_thread
 from jarvise_assist.menu import (
+    _signed_r_one,
+    _signed_usdt,
     handle_menu_text,
     handle_risk_callback,
     handle_risk_number,
@@ -646,6 +648,70 @@ def test_open_positions_menu_sample(tmp_path: Path) -> None:
     assert "PEPEUSDT · no data, no advice" in text
     assert risk_button_label(2.0).startswith("⚙️")
     conn.close()
+
+
+def test_open_positions_mark_and_liquidation_use_tick(tmp_path: Path) -> None:
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / "tick_pos.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-259"),
+        entry_price=Decimal("0.07527"),
+        mark_price=Decimal("0.07543363"),
+        update_time_ms=day,
+        liquidation_price=Decimal("0.14953253"),
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[],
+        ticks={"DOGEUSDT": Decimal("0.00001")},
+    )
+    text = render_open_positions(conn, futures=fake, now_ms=day)
+    assert "mark 0.07543" in text
+    assert "liquidation 0.14953" in text
+    assert "0.07543363" not in text
+    assert "0.14953253" not in text
+    conn.close()
+
+
+def test_open_positions_mark_falls_back_when_filters_fail(tmp_path: Path) -> None:
+    from jarvise_assist.futures import FuturesPosition, SymbolFilters
+
+    conn = open_db(tmp_path / "filt_fail.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-259"),
+        entry_price=Decimal("0.07527"),
+        mark_price=Decimal("0.07543363"),
+        update_time_ms=day,
+        liquidation_price=Decimal("0.14953253"),
+    )
+    fake = FakeFutures(positions=[pos], orders=[], ticks={"DOGEUSDT": Decimal("0.00001")})
+
+    def boom(symbol: str) -> SymbolFilters:
+        raise RuntimeError("exchangeInfo down")
+
+    fake.symbol_filters = boom  # type: ignore[method-assign]
+    text = render_open_positions(conn, futures=fake, now_ms=day)
+    assert "mark 0.07543363" in text
+    assert "liquidation 0.14953253" in text
+    conn.close()
+
+
+def test_signed_usdt_and_r_drop_minus_on_rounded_zero() -> None:
+    assert _signed_usdt(-0.0026) == "0.00"
+    assert _signed_usdt(0.004) == "0.00"
+    assert _signed_usdt(-1.25) == "-1.25"
+    assert _signed_usdt(1.25) == "+1.25"
+    assert _signed_r_one(-0.04) == "0.0R"
+    assert _signed_r_one(0.04) == "0.0R"
+    assert _signed_r_one(-1.2) == "-1.2R"
+    assert _signed_r_one(1.2) == "+1.2R"
 
 
 def test_open_positions_lock_r_vs_unrealized_and_trigger_mismatch(tmp_path: Path) -> None:

@@ -21,12 +21,11 @@ from jarvise_assist.futures import (
 )
 from jarvise_assist.keyboard import reply_keyboard, skip_inline_keyboard
 from jarvise_assist.messages import (
-    fmt_price,
-    fmt_qty,
     format_futures_down_alert,
     format_futures_recovered_alert,
     format_key_unsafe_alert,
     format_permission_error_alert,
+    format_prior_idea_line,
     format_signal_message,
     safe_symbol_configs,
 )
@@ -713,7 +712,11 @@ def run_assist_morning(
             balance=balance,
         )
         filters_by_symbol[symbol] = filters
-        first_send_by_symbol[symbol] = {"entry": entry0, "qty": first_qty or Decimal("0")}
+        first_send_by_symbol[symbol] = {
+            "entry": entry0,
+            "stop": stop0,
+            "qty": first_qty or Decimal("0"),
+        }
         morning_candidates.append(
             (
                 str(row["id"]),
@@ -796,10 +799,12 @@ def run_assist_morning(
         )
         first = first_send_by_symbol.get(sized.symbol)
         if first is not None:
-            text = (
-                f"{text}\nไอเดียเดิม (พักไว้ช่วงกลางคืน): เข้า "
-                f"{fmt_price(Decimal(str(first['entry'])))} · "
-                f"{fmt_qty(Decimal(str(first['qty'])))}"
+            text = f"{text}\n" + format_prior_idea_line(
+                label="ไอเดียเดิม (พักไว้ช่วงกลางคืน)",
+                entry=Decimal(str(first["entry"])),
+                stop=Decimal(str(first["stop"])),
+                qty=Decimal(str(first["qty"])),
+                tick_size=tick,
             )
         markup = skip_inline_keyboard(sid, entry=execution_buttons_enabled(conn))
         sent_ok, mid = _invoke_send(send_fn, text, reply_markup=markup)
