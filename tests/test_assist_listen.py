@@ -373,7 +373,8 @@ def test_weekly_summary_includes_funding(tmp_path: Path) -> None:
             "total_r": -1.0,
             "mean_r": -1.0,
             "total_usdt": -20.0,
-            "exit_stop": 1,
+            "exit_stop_original": 1,
+            "exit_stop_trailed": 0,
             "exit_target_2r": 1,
             "exit_analysis": 1,
         },
@@ -381,9 +382,41 @@ def test_weekly_summary_includes_funding(tmp_path: Path) -> None:
         closed_all=1,
     )
     assert "ยังไม่พิสูจน์ edge — ตัวอย่าง 1 ไม้" in sample
-    assert "ปิดที่ stop 1 · ถึง 2R 1 · ปิดตามสัญญาณ 1" in sample
+    assert "ปิดที่ stop เดิม 1 · stop ที่เลื่อนแล้ว 0 · ถึง 2R 1 · ปิดตามสัญญาณ 1" in sample
     assert "-1.00R" in sample or "-1.0R" in sample
     conn.close()
+
+
+def test_weekly_stop_split_original_vs_trailed() -> None:
+    from jarvise_assist.weekly import format_weekly_summary, summarize_virtual
+
+    rows = [
+        {"exit_reason": "stop", "gross_r": -1.0, "net_r": -1.04, "pnl_usdt": -10.0},
+        {"exit_reason": "stop", "gross_r": -1.0, "net_r": -1.03, "pnl_usdt": -10.0},
+        {"exit_reason": "stop", "gross_r": 0.586, "net_r": 0.507, "pnl_usdt": 5.0},
+        {"exit_reason": "stop", "gross_r": 0.079, "net_r": 0.058, "pnl_usdt": 0.5},
+        {"exit_reason": "stop", "gross_r": 0.135, "net_r": 0.081, "pnl_usdt": 0.8},
+        {"exit_reason": "stop", "gross_r": 0.051, "net_r": 0.031, "pnl_usdt": 0.3},
+    ]
+    virtual = summarize_virtual(rows)
+    assert virtual["exit_stop_original"] == 2
+    assert virtual["exit_stop_trailed"] == 4
+    assert abs(virtual["win_rate"] - (4 / 6)) < 1e-9
+    text = format_weekly_summary(
+        counts={"sent": 6, "skipped": 0, "taken": 0},
+        virtual=virtual,
+        real={
+            "realized_pnl": 0.0,
+            "funding": 0.0,
+            "commission": 0.0,
+            "universe_usdt": 0.0,
+            "other_usdt": 0.0,
+        },
+        closed_all=6,
+    )
+    assert "ชนะ 67%" in text
+    assert "ปิดที่ stop เดิม 2 · stop ที่เลื่อนแล้ว 4 · ถึง 2R 0 · ปิดตามสัญญาณ 0" in text
+    assert "ยังไม่พิสูจน์ edge — ตัวอย่าง 6 ไม้" in text
 
 
 def _three_losses(now_ms: int) -> list[dict[str, Any]]:
@@ -605,7 +638,8 @@ def test_open_positions_menu_sample(tmp_path: Path) -> None:
     text = render_open_positions(conn, futures=fake, now_ms=day)
     assert "📋 ไม้ที่ถืออยู่" in text
     assert "BTCUSDT LONG" in text
-    assert "ยังไม่ปิด:" in text
+    assert "ยังไม่ปิด:" in text and "USDT · ≈" in text
+    assert "stop ที่ตั้งไว้ 92 · trigger Mark" in text
     assert "ถ้าโดน stop: ล็อก ≈" in text
     assert "TP 120 · trigger Mark" in text
     assert "liquidation 80" in text
@@ -673,7 +707,8 @@ def test_open_positions_lock_r_vs_unrealized_and_trigger_mismatch(tmp_path: Path
     )
     text = render_open_positions(conn, futures=fake, now_ms=day)
     assert "ADAUSDT SHORT" in text
-    assert "≈ +1.2R" in text or "≈ +1.21R" in text
+    assert "ยังไม่ปิด: +11.60 USDT · ≈ +1.2R" in text
+    assert "stop ที่ตั้งไว้ 0.1971 · trigger Last" in text
     assert "ล็อก ≈ +0.56R" in text
     assert "⚠️ stop กับ TP คนละ trigger (Last / Mark)" in text
     conn.close()

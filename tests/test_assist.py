@@ -434,6 +434,8 @@ def test_night_hold_then_morning_send(tmp_path: Path) -> None:
     assert len(sent) == 1
     assert "DOGEUSDT" in sent[0]
     assert "0.083" in sent[0]  # newest invalidation in message
+    assert "ไอเดียเดิม (พักไว้ช่วงกลางคืน):" in sent[0]
+    assert "ส่งครั้งแรก:" not in sent[0]
     assert list_held_signals(conn) == []
     conn.close()
 
