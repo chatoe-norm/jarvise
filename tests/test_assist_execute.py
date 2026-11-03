@@ -20,6 +20,7 @@ from jarvise_assist.execute import (
     MSG_OFF,
     MSG_STOP_CLOSED,
     BinanceTradeClient,
+    TradeClientError,
     assist_execute_mode,
     build_trade_client,
     cancel_jv_orders_for_symbol,
@@ -665,7 +666,7 @@ def test_client_order_id_prefix() -> None:
     assert len(cid) <= 36
 
 
-def _entry_intent(conn: Any, *, ts: int | None = None) -> str:
+def _entry_intent(conn: Any, *, ts: int | None = None, qty: str = "100") -> str:
     t = int(ts if ts is not None else now_ms())
     intent_id = insert_exec_intent(
         conn,
@@ -673,7 +674,7 @@ def _entry_intent(conn: Any, *, ts: int | None = None) -> str:
         symbol="DOGEUSDT",
         side="short",
         preview={
-            "qty": "100",
+            "qty": qty,
             "stop": "0.083",
             "target": "0.07",
             "leverage": 5,
@@ -1536,3 +1537,286 @@ def test_long_preview_expiry_and_directional_stop(tmp_path: Path, monkeypatch: p
     assert sized.stop == Decimal("0.076")  # long stop floors
     assert "Stop: 0.076" in preview["text"]
     conn.close()
+
+
+def test_entry_zero_avg_price_uses_order_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "avg_query.db")
+    ts = now_ms()
+    intent_id = _entry_intent(conn, ts=ts, qty="759")
+    handlers: dict[tuple[str, str], Any] = {
+        ("POST", "/fapi/v1/marginType"): (200, {"code": 200}),
+        ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
+        ("POST", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "759", "avgPrice": "0.07526", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.075"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("POST", "/fapi/v1/algoOrder"): [
+            (200, {"algoId": 11}),
+            (200, {"algoId": 12}),
+        ],
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    result = run_entry_sequence(conn, intent_id, trade=trade)
+    assert result.startswith("✅")
+    assert "fill 0.07526 × 759" in result
+    assert "ถ้าชน stop" in result
+    assert "ราคายังไม่ยืนยัน" not in result
+    assert ("GET", "/fapi/v1/order") in [(m, p) for m, p, _ in transport.calls]
+    conn.close()
+
+
+def test_entry_zero_avg_price_falls_back_to_position_risk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "avg_pos.db")
+    ts = now_ms()
+    intent_id = _entry_intent(conn, ts=ts, qty="759")
+    transport = RecordingTransport(
+        {
+            ("POST", "/fapi/v1/marginType"): (200, {"code": 200}),
+            ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
+            ("POST", "/fapi/v1/order"): (
+                200,
+                {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
+            ),
+            ("GET", "/fapi/v1/order"): (
+                200,
+                {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
+            ),
+            ("GET", "/fapi/v3/positionRisk"): (
+                200,
+                [
+                    {
+                        "symbol": "DOGEUSDT",
+                        "positionSide": "BOTH",
+                        "positionAmt": "-759",
+                        "entryPrice": "0.0753",
+                        "markPrice": "0.075",
+                    }
+                ],
+            ),
+            ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.075"}),
+            ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+            ("POST", "/fapi/v1/algoOrder"): [
+                (200, {"algoId": 11}),
+                (200, {"algoId": 12}),
+            ],
+        }
+    )
+    trade = _client(transport)
+    result = run_entry_sequence(conn, intent_id, trade=trade)
+    assert "fill 0.0753 × 759" in result
+    assert "ถ้าชน stop" in result
+    conn.close()
+
+
+def test_entry_unknown_price_skips_watch_and_loss_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "avg_unknown.db")
+    ts = now_ms()
+    intent_id = _entry_intent(conn, ts=ts, qty="759")
+    transport = RecordingTransport(
+        {
+            ("POST", "/fapi/v1/marginType"): (200, {"code": 200}),
+            ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
+            ("POST", "/fapi/v1/order"): (
+                200,
+                {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
+            ),
+            ("GET", "/fapi/v1/order"): (
+                200,
+                {"orderId": 1, "executedQty": "759", "avgPrice": "0", "status": "FILLED"},
+            ),
+            ("GET", "/fapi/v3/positionRisk"): (200, []),
+            ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.075"}),
+            ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+            ("POST", "/fapi/v1/algoOrder"): [
+                (200, {"algoId": 11}),
+                (200, {"algoId": 12}),
+            ],
+        }
+    )
+    trade = _client(transport)
+    result = run_entry_sequence(conn, intent_id, trade=trade)
+    assert "ราคายังไม่ยืนยัน × 759" in result
+    assert "ถ้าชน stop" not in result
+    n = conn.execute("SELECT COUNT(*) FROM assist_watch_position").fetchone()[0]
+    assert n == 0
+    conn.close()
+
+
+def test_exit_zero_avg_price_uses_query_or_omits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "exit_avg.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    claim_exec_intent(conn, intent_id)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/positionRisk"): (
+            200,
+            [
+                {
+                    "symbol": "DOGEUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "-100",
+                    "entryPrice": "0.08",
+                    "markPrice": "0.07",
+                }
+            ],
+        ),
+        ("POST", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.000000", "executedQty": "100"},
+        ),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.071", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/userTrades"): (200, [{"realizedPnl": "0.9"}]),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+    }
+    trade = _client(RecordingTransport(handlers))
+    result = run_exit_sequence(conn, intent_id, trade=trade)
+    assert "@ 0.071" in result
+    assert "@ 0 " not in result and "@ 0.000000" not in result
+
+    intent2 = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    claim_exec_intent(conn, intent2)
+    handlers2: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/positionRisk"): (
+            200,
+            [
+                {
+                    "symbol": "DOGEUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "-100",
+                    "entryPrice": "0.08",
+                    "markPrice": "0.07",
+                }
+            ],
+        ),
+        ("POST", "/fapi/v1/order"): (
+            200,
+            {"orderId": 10, "avgPrice": "0.000000", "executedQty": "100"},
+        ),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 10, "avgPrice": "0.000000", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/userTrades"): (200, [{"realizedPnl": "0.5"}]),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+    }
+    result2 = run_exit_sequence(conn, intent2, trade=_client(RecordingTransport(handlers2)))
+    assert "@ 0" not in result2
+    assert result2.startswith("✅ ปิด DOGEUSDT · PnL")
+    conn.close()
+
+
+def test_size_for_execution_split_reasons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.execute import _reason_th
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "size_reasons.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    _seed_doge_short(conn, ts=bar)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+
+    zero_handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "0", "availableBalance": "0"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    sized, reason = size_for_execution(
+        conn,
+        trade=_client(RecordingTransport(zero_handlers)),
+        symbol="DOGEUSDT",
+        side="short",
+        now_ms_value=now,
+    )
+    assert sized is None and reason == "balance_zero"
+    assert _reason_th("balance_zero") == "ยอด USDT ในบัญชีเป็น 0"
+
+    def boom(_params: dict[str, Any]) -> tuple[int, Any]:
+        raise TradeClientError("mark down", http_status=503, binance_code=-1001)
+
+    mark_handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/premiumIndex"): boom,
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+    }
+    sized2, reason2 = size_for_execution(
+        conn,
+        trade=_client(RecordingTransport(mark_handlers)),
+        symbol="DOGEUSDT",
+        side="short",
+        now_ms_value=now,
+    )
+    assert sized2 is None and reason2 == "fapi_read_failed:mark"
+    assert _reason_th("fapi_read_failed:mark") == "อ่านบัญชีไม่ได้ (mark)"
+
+    # Short stop not above entry → size_signal None → size_failed
+    bad_stop_conn = open_db(tmp_path / "size_failed.db")
+    _seed_analysis(
+        bad_stop_conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.8,
+        invalidation=0.07,  # below entry 0.08 → invalid short stop
+        ts=bar,
+    )
+    ok_handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    sized3, reason3 = size_for_execution(
+        bad_stop_conn,
+        trade=_client(RecordingTransport(ok_handlers)),
+        symbol="DOGEUSDT",
+        side="short",
+        now_ms_value=now,
+    )
+    assert sized3 is None and reason3 == "size_failed"
+    conn.close()
+    bad_stop_conn.close()
