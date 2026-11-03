@@ -1211,7 +1211,8 @@ def test_size_for_execution_requote_cap_and_chase_vs_seen(
     from jarvise_assist.sizing import size_signal
     from jarvise_assist.store import insert_signal
 
-    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    # Live: demo/mainnet marks match; chase vs seen must still refuse.
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
     conn = open_db(tmp_path / "requote.db")
     bar = _ms_bangkok(2026, 11, 2, 3, 0)
     now = _ms_bangkok(2026, 11, 2, 8, 20)
@@ -1226,7 +1227,6 @@ def test_size_for_execution_requote_cap_and_chase_vs_seen(
         step_size=Decimal("1"),
     )
     assert first is not None
-    # Cap first send to a small qty so a fresh size would otherwise be larger.
     from dataclasses import replace
 
     # Cap below a fresh 1%-of-balance size but keep notional above exchange min.
@@ -1248,7 +1248,7 @@ def test_size_for_execution_requote_cap_and_chase_vs_seen(
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
     }
-    trade = _client(RecordingTransport(handlers))
+    trade = _client(RecordingTransport(handlers), base="https://fapi.binance.com")
     sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
     assert reason is None and sized is not None
     assert sized.qty == Decimal("100")
@@ -1268,6 +1268,7 @@ def test_preview_stores_seen_and_confirm_chases_seen(tmp_path: Path, monkeypatch
     from jarvise_assist.sizing import size_signal
     from jarvise_assist.store import insert_signal
 
+    # Preview can be built in testnet; confirm seen-chase assertion is live-only.
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     monkeypatch.setattr(
         "jarvise_assist.execute.kill_switch_state",
@@ -1317,7 +1318,8 @@ def test_preview_stores_seen_and_confirm_chases_seen(tmp_path: Path, monkeypatch
     assert intent["preview"]["seen_entry"] == "0.08"
     assert intent["preview"]["seen_stop"] == "0.083"
 
-    # Mark chases seen (entry 0.08, R=0.003 → limit 0.0791) but not a looser preview.
+    # Live confirm: mark chases seen but not a looser preview entry/stop.
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
     intent["preview"] = {
         **intent["preview"],
         "entry": "0.078",
@@ -1328,6 +1330,103 @@ def test_preview_stores_seen_and_confirm_chases_seen(tmp_path: Path, monkeypatch
     handlers[("GET", "/fapi/v1/premiumIndex")] = (200, {"markPrice": "0.0785"})
     guard = _confirm_guards_entry(conn, intent, trade, now_ms_value=now + 1_000)
     assert guard == "chase"
+    conn.close()
+
+
+def test_testnet_seen_chase_uses_read_mark_not_demo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.execute import _confirm_guards_entry
+    from jarvise_assist.sizing import size_signal
+    from jarvise_assist.store import insert_signal
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "testnet_chase.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    from dataclasses import replace
+
+    first = replace(first, qty=Decimal("100"), notional=Decimal("8"), loss_at_stop=Decimal("0.3"))
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=now - 60_000,
+        expires_at_ms=now + 3_600_000,
+        sent_at_ms=now - 60_000,
+    )
+    # Demo mark far below mainnet seen; comparing demo to seen would false-chase.
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.06"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    trade = _client(RecordingTransport(handlers))
+    sized, reason = size_for_execution(
+        conn,
+        trade=trade,
+        symbol="DOGEUSDT",
+        side="short",
+        now_ms_value=now,
+        read_mark=Decimal("0.08"),
+    )
+    assert reason is None and sized is not None
+    assert sized.qty == Decimal("100")
+
+    # Missing read_mark: skip seen chase even when demo mark would chase seen.
+    handlers[("GET", "/fapi/v1/premiumIndex")] = (200, {"markPrice": "0.078"})
+    no_read, no_read_reason = size_for_execution(
+        conn,
+        trade=trade,
+        symbol="DOGEUSDT",
+        side="short",
+        now_ms_value=now,
+        read_mark=None,
+    )
+    assert no_read_reason is None and no_read is not None
+
+    # Confirm in testnet skips seen-entry chase; preview entry/stop still guarded.
+    intent_id = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "qty": "100",
+            "stop": "0.081",
+            "target": "0.072",
+            "leverage": 1,
+            "entry": "0.078",
+            "loss_at_stop": "0.3",
+            "r_distance": "0.003",
+            "seen_entry": "0.08",
+            "seen_stop": "0.083",
+        },
+        created_at_ms=now,
+        expires_at_ms=now + 120_000,
+    )
+    intent = get_exec_intent(conn, intent_id)
+    assert intent is not None
+    handlers[("GET", "/fapi/v1/premiumIndex")] = (200, {"markPrice": "0.0785"})
+    guard = _confirm_guards_entry(conn, intent, trade, now_ms_value=now + 1_000)
+    assert guard != "chase"
     conn.close()
 
 
