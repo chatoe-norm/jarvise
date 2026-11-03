@@ -907,7 +907,14 @@ def size_for_execution(
     if seen is not None:
         seen_entry = Decimal(str(seen["entry"]))
         seen_stop = Decimal(str(seen["stop"]))
-        if chase_exceeded(side=side, entry=seen_entry, stop=seen_stop, mark=entry):
+        # Seen levels are mainnet. In testnet compare against read_mark; skip if absent.
+        if mode == "testnet":
+            chase_mark = read_mark if read_mark is not None and read_mark > 0 else None
+        else:
+            chase_mark = entry
+        if chase_mark is not None and chase_exceeded(
+            side=side, entry=seen_entry, stop=seen_stop, mark=chase_mark
+        ):
             return None, "chase"
         first_qty = Decimal(str(seen["qty"])) if seen.get("qty") is not None else None
         first_loss = Decimal(str(seen["loss_at_stop"])) if seen.get("loss_at_stop") is not None else None
@@ -1081,7 +1088,8 @@ def _confirm_guards_entry(
     mark = trade.mark_price(symbol)
     if chase_exceeded(side=side, entry=entry, stop=stop, mark=mark):
         return "chase"
-    if "seen_entry" in preview and "seen_stop" in preview:
+    # Seen levels are mainnet; demo mark cannot be compared in testnet.
+    if assist_execute_mode() != "testnet" and "seen_entry" in preview and "seen_stop" in preview:
         seen_entry = Decimal(str(preview["seen_entry"]))
         seen_stop = Decimal(str(preview["seen_stop"]))
         if chase_exceeded(side=side, entry=seen_entry, stop=seen_stop, mark=mark):
