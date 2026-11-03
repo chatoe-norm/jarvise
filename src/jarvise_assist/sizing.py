@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, Literal
 
 from jarvise_analyze.engine import CONFIDENCE_THRESHOLD
 
@@ -73,6 +73,32 @@ def round_to_tick(price: Decimal, tick: Decimal) -> Decimal:
         return price
     steps = (price / tick).to_integral_value(rounding=ROUND_DOWN)
     return steps * tick
+
+
+def round_level_to_tick(
+    price: Decimal,
+    tick: Decimal,
+    *,
+    side: str,
+    kind: Literal["stop", "target"],
+) -> Decimal:
+    """Round stop/TP so the fill stays on the safe side of the intended level.
+
+    Stop: long floors, short ceils. Target: long ceils, short floors.
+    A price already on a tick multiple is left unchanged when ceiling.
+    """
+    if tick <= 0:
+        return price
+    floored_steps = (price / tick).to_integral_value(rounding=ROUND_DOWN)
+    floored = floored_steps * tick
+    side_l = side.lower()
+    use_floor = (kind == "stop" and side_l == "long") or (kind == "target" and side_l == "short")
+    if use_floor:
+        return floored
+    # Ceil: leave exact multiples; otherwise step up.
+    if floored == price:
+        return price
+    return (floored_steps + Decimal("1")) * tick
 
 
 def cap_requote_qty(

@@ -2170,13 +2170,13 @@ def fmt_qty_local(value: Decimal) -> str:
     return fmt_qty(value)
 
 
-def test_format_signal_tick_matches_execute_round_to_tick() -> None:
-    from jarvise_assist.execute import round_to_tick as exec_round
-    from jarvise_assist.sizing import round_to_tick as size_round
+def test_format_signal_tick_matches_directional_round_level() -> None:
+    from jarvise_assist.sizing import round_level_to_tick
 
     tick = Decimal("0.001")
     stop = Decimal("0.083456")
-    assert exec_round(stop, tick) == size_round(stop, tick) == Decimal("0.083")
+    # Short stop ceils; short target floors.
+    assert round_level_to_tick(stop, tick, side="short", kind="stop") == Decimal("0.084")
     sized = size_signal(
         symbol="DOGEUSDT",
         side="short",
@@ -2193,8 +2193,8 @@ def test_format_signal_tick_matches_execute_round_to_tick() -> None:
         balance=Decimal("1000"),
         tick_size=tick,
     )
-    rounded_stop = exec_round(stop, tick)
-    rounded_target = exec_round(sized.target, tick)
+    rounded_stop = round_level_to_tick(stop, tick, side="short", kind="stop")
+    rounded_target = round_level_to_tick(sized.target, tick, side="short", kind="target")
     assert f"Stop: {rounded_stop}" in text
     assert f"เป้า: {rounded_target}" in text
     assert "เข้า: 0.080" in text

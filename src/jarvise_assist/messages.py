@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jarvise_assist.futures import SymbolAccountConfig
-from jarvise_assist.sizing import SizedSignal, round_to_tick
+from jarvise_assist.sizing import SizedSignal, round_level_to_tick
 
 # Asia/Bangkok has no DST; avoid the tzdata package on Windows.
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -81,6 +81,7 @@ def format_signal_message(
     balance: Decimal | None = None,
     tick_size: Decimal | None = None,
     account_config: SymbolAccountConfig | None = None,
+    confirm_within_min: int | None = None,
 ) -> str:
     side = sized.side.lower()
     emoji = "🔺" if side == "long" else "🔻"
@@ -92,7 +93,12 @@ def format_signal_message(
     else:
         loss_pct = sized.risk_pct
     exp = datetime.fromtimestamp(expires_at_ms / 1000.0, tz=UTC).astimezone(BANGKOK)
-    exp_s = exp.strftime("%H:%M")
+    if confirm_within_min is not None:
+        exp_s = exp.strftime("%H:%M:%S")
+        expiry_line = f"หมดอายุ {exp_s} · ยืนยันภายใน {confirm_within_min} นาที"
+    else:
+        exp_s = exp.strftime("%H:%M")
+        expiry_line = f"หมดอายุ {exp_s}"
     base = _base_asset(sized.symbol)
     notional_s = fmt_price(sized.notional.quantize(Decimal("0.01")))
     loss_s = fmt_price(sized.loss_at_stop.quantize(Decimal("0.01")))
@@ -101,8 +107,14 @@ def format_signal_message(
     margin_s = fmt_price(margin)
     if tick_size is not None and tick_size > 0:
         entry_s = _fmt_price_tick(sized.entry, tick_size)
-        stop_s = _fmt_price_tick(round_to_tick(sized.stop, tick_size), tick_size)
-        target_s = _fmt_price_tick(round_to_tick(sized.target, tick_size), tick_size)
+        stop_s = _fmt_price_tick(
+            round_level_to_tick(sized.stop, tick_size, side=side, kind="stop"),
+            tick_size,
+        )
+        target_s = _fmt_price_tick(
+            round_level_to_tick(sized.target, tick_size, side=side, kind="target"),
+            tick_size,
+        )
     else:
         entry_s = fmt_price(sized.entry)
         stop_s = fmt_price(sized.stop)
@@ -116,7 +128,7 @@ def format_signal_message(
         f"Leverage ที่ต้องใช้: {lev}x (isolated — บัญชีต้องเป็น Single-Asset ไม่ใช่ Multi-Assets)",
         f"margin ≈ {margin_s} USDT",
         f"ถ้าชน stop เสีย: {loss_s} USDT ({fmt_price(loss_pct)}%)",
-        f"หมดอายุ {exp_s}",
+        expiry_line,
         STOP_INSTRUCTION,
         TP_INSTRUCTION,
         "ตั้ง TP/SL ที่เดียว (ใน order หรือ Position TP/SL) — ตั้งทั้งสองที่จะได้ stop 2 ตัว",
