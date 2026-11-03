@@ -702,7 +702,7 @@ def run_assist_watch(
     closed = mark_watch_positions_closed(conn, open_keys=open_keys, now_ms=ts)
     orphan_cancelled: list[dict[str, str]] = []
     if closed and assist_execute_mode() == "live":
-        trade = build_trade_client()
+        trade, _auth_reason = build_trade_client()
         if trade is not None:
             for sym, _ps in closed:
                 try:

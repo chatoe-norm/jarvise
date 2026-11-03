@@ -8,6 +8,7 @@ from typing import Annotated
 
 import typer
 
+from jarvise_assist.execute import resolve_trade_auth as resolve_assist_trade_auth
 from jarvise_exchange.binance_spot import resolve_binance_auth
 from jarvise_exchange.eterna_spot import EternaReadApiBlocked
 from jarvise_exchange.permissions import audit_key_permissions, fetch_api_restrictions
@@ -118,11 +119,83 @@ def check_key(
         bool,
         typer.Option(
             "--trade",
-            help="Audit BINANCE_TRADE_* credentials instead of read-only BINANCE_API_*.",
+            help="Audit BINANCE_TRADE_* credentials for spot live (ok_for_trade).",
+        ),
+    ] = False,
+    assist_trade: Annotated[
+        bool,
+        typer.Option(
+            "--assist-trade",
+            help=(
+                "Audit assist one-tap trade key via jarvise_assist.execute.resolve_trade_auth "
+                "(futures on, withdrawals off, IP restricted)."
+            ),
         ),
     ] = False,
 ) -> None:
-    """Probe API key permissions (spot ok / withdraw forbidden). No orders."""
+    """Probe API key permissions. No orders."""
+    if trade and assist_trade:
+        typer.echo("Use only one of --trade or --assist-trade", err=True)
+        raise typer.Exit(2)
+
+    if assist_trade:
+        auth, reason = resolve_assist_trade_auth()
+        if auth is None:
+            payload = {
+                "ok": False,
+                "assist_trade_key": True,
+                "reason": reason or "no_key",
+                "paper_only": True,
+            }
+            if as_json:
+                typer.echo(json.dumps(payload))
+            else:
+                typer.echo(f"assist_trade ok=false reason={reason or 'no_key'}")
+            raise typer.Exit(2)
+        try:
+            raw = fetch_api_restrictions(auth)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"apiRestrictions failed: {exc}"
+            if as_json:
+                typer.echo(json.dumps({"ok": False, "error": msg, "assist_trade_key": True}))
+            else:
+                typer.echo(msg, err=True)
+            raise typer.Exit(1) from exc
+        enable_futures = bool(raw.get("enableFutures"))
+        enable_withdrawals = bool(raw.get("enableWithdrawals"))
+        ip_restrict = bool(raw.get("ipRestrict"))
+        reasons: list[str] = []
+        if not enable_futures:
+            reasons.append("enableFutures=false")
+        if enable_withdrawals:
+            reasons.append("enableWithdrawals=true")
+        if not ip_restrict:
+            reasons.append("ipRestrict=false")
+        ok = not reasons
+        payload = {
+            "ok": ok,
+            "assist_trade_key": True,
+            "enableFutures": enable_futures,
+            "enableWithdrawals": enable_withdrawals,
+            "ipRestrict": ip_restrict,
+            "block_reasons": reasons,
+            "paper_only": True,
+        }
+        if as_json:
+            typer.echo(json.dumps(payload))
+        else:
+            typer.echo(
+                f"key=assist_trade ok={str(ok).lower()} "
+                f"futures={str(enable_futures).lower()} "
+                f"withdraw={str(enable_withdrawals).lower()} "
+                f"ipRestrict={str(ip_restrict).lower()}"
+            )
+            if reasons:
+                typer.echo("block: " + ", ".join(reasons))
+        if not ok:
+            raise typer.Exit(3)
+        return
+
     try:
         auth = resolve_trade_auth() if trade else resolve_binance_auth()
     except (OSError, ValueError, TypeError) as exc:

@@ -84,6 +84,25 @@ Idempotency: every live order carries `newClientOrderId = jrv-<approval id>`. A 
 1. Engage the kill-switch on Ops and let flatten finish: `jarvise trade flatten --json` shows every symbol `sold`, `already_sold`, or dust.
 2. Only then set `JARVISE_LIVE_TRADING=false` and recreate `jobs web`. With the flag off, Jarvise makes **no** trade HTTP at all, including flatten.
 
+## Assist one-tap execute key
+
+Separate from the spot live section above. Spec: [`2026-11-02-assist-execute-design.md`](../superpowers/specs/2026-11-02-assist-execute-design.md) §8. Does **not** enable `JARVISE_LIVE_TRADING`.
+
+1. Create an Ed25519 PEM API key (for example "Jarvise-trade") on the account that will hold assist futures positions.
+2. Permissions: **Enable Futures** on; **Withdrawals**, Spot, and Margin **off**; **IP restrict** to the VPS egress.
+3. Store under `/opt/jarvise/secrets` (compose mounts `./secrets` → `/opt/jarvise/secrets`) with the same owner/mode as the read PEM. Point env at that path:
+   - `BINANCE_TRADE_API_KEY`
+   - `BINANCE_TRADE_PRIVATE_KEY_PATH`
+   Never reuse `BINANCE_API_*` (the read key) for writes.
+4. Verify (booleans only; never prints secrets):
+
+```bash
+docker compose exec jobs jarvise exchange check-key --assist-trade --json
+```
+
+Expect `ok: true`, `enableFutures: true`, `enableWithdrawals: false`, `ipRestrict: true`. Exit 3 = unsafe; exit 2 = missing/refused auth reason.
+5. Testnet: use a demo.binance.com futures key and set `JARVISE_ASSIST_EXECUTE=testnet` (owner only). Live assist execute uses `JARVISE_ASSIST_EXECUTE=live` after the same key audit.
+
 ## Current VPS status (2026-10-01)
 
 - Read-only key present (Ed25519 PEM); trade keys **not** set.

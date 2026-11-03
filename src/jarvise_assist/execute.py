@@ -35,9 +35,10 @@ from jarvise_assist.sizing import (
     analysis_is_fresh,
     assign_shared_leverage,
     below_min_notional,
+    cap_requote_qty,
     chase_exceeded,
-    next_assist_run_ms,
     passes_signal_floor,
+    round_level_to_tick,
     round_to_tick,
     size_signal,
 )
@@ -50,6 +51,7 @@ from jarvise_assist.store import (
     get_signal,
     insert_exec_intent,
     insert_exec_log,
+    latest_seen_idea,
     mark_signal_taken,
     now_ms,
     set_exec_intent_message_id,
@@ -77,12 +79,23 @@ MSG_ALREADY_CLOSED = "ไม้นี้ปิดไปแล้ว"
 MSG_KILL = "kill switch เปิดอยู่ — ไม่ส่งคำสั่ง"
 MSG_KEY_REFUSED = "คีย์เทรดไม่ปลอดภัย — ไม่ส่งคำสั่ง"
 MSG_NO_TRADE_KEY = "ยังไม่มีคีย์เทรด — ไม่ส่งคำสั่ง"
+MSG_TRADE_FILE_MISSING = "หาไฟล์คีย์เทรดไม่เจอ"
+MSG_TRADE_REUSES_READ = "คีย์เทรดซ้ำกับคีย์อ่าน — ไม่ส่งคำสั่ง"
+MSG_TRADE_PEM_FAILED = "โหลดคีย์เทรดไม่ได้"
 MSG_ONE_WAY = "บัญชีต้องเป็น one-way mode"
 MSG_MULTI_ASSETS = "บัญชีต้องปิด Multi-Assets (Single-Asset เท่านั้น)"
 MSG_CANCELLED = "ยกเลิกแล้ว"
 MSG_STOP_CLOSED = "วาง stop ไม่ได้ — ปิดไม้แล้วเพื่อความปลอดภัย"
 MSG_TP_KEEP = "เข้าแล้วและมี stop — วาง TP ไม่ได้ ตั้งเองได้"
 MSG_HANDLER_ERROR = "ทำคำสั่งไม่สำเร็จ — ลองใหม่หรือปิดเอง"
+
+_TRADE_AUTH_REASON_TH: dict[str, str] = {
+    "no_key": MSG_NO_TRADE_KEY,
+    "no_path": MSG_NO_TRADE_KEY,
+    "file_missing": MSG_TRADE_FILE_MISSING,
+    "reuses_read_key": MSG_TRADE_REUSES_READ,
+    "pem_load_failed": MSG_TRADE_PEM_FAILED,
+}
 
 SendFn = Callable[..., Any]
 EditFn = Callable[..., Any]
@@ -105,25 +118,41 @@ def execution_buttons_enabled(conn: Any) -> bool:
     return bool(ensure_settings(conn).get("enabled"))
 
 
-def resolve_trade_auth() -> BinanceAuth | None:
-    """Trade key only. Never falls back to the read-only assist key."""
+def trade_auth_reason_th(reason: str | None) -> str:
+    """Map typed resolve_trade_auth failure reasons to Thai owner copy."""
+    if reason is None:
+        return MSG_NO_TRADE_KEY
+    return _TRADE_AUTH_REASON_TH.get(reason, MSG_NO_TRADE_KEY)
+
+
+def resolve_trade_auth() -> tuple[BinanceAuth | None, str | None]:
+    """Trade key only. Never falls back to the read-only assist key.
+
+    Returns (auth, None) on success, or (None, reason) with one of:
+    no_key, no_path, file_missing, reuses_read_key, pem_load_failed.
+    """
     api_key = (os.environ.get("BINANCE_TRADE_API_KEY") or "").strip()
     if not api_key:
-        return None
+        return None, "no_key"
     key_path = (os.environ.get("BINANCE_TRADE_PRIVATE_KEY_PATH") or "").strip()
     if not key_path:
-        return None
+        return None, "no_path"
     read_key = (os.environ.get("BINANCE_API_KEY") or "").strip()
     read_path = (os.environ.get("BINANCE_API_PRIVATE_KEY_PATH") or "").strip()
     if (read_key and api_key == read_key) or (read_path and key_path == read_path):
         logger.error("trade key reuses the read-only BINANCE_API_* key; refusing to trade")
-        return None
+        return None, "reuses_read_key"
     path = Path(key_path)
     if not path.is_file():
-        raise FileNotFoundError(f"BINANCE_TRADE_PRIVATE_KEY_PATH not found: {key_path}")
+        logger.error("BINANCE_TRADE_PRIVATE_KEY_PATH file missing (path=%s)", "set")
+        return None, "file_missing"
     passphrase = os.environ.get("BINANCE_TRADE_PRIVATE_KEY_PASSPHRASE") or None
-    private_key = load_private_key_pem(path, passphrase=passphrase)
-    return BinanceAuth(api_key=api_key, private_key=private_key)
+    try:
+        private_key = load_private_key_pem(path, passphrase=passphrase)
+    except Exception:  # noqa: BLE001
+        logger.exception("BINANCE_TRADE_PRIVATE_KEY_PATH pem load failed (path=%s)", "set")
+        return None, "pem_load_failed"
+    return BinanceAuth(api_key=api_key, private_key=private_key), None
 
 
 def trade_base_url(mode: str | None = None) -> str:
@@ -507,14 +536,16 @@ def build_trade_client(
     http_client: httpx.Client | None = None,
     auth: BinanceAuth | None = None,
     base_url: str | None = None,
-) -> BinanceTradeClient | None:
-    try:
-        resolved = auth if auth is not None else resolve_trade_auth()
-    except FileNotFoundError:
-        return None
+) -> tuple[BinanceTradeClient | None, str | None]:
+    if auth is not None:
+        return BinanceTradeClient(auth, client=http_client, base_url=base_url or trade_base_url()), None
+    resolved, reason = resolve_trade_auth()
     if resolved is None:
-        return None
-    return BinanceTradeClient(resolved, client=http_client, base_url=base_url or trade_base_url())
+        return None, reason
+    return (
+        BinanceTradeClient(resolved, client=http_client, base_url=base_url or trade_base_url()),
+        None,
+    )
 
 
 def reset_trade_key_cache() -> None:
@@ -760,8 +791,13 @@ def _opening_side(trade_side: str) -> str:
     return "BUY" if trade_side == "long" else "SELL"
 
 
-def _preview_from_sized(sized: SizedSignal) -> dict[str, Any]:
-    return {
+def _preview_from_sized(
+    sized: SizedSignal,
+    *,
+    seen_entry: Decimal | None = None,
+    seen_stop: Decimal | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "qty": str(sized.qty),
         "stop": str(sized.stop),
         "target": str(sized.target),
@@ -772,6 +808,10 @@ def _preview_from_sized(sized: SizedSignal) -> dict[str, Any]:
         "analysis_id": sized.analysis_id,
         "step_size": str(sized.step_size) if sized.step_size is not None else None,
     }
+    if seen_entry is not None and seen_stop is not None:
+        out["seen_entry"] = str(seen_entry)
+        out["seen_stop"] = str(seen_stop)
+    return out
 
 
 def _apply_pct_levels(
@@ -844,6 +884,7 @@ def size_for_execution(
         )
     else:
         target_hint = None
+    stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
     risk_pct = Decimal(str(settings["risk_pct"]))
     sized = size_signal(
         symbol=symbol,
@@ -858,28 +899,23 @@ def size_for_execution(
     if sized is None:
         return None, "size_failed"
     if target_hint is not None:
-        sized = SizedSignal(
-            symbol=sized.symbol,
-            side=sized.side,
-            entry=sized.entry,
-            stop=sized.stop,
-            target=round_to_tick(target_hint, filters.tick_size),
-            qty=sized.qty,
-            notional=sized.notional,
-            leverage=sized.leverage,
-            loss_at_stop=sized.loss_at_stop,
-            risk_pct=sized.risk_pct,
-            r_distance=sized.r_distance,
-            leverage_capped=sized.leverage_capped,
-            uncapped_leverage=sized.uncapped_leverage,
-            analysis_id=sized.analysis_id,
-            step_size=sized.step_size,
-        )
+        rounded_target = round_level_to_tick(target_hint, filters.tick_size, side=side, kind="target")
     else:
-        sized = dc_replace(
+        rounded_target = round_level_to_tick(sized.target, filters.tick_size, side=side, kind="target")
+    sized = dc_replace(sized, stop=stop, target=rounded_target)
+    seen = latest_seen_idea(conn, symbol=symbol, side=side, now_ms=now_ms_value)
+    if seen is not None:
+        seen_entry = Decimal(str(seen["entry"]))
+        seen_stop = Decimal(str(seen["stop"]))
+        if chase_exceeded(side=side, entry=seen_entry, stop=seen_stop, mark=entry):
+            return None, "chase"
+        first_qty = Decimal(str(seen["qty"])) if seen.get("qty") is not None else None
+        first_loss = Decimal(str(seen["loss_at_stop"])) if seen.get("loss_at_stop") is not None else None
+        sized = cap_requote_qty(
             sized,
-            stop=round_to_tick(sized.stop, filters.tick_size),
-            target=round_to_tick(sized.target, filters.tick_size),
+            first_qty=first_qty,
+            first_loss=first_loss,
+            balance=balance,
         )
     if below_min_notional(
         qty=sized.qty,
@@ -942,9 +978,18 @@ def create_entry_preview(
         return {"ok": False, "reason": "off", "text": MSG_OFF}
     if _kill_blocks():
         return {"ok": False, "reason": "kill_switch", "text": MSG_KILL}
-    client = trade or build_trade_client()
+    auth_reason: str | None = None
+    client: BinanceTradeClient | None
+    if trade is not None:
+        client = trade
+    else:
+        client, auth_reason = build_trade_client()
     if client is None:
-        return {"ok": False, "reason": "no_trade_key", "text": MSG_NO_TRADE_KEY}
+        return {
+            "ok": False,
+            "reason": auth_reason or "no_key",
+            "text": trade_auth_reason_th(auth_reason),
+        }
     try:
         client.assert_trade_key_safe()
         client.assert_account_modes()
@@ -968,17 +1013,31 @@ def create_entry_preview(
     if sized is None:
         return {"ok": False, "reason": reason or "flat", "text": _reason_th(reason or "flat")}
     expires = ts + PREVIEW_TTL_MS
+    seen = latest_seen_idea(conn, symbol=symbol, side=side, now_ms=ts)
+    seen_entry = Decimal(str(seen["entry"])) if seen is not None else None
+    seen_stop = Decimal(str(seen["stop"])) if seen is not None else None
     intent_id = insert_exec_intent(
         conn,
         kind="entry",
         symbol=symbol,
         side=side,
-        preview=_preview_from_sized(sized),
+        preview=_preview_from_sized(sized, seen_entry=seen_entry, seen_stop=seen_stop),
         created_at_ms=ts,
         expires_at_ms=expires,
     )
     balance, _ = client.usdt_wallet_and_available()
-    text = format_signal_message(sized, expires_at_ms=next_assist_run_ms(ts), balance=balance)
+    tick_size: Decimal | None = None
+    try:
+        tick_size = client.symbol_filters(symbol).tick_size
+    except Exception:  # noqa: BLE001
+        tick_size = None
+    text = format_signal_message(
+        sized,
+        expires_at_ms=expires,
+        balance=balance,
+        tick_size=tick_size,
+        confirm_within_min=2,
+    )
     return {
         "ok": True,
         "intent_id": intent_id,
@@ -1022,6 +1081,11 @@ def _confirm_guards_entry(
     mark = trade.mark_price(symbol)
     if chase_exceeded(side=side, entry=entry, stop=stop, mark=mark):
         return "chase"
+    if "seen_entry" in preview and "seen_stop" in preview:
+        seen_entry = Decimal(str(preview["seen_entry"]))
+        seen_stop = Decimal(str(preview["seen_stop"]))
+        if chase_exceeded(side=side, entry=seen_entry, stop=seen_stop, mark=mark):
+            return "chase"
     balance, available = trade.usdt_wallet_and_available()
     filters = trade.symbol_filters(symbol)
     if below_min_notional(
@@ -1347,7 +1411,7 @@ def run_move_stop_sequence(
     if pos.side != side:
         return _reason_th("wrong_side")
     filters = trade.symbol_filters(symbol)
-    new_stop = round_to_tick(new_stop, filters.tick_size)
+    new_stop = round_level_to_tick(new_stop, filters.tick_size, side=side, kind="stop")
     mark = trade.mark_price(symbol)
     if side == "long" and mark <= new_stop:
         return MSG_MARK_PASSED
@@ -1698,12 +1762,17 @@ def handle_exec_callback(
             return {"ok": False, "reason": "race"}
 
         answer()
-        client = trade or build_trade_client()
+        auth_reason: str | None = None
+        client: BinanceTradeClient | None
+        if trade is not None:
+            client = trade
+        else:
+            client, auth_reason = build_trade_client()
         if client is None:
-            text = MSG_NO_TRADE_KEY
+            text = trade_auth_reason_th(auth_reason)
             finish_exec_intent(conn, intent_id, status="failed", result_text=text)
             send(text)
-            return {"ok": False, "reason": "no_trade_key"}
+            return {"ok": False, "reason": auth_reason or "no_key"}
         try:
             client.assert_trade_key_safe()
             if prefix == "ey:":
