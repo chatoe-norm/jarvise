@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any
@@ -9,6 +10,35 @@ from typing import Any
 from jarvise_assist.sizing import SAME_IDEA_MS, SizedSignal
 
 _UNSET: object = object()
+
+
+RISK_MAX_PCT = 3.0
+
+
+def clamp_stored_risk_pct(
+    conn: Any,
+    *,
+    send: Any | None = None,
+    reply_keyboard_fn: Any | None = None,
+) -> float:
+    """If stored risk_pct > 3, write 3 and notify once. Returns the effective pct."""
+    settings = ensure_settings(conn)
+    pct = float(settings["risk_pct"])
+    if pct <= RISK_MAX_PCT:
+        return pct
+    write_settings(conn, risk_pct=RISK_MAX_PCT)
+    if send is not None:
+        markup = None
+        if reply_keyboard_fn is not None:
+            markup = reply_keyboard_fn(RISK_MAX_PCT)
+        try:
+            send(
+                "ความเสี่ยงที่บันทึกไว้เกิน 3% — ปรับเป็น 3% แล้ว",
+                reply_markup=markup,
+            )
+        except TypeError:
+            send("ความเสี่ยงที่บันทึกไว้เกิน 3% — ปรับเป็น 3% แล้ว")
+    return RISK_MAX_PCT
 
 
 def ensure_settings(conn: Any) -> dict[str, Any]:
@@ -279,7 +309,8 @@ def latest_seen_idea(
     """Newest sent/taken/skipped row for symbol+side within within_ms, or None."""
     cur = conn.execute(
         """
-        SELECT id, symbol, side, entry, stop, target, created_at_ms, sent_at_ms, status
+        SELECT id, symbol, side, entry, stop, target, qty, loss_at_stop,
+               created_at_ms, sent_at_ms, status
         FROM assist_signal
         WHERE symbol=? AND side=? AND status IN ('sent', 'taken', 'skipped')
           AND created_at_ms >= ?
@@ -622,6 +653,24 @@ def get_watch_position(conn: Any, symbol: str, position_side: str) -> dict[str, 
     return dict(row) if row is not None else None
 
 
+def reset_watch_position(conn: Any, symbol: str, position_side: str) -> None:
+    """Forget a finished position so a new one on the same key starts clean.
+
+    Drops its held advice too; sent advice stays as history and is ignored by
+    ``advice_already_sent(since_ms=entry_time)`` for the new position.
+    """
+    key = (symbol.upper(), position_side.upper())
+    conn.execute("DELETE FROM assist_watch_position WHERE symbol=? AND position_side=?", key)
+    conn.execute(
+        """
+        UPDATE assist_watch_advice SET status='dropped'
+        WHERE symbol=? AND position_side=? AND status='held'
+        """,
+        key,
+    )
+    conn.commit()
+
+
 def set_watch_no_stop_latched(conn: Any, symbol: str, position_side: str, *, latched: bool) -> None:
     conn.execute(
         """
@@ -641,6 +690,24 @@ def set_watch_no_stop_latched(conn: Any, symbol: str, position_side: str, *, lat
             (symbol.upper(), position_side.upper()),
         )
     conn.commit()
+
+
+def latest_no_stop_reason(conn: Any, symbol: str, position_side: str) -> str | None:
+    """Most recent sent/held no-stop reason for this position, or None."""
+    row = conn.execute(
+        """
+        SELECT reason FROM assist_watch_advice
+        WHERE symbol=? AND position_side=? AND kind='no_stop'
+          AND status IN ('sent', 'held')
+        ORDER BY created_at_ms DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), position_side.upper()),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row["reason"] if hasattr(row, "keys") else row[0]
+    return str(raw) if raw is not None else None
 
 
 def mark_watch_positions_closed(
@@ -678,12 +745,18 @@ def advice_already_sent(
     kind: str,
     reason: str | None = None,
     level: float | None = None,
+    since_ms: int | None = None,
 ) -> bool:
     sql = """
         SELECT 1 FROM assist_watch_advice
         WHERE symbol=? AND position_side=? AND kind=? AND status IN ('sent', 'held')
     """
     params: list[Any] = [symbol.upper(), position_side.upper(), kind]
+    if since_ms is not None:
+        # Only advice for the current position counts; an earlier trade on the
+        # same symbol must not silence it.
+        sql += " AND created_at_ms >= ?"
+        params.append(int(since_ms))
     if reason is not None:
         sql += " AND reason=?"
         params.append(reason)
@@ -868,3 +941,165 @@ def delete_explore_symbol(conn: Any, symbol: str) -> bool:
     cur = conn.execute("DELETE FROM assist_explore_symbols WHERE symbol=?", (symbol,))
     conn.commit()
     return cur.rowcount > 0
+
+
+def insert_exec_intent(
+    conn: Any,
+    *,
+    kind: str,
+    symbol: str,
+    side: str,
+    preview: dict[str, Any],
+    created_at_ms: int,
+    expires_at_ms: int,
+    telegram_message_id: int | None = None,
+) -> str:
+    intent_id = f"aei_{uuid.uuid4().hex[:16]}"
+    conn.execute(
+        """
+        INSERT INTO assist_exec_intent (
+            id, kind, symbol, side, preview_json, created_at_ms, expires_at_ms,
+            status, result_text, telegram_message_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'preview', NULL, ?)
+        """,
+        (
+            intent_id,
+            kind,
+            symbol.upper(),
+            side.lower(),
+            json.dumps(preview, separators=(",", ":"), default=str),
+            int(created_at_ms),
+            int(expires_at_ms),
+            telegram_message_id,
+        ),
+    )
+    conn.commit()
+    return intent_id
+
+
+def get_exec_intent(conn: Any, intent_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, kind, symbol, side, preview_json, created_at_ms, expires_at_ms,
+               status, result_text, telegram_message_id
+        FROM assist_exec_intent WHERE id=?
+        """,
+        (intent_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    data = (
+        dict(row)
+        if hasattr(row, "keys")
+        else {
+            "id": row[0],
+            "kind": row[1],
+            "symbol": row[2],
+            "side": row[3],
+            "preview_json": row[4],
+            "created_at_ms": row[5],
+            "expires_at_ms": row[6],
+            "status": row[7],
+            "result_text": row[8],
+            "telegram_message_id": row[9],
+        }
+    )
+    raw = data.get("preview_json")
+    try:
+        data["preview"] = json.loads(str(raw or "{}"))
+    except Exception:  # noqa: BLE001
+        data["preview"] = {}
+    return data
+
+
+def claim_exec_intent(conn: Any, intent_id: str) -> bool:
+    """Atomic preview → confirmed. True only for the caller that won the race."""
+    cur = conn.execute(
+        """
+        UPDATE assist_exec_intent SET status='confirmed'
+        WHERE id=? AND status='preview'
+        """,
+        (intent_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def finish_exec_intent(
+    conn: Any,
+    intent_id: str,
+    *,
+    status: str,
+    result_text: str,
+    telegram_message_id: int | None = None,
+) -> None:
+    if telegram_message_id is not None:
+        conn.execute(
+            """
+            UPDATE assist_exec_intent
+            SET status=?, result_text=?, telegram_message_id=?
+            WHERE id=?
+            """,
+            (status, result_text, int(telegram_message_id), intent_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE assist_exec_intent SET status=?, result_text=? WHERE id=?
+            """,
+            (status, result_text, intent_id),
+        )
+    conn.commit()
+
+
+def set_exec_intent_message_id(conn: Any, intent_id: str, message_id: int) -> None:
+    conn.execute(
+        "UPDATE assist_exec_intent SET telegram_message_id=? WHERE id=?",
+        (int(message_id), intent_id),
+    )
+    conn.commit()
+
+
+def cancel_exec_intent(conn: Any, intent_id: str) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE assist_exec_intent SET status='cancelled'
+        WHERE id=? AND status='preview'
+        """,
+        (intent_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def insert_exec_log(
+    conn: Any,
+    *,
+    intent_id: str,
+    step: str,
+    endpoint: str,
+    client_order_id: str | None = None,
+    http_status: int | None = None,
+    binance_code: int | None = None,
+    order_or_algo_id: str | None = None,
+    created_at_ms: int | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO assist_exec_log (
+            intent_id, step, endpoint, client_order_id, http_status,
+            binance_code, order_or_algo_id, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            intent_id,
+            step,
+            endpoint,
+            client_order_id,
+            http_status,
+            binance_code,
+            order_or_algo_id,
+            int(created_at_ms if created_at_ms is not None else now_ms()),
+        ),
+    )
+    conn.commit()

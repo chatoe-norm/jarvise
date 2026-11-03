@@ -147,26 +147,66 @@ def test_skip_callback_sets_skipped_and_edits(tmp_path: Path, monkeypatch: Any) 
     conn.close()
 
 
-def test_risk_menu_confirms_above_5_and_rejects_out_of_range(tmp_path: Path) -> None:
+def test_risk_menu_confirms_above_2_and_rejects_out_of_range(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "risk.db")
     sent, send = _send_capture()
     out = handle_risk_callback(conn, "risk:other", send=send)
     assert out["awaiting"] == "number"
     assert ensure_settings(conn)["awaiting_risk"] == "number"
 
-    bad = handle_risk_number(conn, "20", send=send)
+    bad = handle_risk_number(conn, "7.5", send=send)
     assert bad["rejected"] is True
     assert ensure_settings(conn)["risk_pct"] == 1.0
+    assert "0.5–3" in sent[-1]["text"]
 
     write_settings(conn, awaiting_risk="number")
-    conf = handle_risk_number(conn, "7.5", send=send)
-    assert conf.get("confirm") is True
-    assert "ยืนยัน 7.5%?" in sent[-1]["text"]
-    assert ensure_settings(conn)["pending_risk_pct"] == 7.5
+    apply = handle_risk_number(conn, "2", send=send)
+    assert apply.get("risk_pct") == 2.0
+    assert ensure_settings(conn)["risk_pct"] == 2.0
 
-    yes = handle_risk_callback(conn, "risk_yes:7.5", send=send)
-    assert yes["risk_pct"] == 7.5
-    assert ensure_settings(conn)["risk_pct"] == 7.5
+    write_settings(conn, awaiting_risk="number")
+    conf = handle_risk_number(conn, "2.5", send=send)
+    assert conf.get("confirm") is True
+    assert "ยืนยัน 2.5%?" in sent[-1]["text"]
+    assert ensure_settings(conn)["pending_risk_pct"] == 2.5
+
+    yes = handle_risk_callback(conn, "risk_yes:2.5", send=send)
+    assert yes["risk_pct"] == 2.5
+    assert ensure_settings(conn)["risk_pct"] == 2.5
+
+    refused = handle_risk_callback(conn, "risk_yes:7.5", send=send)
+    assert refused.get("rejected") is True
+    assert ensure_settings(conn)["risk_pct"] == 2.5
+    conn.close()
+
+
+def test_risk_buttons_include_usdt_and_clamp_stored(tmp_path: Path) -> None:
+    from jarvise_assist.keyboard import risk_choice_keyboard
+    from jarvise_assist.store import clamp_stored_risk_pct
+
+    kb = risk_choice_keyboard(balance=Decimal("100"))
+    labels = [b["text"] for row in kb["inline_keyboard"] for b in row]
+    assert "2% · 2.00 USDT" in labels
+    assert "0.5% · 0.50 USDT" in labels
+    assert "5%" not in labels
+
+    kb_pct = risk_choice_keyboard(balance=None)
+    labels_pct = [b["text"] for row in kb_pct["inline_keyboard"] for b in row]
+    assert "2%" in labels_pct
+
+    conn = open_db(tmp_path / "clamp.db")
+    write_settings(conn, risk_pct=5.0)
+    sent, send = _send_capture()
+    from jarvise_assist.keyboard import reply_keyboard
+
+    out = clamp_stored_risk_pct(conn, send=send, reply_keyboard_fn=reply_keyboard)
+    assert out == 3.0
+    assert ensure_settings(conn)["risk_pct"] == 3.0
+    assert "ปรับเป็น 3%" in sent[-1]["text"]
+    n = len(sent)
+    again = clamp_stored_risk_pct(conn, send=send, reply_keyboard_fn=reply_keyboard)
+    assert again == 3.0
+    assert len(sent) == n
     conn.close()
 
 
@@ -309,24 +349,74 @@ def test_weekly_summary_includes_funding(tmp_path: Path) -> None:
     ]
     real = summarize_income(income)
     assert real["universe_usdt"] == -12.0
+    assert real["realized_pnl"] == -10.0
+    assert real["funding"] == -1.5
+    assert real["commission"] == -0.5
     assert real["other_usdt"] == 3.0
     assert real["realized_n"] == 2
     fake = FakeFutures(balance=Decimal("1000"), income=income)
     sent, send = _send_capture()
     payload = run_assist_weekly(conn, futures=fake, now_ms_value=day, send=send)
-    assert "FUNDING" not in payload["text"]  # Thai summary; funding folded into USDT
+    assert "จักรวาล" not in payload["text"]
+    assert "กำไรปิด (REALIZED_PNL)" in payload["text"]
+    assert "funding" in payload["text"]
+    assert "ค่าธรรมเนียม (COMMISSION)" in payload["text"]
+    assert "สุทธิ" in payload["text"]
+    assert "เหรียญนอกรายการ" in payload["text"]
     assert "-12.00" in payload["text"] or "-12" in payload["text"]
-    assert "REALIZED_PNL" in payload["text"] or "2 แถว" in payload["text"]
     # Sample line shape for the report.
     sample = format_weekly_summary(
         counts={"sent": 1, "skipped": 1, "taken": 0},
-        virtual={"n": 1, "win_rate": 0.0, "total_r": -1.0, "mean_r": -1.0, "total_usdt": -20.0},
+        virtual={
+            "n": 3,
+            "win_rate": 0.0,
+            "total_r": -1.0,
+            "mean_r": -1.0,
+            "total_usdt": -20.0,
+            "exit_stop_original": 1,
+            "exit_stop_trailed": 0,
+            "exit_target_2r": 1,
+            "exit_analysis": 1,
+        },
         real=real,
         closed_all=1,
     )
-    assert "ยังไม่พิสูจน์ edge" in sample
+    assert "ยังไม่พิสูจน์ edge — ตัวอย่าง 1 ไม้" in sample
+    assert "ปิดที่ stop เดิม 1 · stop ที่เลื่อนแล้ว 0 · ถึง 2R 1 · ปิดตามสัญญาณ 1" in sample
     assert "-1.00R" in sample or "-1.0R" in sample
     conn.close()
+
+
+def test_weekly_stop_split_original_vs_trailed() -> None:
+    from jarvise_assist.weekly import format_weekly_summary, summarize_virtual
+
+    rows = [
+        {"exit_reason": "stop", "gross_r": -1.0, "net_r": -1.04, "pnl_usdt": -10.0},
+        {"exit_reason": "stop", "gross_r": -1.0, "net_r": -1.03, "pnl_usdt": -10.0},
+        {"exit_reason": "stop", "gross_r": 0.586, "net_r": 0.507, "pnl_usdt": 5.0},
+        {"exit_reason": "stop", "gross_r": 0.079, "net_r": 0.058, "pnl_usdt": 0.5},
+        {"exit_reason": "stop", "gross_r": 0.135, "net_r": 0.081, "pnl_usdt": 0.8},
+        {"exit_reason": "stop", "gross_r": 0.051, "net_r": 0.031, "pnl_usdt": 0.3},
+    ]
+    virtual = summarize_virtual(rows)
+    assert virtual["exit_stop_original"] == 2
+    assert virtual["exit_stop_trailed"] == 4
+    assert abs(virtual["win_rate"] - (4 / 6)) < 1e-9
+    text = format_weekly_summary(
+        counts={"sent": 6, "skipped": 0, "taken": 0},
+        virtual=virtual,
+        real={
+            "realized_pnl": 0.0,
+            "funding": 0.0,
+            "commission": 0.0,
+            "universe_usdt": 0.0,
+            "other_usdt": 0.0,
+        },
+        closed_all=6,
+    )
+    assert "ชนะ 67%" in text
+    assert "ปิดที่ stop เดิม 2 · stop ที่เลื่อนแล้ว 4 · ถึง 2R 0 · ปิดตามสัญญาณ 0" in text
+    assert "ยังไม่พิสูจน์ edge — ตัวอย่าง 6 ไม้" in text
 
 
 def _three_losses(now_ms: int) -> list[dict[str, Any]]:
@@ -512,6 +602,7 @@ def test_open_positions_menu_sample(tmp_path: Path) -> None:
         entry_price=Decimal("100"),
         mark_price=Decimal("105"),
         update_time_ms=day,
+        liquidation_price=Decimal("80"),
     )
     other = FuturesPosition(
         symbol="PEPEUSDT",
@@ -531,14 +622,95 @@ def test_open_positions_menu_sample(tmp_path: Path) -> None:
                 "stopPrice": "92",
                 "reduceOnly": True,
                 "positionSide": "BOTH",
-            }
+                "workingType": "MARK_PRICE",
+            },
+            {
+                "symbol": "BTCUSDT",
+                "type": "TAKE_PROFIT_MARKET",
+                "side": "SELL",
+                "stopPrice": "120",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+                "workingType": "MARK_PRICE",
+            },
         ],
     )
     text = render_open_positions(conn, futures=fake, now_ms=day)
     assert "📋 ไม้ที่ถืออยู่" in text
     assert "BTCUSDT LONG" in text
+    assert "ยังไม่ปิด:" in text and "USDT · ≈" in text
+    assert "stop ที่ตั้งไว้ 92 · trigger Mark" in text
+    assert "ถ้าโดน stop: ล็อก ≈" in text
+    assert "TP 120 · trigger Mark" in text
+    assert "liquidation 80" in text
     assert "PEPEUSDT · no data, no advice" in text
     assert risk_button_label(2.0).startswith("⚙️")
+    conn.close()
+
+
+def test_open_positions_lock_r_vs_unrealized_and_trigger_mismatch(tmp_path: Path) -> None:
+    from jarvise_assist.futures import FuturesPosition
+    from jarvise_assist.store import upsert_watch_position
+
+    conn = open_db(tmp_path / "ada_pos.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    # ADA SHORT: entry 0.2025, freeze stop 0.212078, mark 0.1909, protective 0.1971
+    # R distance from freeze ≈ 0.009578; unrealized ≈ +1.21R; lock at 0.1971 ≈ +0.56R
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "ADAUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.2025,
+            "qty": 1000.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.212078,
+            "initial_stop_source": "freeze",
+            "entry_time_ms": day,
+            "no_stop_latched": 0,
+            "last_seen_ms": day,
+            "closed_at_ms": None,
+        },
+    )
+    pos = FuturesPosition(
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-1000"),
+        entry_price=Decimal("0.2025"),
+        mark_price=Decimal("0.1909"),
+        update_time_ms=day,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[
+            {
+                "symbol": "ADAUSDT",
+                "type": "STOP_MARKET",
+                "side": "BUY",
+                "stopPrice": "0.1971",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+                "workingType": "CONTRACT_PRICE",
+            },
+            {
+                "symbol": "ADAUSDT",
+                "type": "TAKE_PROFIT_MARKET",
+                "side": "BUY",
+                "stopPrice": "0.1833",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+                "workingType": "MARK_PRICE",
+            },
+        ],
+    )
+    text = render_open_positions(conn, futures=fake, now_ms=day)
+    assert "ADAUSDT SHORT" in text
+    assert "ยังไม่ปิด: +11.60 USDT · ≈ +1.2R" in text
+    assert "stop ที่ตั้งไว้ 0.1971 · trigger Last" in text
+    assert "ล็อก ≈ +0.56R" in text
+    assert "⚠️ stop กับ TP คนละ trigger (Last / Mark)" in text
     conn.close()
 
 

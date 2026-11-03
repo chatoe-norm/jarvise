@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 BTN_POSITIONS = "📋 ไม้ที่ถืออยู่"
@@ -11,6 +12,8 @@ BTN_RISK_PREFIX = "⚙️ ตั้งความเสี่ยงต่อไ
 BTN_TOGGLE = "⏸ หยุด / ▶️ เปิด ผู้ช่วย"
 BTN_EXPLORE = "🧪 เหรียญทดลอง"
 EXPLORE_RM_PREFIX = "explore:rm:"
+
+RISK_CHOICE_PCTS: tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
 
 
 def risk_button_label(risk_pct: float) -> str:
@@ -39,19 +42,66 @@ def explore_remove_keyboard(symbols: list[str]) -> dict[str, Any]:
     }
 
 
-def skip_inline_keyboard(signal_id: str) -> dict[str, Any]:
+def skip_inline_keyboard(signal_id: str, *, entry: bool = False) -> dict[str, Any]:
     # callback_data is the assist_signal.id (Telegram limit 64 bytes; our ids fit).
-    return {"inline_keyboard": [[{"text": "⏭ ข้าม", "callback_data": signal_id}]]}
+    row: list[dict[str, str]] = [{"text": "⏭ ข้าม", "callback_data": signal_id}]
+    if entry:
+        row.insert(0, {"text": "เข้าไม้", "callback_data": f"ec:{signal_id}"})
+    return {"inline_keyboard": [row]}
 
 
-def risk_choice_keyboard() -> dict[str, Any]:
+def coin_entry_keyboard(symbol: str, side: str) -> dict[str, Any]:
+    side_code = "l" if side.lower() == "long" else "s"
+    label = f"{symbol.upper()} {'LONG' if side_code == 'l' else 'SHORT'}"
+    return {"inline_keyboard": [[{"text": label, "callback_data": f"ec:{symbol.upper()}:{side_code}"}]]}
+
+
+def anything_now_keyboard(ideas: list[tuple[str, str]]) -> dict[str, Any]:
+    """One button per admitted (symbol, side)."""
+    rows = []
+    for symbol, side in ideas:
+        side_code = "l" if side.lower() == "long" else "s"
+        label = f"{symbol.upper()} {'LONG' if side_code == 'l' else 'SHORT'}"
+        rows.append([{"text": label, "callback_data": f"ec:{symbol.upper()}:{side_code}"}])
+    return {"inline_keyboard": rows}
+
+
+def entry_confirm_keyboard(intent_id: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "1%", "callback_data": "risk:1"},
-                {"text": "2%", "callback_data": "risk:2"},
-                {"text": "3%", "callback_data": "risk:3"},
-                {"text": "5%", "callback_data": "risk:5"},
+                {"text": "✅ ยืนยันเข้าไม้", "callback_data": f"ey:{intent_id}"},
+                {"text": "✖️ ยกเลิก", "callback_data": f"en:{intent_id}"},
+            ]
+        ]
+    }
+
+
+def move_stop_keyboard(intent_id: str) -> dict[str, Any]:
+    return {"inline_keyboard": [[{"text": "✅ เลื่อนให้", "callback_data": f"ms:{intent_id}"}]]}
+
+
+def exit_confirm_keyboard(intent_id: str) -> dict[str, Any]:
+    return {"inline_keyboard": [[{"text": "✅ ปิดไม้", "callback_data": f"xx:{intent_id}"}]]}
+
+
+def _risk_choice_label(pct: float, balance: Decimal | None) -> str:
+    pct_s = f"{pct:g}"
+    if balance is None or balance <= 0:
+        return f"{pct_s}%"
+    usdt = (balance * Decimal(str(pct)) / Decimal("100")).quantize(Decimal("0.01"))
+    return f"{pct_s}% · {usdt} USDT"
+
+
+def risk_choice_keyboard(*, balance: Decimal | None = None) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": _risk_choice_label(pct, balance),
+                    "callback_data": f"risk:{pct:g}",
+                }
+                for pct in RISK_CHOICE_PCTS
             ],
             [{"text": "อื่นๆ", "callback_data": "risk:other"}],
         ]

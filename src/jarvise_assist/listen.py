@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from jarvise_assist.execute import handle_exec_callback
 from jarvise_assist.explore import remove_explore_symbol, submit_explore_symbol
 from jarvise_assist.futures import build_futures_client, public_exchange_symbol
 from jarvise_assist.keyboard import EXPLORE_RM_PREFIX, reply_keyboard
@@ -97,6 +98,21 @@ def process_update(
             result = remove_explore_symbol(conn, data.removeprefix(EXPLORE_RM_PREFIX))
             send_fn(result["text"], reply_markup=result.get("reply_markup"))
             return result
+        if data.startswith(("ec:", "ey:", "en:", "ms:", "xx:")):
+
+            def _answer(text: str | None = None) -> None:
+                answer_fn(cq_id, text=text)
+
+            return handle_exec_callback(
+                conn,
+                data,
+                send=send_fn,
+                answer=_answer,
+                edit=edit_fn,
+                read_futures=futures if futures is not None else build_futures_client(),
+                now_ms_value=ts,
+                message=msg if isinstance(msg, dict) else {},
+            )
         row = get_signal(conn, data) if data else None
         if row is not None:
             signal_id = data

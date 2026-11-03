@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
 from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_assist import ASSIST_SYMBOLS, ASSIST_TIMEFRAME
+from jarvise_assist.execute import (
+    PREVIEW_TTL_MS,
+    assist_execute_mode,
+    build_trade_client,
+    cancel_jv_orders_for_symbol,
+)
 from jarvise_assist.futures import (
     BinanceFuturesClient,
     FuturesKeyUnsafeError,
@@ -15,11 +22,15 @@ from jarvise_assist.futures import (
     FuturesPosition,
     build_futures_client,
     find_protective_stop,
+    protective_stop_coverage,
+    protective_stop_covered_qty,
 )
+from jarvise_assist.keyboard import exit_confirm_keyboard, move_stop_keyboard
 from jarvise_assist.messages import (
     format_exit_advice,
     format_move_stop_advice,
     format_no_stop_warning,
+    format_partial_stop_warning,
 )
 from jarvise_assist.pause import evaluate_pause, maybe_auto_resume
 from jarvise_assist.signals import (
@@ -36,19 +47,24 @@ from jarvise_assist.store import (
     ensure_settings,
     find_linkable_signal,
     get_watch_position,
+    insert_exec_intent,
     insert_watch_advice,
+    latest_no_stop_reason,
     list_held_watch_advice,
     mark_signal_taken,
     mark_watch_advice_dropped,
     mark_watch_advice_sent,
     mark_watch_positions_closed,
     now_ms,
+    reset_watch_position,
     set_watch_no_stop_latched,
     upsert_watch_position,
 )
 from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
 from jarvise_notify.telegram import send_telegram_message
 from jarvise_paper.profit_lock import trail_stop_with_source
+
+logger = logging.getLogger(__name__)
 
 FOUR_H_MS = 4 * 3_600_000
 ONE_H_MS = 3_600_000
@@ -121,6 +137,8 @@ def _emit_advice(
     now_ms: int,
     send: SendFn,
     hold_ok: bool,
+    since_ms: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
 ) -> str:
     """Send or hold; return status sent/held/skipped."""
     if advice_already_sent(
@@ -130,6 +148,7 @@ def _emit_advice(
         kind=kind,
         reason=reason,
         level=level,
+        since_ms=since_ms,
     ):
         return "skipped"
     if night and hold_ok:
@@ -145,7 +164,11 @@ def _emit_advice(
             created_at_ms=now_ms,
         )
         return "held"
-    if send(text):
+    try:
+        sent_ok = bool(send(text, reply_markup=reply_markup) if reply_markup is not None else send(text))
+    except TypeError:
+        sent_ok = bool(send(text))
+    if sent_ok:
         insert_watch_advice(
             conn,
             symbol=symbol,
@@ -177,6 +200,17 @@ def _emit_advice(
     return "failed"
 
 
+def _entry_shifted(existing: dict[str, Any], pos: FuturesPosition) -> bool:
+    """True when Binance entryPrice moved more than 0.05% (add or reopen)."""
+    raw = existing.get("entry")
+    if raw is None:
+        return False
+    stored = Decimal(str(raw))
+    if stored <= 0:
+        return False
+    return abs(pos.entry_price - stored) / stored > Decimal("0.0005")
+
+
 def _ensure_watch_row(
     conn: Any,
     pos: FuturesPosition,
@@ -185,6 +219,16 @@ def _ensure_watch_row(
     in_universe: bool,
 ) -> dict[str, Any]:
     existing = get_watch_position(conn, pos.symbol, pos.position_side)
+    if existing is not None and (
+        existing.get("closed_at_ms") is not None
+        or str(existing.get("side") or "") != pos.side
+        or (existing.get("closed_at_ms") is None and _entry_shifted(existing, pos))
+    ):
+        # A new trade on the same symbol: never reuse the old stop, entry time,
+        # signal link or no-stop latch. Entry shift >0.05% is add/reopen
+        # (partial closes keep Binance entryPrice).
+        reset_watch_position(conn, pos.symbol, pos.position_side)
+        existing = None
     entry_time = pos.update_time_ms
     if entry_time is None:
         entry_time = int(existing["entry_time_ms"]) if existing and existing.get("entry_time_ms") else now_ms
@@ -310,22 +354,58 @@ def _process_universe_position(
         actions.append({"symbol": pos.symbol, "action": "no_initial_stop"})
         return
     stop_dec = Decimal(str(initial_stop))
+    since = int(stored["entry_time_ms"]) if stored.get("entry_time_ms") else None
+    try:
+        step = client.step_size(pos.symbol)
+    except Exception:  # noqa: BLE001
+        step = Decimal("0")
+    coverage = protective_stop_coverage(
+        orders,
+        symbol=pos.symbol,
+        position_side=pos.position_side,
+        trade_side=pos.side,
+        position_qty=pos.qty,
+        step_size=step,
+    )
     protective = find_protective_stop(
         orders,
         symbol=pos.symbol,
         position_side=pos.position_side,
         trade_side=pos.side,
     )
-    if protective is None:
+    if coverage in {"none", "partial"}:
+        no_stop_reason = "partial" if coverage == "partial" else "missing"
+        # One latch bit for both reasons: clear when coverage flips so the
+        # other warning can fire once (partial → missing or the reverse).
+        if stored.get("no_stop_latched"):
+            prior = latest_no_stop_reason(conn, pos.symbol, pos.position_side)
+            if prior is not None and prior != no_stop_reason:
+                set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=False)
+                stored["no_stop_latched"] = 0
         if not stored.get("no_stop_latched"):
-            text = format_no_stop_warning(symbol=pos.symbol, side=pos.side, stop=stop_dec)
+            if coverage == "partial":
+                covered = protective_stop_covered_qty(
+                    orders,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    trade_side=pos.side,
+                )
+                text = format_partial_stop_warning(
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    covered=covered,
+                    position_qty=pos.qty,
+                    stop=stop_dec,
+                )
+            else:
+                text = format_no_stop_warning(symbol=pos.symbol, side=pos.side, stop=stop_dec)
             # Never hold no-stop overnight.
             status = _emit_advice(
                 conn,
                 symbol=pos.symbol,
                 position_side=pos.position_side,
                 kind="no_stop",
-                reason="missing",
+                reason=no_stop_reason,
                 level=float(stop_dec),
                 approx_r=None,
                 text=text,
@@ -333,10 +413,18 @@ def _process_universe_position(
                 now_ms=now_ms,
                 send=send,
                 hold_ok=False,
+                since_ms=since,
             )
             if status == "sent":
                 set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=True)
-            actions.append({"symbol": pos.symbol, "action": "no_stop", "status": status})
+            actions.append(
+                {
+                    "symbol": pos.symbol,
+                    "action": "no_stop",
+                    "status": status,
+                    "reason": no_stop_reason,
+                }
+            )
     elif stored.get("no_stop_latched"):
         set_watch_no_stop_latched(conn, pos.symbol, pos.position_side, latched=False)
 
@@ -362,6 +450,31 @@ def _process_universe_position(
         tighter = suggested_d > compare_stop if pos.side == "long" else suggested_d < compare_stop
         if tighter:
             text = format_move_stop_advice(symbol=pos.symbol, side=pos.side, stop=suggested_d)
+            move_markup = None
+            # Buttons/intents only in live daytime sends that will not dedupe-skip.
+            if (
+                assist_execute_mode() == "live"
+                and not night
+                and not advice_already_sent(
+                    conn,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    kind="move_stop",
+                    reason=_source,
+                    level=float(suggested_d),
+                    since_ms=since,
+                )
+            ):
+                intent_id = insert_exec_intent(
+                    conn,
+                    kind="move_stop",
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    preview={"stop": str(suggested_d), "qty": str(pos.qty)},
+                    created_at_ms=now_ms,
+                    expires_at_ms=now_ms + PREVIEW_TTL_MS,
+                )
+                move_markup = move_stop_keyboard(intent_id)
             status = _emit_advice(
                 conn,
                 symbol=pos.symbol,
@@ -375,6 +488,8 @@ def _process_universe_position(
                 now_ms=now_ms,
                 send=send,
                 hold_ok=True,
+                since_ms=since,
+                reply_markup=move_markup,
             )
             actions.append(
                 {
@@ -397,6 +512,30 @@ def _process_universe_position(
     if reason is not None:
         r_mult = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
         text = format_exit_advice(symbol=pos.symbol, side=pos.side, reason=reason, approx_r=r_mult)
+        exit_markup = None
+        if (
+            assist_execute_mode() == "live"
+            and not night
+            and not advice_already_sent(
+                conn,
+                symbol=pos.symbol,
+                position_side=pos.position_side,
+                kind="exit",
+                reason=reason,
+                level=None,
+                since_ms=since,
+            )
+        ):
+            intent_id = insert_exec_intent(
+                conn,
+                kind="exit",
+                symbol=pos.symbol,
+                side=pos.side,
+                preview={"qty": str(pos.qty)},
+                created_at_ms=now_ms,
+                expires_at_ms=now_ms + PREVIEW_TTL_MS,
+            )
+            exit_markup = exit_confirm_keyboard(intent_id)
         status = _emit_advice(
             conn,
             symbol=pos.symbol,
@@ -410,6 +549,8 @@ def _process_universe_position(
             now_ms=now_ms,
             send=send,
             hold_ok=True,
+            since_ms=since,
+            reply_markup=exit_markup,
         )
         actions.append({"symbol": pos.symbol, "action": "exit", "reason": reason, "status": status})
 
@@ -559,6 +700,18 @@ def run_assist_watch(
             actions=actions,
         )
     closed = mark_watch_positions_closed(conn, open_keys=open_keys, now_ms=ts)
+    orphan_cancelled: list[dict[str, str]] = []
+    if closed and assist_execute_mode() == "live":
+        trade = build_trade_client()
+        if trade is not None:
+            for sym, _ps in closed:
+                try:
+                    ids = cancel_jv_orders_for_symbol(trade, sym)
+                except Exception:  # noqa: BLE001
+                    logger.exception("orphan jv- cancel failed for %s", sym)
+                    ids = []
+                for algo_id in ids:
+                    orphan_cancelled.append({"symbol": sym, "algo_id": algo_id})
     return _strip_secrets(
         {
             "ok": True,
@@ -567,6 +720,7 @@ def run_assist_watch(
             "night_hold": night,
             "actions": actions,
             "closed": [{"symbol": s, "position_side": p} for s, p in closed],
+            "orphan_cancelled": orphan_cancelled,
             "futures_recovered": recovered,
             "pause": pause_info,
         }

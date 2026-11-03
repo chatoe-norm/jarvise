@@ -21,7 +21,11 @@ BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 ASSIST_HOURS = (0, 4, 8, 12, 16, 20)
 ASSIST_MINUTE = 25
 SAME_IDEA_MS = 24 * 3_600_000
-ANALYSIS_MAX_AGE_MS = int(8.5 * 3_600_000)
+FOUR_H_MS = 4 * 3_600_000
+# Paper-run (00/04/08/... Bangkok) writes the analysis for a 4h bar one hour after
+# the bar closes. Allow 10 more minutes for the run to finish. The assist jobs run
+# later than this (signal :25, morning 08:20), so they still require the newest bar.
+ANALYSIS_PUBLISH_LAG_MS = 70 * 60_000
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,7 @@ class SizedSignal:
     leverage_capped: bool
     uncapped_leverage: int
     analysis_id: str | None
+    step_size: Decimal | None = None
 
 
 def floor_to_step(qty: Decimal, step: Decimal) -> Decimal:
@@ -61,6 +66,58 @@ def floor_to_step(qty: Decimal, step: Decimal) -> Decimal:
         raise ValueError("step size must be positive")
     steps = (qty / step).to_integral_value(rounding=ROUND_DOWN)
     return steps * step
+
+
+def round_to_tick(price: Decimal, tick: Decimal) -> Decimal:
+    if tick <= 0:
+        return price
+    steps = (price / tick).to_integral_value(rounding=ROUND_DOWN)
+    return steps * tick
+
+
+def cap_requote_qty(
+    sized: SizedSignal,
+    *,
+    first_qty: Decimal | None,
+    first_loss: Decimal | None,
+    balance: Decimal,
+) -> SizedSignal:
+    """Cap a re-quote so qty never grows past the first sent idea.
+
+    Prefer first_qty when positive; otherwise scale so loss_at_stop stays at
+    or under first_loss. Never raises qty. Entry, stop, and target stay put.
+    """
+    step = sized.step_size if sized.step_size is not None and sized.step_size > 0 else Decimal("1")
+    cap: Decimal | None = None
+    if first_qty is not None and first_qty > 0:
+        cap = floor_to_step(first_qty, step)
+    elif first_loss is not None and first_loss > 0:
+        r = abs(sized.entry - sized.stop)
+        if r > 0:
+            cap = floor_to_step(first_loss / r, step)
+    if cap is None or sized.qty <= cap:
+        return sized
+    qty = cap
+    if qty <= 0:
+        return sized
+    notional = qty * sized.entry
+    r = abs(sized.entry - sized.stop)
+    loss = qty * r
+    if balance > 0:
+        uncapped = int(math.ceil(float(notional / balance)))
+    else:
+        uncapped = sized.uncapped_leverage
+    leverage_capped = uncapped > MAX_LEVERAGE
+    leverage = MAX_LEVERAGE if leverage_capped else max(1, uncapped)
+    return replace(
+        sized,
+        qty=qty,
+        notional=notional,
+        loss_at_stop=loss,
+        leverage=leverage,
+        leverage_capped=leverage_capped,
+        uncapped_leverage=uncapped,
+    )
 
 
 def passes_signal_floor(analysis: dict[str, Any]) -> bool:
@@ -137,6 +194,7 @@ def size_signal(
         leverage_capped=leverage_capped,
         uncapped_leverage=uncapped,
         analysis_id=analysis_id,
+        step_size=step_size,
     )
 
 
@@ -187,14 +245,27 @@ def next_assist_run_ms(now_ms: int) -> int:
     return int(candidate.timestamp() * 1000)
 
 
+def expected_analysis_bar_ms(now_ms: int) -> int:
+    """Open time of the newest 4h bar whose analysis should exist by now_ms."""
+    published = int(now_ms) - ANALYSIS_PUBLISH_LAG_MS
+    return (published // FOUR_H_MS) * FOUR_H_MS - FOUR_H_MS
+
+
 def analysis_is_fresh(analysis: dict[str, Any] | None, *, now_ms: int) -> bool:
+    """True when the analysis is for the newest bar paper-run should have written.
+
+    A fixed age limit failed here: analysis for bar T is written at T+5h and
+    replaced at T+9h, so an 8.5h limit went stale every cycle before paper-run.
+    """
     if analysis is None:
         return False
     raw = analysis.get("timestamp")
     if raw is None:
         return False
-    age = int(now_ms) - int(raw)
-    return 0 <= age <= ANALYSIS_MAX_AGE_MS
+    ts = int(raw)
+    if ts > int(now_ms):
+        return False
+    return ts >= expected_analysis_bar_ms(now_ms)
 
 
 def below_min_notional(
@@ -287,16 +358,14 @@ def _shrink_for_max_leverage(
     available_balance: Decimal,
     uncapped: int,
     max_leverage: int = MAX_LEVERAGE,
-) -> SizedSignal:
-    """Cap notional to availableBalance × max_leverage (existing leverage_capped rule)."""
+) -> SizedSignal | None:
+    """Cap notional to availableBalance × max_leverage (existing leverage_capped rule).
+
+    Returns None when no margin is left or the capped size rounds to zero lots.
+    """
     max_notional = available_balance * Decimal(max_leverage) if available_balance > 0 else Decimal("0")
     if max_notional <= 0 or sized.entry <= 0:
-        return replace(
-            sized,
-            leverage=max_leverage,
-            leverage_capped=True,
-            uncapped_leverage=max(sized.uncapped_leverage, uncapped),
-        )
+        return None
     if sized.notional <= max_notional:
         return replace(
             sized,
@@ -305,6 +374,11 @@ def _shrink_for_max_leverage(
             uncapped_leverage=max(sized.uncapped_leverage, uncapped),
         )
     qty = max_notional / sized.entry
+    if sized.step_size is not None and sized.step_size > 0:
+        # Binance rejects a quantity that is not a whole number of lots.
+        qty = floor_to_step(qty, sized.step_size)
+    if qty <= 0:
+        return None
     notional = qty * sized.entry
     loss = qty * sized.r_distance
     return replace(
@@ -359,6 +433,9 @@ def assign_shared_leverage(
                 uncapped=leverage,
                 max_leverage=max_leverage,
             )
+            if shrunk is None:
+                dropped.append(only)
+                return [], dropped
             return (
                 [
                     SignalCandidate(

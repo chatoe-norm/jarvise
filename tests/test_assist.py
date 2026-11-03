@@ -13,6 +13,7 @@ from jarvise_assist.futures import (
     FuturesKeyUnsafeError,
     FuturesPermissionError,
     FuturesPosition,
+    SymbolAccountConfig,
     SymbolFilters,
     audit_key_for_assist,
 )
@@ -71,6 +72,9 @@ class FakeFutures:
         read_error: Exception | None = None,
         permission_on_balance: Exception | None = None,
         income: list[dict[str, Any]] | None = None,
+        ticks: dict[str, Decimal] | None = None,
+        symbol_configs: dict[str, SymbolAccountConfig] | None = None,
+        symbol_config_error: Exception | None = None,
     ) -> None:
         self.balance = balance
         self.available = available
@@ -78,6 +82,9 @@ class FakeFutures:
         self.steps = steps or {}
         self.min_qty = min_qty or {}
         self.min_notional = min_notional or {}
+        self.ticks = ticks or {}
+        self.symbol_configs = symbol_configs or {}
+        self.symbol_config_error = symbol_config_error
         self._open = open_symbols or set()
         self.positions = list(positions or [])
         self.orders = list(orders or [])
@@ -151,7 +158,13 @@ class FakeFutures:
             step_size=self.steps.get(sym, Decimal("1")),
             min_qty=self.min_qty.get(sym, Decimal("0")),
             min_notional=self.min_notional.get(sym, Decimal("0")),
+            tick_size=self.ticks.get(sym, Decimal("0.00000001")),
         )
+
+    def symbol_config(self) -> dict[str, SymbolAccountConfig]:
+        if self.symbol_config_error is not None:
+            raise self.symbol_config_error
+        return dict(self.symbol_configs)
 
     def open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         if symbol:
@@ -320,6 +333,7 @@ def test_format_signal_message_style_a() -> None:
     assert "isolated" in text
     assert "margin ≈" in text
     assert "ตั้ง Stop-Market (Reduce-Only, trigger = Mark Price) ทันทีหลังเข้า" in text
+    assert "ตั้ง TP เป็น Mark Price เช่นกัน" in text
     assert "หมดอายุ 20:00" in text
     assert "api_key" not in text.lower()
 
@@ -420,6 +434,8 @@ def test_night_hold_then_morning_send(tmp_path: Path) -> None:
     assert len(sent) == 1
     assert "DOGEUSDT" in sent[0]
     assert "0.083" in sent[0]  # newest invalidation in message
+    assert "ไอเดียเดิม (พักไว้ช่วงกลางคืน):" in sent[0]
+    assert "ส่งครั้งแรก:" not in sent[0]
     assert list_held_signals(conn) == []
     conn.close()
 
@@ -1988,7 +2004,7 @@ def test_on_demand_shows_same_idea_with_sent_at(tmp_path: Path) -> None:
     before = conn.execute("SELECT COUNT(*) FROM assist_signal").fetchone()[0]
     fake = FakeFutures(marks={"ADAUSDT": Decimal("0.40")}, steps={"ADAUSDT": Decimal("1")})
 
-    text = render_anything_now(conn, futures=fake, now_ms=now)
+    text, _markup = render_anything_now(conn, futures=fake, now_ms=now)
     print(text)
     assert "ADAUSDT" in text
     assert "SHORT" in text
@@ -2018,7 +2034,7 @@ def test_on_demand_chase_shows_do_not_chase(tmp_path: Path) -> None:
     _seed_sent_ada_short(conn, sent_at_ms=sent_at, entry=Decimal("0.40"), stop=Decimal("0.42"))
     # Short chase: mark < entry - 0.3R; R=0.02 → mark < 0.394.
     fake = FakeFutures(marks={"ADAUSDT": Decimal("0.39")}, steps={"ADAUSDT": Decimal("1")})
-    text = render_anything_now(conn, futures=fake, now_ms=now)
+    text, _markup = render_anything_now(conn, futures=fake, now_ms=now)
     assert text == "ADAUSDT ราคาวิ่งไปแล้ว — ไม่แนะนำไล่"
     assert "เข้า:" not in text
     conn.close()
@@ -2028,7 +2044,7 @@ def test_on_demand_all_flat_lists_seven_reasons(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "ondemand_flat.db")
     now = _ms_bangkok(2026, 10, 28, 10, 0)
     fake = FakeFutures()
-    text = render_anything_now(conn, futures=fake, now_ms=now)
+    text, _markup = render_anything_now(conn, futures=fake, now_ms=now)
     print(text)
     lines = text.splitlines()
     assert len(lines) == 7
@@ -2086,3 +2102,144 @@ def test_on_demand_reason_lines_are_thai_for_size_and_mark_errors() -> None:
     assert "BTCUSDT คำนวณขนาดไม้ไม่ได้" in text
     assert "ETHUSDT อ่านราคาไม่ได้" in text
     assert "size_failed" not in text and "ReadTimeout" not in text
+
+
+def test_on_demand_requote_caps_qty_at_first_sent(tmp_path: Path) -> None:
+    """Mark toward stop grows raw qty; re-quote keeps first qty."""
+    from jarvise_assist.sizing import cap_requote_qty
+    from jarvise_assist.store import get_signal
+
+    conn = open_db(tmp_path / "requote.db")
+    now = _ms_bangkok(2026, 10, 28, 10, 0)
+    sent_at = _ms_bangkok(2026, 10, 27, 20, 59)
+    # First send at entry 0.0800, stop 0.0835 → R=0.0035; 1% of 1000 = 10 → qty ≈ 2857
+    sid = _seed_sent_ada_short(
+        conn,
+        sent_at_ms=sent_at,
+        entry=Decimal("0.0800"),
+        stop=Decimal("0.0835"),
+    )
+    # Fix symbol to DOGE for clearer qty math (ADA seed uses ADAUSDT).
+    first = get_signal(conn, sid)
+    assert first is not None
+    first_qty = Decimal(str(first["qty"]))
+    # Re-size at mark closer to stop: smaller R → larger raw qty.
+    raw = size_signal(
+        symbol="ADAUSDT",
+        side="short",
+        entry=Decimal("0.0815"),
+        stop=Decimal("0.0835"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert raw is not None
+    assert raw.qty > first_qty
+    capped = cap_requote_qty(
+        raw,
+        first_qty=first_qty,
+        first_loss=Decimal(str(first["loss_at_stop"])),
+        balance=Decimal("1000"),
+    )
+    assert capped.qty == first_qty
+
+    _seed_analysis(
+        conn,
+        symbol="ADAUSDT",
+        action="short",
+        confidence=0.75,
+        invalidation=0.0835,
+        ts=now - 7 * 3_600_000,
+    )
+    # Mark moved toward stop (short: mark up), not past chase.
+    fake = FakeFutures(
+        marks={"ADAUSDT": Decimal("0.0815")},
+        steps={"ADAUSDT": Decimal("1")},
+    )
+    text, _ = render_anything_now(conn, futures=fake, now_ms=now)
+    assert "ส่งครั้งแรก:" in text
+    assert f"· {first_qty:g}" in text or f"· {int(first_qty)}" in text
+    # Sized line uses capped qty.
+    assert f"ขนาด: {fmt_qty_local(first_qty)}" in text or f"ขนาด: {first_qty:g}" in text
+    conn.close()
+
+
+def fmt_qty_local(value: Decimal) -> str:
+    from jarvise_assist.messages import fmt_qty
+
+    return fmt_qty(value)
+
+
+def test_format_signal_tick_matches_execute_round_to_tick() -> None:
+    from jarvise_assist.execute import round_to_tick as exec_round
+    from jarvise_assist.sizing import round_to_tick as size_round
+
+    tick = Decimal("0.001")
+    stop = Decimal("0.083456")
+    assert exec_round(stop, tick) == size_round(stop, tick) == Decimal("0.083")
+    sized = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.0800123"),
+        stop=stop,
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert sized is not None
+    text = format_signal_message(
+        sized,
+        expires_at_ms=_ms_bangkok(2026, 10, 28, 12, 25),
+        balance=Decimal("1000"),
+        tick_size=tick,
+    )
+    rounded_stop = exec_round(stop, tick)
+    rounded_target = exec_round(sized.target, tick)
+    assert f"Stop: {rounded_stop}" in text
+    assert f"เป้า: {rounded_target}" in text
+    assert "เข้า: 0.080" in text
+
+
+def test_leverage_warning_and_config_failure_soft(tmp_path: Path) -> None:
+    # Tight stop → large notional → leverage > 1.
+    sized = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("99"),
+        balance=Decimal("100"),
+        risk_pct=Decimal("2"),
+        step_size=Decimal("0.001"),
+    )
+    assert sized is not None
+    assert sized.leverage >= 2
+    expires = _ms_bangkok(2026, 10, 28, 12, 25)
+    cfg = SymbolAccountConfig(symbol="BTCUSDT", leverage=1, margin_type="CROSSED")
+    text = format_signal_message(
+        sized,
+        expires_at_ms=expires,
+        balance=Decimal("100"),
+        account_config=cfg,
+    )
+    assert "บัญชีตั้ง BTCUSDT ไว้ 1x — ต้องเปลี่ยนเป็น" in text
+    assert "บัญชีตั้ง BTCUSDT เป็น CROSSED — ต้องเป็น Isolated" in text
+
+    conn = open_db(tmp_path / "lev_fail.db")
+    now = _ms_bangkok(2026, 10, 28, 10, 0)
+    _seed_analysis(
+        conn,
+        symbol="ADAUSDT",
+        action="short",
+        confidence=0.75,
+        invalidation=0.42,
+        ts=now - 7 * 3_600_000,
+    )
+    fake = FakeFutures(
+        marks={"ADAUSDT": Decimal("0.40")},
+        steps={"ADAUSDT": Decimal("1")},
+        symbol_config_error=RuntimeError("boom"),
+    )
+    text2, _ = render_anything_now(conn, futures=fake, now_ms=now)
+    assert "ADAUSDT" in text2
+    assert "บัญชีตั้ง" not in text2
+    conn.close()
