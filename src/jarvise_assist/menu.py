@@ -13,7 +13,9 @@ from jarvise_assist.explore import render_explore_message
 from jarvise_assist.futures import (
     BinanceFuturesClient,
     build_futures_client,
-    find_protective_stop,
+    find_protective_stop_info,
+    find_take_profit_info,
+    trigger_label,
 )
 from jarvise_assist.keyboard import (
     BTN_ANYTHING,
@@ -27,11 +29,17 @@ from jarvise_assist.keyboard import (
     risk_choice_keyboard,
     risk_confirm_keyboard,
 )
-from jarvise_assist.messages import format_signal_message
+from jarvise_assist.messages import (
+    fmt_price,
+    fmt_qty,
+    format_signal_message,
+    safe_symbol_configs,
+)
 from jarvise_assist.pause import clear_pause_manual, format_paused_until, is_paused
 from jarvise_assist.signals import scan_signal_candidates
-from jarvise_assist.sizing import chase_exceeded, next_assist_run_ms
+from jarvise_assist.sizing import cap_requote_qty, chase_exceeded, next_assist_run_ms
 from jarvise_assist.store import (
+    clamp_stored_risk_pct,
     ensure_settings,
     find_linkable_signal,
     get_watch_position,
@@ -44,6 +52,9 @@ from jarvise_notify.telegram import send_message
 SendFn = Callable[..., Any]
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+RISK_MIN_PCT = 0.5
+RISK_MAX_PCT = 3.0
+RISK_CONFIRM_ABOVE = 2.0
 
 ON_DEMAND_REASON_TH: dict[str, str] = {
     "flat": "ไม่มีแนวโน้ม",
@@ -89,6 +100,7 @@ def handle_menu_text(
     if kind != "explore" and ensure_settings(conn).get("awaiting_explore"):
         write_settings(conn, awaiting_explore=False)
     send_fn = send or (lambda t, **kw: send_message(t, reply_markup=kw.get("reply_markup")) is not None)
+    clamp_stored_risk_pct(conn, send=send_fn, reply_keyboard_fn=reply_keyboard)
     if kind == "positions":
         body = render_open_positions(conn, futures=futures, now_ms=now_ms)
         send_fn(body)
@@ -101,8 +113,15 @@ def handle_menu_text(
         payload = run_assist_weekly(conn, futures=futures, now_ms_value=now_ms, send=send_fn)
         return {"handled": True, "kind": kind, "text": payload.get("text"), "payload": payload}
     if kind == "risk":
-        markup = risk_choice_keyboard()
-        msg = "ตั้งความเสี่ยงต่อไม้ — เลือก หรือ กด อื่นๆ แล้วพิมพ์ตัวเลข 0.5–15"
+        balance: Decimal | None = None
+        client = futures if futures is not None else build_futures_client()
+        if client is not None:
+            try:
+                balance = client.usdt_wallet_balance()
+            except Exception:  # noqa: BLE001
+                balance = None
+        markup = risk_choice_keyboard(balance=balance)
+        msg = "ตั้งความเสี่ยงต่อไม้ — เลือก หรือ กด อื่นๆ แล้วพิมพ์ตัวเลข 0.5–3"
         send_fn(msg, reply_markup=markup)
         return {"handled": True, "kind": kind}
     if kind == "toggle":
@@ -126,6 +145,24 @@ def toggle_enabled(conn: Any) -> str:
     write_settings(conn, enabled=True)
     clear_pause_manual(conn)
     return "▶️ ผู้ช่วยเปิดแล้ว"
+
+
+def _signed_usdt(value: float) -> str:
+    if value > 0:
+        return f"+{value:.2f}"
+    return f"{value:.2f}"
+
+
+def _signed_r_one(value: float) -> str:
+    if value > 0:
+        return f"+{value:.1f}R"
+    return f"{value:.1f}R"
+
+
+def _signed_r_two(value: float) -> str:
+    if value > 0:
+        return f"+{value:.2f}R"
+    return f"{value:.2f}R"
 
 
 def render_open_positions(
@@ -161,27 +198,75 @@ def render_open_positions(
         else:
             suggested = None
             src = None
-        protective = find_protective_stop(
+        stop_info = find_protective_stop_info(
             orders,
             symbol=sym,
             position_side=pos.position_side,
             trade_side=pos.side,
         )
-        prot_s = f"{float(protective):g}" if protective is not None else "ไม่มี"
+        tp_info = find_take_profit_info(
+            orders,
+            symbol=sym,
+            position_side=pos.position_side,
+            trade_side=pos.side,
+        )
         side_l = "LONG" if pos.side == "long" else "SHORT"
-        if suggested is None:
-            lines.append(f"{sym} {side_l} · stop แนะนำไม่มี · ป้องกัน {prot_s}")
-            continue
-        risk = abs(float(pos.entry_price) - suggested)
+        entry = float(pos.entry_price)
+        mark = float(pos.mark_price)
+        qty = float(pos.qty)
+        lines.append(f"{sym} {side_l}")
+        lines.append(
+            f"qty {fmt_qty(pos.qty)} · เข้า {fmt_price(pos.entry_price)} · mark {fmt_price(pos.mark_price)}"
+        )
+        if pos.side == "long":
+            unreal_usdt = (mark - entry) * qty
+        else:
+            unreal_usdt = (entry - mark) * qty
+        risk = abs(entry - suggested) if suggested is not None else 0.0
         if risk > 0:
             if pos.side == "long":
-                r_mult = (float(pos.mark_price) - float(pos.entry_price)) / risk
+                r_mult = (mark - entry) / risk
             else:
-                r_mult = (float(pos.entry_price) - float(pos.mark_price)) / risk
-            r_s = f"{r_mult:.1f}R"
+                r_mult = (entry - mark) / risk
+            r_s = _signed_r_one(r_mult)
         else:
             r_s = "R unknown"
-        lines.append(f"{sym} {side_l} · stop แนะนำ {suggested:g} ({src}) · ป้องกัน {prot_s} · ≈ {r_s}")
+        lines.append(f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} · ≈ {r_s}")
+
+        if stop_info is None:
+            lines.append("ยังไม่มี stop")
+        else:
+            prot = float(stop_info.price)
+            if pos.side == "long":
+                lock_usdt = (prot - entry) * qty
+            else:
+                lock_usdt = (entry - prot) * qty
+            if risk > 0 and qty > 0:
+                lock_r = lock_usdt / (qty * risk)
+                lock_r_s = _signed_r_two(lock_r)
+            else:
+                lock_r_s = "R unknown"
+            lines.append(f"ถ้าโดน stop: ล็อก ≈ {lock_r_s} ({_signed_usdt(lock_usdt)} USDT)")
+
+        if suggested is None:
+            lines.append("stop แนะนำไม่มี")
+        else:
+            lines.append(f"stop แนะนำ {suggested:g} ({src})")
+
+        if tp_info is not None:
+            tp_trig = trigger_label(tp_info.working_type) or "?"
+            lines.append(f"TP {fmt_price(tp_info.price)} · trigger {tp_trig}")
+            if (
+                stop_info is not None
+                and stop_info.working_type is not None
+                and tp_info.working_type is not None
+                and stop_info.working_type != tp_info.working_type
+            ):
+                stop_trig = trigger_label(stop_info.working_type) or stop_info.working_type
+                lines.append(f"⚠️ stop กับ TP คนละ trigger ({stop_trig} / {tp_trig})")
+
+        if pos.liquidation_price is not None and pos.liquidation_price > 0:
+            lines.append(f"liquidation {fmt_price(pos.liquidation_price)}")
     return "\n".join(lines)
 
 
@@ -203,6 +288,12 @@ def _format_sent_at_line(seen: dict[str, Any]) -> str:
     return f"ส่งแล้วเมื่อ {when.strftime('%H:%M')}"
 
 
+def _format_first_send_line(seen: dict[str, Any]) -> str:
+    entry = Decimal(str(seen.get("entry") or "0"))
+    qty = Decimal(str(seen.get("qty") or "0"))
+    return f"ส่งครั้งแรก: เข้า {fmt_price(entry)} · {fmt_qty(qty)}"
+
+
 def _render_on_demand_idea(
     conn: Any,
     cand: Any,
@@ -210,6 +301,8 @@ def _render_on_demand_idea(
     now_ms: int,
     expires_at_ms: int,
     balance: Decimal,
+    tick_size: Decimal | None = None,
+    account_config: Any = None,
 ) -> str:
     sized = cand.sized
     seen = latest_seen_idea(conn, symbol=sized.symbol, side=sized.side, now_ms=now_ms)
@@ -218,9 +311,29 @@ def _render_on_demand_idea(
         stop = Decimal(str(seen["stop"]))
         if chase_exceeded(side=sized.side, entry=entry, stop=stop, mark=sized.entry):
             return f"{sized.symbol} ราคาวิ่งไปแล้ว — ไม่แนะนำไล่"
-        body = format_signal_message(sized, expires_at_ms=expires_at_ms, balance=balance)
-        return f"{body}\n{_format_sent_at_line(seen)}"
-    return format_signal_message(sized, expires_at_ms=expires_at_ms, balance=balance)
+        first_qty = Decimal(str(seen["qty"])) if seen.get("qty") is not None else None
+        first_loss = Decimal(str(seen["loss_at_stop"])) if seen.get("loss_at_stop") is not None else None
+        sized = cap_requote_qty(
+            sized,
+            first_qty=first_qty,
+            first_loss=first_loss,
+            balance=balance,
+        )
+        body = format_signal_message(
+            sized,
+            expires_at_ms=expires_at_ms,
+            balance=balance,
+            tick_size=tick_size,
+            account_config=account_config,
+        )
+        return f"{body}\n{_format_sent_at_line(seen)}\n{_format_first_send_line(seen)}"
+    return format_signal_message(
+        sized,
+        expires_at_ms=expires_at_ms,
+        balance=balance,
+        tick_size=tick_size,
+        account_config=account_config,
+    )
 
 
 def render_empty_on_demand(skipped: list[dict[str, Any]]) -> str:
@@ -259,6 +372,14 @@ def render_anything_now(
         return render_empty_on_demand(list(result.get("skipped") or [])), None
     balance = Decimal(str(result.get("balance_usdt") or 0))
     expires = next_assist_run_ms(now_ms)
+    configs = safe_symbol_configs(client)
+    ticks: dict[str, Decimal] = {}
+    for cand in admitted:
+        sym = cand.sized.symbol
+        try:
+            ticks[sym] = client.symbol_filters(sym).tick_size
+        except Exception:  # noqa: BLE001
+            ticks[sym] = Decimal("0")
     blocks = [
         _render_on_demand_idea(
             conn,
@@ -266,6 +387,8 @@ def render_anything_now(
             now_ms=now_ms,
             expires_at_ms=expires,
             balance=balance,
+            tick_size=ticks.get(cand.sized.symbol) or None,
+            account_config=configs.get(cand.sized.symbol),
         )
         for cand in admitted
     ]
@@ -281,22 +404,29 @@ def handle_risk_callback(
     *,
     send: SendFn,
 ) -> dict[str, Any]:
-    """Inline risk:1|2|3|5|other or risk_yes:X / risk_no."""
+    """Inline risk:0.5|1|2|3|other or risk_yes:X / risk_no."""
     if data == "risk:other":
         write_settings(conn, awaiting_risk="number", pending_risk_pct=None)
-        send("พิมพ์ความเสี่ยงเป็นตัวเลข 0.5–15")
+        send("พิมพ์ความเสี่ยงเป็นตัวเลข 0.5–3")
         return {"ok": True, "awaiting": "number"}
     if data.startswith("risk:"):
         try:
             pct = float(data.split(":", 1)[1])
         except ValueError:
             return {"ok": False}
+        if pct < RISK_MIN_PCT or pct > RISK_MAX_PCT:
+            send("รับได้แค่ 0.5–3 — ลองใหม่หรือยกเลิกด้วยเมนู")
+            return {"ok": False, "rejected": True}
         return _apply_or_confirm_risk(conn, pct, send=send)
     if data.startswith("risk_yes:"):
         try:
             pct = float(data.split(":", 1)[1])
         except ValueError:
             return {"ok": False}
+        if pct < RISK_MIN_PCT or pct > RISK_MAX_PCT:
+            send("รับได้แค่ 0.5–3 — ลองใหม่หรือยกเลิกด้วยเมนู")
+            write_settings(conn, awaiting_risk=None, pending_risk_pct=None)
+            return {"ok": False, "rejected": True}
         write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
         send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard(pct))
         return {"ok": True, "risk_pct": pct}
@@ -323,15 +453,15 @@ def handle_risk_number(
         pct = float(raw)
     except ValueError:
         return {"handled": False}
-    if pct < 0.5 or pct > 15:
-        send("รับได้แค่ 0.5–15 — ลองใหม่หรือยกเลิกด้วยเมนู")
+    if pct < RISK_MIN_PCT or pct > RISK_MAX_PCT:
+        send("รับได้แค่ 0.5–3 — ลองใหม่หรือยกเลิกด้วยเมนู")
         return {"handled": True, "rejected": True}
     write_settings(conn, awaiting_risk=None)
     return {**_apply_or_confirm_risk(conn, pct, send=send), "handled": True}
 
 
 def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn) -> dict[str, Any]:
-    if pct > 5:
+    if pct > RISK_CONFIRM_ABOVE:
         write_settings(conn, awaiting_risk="confirm", pending_risk_pct=pct)
         send(f"ยืนยัน {pct:g}%?", reply_markup=risk_confirm_keyboard(pct))
         return {"ok": True, "confirm": True, "pending": pct}

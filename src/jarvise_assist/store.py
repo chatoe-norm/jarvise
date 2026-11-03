@@ -12,6 +12,35 @@ from jarvise_assist.sizing import SAME_IDEA_MS, SizedSignal
 _UNSET: object = object()
 
 
+RISK_MAX_PCT = 3.0
+
+
+def clamp_stored_risk_pct(
+    conn: Any,
+    *,
+    send: Any | None = None,
+    reply_keyboard_fn: Any | None = None,
+) -> float:
+    """If stored risk_pct > 3, write 3 and notify once. Returns the effective pct."""
+    settings = ensure_settings(conn)
+    pct = float(settings["risk_pct"])
+    if pct <= RISK_MAX_PCT:
+        return pct
+    write_settings(conn, risk_pct=RISK_MAX_PCT)
+    if send is not None:
+        markup = None
+        if reply_keyboard_fn is not None:
+            markup = reply_keyboard_fn(RISK_MAX_PCT)
+        try:
+            send(
+                "ความเสี่ยงที่บันทึกไว้เกิน 3% — ปรับเป็น 3% แล้ว",
+                reply_markup=markup,
+            )
+        except TypeError:
+            send("ความเสี่ยงที่บันทึกไว้เกิน 3% — ปรับเป็น 3% แล้ว")
+    return RISK_MAX_PCT
+
+
 def ensure_settings(conn: Any) -> dict[str, Any]:
     row = conn.execute(
         """
@@ -280,7 +309,8 @@ def latest_seen_idea(
     """Newest sent/taken/skipped row for symbol+side within within_ms, or None."""
     cur = conn.execute(
         """
-        SELECT id, symbol, side, entry, stop, target, created_at_ms, sent_at_ms, status
+        SELECT id, symbol, side, entry, stop, target, qty, loss_at_stop,
+               created_at_ms, sent_at_ms, status
         FROM assist_signal
         WHERE symbol=? AND side=? AND status IN ('sent', 'taken', 'skipped')
           AND created_at_ms >= ?

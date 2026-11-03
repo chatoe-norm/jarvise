@@ -8,7 +8,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import replace as dc_replace
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -38,6 +38,7 @@ from jarvise_assist.sizing import (
     chase_exceeded,
     next_assist_run_ms,
     passes_signal_floor,
+    round_to_tick,
     size_signal,
 )
 from jarvise_assist.store import (
@@ -130,13 +131,6 @@ def trade_base_url(mode: str | None = None) -> str:
     if m == "testnet":
         return DEMO_FAPI_BASE
     return FAPI_BASE
-
-
-def round_to_tick(price: Decimal, tick: Decimal) -> Decimal:
-    if tick <= 0:
-        return price
-    steps = (price / tick).to_integral_value(rounding=ROUND_DOWN)
-    return steps * tick
 
 
 def client_order_id(intent_id: str, step: str) -> str:

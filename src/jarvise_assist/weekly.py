@@ -21,6 +21,7 @@ SendFn = Callable[..., Any]
 INCOME_TYPES = frozenset({"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"})
 EDGE_SAMPLE_MIN = 30
 WEEK_MS = 7 * 24 * 3_600_000
+ANALYSIS_EXIT_REASONS = frozenset({"flat", "opposite"})
 
 
 def format_weekly_summary(
@@ -51,13 +52,22 @@ def format_weekly_summary(
             f"รวม {_signed(total_r)}R · เฉลี่ย {_signed(mean_r)}R · "
             f"{_signed(total_usdt)} USDT"
         )
-    uni = float(real.get("universe_usdt") or 0.0)
+        lines.append(
+            f"ปิดที่ stop {int(virtual.get('exit_stop') or 0)} · "
+            f"ถึง 2R {int(virtual.get('exit_target_2r') or 0)} · "
+            f"ปิดตามสัญญาณ {int(virtual.get('exit_analysis') or 0)}"
+        )
+    realized = float(real.get("realized_pnl") or 0.0)
+    funding = float(real.get("funding") or 0.0)
+    commission = float(real.get("commission") or 0.0)
+    net = float(real.get("universe_usdt") or (realized + funding + commission))
+    lines.append(f"กำไรปิด (REALIZED_PNL) {_signed(realized)} USDT")
+    lines.append(f"funding {_signed(funding)} USDT")
+    lines.append(f"ค่าธรรมเนียม (COMMISSION) {_signed(commission)} USDT")
+    lines.append(f"สุทธิ {_signed(net)} USDT")
     other = float(real.get("other_usdt") or 0.0)
-    realized_n = int(real.get("realized_n") or 0)
-    lines.append(
-        f"จริง (futures): จักรวาล {_signed(uni)} USDT · อื่น {_signed(other)} USDT · "
-        f"REALIZED_PNL≠0 {realized_n} แถว"
-    )
+    if other != 0.0:
+        lines.append(f"เหรียญนอกรายการ {_signed(other)} USDT")
     if closed_all < EDGE_SAMPLE_MIN:
         lines.append(f"ยังไม่พิสูจน์ edge — ตัวอย่าง {closed_all} ไม้")
     return "\n".join(lines)
@@ -71,22 +81,47 @@ def _signed(value: float) -> str:
 
 def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
-        return {"n": 0, "win_rate": 0.0, "total_r": 0.0, "mean_r": 0.0, "total_usdt": 0.0}
+        return {
+            "n": 0,
+            "win_rate": 0.0,
+            "total_r": 0.0,
+            "mean_r": 0.0,
+            "total_usdt": 0.0,
+            "exit_stop": 0,
+            "exit_target_2r": 0,
+            "exit_analysis": 0,
+        }
     nets = [float(r.get("net_r") or 0.0) for r in rows]
     pnls = [float(r.get("pnl_usdt") or 0.0) for r in rows]
     wins = sum(1 for x in nets if x > 0)
     total_r = sum(nets)
+    exit_stop = 0
+    exit_target = 0
+    exit_analysis = 0
+    for row in rows:
+        reason = str(row.get("exit_reason") or "").lower()
+        if reason == "stop":
+            exit_stop += 1
+        elif reason == "target_2r":
+            exit_target += 1
+        elif reason in ANALYSIS_EXIT_REASONS:
+            exit_analysis += 1
     return {
         "n": len(rows),
         "win_rate": wins / len(rows),
         "total_r": total_r,
         "mean_r": total_r / len(rows),
         "total_usdt": sum(pnls),
+        "exit_stop": exit_stop,
+        "exit_target_2r": exit_target,
+        "exit_analysis": exit_analysis,
     }
 
 
 def summarize_income(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    uni = Decimal("0")
+    realized = Decimal("0")
+    funding = Decimal("0")
+    commission = Decimal("0")
     other = Decimal("0")
     realized_n = 0
     for row in rows:
@@ -100,11 +135,20 @@ def summarize_income(rows: list[dict[str, Any]]) -> dict[str, Any]:
         sym = str(row.get("symbol") or "").upper()
         if itype == "REALIZED_PNL" and amount != 0:
             realized_n += 1
-        if sym in ASSIST_SYMBOLS:
-            uni += amount
-        else:
+        if sym not in ASSIST_SYMBOLS:
             other += amount
+            continue
+        if itype == "REALIZED_PNL":
+            realized += amount
+        elif itype == "FUNDING_FEE":
+            funding += amount
+        elif itype == "COMMISSION":
+            commission += amount
+    uni = realized + funding + commission
     return {
+        "realized_pnl": float(realized),
+        "funding": float(funding),
+        "commission": float(commission),
         "universe_usdt": float(uni),
         "other_usdt": float(other),
         "realized_n": realized_n,
@@ -132,7 +176,14 @@ def run_assist_weekly(
     closed_all = count_closed_tracks_all(conn)
 
     client = futures if futures is not None else build_futures_client()
-    real: dict[str, Any] = {"universe_usdt": 0.0, "other_usdt": 0.0, "realized_n": 0}
+    real: dict[str, Any] = {
+        "realized_pnl": 0.0,
+        "funding": 0.0,
+        "commission": 0.0,
+        "universe_usdt": 0.0,
+        "other_usdt": 0.0,
+        "realized_n": 0,
+    }
     if client is not None:
         try:
             income = client.income_history(start_ms=week_start, end_ms=ts, limit=1000)
