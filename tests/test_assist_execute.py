@@ -1569,7 +1569,13 @@ def test_entry_zero_avg_price_uses_order_query(tmp_path: Path, monkeypatch: pyte
     assert "fill 0.07526 × 759" in result
     assert "ถ้าชน stop" in result
     assert "ราคายังไม่ยืนยัน" not in result
-    assert ("GET", "/fapi/v1/order") in [(m, p) for m, p, _ in transport.calls]
+    methods_paths = [(m, p) for m, p, _ in transport.calls]
+    # Price query must run after market → stop → TP (not before protective stops).
+    post_order_i = methods_paths.index(("POST", "/fapi/v1/order"))
+    algo_indices = [i for i, mp in enumerate(methods_paths) if mp == ("POST", "/fapi/v1/algoOrder")]
+    get_order_i = methods_paths.index(("GET", "/fapi/v1/order"))
+    assert len(algo_indices) >= 2
+    assert post_order_i < algo_indices[0] < algo_indices[1] < get_order_i
     conn.close()
 
 

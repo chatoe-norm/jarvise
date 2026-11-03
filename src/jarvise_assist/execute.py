@@ -1281,31 +1281,6 @@ def run_entry_sequence(
     if exec_qty <= 0:
         return _reason_th("zero_fill")
 
-    # RESULT can return avgPrice "0.000000" (truthy string → Decimal 0). Recover before text/watch.
-    if avg is None:
-        queried = _query_fill_after_unknown(
-            trade,
-            symbol=symbol,
-            client_id=cid,
-            conn=conn,
-            intent_id=intent_id,
-            step="entry_price_query",
-        )
-        avg = _positive_fill_price(queried)
-        if avg is not None:
-            logger.info("entry fill price source=order_query intent_id=%s", intent_id)
-        else:
-            try:
-                pos_fill = _fill_from_position(trade, symbol=symbol)
-            except Exception:  # noqa: BLE001
-                logger.exception("position read failed while resolving entry price")
-                pos_fill = None
-            if pos_fill is not None and pos_fill[1] > 0:
-                avg = pos_fill[1]
-                logger.info("entry fill price source=position_risk intent_id=%s", intent_id)
-            else:
-                logger.info("entry fill price source=unknown intent_id=%s", intent_id)
-
     stop_ok = False
     stop_err: str | None = None
     for attempt in range(2):
@@ -1406,6 +1381,32 @@ def run_entry_sequence(
                 tp_note = f"\n{MSG_TP_KEEP}"
         else:
             tp_note = f"\n{MSG_TP_KEEP}"
+
+    # RESULT can return avgPrice "0.000000". Recover after stop/TP so a slow query
+    # cannot leave the position unprotected.
+    if avg is None:
+        queried = _query_fill_after_unknown(
+            trade,
+            symbol=symbol,
+            client_id=cid,
+            conn=conn,
+            intent_id=intent_id,
+            step="entry_price_query",
+        )
+        avg = _positive_fill_price(queried)
+        if avg is not None:
+            logger.info("entry fill price source=order_query intent_id=%s", intent_id)
+        else:
+            try:
+                pos_fill = _fill_from_position(trade, symbol=symbol)
+            except Exception:  # noqa: BLE001
+                logger.exception("position read failed while resolving entry price")
+                pos_fill = None
+            if pos_fill is not None and pos_fill[1] > 0:
+                avg = pos_fill[1]
+                logger.info("entry fill price source=position_risk intent_id=%s", intent_id)
+            else:
+                logger.info("entry fill price source=unknown intent_id=%s", intent_id)
 
     # Live-only: link watch / mark signal taken. Testnet must not touch live watch.
     # Never write entry=0 when fill price is still unknown.
