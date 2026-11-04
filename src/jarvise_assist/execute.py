@@ -710,10 +710,7 @@ def _emergency_close_verified(
             filled = _cls_filled(trade, symbol=symbol, client_id=ccid)
             if filled is True and _position_gone(trade, symbol=symbol) is True:
                 return True
-            # Resend only when the position is still open and cls is not filled.
-            # A failed check (None) is not confirmed — skip the resend this round.
-            if gone is not False or filled is not False:
-                continue
+            # Unknown (None), still open, or not filled: resend same client id.
         step = _emergency_close_step(attempt)
         query_step = _emergency_close_query_step(attempt)
         try:
@@ -757,6 +754,7 @@ def _emergency_close_verified(
                 )
                 if recovered is not None and Decimal(str(recovered.get("executedQty") or "0")) > 0:
                     return True
+        # -2022 (reduceOnly, no position) counts as closed only after positionRisk confirms flat.
         if _position_gone(trade, symbol=symbol) is True:
             return True
     return False

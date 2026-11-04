@@ -2648,6 +2648,229 @@ def test_emergency_close_all_fail_sends_alert_and_notifies(
     conn.close()
 
 
+def test_emergency_close_check_failures_still_send_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When position/fill checks raise, still POST reduceOnly three times, then alert."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "cls-check-fail.db")
+    intent_id = _entry_intent(conn)
+    claim_exec_intent(conn, intent_id)
+    handlers = _base_entry_handlers()
+    close_phase = {"on": False}
+
+    def order_handler(clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
+        if clean.get("reduceOnly") == "true":
+            close_phase["on"] = True
+            return httpx.ConnectError("close down")
+        close_phase["on"] = True
+        return (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
+
+    def position_risk(_clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
+        if close_phase["on"]:
+            return httpx.ConnectError("positionRisk down")
+        return (200, [])
+
+    def query_order(_clean: dict[str, Any]) -> BaseException:
+        return httpx.ConnectError("order query down")
+
+    handlers[("POST", "/fapi/v1/order")] = order_handler
+    handlers[("GET", "/fapi/v3/positionRisk")] = position_risk
+    handlers[("GET", "/fapi/v1/order")] = query_order
+    handlers[("POST", "/fapi/v1/algoOrder")] = [
+        (400, {"code": -2010, "msg": "reject"}),
+        (400, {"code": -2010, "msg": "reject"}),
+    ]
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    result = run_entry_sequence(conn, intent_id, trade=trade, sleep=_noop_sleep)
+    assert result.startswith("🚨")
+    assert "เข้า Binance" in result
+    assert "ลองใหม่" not in result
+    cls_id = client_order_id(intent_id, "cls")
+    cls_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true"
+    ]
+    assert len(cls_posts) == 3
+    assert all(c[2].get("newClientOrderId") == cls_id for c in cls_posts)
+    steps = _exec_log_steps(conn, intent_id)
+    assert "emergency_close" in steps
+    assert "emergency_close_2" in steps
+    assert "emergency_close_3" in steps
+    conn.close()
+
+
+def test_emergency_close_check_fail_second_fill_orphans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checks fail but 2nd reduceOnly fills → success and orphan jv- cancel."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "cls-check-fill2.db")
+    intent_id = _entry_intent(conn)
+    claim_exec_intent(conn, intent_id)
+    handlers = _base_entry_handlers()
+    close_phase = {"on": False}
+    cls_n = {"n": 0}
+
+    def order_handler(clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
+        if clean.get("reduceOnly") != "true":
+            close_phase["on"] = True
+            return (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
+        close_phase["on"] = True
+        cls_n["n"] += 1
+        if cls_n["n"] == 1:
+            return httpx.ConnectError("close1")
+        return (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
+
+    def position_risk(_clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
+        if close_phase["on"]:
+            return httpx.ConnectError("positionRisk down")
+        return (200, [])
+
+    def query_order(_clean: dict[str, Any]) -> BaseException:
+        return httpx.ConnectError("order query down")
+
+    handlers[("POST", "/fapi/v1/order")] = order_handler
+    handlers[("GET", "/fapi/v3/positionRisk")] = position_risk
+    handlers[("GET", "/fapi/v1/order")] = query_order
+    handlers[("POST", "/fapi/v1/algoOrder")] = [
+        (400, {"code": -2010, "msg": "reject"}),
+        (400, {"code": -2010, "msg": "reject"}),
+    ]
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    result = run_entry_sequence(conn, intent_id, trade=trade, sleep=_noop_sleep)
+    assert result.startswith(MSG_STOP_CLOSED)
+    cls_id = client_order_id(intent_id, "cls")
+    cls_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true"
+    ]
+    assert len(cls_posts) == 2
+    assert all(c[2].get("newClientOrderId") == cls_id for c in cls_posts)
+    deletes = [c for c in transport.calls if c[0] == "DELETE"]
+    assert any(c[2].get("clientAlgoId") == client_order_id(intent_id, "sl0") for c in deletes)
+    assert any(c[2].get("clientAlgoId") == client_order_id(intent_id, "sl1") for c in deletes)
+    steps = _exec_log_steps(conn, intent_id)
+    assert "emergency_close" in steps
+    assert "emergency_close_2" in steps
+    assert "orphan_cancel" in steps
+    conn.close()
+
+
+def test_emergency_close_reduce_only_2022_flat_counts_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """-2022 then positionRisk empty → closed, no second POST."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "cls-2022-flat.db")
+    intent_id = _entry_intent(conn)
+    claim_exec_intent(conn, intent_id)
+    handlers = _base_entry_handlers()
+    pos_calls = {"n": 0}
+
+    def order_handler(clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
+        if clean.get("reduceOnly") == "true":
+            return (400, {"code": -2022, "msg": "ReduceOnly Order is rejected."})
+        return (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
+
+    def position_risk(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        pos_calls["n"] += 1
+        # After the -2022 close attempt, confirm flat.
+        if pos_calls["n"] >= 2:
+            return (200, [])
+        return (
+            200,
+            [
+                {
+                    "symbol": "DOGEUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "-100",
+                    "entryPrice": "0.08",
+                    "markPrice": "0.08",
+                }
+            ],
+        )
+
+    handlers[("POST", "/fapi/v1/order")] = order_handler
+    handlers[("GET", "/fapi/v3/positionRisk")] = position_risk
+    handlers[("POST", "/fapi/v1/algoOrder")] = [
+        (400, {"code": -2010, "msg": "reject"}),
+        (400, {"code": -2010, "msg": "reject"}),
+    ]
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    result = run_entry_sequence(conn, intent_id, trade=trade, sleep=_noop_sleep)
+    assert result.startswith(MSG_STOP_CLOSED)
+    cls_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true"
+    ]
+    assert len(cls_posts) == 1
+    assert cls_posts[0][2].get("newClientOrderId") == client_order_id(intent_id, "cls")
+    steps = _exec_log_steps(conn, intent_id)
+    assert "emergency_close" in steps
+    assert "emergency_close_2" not in steps
+    conn.close()
+
+
+def test_emergency_close_reduce_only_2022_still_open_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """-2022 while positionRisk still open → resend, then fill on attempt 2."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "cls-2022-open.db")
+    intent_id = _entry_intent(conn)
+    claim_exec_intent(conn, intent_id)
+    handlers = _base_entry_handlers()
+    cls_n = {"n": 0}
+    open_pos = [
+        {
+            "symbol": "DOGEUSDT",
+            "positionSide": "BOTH",
+            "positionAmt": "-100",
+            "entryPrice": "0.08",
+            "markPrice": "0.08",
+        }
+    ]
+
+    def order_handler(clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
+        if clean.get("reduceOnly") != "true":
+            return (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
+        cls_n["n"] += 1
+        if cls_n["n"] == 1:
+            return (400, {"code": -2022, "msg": "ReduceOnly Order is rejected."})
+        return (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
+
+    handlers[("POST", "/fapi/v1/order")] = order_handler
+    handlers[("GET", "/fapi/v3/positionRisk")] = (200, open_pos)
+    handlers[("GET", "/fapi/v1/order")] = (200, {"orderId": 9, "executedQty": "0", "status": "NEW"})
+    handlers[("POST", "/fapi/v1/algoOrder")] = [
+        (400, {"code": -2010, "msg": "reject"}),
+        (400, {"code": -2010, "msg": "reject"}),
+    ]
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    result = run_entry_sequence(conn, intent_id, trade=trade, sleep=_noop_sleep)
+    assert result.startswith(MSG_STOP_CLOSED)
+    cls_id = client_order_id(intent_id, "cls")
+    cls_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true"
+    ]
+    assert len(cls_posts) == 2
+    assert all(c[2].get("newClientOrderId") == cls_id for c in cls_posts)
+    steps = _exec_log_steps(conn, intent_id)
+    assert "emergency_close" in steps
+    assert "emergency_close_2" in steps
+    conn.close()
+
+
 def test_orphan_list_fail_direct_cancel_unknown_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "orphan-direct.db")
