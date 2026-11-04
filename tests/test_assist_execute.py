@@ -131,7 +131,7 @@ def _seed_doge_short(conn: Any, *, ts: int) -> None:
 
 def test_schema_version_includes_assist_execute(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "mig.db")
-    assert SCHEMA_VERSION >= 18
+    assert SCHEMA_VERSION >= 19
     tables = {
         r[0]
         for r in conn.execute(

@@ -16,7 +16,17 @@ TRACK_TF = "1h"
 ANALYSIS_TF = "4h"
 # 4h bar open → available after close + ~1h (timestamp + 5h).
 ANALYSIS_LAG_MS = 5 * 3_600_000
-FEE_BPS_PER_SIDE = 4.0
+# Binance USDⓈ-M VIP0 taker (no BNB discount). Entry, stop and TP are all market fills.
+FEE_BPS_PER_SIDE = 5.0
+# Adverse slippage per market fill. Cost only: exit_px and gross_r stay at the bar price.
+SLIPPAGE_BPS_PER_SIDE = 1.0
+# Stop exits are labelled by the stop that filled.
+STOP_EXIT_REASONS = {"initial": "initial_stop", "breakeven": "be_stop", "trail": "trail_stop"}
+# Virtual-track sample id for the seven-universe 4h assistant. A new symbol or
+# timeframe must use a different string; never mix cohorts in weekly stats.
+TRACK_COHORT = "core7_4h_v2"
+# Binance USDⓈ-M funding settlements (00:00 / 08:00 / 16:00 UTC).
+FUNDING_INTERVAL_MS = 8 * 3_600_000
 
 
 def gap_aware_stop_fill(
@@ -72,6 +82,71 @@ def _fees_usdt(*, entry: float, exit_px: float, qty: float) -> float:
     return abs(entry) * abs(qty) * rate + abs(exit_px) * abs(qty) * rate
 
 
+def _slippage_usdt(*, entry: float, exit_px: float, qty: float) -> float:
+    rate = SLIPPAGE_BPS_PER_SIDE / 10_000.0
+    return abs(entry) * abs(qty) * rate + abs(exit_px) * abs(qty) * rate
+
+
+def _deriv_coin(symbol: str) -> str:
+    coin = symbol.upper()
+    for quote in ("USDT", "USD", "BUSD", "USDC"):
+        if coin.endswith(quote) and len(coin) > len(quote):
+            return coin[: -len(quote)]
+    return coin
+
+
+def _funding_rate_at_or_before(conn: Any, symbol: str, at_ms: int) -> float | None:
+    """Nearest non-null funding_rate with event time <= at_ms (base coin or pair)."""
+    pair = symbol.upper()
+    coin = _deriv_coin(pair)
+    row = conn.execute(
+        """
+        SELECT funding_rate FROM derivatives_analytics
+        WHERE symbol IN (?, ?)
+          AND timestamp <= ?
+          AND funding_rate IS NOT NULL
+        ORDER BY timestamp DESC, ingested_at DESC
+        LIMIT 1
+        """,
+        (coin, pair, int(at_ms)),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return float(row[0])
+
+
+def _funding_cost(
+    conn: Any,
+    *,
+    symbol: str,
+    side: str,
+    entry: float,
+    qty: float,
+    entry_ms: int,
+    exit_ms: int,
+) -> tuple[float, int]:
+    """Virtual funding USDT cost and count of settlements with a missing rate.
+
+    Settlements at 00/08/16 UTC with entry_ms < t <= exit_ms. Positive rate: long
+    pays, short receives. Missing rate costs 0 and increments the missing count.
+    """
+    first = ((int(entry_ms) // FUNDING_INTERVAL_MS) + 1) * FUNDING_INTERVAL_MS
+    notional = abs(entry) * abs(qty)
+    total = 0.0
+    missing = 0
+    t = first
+    while t <= int(exit_ms):
+        rate = _funding_rate_at_or_before(conn, symbol, t)
+        if rate is None:
+            missing += 1
+        else:
+            # Long pays positive rate; short receives (negative cost).
+            signed = notional * rate if side == "long" else -notional * rate
+            total += signed
+        t += FUNDING_INTERVAL_MS
+    return total, missing
+
+
 def _r_and_pnl(
     *,
     side: str,
@@ -80,6 +155,7 @@ def _r_and_pnl(
     exit_px: float,
     qty: float,
     loss_at_stop: float,
+    funding_usdt: float = 0.0,
 ) -> tuple[float, float, float, float]:
     risk = abs(entry - stop)
     if risk <= 0 or loss_at_stop <= 0:
@@ -89,7 +165,7 @@ def _r_and_pnl(
     else:
         gross_usd = (entry - exit_px) * qty
     fee = _fees_usdt(entry=entry, exit_px=exit_px, qty=qty)
-    net_usd = gross_usd - fee
+    net_usd = gross_usd - fee - _slippage_usdt(entry=entry, exit_px=exit_px, qty=qty) - funding_usdt
     gross_r = gross_usd / loss_at_stop
     net_r = net_usd / loss_at_stop
     return gross_r, net_r, fee, net_usd
@@ -131,6 +207,7 @@ def _resolve_one(conn: Any, track: dict[str, Any], *, now_ms: int) -> dict[str, 
     best_high: float | None = None
     best_low: float | None = None
     current_stop = stop
+    stop_source = "initial"
 
     for bar in bars:
         open_px = float(bar["open"])
@@ -147,7 +224,7 @@ def _resolve_one(conn: Any, track: dict[str, Any], *, now_ms: int) -> dict[str, 
                 track,
                 exit_at_ms=close_ms,
                 exit_px=float(fill),
-                exit_reason="stop",
+                exit_reason=STOP_EXIT_REASONS.get(stop_source, "trail_stop"),
                 entry=entry,
                 stop=initial_stop,
                 qty=qty,
@@ -169,6 +246,7 @@ def _resolve_one(conn: Any, track: dict[str, Any], *, now_ms: int) -> dict[str, 
         trailed = trail_stop_with_source(pos, best_low=best_low, best_high=best_high)
         if trailed is not None:
             current_stop = float(trailed[0])
+            stop_source = str(trailed[1])
 
         # 2R target on this bar.
         if side == "long" and high >= target:
@@ -231,6 +309,15 @@ def _finalize(
     loss_at_stop: float,
     side: str,
 ) -> dict[str, Any]:
+    funding_usdt, funding_missing = _funding_cost(
+        conn,
+        symbol=str(track["symbol"]),
+        side=side,
+        entry=entry,
+        qty=qty,
+        entry_ms=int(track["sent_at_ms"]),
+        exit_ms=int(exit_at_ms),
+    )
     gross_r, net_r, fee, pnl = _r_and_pnl(
         side=side,
         entry=entry,
@@ -238,6 +325,7 @@ def _finalize(
         exit_px=exit_px,
         qty=qty,
         loss_at_stop=loss_at_stop,
+        funding_usdt=funding_usdt,
     )
     close_track(
         conn,
@@ -249,6 +337,8 @@ def _finalize(
         net_r=net_r,
         fee_usdt=fee,
         pnl_usdt=pnl,
+        funding_usdt=funding_usdt,
+        funding_missing=funding_missing,
     )
     return {
         "signal_id": track["signal_id"],
@@ -258,4 +348,6 @@ def _finalize(
         "net_r": net_r,
         "fee_usdt": fee,
         "pnl_usdt": pnl,
+        "funding_usdt": funding_usdt,
+        "funding_missing": funding_missing,
     }

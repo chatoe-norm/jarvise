@@ -345,6 +345,25 @@ def previous_analysis_action(
     return str(rows[1][0] or "").lower() or None
 
 
+def _track_cohort() -> str:
+    # Function-local: jarvise_assist.track imports close_track from this module.
+    from jarvise_assist.track import TRACK_COHORT
+
+    return TRACK_COHORT
+
+
+def _open_track_for_symbol_side(conn: Any, symbol: str, side: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM assist_track
+        WHERE symbol=? AND side=? AND exit_at_ms IS NULL
+        LIMIT 1
+        """,
+        (symbol.upper(), side.lower()),
+    ).fetchone()
+    return row is not None
+
+
 def insert_signal(
     conn: Any,
     sized: SizedSignal,
@@ -389,12 +408,35 @@ def insert_signal(
     )
     if status in {"held", "sent"}:
         expire_older_held(conn, sized.symbol, keep_id=signal_id)
-    if status == "sent" and sent_at_ms is not None:
+    cohort = _track_cohort()
+    if status == "held":
+        if not _open_track_for_symbol_side(conn, sized.symbol, sized.side):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO assist_track (
+                    signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
+                    cohort, kind
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'held')
+                """,
+                (
+                    signal_id,
+                    sized.symbol,
+                    sized.side,
+                    float(sized.entry),
+                    float(sized.stop),
+                    float(sized.target),
+                    float(sized.qty),
+                    int(created_at_ms),
+                    cohort,
+                ),
+            )
+    elif status == "sent" and sent_at_ms is not None:
         conn.execute(
             """
             INSERT OR IGNORE INTO assist_track (
-                signal_id, symbol, side, entry, stop, target, qty, sent_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
+                cohort, kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent')
             """,
             (
                 signal_id,
@@ -405,6 +447,7 @@ def insert_signal(
                 float(sized.target),
                 float(sized.qty),
                 int(sent_at_ms),
+                cohort,
             ),
         )
     conn.commit()
@@ -451,23 +494,52 @@ def mark_signal_sent(
             signal_id,
         ),
     )
-    conn.execute(
+    cohort = _track_cohort()
+    # Promote an open held track for this signal; leave a closed held row alone.
+    cur = conn.execute(
         """
-        INSERT OR IGNORE INTO assist_track (
-            signal_id, symbol, side, entry, stop, target, qty, sent_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        UPDATE assist_track SET
+            kind='sent',
+            entry=?,
+            stop=?,
+            target=?,
+            qty=?,
+            sent_at_ms=?,
+            cohort=?
+        WHERE signal_id=? AND exit_at_ms IS NULL
         """,
         (
-            signal_id,
-            sized.symbol,
-            sized.side,
             float(sized.entry),
             float(sized.stop),
             float(sized.target),
             float(sized.qty),
             int(sent_at_ms),
+            cohort,
+            signal_id,
         ),
     )
+    # A sent signal always gets its own track, even when another track for the same
+    # symbol+side is open (a superseded night idea, or a repeat idea after 24 h).
+    if int(cur.rowcount or 0) == 0:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO assist_track (
+                signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
+                cohort, kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent')
+            """,
+            (
+                signal_id,
+                sized.symbol,
+                sized.side,
+                float(sized.entry),
+                float(sized.stop),
+                float(sized.target),
+                float(sized.qty),
+                int(sent_at_ms),
+                cohort,
+            ),
+        )
     conn.commit()
 
 
@@ -862,12 +934,14 @@ def close_track(
     net_r: float,
     fee_usdt: float,
     pnl_usdt: float,
+    funding_usdt: float = 0.0,
+    funding_missing: int = 0,
 ) -> None:
     conn.execute(
         """
         UPDATE assist_track SET
             exit_at_ms=?, exit_px=?, exit_reason=?,
-            gross_r=?, net_r=?, fee_usdt=?, pnl_usdt=?
+            gross_r=?, net_r=?, fee_usdt=?, pnl_usdt=?, funding_usdt=?, funding_missing=?
         WHERE signal_id=? AND exit_at_ms IS NULL
         """,
         (
@@ -878,28 +952,55 @@ def close_track(
             float(net_r),
             float(fee_usdt),
             float(pnl_usdt),
+            float(funding_usdt),
+            int(funding_missing),
             signal_id,
         ),
     )
     conn.commit()
 
 
-def list_closed_tracks_since(conn: Any, *, since_ms: int) -> list[dict[str, Any]]:
-    cur = conn.execute(
-        """
+def list_closed_tracks_since(
+    conn: Any,
+    *,
+    since_ms: int,
+    cohort: str | None = None,
+    kind: str | None = None,
+) -> list[dict[str, Any]]:
+    sql = """
         SELECT signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
-               exit_at_ms, exit_px, exit_reason, gross_r, net_r, fee_usdt, pnl_usdt
+               exit_at_ms, exit_px, exit_reason, gross_r, net_r, fee_usdt, pnl_usdt,
+               funding_usdt, funding_missing, cohort, kind
         FROM assist_track
         WHERE exit_at_ms IS NOT NULL AND exit_at_ms >= ?
-        ORDER BY exit_at_ms ASC
-        """,
-        (int(since_ms),),
-    )
+        """
+    params: list[Any] = [int(since_ms)]
+    if cohort is not None:
+        sql += " AND cohort=?"
+        params.append(cohort)
+    if kind is not None:
+        sql += " AND kind=?"
+        params.append(kind)
+    sql += " ORDER BY exit_at_ms ASC"
+    cur = conn.execute(sql, params)
     return [dict(r) for r in cur.fetchall()]
 
 
-def count_closed_tracks_all(conn: Any) -> int:
-    row = conn.execute("SELECT COUNT(*) FROM assist_track WHERE exit_at_ms IS NOT NULL").fetchone()
+def count_closed_tracks_all(
+    conn: Any,
+    *,
+    cohort: str | None = None,
+    kind: str | None = None,
+) -> int:
+    sql = "SELECT COUNT(*) FROM assist_track WHERE exit_at_ms IS NOT NULL"
+    params: list[Any] = []
+    if cohort is not None:
+        sql += " AND cohort=?"
+        params.append(cohort)
+    if kind is not None:
+        sql += " AND kind=?"
+        params.append(kind)
+    row = conn.execute(sql, params).fetchone()
     return int(row[0]) if row else 0
 
 

@@ -313,7 +313,7 @@ def test_virtual_track_stop_trail_and_2r_matches_resting_fill(tmp_path: Path) ->
         (sid,),
     ).fetchone()
     assert row is not None
-    assert row[0] == "stop"
+    assert row[0] == "initial_stop"
     assert float(row[1]) == 85.0
     assert row[3] is not None and float(row[3]) > 0
     conn.close()
@@ -376,7 +376,8 @@ def test_weekly_summary_includes_funding(tmp_path: Path) -> None:
             "mean_r": -1.0,
             "total_usdt": -20.0,
             "exit_stop_original": 1,
-            "exit_stop_trailed": 0,
+            "exit_stop_be": 0,
+            "exit_stop_trail": 0,
             "exit_target_2r": 1,
             "exit_analysis": 1,
         },
@@ -384,7 +385,7 @@ def test_weekly_summary_includes_funding(tmp_path: Path) -> None:
         closed_all=1,
     )
     assert "ยังไม่พิสูจน์ edge — ตัวอย่าง 1 ไม้" in sample
-    assert "ปิดที่ stop เดิม 1 · stop ที่เลื่อนแล้ว 0 · ถึง 2R 1 · ปิดตามสัญญาณ 1" in sample
+    assert "ปิดที่ stop เดิม 1 · stop ที่ทุน 0 · stop ที่ trail 0 · ถึง 2R 1 · ปิดตามสัญญาณ 1" in sample
     assert "-1.00R" in sample or "-1.0R" in sample
     conn.close()
 
@@ -402,7 +403,7 @@ def test_weekly_stop_split_original_vs_trailed() -> None:
     ]
     virtual = summarize_virtual(rows)
     assert virtual["exit_stop_original"] == 2
-    assert virtual["exit_stop_trailed"] == 4
+    assert virtual["exit_stop_trail"] == 4  # legacy "stop" rows with gross R > 0
     assert abs(virtual["win_rate"] - (4 / 6)) < 1e-9
     text = format_weekly_summary(
         counts={"sent": 6, "skipped": 0, "taken": 0},
@@ -417,7 +418,7 @@ def test_weekly_stop_split_original_vs_trailed() -> None:
         closed_all=6,
     )
     assert "ชนะ 67%" in text
-    assert "ปิดที่ stop เดิม 2 · stop ที่เลื่อนแล้ว 4 · ถึง 2R 0 · ปิดตามสัญญาณ 0" in text
+    assert "ปิดที่ stop เดิม 2 · stop ที่ทุน 0 · stop ที่ trail 4 · ถึง 2R 0 · ปิดตามสัญญาณ 0" in text
     assert "ยังไม่พิสูจน์ edge — ตัวอย่าง 6 ไม้" in text
 
 
