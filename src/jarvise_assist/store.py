@@ -1082,7 +1082,7 @@ def get_exec_intent(conn: Any, intent_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
         SELECT id, kind, symbol, side, preview_json, created_at_ms, expires_at_ms,
-               status, result_text, telegram_message_id
+               status, result_text, telegram_message_id, ref_price, ref_source, ref_at_ms
         FROM assist_exec_intent WHERE id=?
         """,
         (intent_id,),
@@ -1103,6 +1103,9 @@ def get_exec_intent(conn: Any, intent_id: str) -> dict[str, Any] | None:
             "status": row[7],
             "result_text": row[8],
             "telegram_message_id": row[9],
+            "ref_price": row[10],
+            "ref_source": row[11],
+            "ref_at_ms": row[12],
         }
     )
     raw = data.get("preview_json")
@@ -1111,6 +1114,26 @@ def get_exec_intent(conn: Any, intent_id: str) -> dict[str, Any] | None:
     except Exception:  # noqa: BLE001
         data["preview"] = {}
     return data
+
+
+def set_exec_intent_ref(
+    conn: Any,
+    intent_id: str,
+    *,
+    ref_price: str,
+    ref_source: str,
+    ref_at_ms: int,
+) -> None:
+    """Store the confirm-time mark. Does not change status or preview_json."""
+    conn.execute(
+        """
+        UPDATE assist_exec_intent
+        SET ref_price=?, ref_source=?, ref_at_ms=?
+        WHERE id=?
+        """,
+        (str(ref_price), str(ref_source), int(ref_at_ms), intent_id),
+    )
+    conn.commit()
 
 
 def claim_exec_intent(conn: Any, intent_id: str) -> bool:

@@ -55,6 +55,7 @@ from jarvise_assist.store import (
     mark_signal_taken,
     now_ms,
     set_exec_intent_message_id,
+    set_exec_intent_ref,
 )
 from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_exchange.binance_spot import (
@@ -1344,6 +1345,17 @@ def _confirm_guards_entry(
     admitted, dropped = assign_shared_leverage(admitted, available_balance=available)
     if dropped:
         return "margin_cap"
+    # Persist the mark already used for chase. Never changes the return or timing.
+    try:
+        set_exec_intent_ref(
+            conn,
+            str(intent["id"]),
+            ref_price=str(mark),
+            ref_source="confirm_mark",
+            ref_at_ms=int(now_ms_value),
+        )
+    except Exception as exc:  # noqa: BLE001 — ref is best-effort; orders must still proceed
+        logger.warning("set_exec_intent_ref failed type=%s", type(exc).__name__)
     return None
 
 

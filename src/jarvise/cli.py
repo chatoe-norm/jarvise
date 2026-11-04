@@ -529,6 +529,70 @@ def assist_explore(
     raise typer.Exit(run_explore_cli(json_output=json_output))
 
 
+@assist_app.command("real-report")
+def assist_real_report(
+    since_ms: Annotated[
+        int | None,
+        typer.Option("--since-ms", help="Include fills at or after this Unix ms (UTC)."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the report JSON.")] = False,
+    do_sync: Annotated[
+        bool,
+        typer.Option("--sync", help="Write assist_real_trade (deployed jobs path only)."),
+    ] = False,
+) -> None:
+    """Print the real-vs-virtual one-tap report. Read key only; no orders.
+
+    Default opens the DB read-only and never writes. ``--sync`` migrates and
+    rebuilds ``assist_real_trade`` (for weekly/jobs after deploy).
+    """
+    from jarvise_assist.futures import build_futures_client
+    from jarvise_assist.real_trades import SPEC_START_MS, run_real_report
+    from jarvise_ingest.db import SCHEMA_VERSION, open_db
+    from jarvise_ingest.universe_cli import connect_readonly
+
+    db_path = analytics_db_path()
+    if not db_path.is_file():
+        typer.echo("analytics db missing", err=True)
+        raise typer.Exit(code=2)
+    client = build_futures_client()
+    if client is None:
+        typer.echo("no read-only Binance auth", err=True)
+        raise typer.Exit(code=2)
+    since = int(since_ms if since_ms is not None else SPEC_START_MS)
+    if do_sync:
+        conn = open_db(db_path)
+        try:
+            payload = run_real_report(conn, client, since_ms=since, sync=True)
+        finally:
+            conn.close()
+    else:
+        conn = connect_readonly(db_path)
+        try:
+            user_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+            if user_version != SCHEMA_VERSION:
+                typer.echo(
+                    f"schema mismatch: user_version={user_version} expected={SCHEMA_VERSION}",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            payload = run_real_report(conn, client, since_ms=since, sync=False)
+        finally:
+            conn.close()
+    if json_output:
+        # Counts and bps only — no order ids or keys.
+        out = {
+            "ok": payload.get("ok"),
+            "summary": payload.get("summary"),
+            "lines": payload.get("lines"),
+        }
+        typer.echo(json.dumps(out, ensure_ascii=False))
+    else:
+        typer.echo(payload.get("text") or "")
+    if payload.get("ok") is False:
+        raise typer.Exit(code=1)
+
+
 report_app = typer.Typer(help="Read-only owner reports. No orders.")
 app.add_typer(report_app, name="report")
 

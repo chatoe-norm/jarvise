@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 19).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 20).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -461,7 +461,10 @@ CREATE TABLE IF NOT EXISTS assist_exec_intent (
     expires_at_ms INTEGER NOT NULL,
     status TEXT NOT NULL,
     result_text TEXT,
-    telegram_message_id INTEGER
+    telegram_message_id INTEGER,
+    ref_price TEXT,
+    ref_source TEXT,
+    ref_at_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_assist_exec_intent_status
     ON assist_exec_intent (status, expires_at_ms);
@@ -479,3 +482,39 @@ CREATE TABLE IF NOT EXISTS assist_exec_log (
 );
 CREATE INDEX IF NOT EXISTS idx_assist_exec_log_intent
     ON assist_exec_log (intent_id, created_at_ms);
+
+-- Real one-tap fills vs virtual track (migration 20). Read-key sync only.
+CREATE TABLE IF NOT EXISTS assist_real_trade (
+    intent_id TEXT,
+    signal_id TEXT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry_order_id TEXT NOT NULL UNIQUE,
+    entry_client_id TEXT,
+    entry_time_ms INTEGER,
+    entry_qty REAL,
+    entry_fill_avg REAL,
+    ref_price REAL,
+    ref_source TEXT,
+    signal_entry REAL,
+    planned_stop REAL,
+    loss_at_stop REAL,
+    exit_time_ms INTEGER,
+    exit_fill_avg REAL,
+    exit_kind TEXT,
+    exit_order_ids TEXT,
+    stop_trigger REAL,
+    commission_usdt REAL,
+    commission_other_asset TEXT,
+    funding_usdt REAL,
+    realized_pnl_usdt REAL,
+    net_r_real REAL,
+    net_r_virtual REAL,
+    slip_entry_bps REAL,
+    drift_signal_bps REAL,
+    slip_stop_bps REAL,
+    status TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assist_real_trade_status
+    ON assist_real_trade (status, entry_time_ms);
