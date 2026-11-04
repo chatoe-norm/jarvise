@@ -455,7 +455,15 @@ def test_signal_and_morning_return_streak_pause(tmp_path: Path) -> None:
     _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=now - 60_000)
     p = run_assist_signals(conn, futures=fake, now_ms_value=now, send=lambda *_a, **_k: True)
     assert p["skipped"] == "streak_pause"
-    assert conn.execute("SELECT COUNT(*) FROM assist_signal").fetchone()[0] == 0
+    # Pause still records a blocked virtual track for the admitted candidate; sends nothing.
+    blocked = conn.execute(
+        "SELECT status, kind, block_reason FROM assist_signal s JOIN assist_track t ON t.signal_id = s.id"
+    ).fetchall()
+    assert len(blocked) == 1
+    assert blocked[0][0] == "blocked"
+    assert blocked[0][1] == "blocked"
+    assert blocked[0][2] == "streak_pause"
+    assert conn.execute("SELECT COUNT(*) FROM assist_signal WHERE status != 'blocked'").fetchone()[0] == 0
 
     # Held overnight should also skip morning inserts/sends when paused.
     sized = size_signal(

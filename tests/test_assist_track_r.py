@@ -10,18 +10,24 @@ from typing import Any
 import pytest
 from tests.test_assist import _ms_bangkok
 
-from jarvise_assist.sizing import size_signal
+from jarvise_assist.sizing import IDEA_LOOKBACK_MS, size_signal
 from jarvise_assist.store import (
     count_closed_tracks_all,
+    count_signals_since,
     insert_signal,
+    list_active_idea_signals,
     list_closed_tracks_since,
     mark_signal_sent,
+    recent_same_idea,
+    record_blocked_signal,
 )
 from jarvise_assist.track import (
     FEE_BPS_PER_SIDE,
     FUNDING_INTERVAL_MS,
     SLIPPAGE_BPS_PER_SIDE,
     TRACK_COHORT,
+    _funding_cost,
+    _funding_rate_at_or_before,
     resolve_open_tracks,
 )
 from jarvise_assist.weekly import format_weekly_summary, summarize_virtual
@@ -260,16 +266,16 @@ def test_funding_long_short_sign_and_missing_rate(tmp_path: Path) -> None:
                 [
                     {
                         "symbol": "BTC",
-                        "timestamp": settle - 60_000,
+                        "timestamp": settle,
                         "funding_rate": rate,
                         "open_interest_usd": 1.0,
                         "long_short_ratio": None,
                         "liquidations_24h_usd": None,
                     },
-                    # After settlement: must not be used for that t.
+                    # Outside the ±60s window: must not be used for that t.
                     {
                         "symbol": "BTC",
-                        "timestamp": settle + 1,
+                        "timestamp": settle + 60_001,
                         "funding_rate": 0.9,
                         "open_interest_usd": 1.0,
                         "long_short_ratio": None,
@@ -455,4 +461,291 @@ def test_funding_missing_is_stored_and_shown(tmp_path: Path) -> None:
     assert v["funding_missing"] == 1
     text = format_weekly_summary(counts={}, virtual=v, real={"universe_usdt": 0.0}, closed_all=1)
     assert "funding เสมือน 0.00 USDT (ไม่มีอัตรา 1 รอบ นับเป็น 0)" in text
+    conn.close()
+
+
+def test_record_blocked_reasons_and_dedupe(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "blocked.db")
+    ts = _ms_bangkok(2026, 10, 27, 12, 0)
+    sized = _sized()
+    sid = record_blocked_signal(conn, sized, reason="risk_cap", created_at_ms=ts)
+    assert sid is not None
+    row = conn.execute(
+        "SELECT s.status, t.kind, t.block_reason, t.cohort FROM assist_signal s "
+        "JOIN assist_track t ON t.signal_id = s.id WHERE s.id=?",
+        (sid,),
+    ).fetchone()
+    assert tuple(row) == ("blocked", "blocked", "risk_cap", TRACK_COHORT)
+    # Open blocked track blocks another blocked insert for the same symbol+side.
+    assert record_blocked_signal(conn, sized, reason="margin_cap", created_at_ms=ts + 1) is None
+    assert record_blocked_signal(conn, sized, reason="below_min_notional", created_at_ms=ts + 2) is None
+    eth = _sized(symbol="ETHUSDT")
+    assert record_blocked_signal(conn, eth, reason="margin_cap", created_at_ms=ts) is not None
+    doge = _sized(symbol="DOGEUSDT")
+    assert record_blocked_signal(conn, doge, reason="streak_pause", created_at_ms=ts) is not None
+    conn.close()
+
+
+def test_blocked_does_not_block_later_held_or_sent(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "blocked-held.db")
+    ts = _ms_bangkok(2026, 10, 27, 12, 0)
+    sized = _sized()
+    blocked_id = record_blocked_signal(conn, sized, reason="risk_cap", created_at_ms=ts)
+    assert blocked_id is not None
+    held_id = insert_signal(conn, sized, status="held", created_at_ms=ts + H, expires_at_ms=ts + 10**9)
+    kinds = dict(conn.execute("SELECT signal_id, kind FROM assist_track").fetchall())
+    assert kinds[blocked_id] == "blocked"
+    assert kinds[held_id] == "held"
+    mark_signal_sent(conn, held_id, sized, sent_at_ms=ts + 2 * H, expires_at_ms=ts + 10**9)
+    assert conn.execute("SELECT kind FROM assist_track WHERE signal_id=?", (held_id,)).fetchone()[0] == "sent"
+    # A fresh sent insert also lands while the blocked row is still open.
+    eth = _sized(symbol="ETHUSDT")
+    record_blocked_signal(conn, eth, reason="margin_cap", created_at_ms=ts)
+    sent_id = insert_signal(
+        conn, eth, status="sent", created_at_ms=ts + H, expires_at_ms=ts + 10**9, sent_at_ms=ts + H
+    )
+    assert conn.execute("SELECT kind FROM assist_track WHERE signal_id=?", (sent_id,)).fetchone()[0] == "sent"
+    conn.close()
+
+
+def test_risk_slots_and_same_idea_ignore_blocked(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "blocked-slots.db")
+    ts = _ms_bangkok(2026, 10, 27, 12, 0)
+    sized = _sized()
+    record_blocked_signal(conn, sized, reason="risk_cap", created_at_ms=ts)
+    assert recent_same_idea(conn, symbol="BTCUSDT", side="long", now_ms=ts + 60_000) is False
+    active = list_active_idea_signals(conn, now_ms=ts + 60_000, within_ms=IDEA_LOOKBACK_MS)
+    assert active == []
+    counts = count_signals_since(conn, since_ms=ts - H)
+    assert counts == {"sent": 0, "skipped": 0, "taken": 0, "held": 0, "expired": 0}
+    conn.close()
+
+
+def test_closed_blocked_net_r_matches_sent(tmp_path: Path) -> None:
+    bars = [(99.0, 99.5, 89.0, 89.5)]
+    conn_sent, sid_sent, now = _track(tmp_path, bars)
+    resolve_open_tracks(conn_sent, now_ms=now)
+    sent_row = _row(conn_sent, sid_sent)
+
+    conn = open_db(tmp_path / "match-blocked.db")
+    sent_at = _ms_bangkok(2026, 10, 27, 8, 0)
+    sized = _sized()
+    sid = record_blocked_signal(conn, sized, reason="risk_cap", created_at_ms=sent_at)
+    assert sid is not None
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "timestamp": sent_at + (i + 1) * H,
+                "symbol": "BTCUSDT",
+                "timeframe": "1h",
+                "open": o,
+                "high": h,
+                "low": low,
+                "close": c,
+                "volume": 1.0,
+            }
+            for i, (o, h, low, c) in enumerate(bars)
+        ],
+    )
+    resolve_open_tracks(conn, now_ms=sent_at + (len(bars) + 2) * H)
+    blocked_row = _row(conn, sid)
+    assert blocked_row["exit_reason"] == sent_row["exit_reason"]
+    assert blocked_row["exit_px"] == sent_row["exit_px"]
+    assert blocked_row["net_r"] == pytest.approx(sent_row["net_r"])
+    assert blocked_row["gross_r"] == pytest.approx(sent_row["gross_r"])
+    conn_sent.close()
+    conn.close()
+
+
+def test_weekly_blocked_line_and_closed_all_excludes_blocked(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "weekly-blocked.db")
+    since = _ms_bangkok(2026, 10, 20, 8, 0)
+    fixtures = (
+        ("as_sent", "sent", None, 0.5, 0),
+        ("as_held", "held", None, -0.2, 0),
+        ("as_rc", "blocked", "risk_cap", 0.20, 0),
+        ("as_rc2", "blocked", "risk_cap", 0.20, 0),
+        ("as_rc3", "blocked", "risk_cap", 0.20, 0),
+        ("as_sp1", "blocked", "streak_pause", -0.9, 1),
+        ("as_sp2", "blocked", "streak_pause", -0.7, 1),
+    )
+    for sid, kind, block_reason, net_r, funding_missing in fixtures:
+        conn.execute(
+            """
+            INSERT INTO assist_signal (
+                id, symbol, side, entry, stop, target, qty, notional, leverage, loss_at_stop,
+                created_at_ms, expires_at_ms, status
+            ) VALUES (?, 'ETHUSDT', 'long', 100, 90, 120, 0.1, 10, 5, 1, ?, ?, ?)
+            """,
+            (sid, since, since + 1, "blocked" if kind == "blocked" else "sent"),
+        )
+        conn.execute(
+            """
+            INSERT INTO assist_track (
+                signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
+                exit_at_ms, exit_px, exit_reason, gross_r, net_r, fee_usdt, pnl_usdt,
+                cohort, kind, funding_usdt, funding_missing, block_reason
+            ) VALUES (?, 'ETHUSDT', 'long', 100, 90, 120, 0.1, ?, ?, 100, 'flat', 0, ?, 0, ?,
+                      ?, ?, 0, ?, ?)
+            """,
+            (
+                sid,
+                since,
+                since + H,
+                net_r,
+                net_r,
+                TRACK_COHORT,
+                kind,
+                funding_missing,
+                block_reason,
+            ),
+        )
+    conn.commit()
+    sent_rows = list_closed_tracks_since(conn, since_ms=since, cohort=TRACK_COHORT, kind="sent")
+    held_rows = list_closed_tracks_since(conn, since_ms=since, cohort=TRACK_COHORT, kind="held")
+    blocked_rows = list_closed_tracks_since(conn, since_ms=since, cohort=TRACK_COHORT, kind="blocked")
+    blocked = {
+        "risk_cap": summarize_virtual([r for r in blocked_rows if r["block_reason"] == "risk_cap"]),
+        "streak_pause": summarize_virtual([r for r in blocked_rows if r["block_reason"] == "streak_pause"]),
+    }
+    closed_all = count_closed_tracks_all(conn, cohort=TRACK_COHORT, kind="sent")
+    assert closed_all == 1
+    text = format_weekly_summary(
+        counts={"sent": 1, "skipped": 0, "taken": 0},
+        virtual=summarize_virtual(sent_rows),
+        real={"realized_pnl": 0.0, "funding": 0.0, "commission": 0.0, "universe_usdt": 0.0},
+        closed_all=closed_all,
+        held=summarize_virtual(held_rows),
+        blocked=blocked,
+    )
+    assert "ไม้เสมือน: n=1" in text
+    assert "สัญญาณที่ถูก hold: 1 · Expectancy -0.20R" in text
+    assert (
+        "ถ้าไม่บล็อก: risk_cap n=3 · Expectancy +0.20R · streak_pause n=2 · Expectancy -0.80R (ไม่มีอัตรา 2 รอบ)"
+    ) in text
+    print("FIXTURE_WEEKLY_BLOCKED:\n" + text)
+    conn.close()
+
+
+def test_funding_window_late_wins_over_on_the_hour(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "fund-late.db")
+    settle = int(datetime(2026, 10, 27, 8, 0, tzinfo=UTC).timestamp() * 1000)
+    append_derivatives(
+        conn,
+        [
+            {
+                "symbol": "BTC",
+                "timestamp": settle,
+                "funding_rate": 0.0001,
+                "open_interest_usd": 1.0,
+                "long_short_ratio": None,
+                "liquidations_24h_usd": None,
+            },
+            {
+                "symbol": "BTC",
+                "timestamp": settle + 1,
+                "funding_rate": 0.0002,
+                "open_interest_usd": 1.0,
+                "long_short_ratio": None,
+                "liquidations_24h_usd": None,
+            },
+        ],
+    )
+    assert _funding_rate_at_or_before(conn, "BTCUSDT", settle) == pytest.approx(0.0002)
+    conn.close()
+
+
+def test_funding_window_exact_t(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "fund-exact.db")
+    settle = int(datetime(2026, 10, 27, 8, 0, tzinfo=UTC).timestamp() * 1000)
+    append_derivatives(
+        conn,
+        [
+            {
+                "symbol": "BTC",
+                "timestamp": settle,
+                "funding_rate": 0.0003,
+                "open_interest_usd": 1.0,
+                "long_short_ratio": None,
+                "liquidations_24h_usd": None,
+            }
+        ],
+    )
+    assert _funding_rate_at_or_before(conn, "BTCUSDT", settle) == pytest.approx(0.0003)
+    conn.close()
+
+
+def test_funding_window_newest_ingested_at_wins(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "fund-ingest.db")
+    settle = int(datetime(2026, 10, 27, 8, 0, tzinfo=UTC).timestamp() * 1000)
+    row = {
+        "symbol": "BTC",
+        "timestamp": settle,
+        "funding_rate": 0.0001,
+        "open_interest_usd": 1.0,
+        "long_short_ratio": None,
+        "liquidations_24h_usd": None,
+    }
+    append_derivatives(conn, [row], ingested_at=settle)
+    row2 = {**row, "funding_rate": 0.0005}
+    append_derivatives(conn, [row2], ingested_at=settle + 10)
+    assert _funding_rate_at_or_before(conn, "BTCUSDT", settle) == pytest.approx(0.0005)
+    conn.close()
+
+
+def test_funding_24h_hold_charges_three_settlements(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "fund-24h.db")
+    settle = int(datetime(2026, 10, 27, 8, 0, tzinfo=UTC).timestamp() * 1000)
+    rate = 0.0001
+    for i in range(3):
+        t = settle + i * FUNDING_INTERVAL_MS
+        append_derivatives(
+            conn,
+            [
+                {
+                    "symbol": "BTC",
+                    "timestamp": t,
+                    "funding_rate": rate,
+                    "open_interest_usd": 1.0,
+                    "long_short_ratio": None,
+                    "liquidations_24h_usd": None,
+                }
+            ],
+        )
+    # Open just before 08:00; close just after 16:00 next day → three settlements
+    # (08/16/00), not the fourth at +24h.
+    entry_ms = settle - 1
+    exit_ms = settle + 16 * H + 1
+    cost, missing = _funding_cost(
+        conn,
+        symbol="BTCUSDT",
+        side="long",
+        entry=100.0,
+        qty=1.0,
+        entry_ms=entry_ms,
+        exit_ms=exit_ms,
+    )
+    assert missing == 0
+    assert cost == pytest.approx(3 * 100.0 * rate)
+    conn.close()
+
+
+def test_funding_row_only_at_t_minus_1h_is_missing(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "fund-old.db")
+    settle = int(datetime(2026, 10, 27, 8, 0, tzinfo=UTC).timestamp() * 1000)
+    append_derivatives(
+        conn,
+        [
+            {
+                "symbol": "BTC",
+                "timestamp": settle - H,
+                "funding_rate": 0.0001,
+                "open_interest_usd": 1.0,
+                "long_short_ratio": None,
+                "liquidations_24h_usd": None,
+            }
+        ],
+    )
+    assert _funding_rate_at_or_before(conn, "BTCUSDT", settle) is None
     conn.close()

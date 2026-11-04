@@ -59,6 +59,7 @@ from jarvise_assist.store import (
     now_ms,
     previous_analysis_action,
     recent_same_idea,
+    record_blocked_signal,
     set_signal_telegram_message_id,
     write_edge,
 )
@@ -410,12 +411,16 @@ def scan_signal_candidates(
     admitted, rejected = admit_signals(existing=existing, candidates=candidates, balance=balance)
     for cand in rejected:
         skipped.append({"symbol": cand.sized.symbol, "reason": "risk_cap"})
+        if persist:
+            record_blocked_signal(conn, cand.sized, reason="risk_cap", created_at_ms=now_ms)
     admitted, margin_dropped = assign_shared_leverage(
         admitted,
         available_balance=available,
     )
     for cand in margin_dropped:
         skipped.append({"symbol": cand.sized.symbol, "reason": "margin_cap"})
+        if persist:
+            record_blocked_signal(conn, cand.sized, reason="margin_cap", created_at_ms=now_ms)
     # A margin shrink can push the size under the exchange minimum.
     still_ok: list[SignalCandidate] = []
     for cand in admitted:
@@ -432,6 +437,8 @@ def scan_signal_candidates(
     admitted = still_ok
     return {
         "admitted": admitted,
+        "rejected": rejected,
+        "margin_dropped": margin_dropped,
         "skipped": skipped,
         "balance_usdt": float(balance),
         "available_usdt": float(available),
@@ -492,6 +499,17 @@ def run_assist_signals(
     pause_info = evaluate_pause(conn, futures=client, now_ms=ts, send=send_fn)
     settings = ensure_settings(conn)
     if is_paused(settings, now_ms=ts) or pause_info.get("paused"):
+        try:
+            scanned = scan_signal_candidates(conn, futures=client, now_ms=ts, persist=False)
+        except Exception:  # noqa: BLE001 — leave the pause payload; send nothing
+            scanned = None
+        if scanned is not None:
+            for cand in scanned["admitted"]:
+                record_blocked_signal(conn, cand.sized, reason="streak_pause", created_at_ms=ts)
+            for cand in scanned["rejected"]:
+                record_blocked_signal(conn, cand.sized, reason="risk_cap", created_at_ms=ts)
+            for cand in scanned["margin_dropped"]:
+                record_blocked_signal(conn, cand.sized, reason="margin_cap", created_at_ms=ts)
         return _strip_secrets(
             {
                 "ok": True,

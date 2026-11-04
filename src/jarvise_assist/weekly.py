@@ -31,6 +31,9 @@ WEEK_MS = 7 * 24 * 3_600_000
 ANALYSIS_EXIT_REASONS = frozenset({"flat", "opposite"})
 
 
+_BLOCKED_REASON_ORDER = ("risk_cap", "margin_cap", "streak_pause")
+
+
 def format_weekly_summary(
     *,
     counts: dict[str, int],
@@ -38,6 +41,7 @@ def format_weekly_summary(
     real: dict[str, Any],
     closed_all: int,
     held: dict[str, Any] | None = None,
+    blocked: dict[str, dict[str, Any]] | None = None,
     real_vs_virtual: dict[str, Any] | None = None,
     real_report_error: str | None = None,
 ) -> str:
@@ -81,6 +85,9 @@ def format_weekly_summary(
             lines.append("สัญญาณที่ถูก hold: 0 · Expectancy —")
         else:
             lines.append(f"สัญญาณที่ถูก hold: {held_n} · Expectancy {_signed(float(held.get('mean_r') or 0.0))}R")
+    blocked_line = _format_blocked_line(blocked)
+    if blocked_line:
+        lines.append(blocked_line)
     if real_report_error:
         lines.append(f"รายงานไม้จริง: ดึงข้อมูลไม่ได้ ({real_report_error})")
     elif real_vs_virtual is not None:
@@ -111,6 +118,28 @@ def _r_or_dash(value: Any) -> str:
     if value is None:
         return "—"
     return f"{_signed(float(value))}R"
+
+
+def _format_blocked_line(blocked: dict[str, dict[str, Any]] | None) -> str | None:
+    """One counterfactual line for closed kind=blocked rows, or None when empty."""
+    if not blocked:
+        return None
+    parts: list[str] = []
+    for reason in _BLOCKED_REASON_ORDER:
+        stats = blocked.get(reason)
+        if stats is None:
+            continue
+        n = int(stats.get("n") or 0)
+        if n <= 0:
+            continue
+        part = f"{reason} n={n} · Expectancy {_signed(float(stats.get('mean_r') or 0.0))}R"
+        missing = int(stats.get("funding_missing") or 0)
+        if missing > 0:
+            part += f" (ไม่มีอัตรา {missing} รอบ)"
+        parts.append(part)
+    if not parts:
+        return None
+    return "ถ้าไม่บล็อก: " + " · ".join(parts)
 
 
 def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -241,6 +270,12 @@ def run_assist_weekly(
     virtual = summarize_virtual(virtual_rows)
     held_rows = list_closed_tracks_since(conn, since_ms=week_start, cohort=TRACK_COHORT, kind="held")
     held = summarize_virtual(held_rows)
+    blocked_rows = list_closed_tracks_since(conn, since_ms=week_start, cohort=TRACK_COHORT, kind="blocked")
+    blocked_by_reason: dict[str, dict[str, Any]] = {}
+    for reason in _BLOCKED_REASON_ORDER:
+        group = [r for r in blocked_rows if str(r.get("block_reason") or "") == reason]
+        if group:
+            blocked_by_reason[reason] = summarize_virtual(group)
     closed_all = count_closed_tracks_all(conn, cohort=TRACK_COHORT, kind="sent")
 
     client = futures if futures is not None else build_futures_client()
@@ -277,6 +312,7 @@ def run_assist_weekly(
         real=real,
         closed_all=closed_all,
         held=held,
+        blocked=blocked_by_reason or None,
         real_vs_virtual=None if real_report_error else real_vs_virtual,
         real_report_error=real_report_error,
     )
@@ -290,6 +326,7 @@ def run_assist_weekly(
         "counts": counts,
         "virtual": virtual,
         "held": held,
+        "blocked": blocked_by_reason,
         "real": real,
         "real_vs_virtual": real_vs_virtual,
         "real_report_error": real_report_error,

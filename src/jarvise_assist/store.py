@@ -352,16 +352,100 @@ def _track_cohort() -> str:
     return TRACK_COHORT
 
 
-def _open_track_for_symbol_side(conn: Any, symbol: str, side: str) -> bool:
-    row = conn.execute(
-        """
+def _open_track_for_symbol_side(
+    conn: Any,
+    symbol: str,
+    side: str,
+    *,
+    exclude_blocked: bool = True,
+) -> bool:
+    sql = """
         SELECT 1 FROM assist_track
         WHERE symbol=? AND side=? AND exit_at_ms IS NULL
-        LIMIT 1
-        """,
-        (symbol.upper(), side.lower()),
-    ).fetchone()
+        """
+    if exclude_blocked:
+        sql += " AND kind != 'blocked'"
+    sql += " LIMIT 1"
+    row = conn.execute(sql, (symbol.upper(), side.lower())).fetchone()
     return row is not None
+
+
+_BLOCKED_REASONS = frozenset({"risk_cap", "margin_cap", "streak_pause"})
+
+
+def record_blocked_signal(
+    conn: Any,
+    sized: SizedSignal,
+    *,
+    reason: str,
+    created_at_ms: int,
+) -> str | None:
+    """Insert a blocked virtual track. Never enters sent/held sample or risk slots.
+
+    Returns the new signal id, or None when an open track already exists for
+    symbol+side (any kind) or the reason is not allowed.
+    """
+    if reason not in _BLOCKED_REASONS:
+        return None
+    # Any open track (including blocked) blocks another blocked row for the pair.
+    if _open_track_for_symbol_side(conn, sized.symbol, sized.side, exclude_blocked=False):
+        return None
+    signal_id = f"as_{uuid.uuid4().hex[:16]}"
+    ts = int(created_at_ms)
+    conn.execute(
+        """
+        INSERT INTO assist_signal (
+            id, analysis_id, symbol, side, entry, stop, target, qty, notional,
+            leverage, loss_at_stop, created_at_ms, expires_at_ms, status, sent_at_ms,
+            leverage_capped, uncapped_leverage
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, 'blocked', ?,
+            ?, ?
+        )
+        """,
+        (
+            signal_id,
+            sized.analysis_id,
+            sized.symbol,
+            sized.side,
+            float(sized.entry),
+            float(sized.stop),
+            float(sized.target),
+            float(sized.qty),
+            float(sized.notional),
+            int(sized.leverage),
+            float(sized.loss_at_stop),
+            ts,
+            ts,
+            ts,
+            1 if sized.leverage_capped else 0,
+            int(sized.uncapped_leverage),
+        ),
+    )
+    cohort = _track_cohort()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO assist_track (
+            signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
+            cohort, kind, block_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked', ?)
+        """,
+        (
+            signal_id,
+            sized.symbol,
+            sized.side,
+            float(sized.entry),
+            float(sized.stop),
+            float(sized.target),
+            float(sized.qty),
+            ts,
+            cohort,
+            reason,
+        ),
+    )
+    conn.commit()
+    return signal_id
 
 
 def insert_signal(
@@ -970,7 +1054,7 @@ def list_closed_tracks_since(
     sql = """
         SELECT signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
                exit_at_ms, exit_px, exit_reason, gross_r, net_r, fee_usdt, pnl_usdt,
-               funding_usdt, funding_missing, cohort, kind
+               funding_usdt, funding_missing, cohort, kind, block_reason
         FROM assist_track
         WHERE exit_at_ms IS NOT NULL AND exit_at_ms >= ?
         """
@@ -1009,6 +1093,7 @@ def count_signals_since(conn: Any, *, since_ms: int) -> dict[str, int]:
         """
         SELECT status, COUNT(*) FROM assist_signal
         WHERE created_at_ms >= ?
+          AND status != 'blocked'
         GROUP BY status
         """,
         (int(since_ms),),
