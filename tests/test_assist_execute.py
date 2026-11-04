@@ -20,6 +20,7 @@ from jarvise_assist.execute import (
     MSG_EXPIRED,
     MSG_KILL,
     MSG_MOVE_STOP_BUFFER,
+    MSG_MOVE_STOP_EXPIRED,
     MSG_MOVE_STOP_KEEP,
     MSG_MOVE_STOP_NO_ADVICE,
     MSG_MOVE_STOP_TWO,
@@ -362,7 +363,7 @@ def test_preview_expired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         now_ms_value=ts + 200_000,
         message={"message_id": 7},
     )
-    assert MSG_EXPIRED in (edited or sent)
+    assert MSG_EXPIRED in sent
     assert transport.calls == []
     conn.close()
 
@@ -1013,9 +1014,25 @@ def test_move_stop_expired_and_mn_cancel(tmp_path: Path, monkeypatch: pytest.Mon
         now_ms_value=ts + MOVE_STOP_TTL_MS + 1,
         message={"message_id": 3},
     )
-    assert MSG_EXPIRED in sent
+    assert sent == [MSG_MOVE_STOP_EXPIRED]
     assert not any(c[0] == "POST" for c in transport.calls)
-    assert get_exec_intent(conn, intent_id)["status"] == "expired"
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    assert row["status"] == "expired"
+    assert row["result_text"] == MSG_MOVE_STOP_EXPIRED
+    again: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ms:{intent_id}",
+        send=lambda t, **_: again.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts + MOVE_STOP_TTL_MS + 1,
+        message={"message_id": 3},
+    )
+    assert again == [MSG_MOVE_STOP_EXPIRED]
+    assert not any(c[0] == "POST" for c in transport.calls)
 
     intent2 = insert_exec_intent(
         conn,

@@ -82,6 +82,7 @@ MSG_MOVE_STOP_TWO = "⚠️ ยกเลิก stop เดิมไม่ได�
 
 MSG_OFF = "ปิดอยู่"
 MSG_EXPIRED = "หมดเวลา — กดเหรียญใหม่"
+MSG_MOVE_STOP_EXPIRED = "หมดเวลา — รอคำแนะนำรอบถัดไป หรือดู 📋 ไม้ที่ถืออยู่"
 MSG_MARK_PASSED = "ราคาผ่านจุดนี้แล้ว"
 MSG_ALREADY_CLOSED = "ไม้นี้ปิดไปแล้ว"
 MSG_KILL = "kill switch เปิดอยู่ — ไม่ส่งคำสั่ง"
@@ -2247,7 +2248,8 @@ def handle_exec_callback(
             send("กำลังทำอยู่")
             return {"ok": False, "reason": "in_flight"}
         if prefix in {"ey:", "ms:"} and intent["expires_at_ms"] < ts:
-            finish_exec_intent(conn, intent_id, status="expired", result_text=MSG_EXPIRED)
+            expired_text = MSG_MOVE_STOP_EXPIRED if prefix == "ms:" else MSG_EXPIRED
+            finish_exec_intent(conn, intent_id, status="expired", result_text=expired_text)
             answer()
             advice_body = None
             preview = intent.get("preview") or {}
@@ -2256,7 +2258,7 @@ def handle_exec_callback(
             edit_body = str(advice_body) if (prefix == "ms:" and advice_body) else MSG_EXPIRED
             if mid is not None:
                 edit(int(mid), edit_body, reply_markup={"inline_keyboard": []})
-            send(MSG_EXPIRED)
+            send(expired_text)
             return {"ok": False, "reason": "expired"}
         if not claim_exec_intent(conn, intent_id):
             # Lost race — replay stored or in-flight
