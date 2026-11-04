@@ -628,6 +628,14 @@ def _migrate_assist_listen(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_assist_track_measure(conn: sqlite3.Connection) -> None:
+    """Cohort + kind + virtual funding on assist_track. Never writes paper/live/approval."""
+    _add_column_if_missing(conn, "assist_track", "cohort", "TEXT")
+    conn.execute("UPDATE assist_track SET cohort='core7_4h_v1' WHERE cohort IS NULL")
+    _add_column_if_missing(conn, "assist_track", "kind", "TEXT NOT NULL DEFAULT 'sent'")
+    _add_column_if_missing(conn, "assist_track", "funding_usdt", "REAL")
+
+
 def _migrate_assist_execute(conn: sqlite3.Connection) -> None:
     """Owner-confirm execution intents and write logs. Separate from paper/live ledgers."""
     conn.execute(
@@ -931,6 +939,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (16, "assist_listen", _migrate_assist_listen, True),
     (17, "assist_explore", _migrate_assist_explore, True),
     (18, "assist_execute", _migrate_assist_execute, True),
+    (19, "assist_track_measure", _migrate_assist_track_measure, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

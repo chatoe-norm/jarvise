@@ -15,7 +15,7 @@ from jarvise_assist.store import (
     list_closed_tracks_since,
     now_ms,
 )
-from jarvise_assist.track import resolve_open_tracks
+from jarvise_assist.track import TRACK_COHORT, resolve_open_tracks
 from jarvise_notify.telegram import send_telegram_message
 
 SendFn = Callable[..., Any]
@@ -31,6 +31,7 @@ def format_weekly_summary(
     virtual: dict[str, Any],
     real: dict[str, Any],
     closed_all: int,
+    held: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "📊 ผล 7 วันที่ผ่านมา (assist)",
@@ -61,6 +62,13 @@ def format_weekly_summary(
             f"ถึง 2R {int(virtual.get('exit_target_2r') or 0)} · "
             f"ปิดตามสัญญาณ {int(virtual.get('exit_analysis') or 0)}"
         )
+        lines.append(f"funding เสมือน {_signed(float(virtual.get('funding_usdt') or 0.0))} USDT")
+    if held is not None:
+        held_n = int(held.get("n") or 0)
+        if held_n == 0:
+            lines.append("สัญญาณที่ถูก hold: 0 · Expectancy —")
+        else:
+            lines.append(f"สัญญาณที่ถูก hold: {held_n} · Expectancy {_signed(float(held.get('mean_r') or 0.0))}R")
     realized = float(real.get("realized_pnl") or 0.0)
     funding = float(real.get("funding") or 0.0)
     commission = float(real.get("commission") or 0.0)
@@ -100,6 +108,7 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "avg_win_r": None,
             "avg_loss_r": None,
             "total_usdt": 0.0,
+            "funding_usdt": 0.0,
             "exit_stop_original": 0,
             "exit_stop_be": 0,
             "exit_stop_trail": 0,
@@ -108,6 +117,7 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
         }
     nets = [float(r.get("net_r") or 0.0) for r in rows]
     pnls = [float(r.get("pnl_usdt") or 0.0) for r in rows]
+    fundings = [float(r.get("funding_usdt") or 0.0) for r in rows]
     win_rs = [x for x in nets if x > 0]
     loss_rs = [x for x in nets if x < 0]
     wins = len(win_rs)
@@ -146,6 +156,7 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_win_r": statistics.mean(win_rs) if win_rs else None,
         "avg_loss_r": statistics.mean(loss_rs) if loss_rs else None,
         "total_usdt": sum(pnls),
+        "funding_usdt": sum(fundings),
         "exit_stop_original": exit_stop_original,
         "exit_stop_be": exit_stop_be,
         # Legacy "stop" rows with gross R > 0 count as trail.
@@ -208,9 +219,11 @@ def run_assist_weekly(
     counts = count_signals_since(conn, since_ms=week_start)
     # Count "sent" as rows that left as sent (created this week with status sent/taken/skipped).
     # Use status counts; also add taken/skipped that were created as sent.
-    virtual_rows = list_closed_tracks_since(conn, since_ms=week_start)
+    virtual_rows = list_closed_tracks_since(conn, since_ms=week_start, cohort=TRACK_COHORT, kind="sent")
     virtual = summarize_virtual(virtual_rows)
-    closed_all = count_closed_tracks_all(conn)
+    held_rows = list_closed_tracks_since(conn, since_ms=week_start, cohort=TRACK_COHORT, kind="held")
+    held = summarize_virtual(held_rows)
+    closed_all = count_closed_tracks_all(conn, cohort=TRACK_COHORT, kind="sent")
 
     client = futures if futures is not None else build_futures_client()
     real: dict[str, Any] = {
@@ -228,7 +241,7 @@ def run_assist_weekly(
         except Exception as exc:  # noqa: BLE001
             real["error"] = type(exc).__name__
 
-    text = format_weekly_summary(counts=counts, virtual=virtual, real=real, closed_all=closed_all)
+    text = format_weekly_summary(counts=counts, virtual=virtual, real=real, closed_all=closed_all, held=held)
     sent_ok = bool(send_fn(text))
     return {
         "ok": True,
@@ -238,6 +251,7 @@ def run_assist_weekly(
         "telegram": sent_ok,
         "counts": counts,
         "virtual": virtual,
+        "held": held,
         "real": real,
         "closed_all": closed_all,
     }

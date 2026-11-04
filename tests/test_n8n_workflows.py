@@ -45,6 +45,25 @@ def test_openclaw_network_excludes_redis_jobs_web() -> None:
     assert "${TAILSCALE_IP:?Set TAILSCALE_IP to the VPS Tailscale IPv4}:${OPENCLAW_PORT:-18789}:18789" in prod
 
 
+def test_openclaw_mcp_servers_exclude_redis() -> None:
+    """mcpServers must not launch a Redis MCP; compose openclaw has no REDIS_URL."""
+    cfg = json.loads((ROOT / "config" / "openclaw" / "openclaw.json").read_text(encoding="utf-8"))
+    servers = cfg.get("mcpServers") or {}
+    assert isinstance(servers, dict)
+    for name, entry in servers.items():
+        blob = " ".join(
+            [
+                str(name),
+                str((entry or {}).get("command") or ""),
+                *([str(a) for a in (entry or {}).get("args") or []]),
+            ]
+        ).lower()
+        assert "redis" not in blob, name
+        assert "redis_url" not in blob, name
+    block = _service_block(COMPOSE.read_text(encoding="utf-8"), "openclaw")
+    assert "REDIS_URL" not in block
+
+
 def test_jobs_workflows_send_token_placeholder() -> None:
     files = sorted(WORKFLOWS.glob("*.json"))
     callers: list[str] = []
