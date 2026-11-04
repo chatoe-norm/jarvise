@@ -16,7 +16,12 @@ TRACK_TF = "1h"
 ANALYSIS_TF = "4h"
 # 4h bar open → available after close + ~1h (timestamp + 5h).
 ANALYSIS_LAG_MS = 5 * 3_600_000
-FEE_BPS_PER_SIDE = 4.0
+# Binance USDⓈ-M VIP0 taker (no BNB discount). Entry, stop and TP are all market fills.
+FEE_BPS_PER_SIDE = 5.0
+# Adverse slippage per market fill. Cost only: exit_px and gross_r stay at the bar price.
+SLIPPAGE_BPS_PER_SIDE = 1.0
+# Stop exits are labelled by the stop that filled.
+STOP_EXIT_REASONS = {"initial": "initial_stop", "breakeven": "be_stop", "trail": "trail_stop"}
 
 
 def gap_aware_stop_fill(
@@ -72,6 +77,11 @@ def _fees_usdt(*, entry: float, exit_px: float, qty: float) -> float:
     return abs(entry) * abs(qty) * rate + abs(exit_px) * abs(qty) * rate
 
 
+def _slippage_usdt(*, entry: float, exit_px: float, qty: float) -> float:
+    rate = SLIPPAGE_BPS_PER_SIDE / 10_000.0
+    return abs(entry) * abs(qty) * rate + abs(exit_px) * abs(qty) * rate
+
+
 def _r_and_pnl(
     *,
     side: str,
@@ -89,7 +99,7 @@ def _r_and_pnl(
     else:
         gross_usd = (entry - exit_px) * qty
     fee = _fees_usdt(entry=entry, exit_px=exit_px, qty=qty)
-    net_usd = gross_usd - fee
+    net_usd = gross_usd - fee - _slippage_usdt(entry=entry, exit_px=exit_px, qty=qty)
     gross_r = gross_usd / loss_at_stop
     net_r = net_usd / loss_at_stop
     return gross_r, net_r, fee, net_usd
@@ -131,6 +141,7 @@ def _resolve_one(conn: Any, track: dict[str, Any], *, now_ms: int) -> dict[str, 
     best_high: float | None = None
     best_low: float | None = None
     current_stop = stop
+    stop_source = "initial"
 
     for bar in bars:
         open_px = float(bar["open"])
@@ -147,7 +158,7 @@ def _resolve_one(conn: Any, track: dict[str, Any], *, now_ms: int) -> dict[str, 
                 track,
                 exit_at_ms=close_ms,
                 exit_px=float(fill),
-                exit_reason="stop",
+                exit_reason=STOP_EXIT_REASONS.get(stop_source, "trail_stop"),
                 entry=entry,
                 stop=initial_stop,
                 qty=qty,
@@ -169,6 +180,7 @@ def _resolve_one(conn: Any, track: dict[str, Any], *, now_ms: int) -> dict[str, 
         trailed = trail_stop_with_source(pos, best_low=best_low, best_high=best_high)
         if trailed is not None:
             current_stop = float(trailed[0])
+            stop_source = str(trailed[1])
 
         # 2R target on this bar.
         if side == "long" and high >= target:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import statistics
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
@@ -47,14 +48,16 @@ def format_weekly_summary(
         total_r = float(virtual.get("total_r") or 0.0)
         mean_r = float(virtual.get("mean_r") or 0.0)
         total_usdt = float(virtual.get("total_usdt") or 0.0)
+        lines.append(f"ไม้เสมือน: n={n} · ชนะ {wr:.0f}% · รวม {_signed(total_r)}R · {_signed(total_usdt)} USDT")
         lines.append(
-            f"ไม้เสมือน: n={n} · ชนะ {wr:.0f}% · "
-            f"รวม {_signed(total_r)}R · เฉลี่ย {_signed(mean_r)}R · "
-            f"{_signed(total_usdt)} USDT"
+            f"Expectancy {_signed(mean_r)}R/ไม้ · มัธยฐาน {_signed(float(virtual.get('median_r') or 0.0))}R · "
+            f"ชนะเฉลี่ย {_r_or_dash(virtual.get('avg_win_r'))} · "
+            f"แพ้เฉลี่ย {_r_or_dash(virtual.get('avg_loss_r'))}"
         )
         lines.append(
             f"ปิดที่ stop เดิม {int(virtual.get('exit_stop_original') or 0)} · "
-            f"stop ที่เลื่อนแล้ว {int(virtual.get('exit_stop_trailed') or 0)} · "
+            f"stop ที่ทุน {int(virtual.get('exit_stop_be') or 0)} · "
+            f"stop ที่ trail {int(virtual.get('exit_stop_trail') or 0)} · "
             f"ถึง 2R {int(virtual.get('exit_target_2r') or 0)} · "
             f"ปิดตามสัญญาณ {int(virtual.get('exit_analysis') or 0)}"
         )
@@ -80,6 +83,12 @@ def _signed(value: float) -> str:
     return f"{value:.2f}"
 
 
+def _r_or_dash(value: Any) -> str:
+    if value is None:
+        return "—"
+    return f"{_signed(float(value))}R"
+
+
 def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {
@@ -87,23 +96,38 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "win_rate": 0.0,
             "total_r": 0.0,
             "mean_r": 0.0,
+            "median_r": 0.0,
+            "avg_win_r": None,
+            "avg_loss_r": None,
             "total_usdt": 0.0,
             "exit_stop_original": 0,
-            "exit_stop_trailed": 0,
+            "exit_stop_be": 0,
+            "exit_stop_trail": 0,
             "exit_target_2r": 0,
             "exit_analysis": 0,
         }
     nets = [float(r.get("net_r") or 0.0) for r in rows]
     pnls = [float(r.get("pnl_usdt") or 0.0) for r in rows]
-    wins = sum(1 for x in nets if x > 0)
+    win_rs = [x for x in nets if x > 0]
+    loss_rs = [x for x in nets if x < 0]
+    wins = len(win_rs)
     total_r = sum(nets)
     exit_stop_original = 0
+    exit_stop_be = 0
+    exit_stop_trail = 0
     exit_stop_trailed = 0
     exit_target = 0
     exit_analysis = 0
     for row in rows:
         reason = str(row.get("exit_reason") or "").lower()
-        if reason == "stop":
+        if reason == "initial_stop":
+            exit_stop_original += 1
+        elif reason == "be_stop":
+            exit_stop_be += 1
+        elif reason == "trail_stop":
+            exit_stop_trail += 1
+        elif reason == "stop":
+            # Rows closed before stop labels existed: best guess from gross R.
             gross = float(row.get("gross_r") or 0.0)
             if gross > 0:
                 exit_stop_trailed += 1
@@ -118,9 +142,14 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "win_rate": wins / len(rows),
         "total_r": total_r,
         "mean_r": total_r / len(rows),
+        "median_r": statistics.median(nets),
+        "avg_win_r": statistics.mean(win_rs) if win_rs else None,
+        "avg_loss_r": statistics.mean(loss_rs) if loss_rs else None,
         "total_usdt": sum(pnls),
         "exit_stop_original": exit_stop_original,
-        "exit_stop_trailed": exit_stop_trailed,
+        "exit_stop_be": exit_stop_be,
+        # Legacy "stop" rows with gross R > 0 count as trail.
+        "exit_stop_trail": exit_stop_trail + exit_stop_trailed,
         "exit_target_2r": exit_target,
         "exit_analysis": exit_analysis,
     }
