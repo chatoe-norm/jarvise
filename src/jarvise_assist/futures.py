@@ -643,20 +643,29 @@ class BinanceFuturesClient:
         self,
         symbol: str,
         *,
-        start_ms: int,
-        end_ms: int,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
         from_id: int | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        """Signed GET /fapi/v1/userTrades for one window. end_ms is inclusive for Binance."""
+        """Signed GET /fapi/v1/userTrades.
+
+        Binance rejects ``fromId`` together with ``startTime``/``endTime``.
+        Pass either a time window (inclusive ``end_ms``) or a ``from_id`` cursor.
+        """
+        if from_id is not None and (start_ms is not None or end_ms is not None):
+            raise ValueError("fromId cannot be sent with startTime or endTime")
         params: dict[str, Any] = {
             "symbol": symbol.upper(),
-            "startTime": int(start_ms),
-            "endTime": int(end_ms),
             "limit": int(limit),
         }
         if from_id is not None:
             params["fromId"] = int(from_id)
+        else:
+            if start_ms is None or end_ms is None:
+                raise ValueError("startTime and endTime are required without fromId")
+            params["startTime"] = int(start_ms)
+            params["endTime"] = int(end_ms)
         payload = self._signed_get(USER_TRADES_PATH, params, provider="binance_fapi_user_trades")
         return list(payload) if isinstance(payload, list) else []
 
@@ -664,20 +673,29 @@ class BinanceFuturesClient:
         self,
         symbol: str,
         *,
-        start_ms: int,
-        end_ms: int,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
         order_id: int | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        """Signed GET /fapi/v1/allOrders for one window. end_ms is inclusive for Binance."""
+        """Signed GET /fapi/v1/allOrders.
+
+        Later pages send ``orderId`` alone (same cursor pattern as userTrades).
+        Mixing ``orderId`` with a time window is unspecified, so refuse it here.
+        """
+        if order_id is not None and (start_ms is not None or end_ms is not None):
+            raise ValueError("orderId cannot be sent with startTime or endTime")
         params: dict[str, Any] = {
             "symbol": symbol.upper(),
-            "startTime": int(start_ms),
-            "endTime": int(end_ms),
             "limit": int(limit),
         }
         if order_id is not None:
             params["orderId"] = int(order_id)
+        else:
+            if start_ms is None or end_ms is None:
+                raise ValueError("startTime and endTime are required without orderId")
+            params["startTime"] = int(start_ms)
+            params["endTime"] = int(end_ms)
         payload = self._signed_get(ALL_ORDERS_PATH, params, provider="binance_fapi_all_orders")
         return list(payload) if isinstance(payload, list) else []
 

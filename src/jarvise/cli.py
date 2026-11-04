@@ -536,11 +536,20 @@ def assist_real_report(
         typer.Option("--since-ms", help="Include fills at or after this Unix ms (UTC)."),
     ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print the report JSON.")] = False,
+    do_sync: Annotated[
+        bool,
+        typer.Option("--sync", help="Write assist_real_trade (deployed jobs path only)."),
+    ] = False,
 ) -> None:
-    """Sync and print the real-vs-virtual one-tap report. Read key only; no orders."""
+    """Print the real-vs-virtual one-tap report. Read key only; no orders.
+
+    Default opens the DB read-only and never writes. ``--sync`` migrates and
+    rebuilds ``assist_real_trade`` (for weekly/jobs after deploy).
+    """
     from jarvise_assist.futures import build_futures_client
     from jarvise_assist.real_trades import SPEC_START_MS, run_real_report
-    from jarvise_ingest.db import open_db
+    from jarvise_ingest.db import SCHEMA_VERSION, open_db
+    from jarvise_ingest.universe_cli import connect_readonly
 
     db_path = analytics_db_path()
     if not db_path.is_file():
@@ -550,15 +559,26 @@ def assist_real_report(
     if client is None:
         typer.echo("no read-only Binance auth", err=True)
         raise typer.Exit(code=2)
-    conn = open_db(db_path)
-    try:
-        payload = run_real_report(
-            conn,
-            client,
-            since_ms=int(since_ms if since_ms is not None else SPEC_START_MS),
-        )
-    finally:
-        conn.close()
+    since = int(since_ms if since_ms is not None else SPEC_START_MS)
+    if do_sync:
+        conn = open_db(db_path)
+        try:
+            payload = run_real_report(conn, client, since_ms=since, sync=True)
+        finally:
+            conn.close()
+    else:
+        conn = connect_readonly(db_path)
+        try:
+            user_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+            if user_version != SCHEMA_VERSION:
+                typer.echo(
+                    f"schema mismatch: user_version={user_version} expected={SCHEMA_VERSION}",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            payload = run_real_report(conn, client, since_ms=since, sync=False)
+        finally:
+            conn.close()
     if json_output:
         # Counts and bps only — no order ids or keys.
         out = {
