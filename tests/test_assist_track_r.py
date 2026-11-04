@@ -404,3 +404,55 @@ def test_held_dedupe_and_weekly_hold_line(tmp_path: Path) -> None:
     # Bound for the ship report.
     print("FIXTURE_WEEKLY_SUMMARY:\n" + text)
     conn.close()
+
+
+def test_sent_signal_tracked_even_when_same_side_track_open(tmp_path: Path) -> None:
+    """Night idea A held, B supersedes it, morning sends B: B must be in the sent cohort."""
+    conn = open_db(tmp_path / "supersede.db")
+    ts = _ms_bangkok(2026, 10, 27, 0, 0)
+    sized = _sized()
+    sid_a = insert_signal(conn, sized, status="held", created_at_ms=ts, expires_at_ms=ts + 10**9)
+    sid_b = insert_signal(conn, sized, status="held", created_at_ms=ts + 4 * H, expires_at_ms=ts + 10**9)
+    mark_signal_sent(conn, sid_b, sized, sent_at_ms=ts + 8 * H, expires_at_ms=ts + 10**9)
+    rows = dict(conn.execute("SELECT signal_id, kind FROM assist_track").fetchall())
+    assert rows == {sid_a: "held", sid_b: "sent"}
+
+    # Repeat idea after 24 h while the first virtual track is still open.
+    sid_c = insert_signal(conn, sized, status="held", created_at_ms=ts + 32 * H, expires_at_ms=ts + 10**9)
+    mark_signal_sent(conn, sid_c, sized, sent_at_ms=ts + 32 * H, expires_at_ms=ts + 10**9)
+    kind_c = conn.execute("SELECT kind, cohort FROM assist_track WHERE signal_id=?", (sid_c,)).fetchone()
+    assert tuple(kind_c) == ("sent", TRACK_COHORT)
+    conn.close()
+
+
+def test_funding_missing_is_stored_and_shown(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "missing.db")
+    settle = int(datetime(2026, 10, 27, 8, 0, tzinfo=UTC).timestamp() * 1000)
+    sized = _sized()
+    sid = insert_signal(
+        conn, sized, status="sent", created_at_ms=settle - H, expires_at_ms=settle, sent_at_ms=settle - H
+    )
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "timestamp": settle + H,
+                "symbol": "BTCUSDT",
+                "timeframe": "1h",
+                "open": 99.0,
+                "high": 99.5,
+                "low": 89.0,
+                "close": 89.5,
+                "volume": 1.0,
+            }
+        ],
+    )
+    resolve_open_tracks(conn, now_ms=settle + 4 * H)
+    missing = conn.execute("SELECT funding_missing FROM assist_track WHERE signal_id=?", (sid,)).fetchone()[0]
+    assert missing == 1
+    rows = list_closed_tracks_since(conn, since_ms=0, cohort=TRACK_COHORT, kind="sent")
+    v = summarize_virtual(rows)
+    assert v["funding_missing"] == 1
+    text = format_weekly_summary(counts={}, virtual=v, real={"universe_usdt": 0.0}, closed_all=1)
+    assert "funding เสมือน 0.00 USDT (ไม่มีอัตรา 1 รอบ นับเป็น 0)" in text
+    conn.close()

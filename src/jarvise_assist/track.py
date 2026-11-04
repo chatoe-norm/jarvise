@@ -338,6 +338,7 @@ def _finalize(
         fee_usdt=fee,
         pnl_usdt=pnl,
         funding_usdt=funding_usdt,
+        funding_missing=funding_missing,
     )
     return {
         "signal_id": track["signal_id"],

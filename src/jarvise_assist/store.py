@@ -518,7 +518,9 @@ def mark_signal_sent(
             signal_id,
         ),
     )
-    if int(cur.rowcount or 0) == 0 and not _open_track_for_symbol_side(conn, sized.symbol, sized.side):
+    # A sent signal always gets its own track, even when another track for the same
+    # symbol+side is open (a superseded night idea, or a repeat idea after 24 h).
+    if int(cur.rowcount or 0) == 0:
         conn.execute(
             """
             INSERT OR IGNORE INTO assist_track (
@@ -933,12 +935,13 @@ def close_track(
     fee_usdt: float,
     pnl_usdt: float,
     funding_usdt: float = 0.0,
+    funding_missing: int = 0,
 ) -> None:
     conn.execute(
         """
         UPDATE assist_track SET
             exit_at_ms=?, exit_px=?, exit_reason=?,
-            gross_r=?, net_r=?, fee_usdt=?, pnl_usdt=?, funding_usdt=?
+            gross_r=?, net_r=?, fee_usdt=?, pnl_usdt=?, funding_usdt=?, funding_missing=?
         WHERE signal_id=? AND exit_at_ms IS NULL
         """,
         (
@@ -950,6 +953,7 @@ def close_track(
             float(fee_usdt),
             float(pnl_usdt),
             float(funding_usdt),
+            int(funding_missing),
             signal_id,
         ),
     )
@@ -966,7 +970,7 @@ def list_closed_tracks_since(
     sql = """
         SELECT signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
                exit_at_ms, exit_px, exit_reason, gross_r, net_r, fee_usdt, pnl_usdt,
-               funding_usdt, cohort, kind
+               funding_usdt, funding_missing, cohort, kind
         FROM assist_track
         WHERE exit_at_ms IS NOT NULL AND exit_at_ms >= ?
         """

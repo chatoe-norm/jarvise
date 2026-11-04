@@ -393,6 +393,7 @@ CREATE TABLE IF NOT EXISTS assist_track (
     cohort TEXT,
     kind TEXT NOT NULL DEFAULT 'sent',
     funding_usdt REAL,
+    funding_missing INTEGER,
     FOREIGN KEY (signal_id) REFERENCES assist_signal(id)
 );
 

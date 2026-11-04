@@ -634,6 +634,7 @@ def _migrate_assist_track_measure(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE assist_track SET cohort='core7_4h_v1' WHERE cohort IS NULL")
     _add_column_if_missing(conn, "assist_track", "kind", "TEXT NOT NULL DEFAULT 'sent'")
     _add_column_if_missing(conn, "assist_track", "funding_usdt", "REAL")
+    _add_column_if_missing(conn, "assist_track", "funding_missing", "INTEGER")
 
 
 def _migrate_assist_execute(conn: sqlite3.Connection) -> None:

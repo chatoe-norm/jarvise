@@ -62,7 +62,11 @@ def format_weekly_summary(
             f"ถึง 2R {int(virtual.get('exit_target_2r') or 0)} · "
             f"ปิดตามสัญญาณ {int(virtual.get('exit_analysis') or 0)}"
         )
-        lines.append(f"funding เสมือน {_signed(float(virtual.get('funding_usdt') or 0.0))} USDT")
+        funding_line = f"funding เสมือน {_signed(float(virtual.get('funding_usdt') or 0.0))} USDT"
+        missing = int(virtual.get("funding_missing") or 0)
+        if missing:
+            funding_line += f" (ไม่มีอัตรา {missing} รอบ นับเป็น 0)"
+        lines.append(funding_line)
     if held is not None:
         held_n = int(held.get("n") or 0)
         if held_n == 0:
@@ -109,6 +113,7 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "avg_loss_r": None,
             "total_usdt": 0.0,
             "funding_usdt": 0.0,
+            "funding_missing": 0,
             "exit_stop_original": 0,
             "exit_stop_be": 0,
             "exit_stop_trail": 0,
@@ -157,6 +162,7 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_loss_r": statistics.mean(loss_rs) if loss_rs else None,
         "total_usdt": sum(pnls),
         "funding_usdt": sum(fundings),
+        "funding_missing": sum(int(r.get("funding_missing") or 0) for r in rows),
         "exit_stop_original": exit_stop_original,
         "exit_stop_be": exit_stop_be,
         # Legacy "stop" rows with gross R > 0 count as trail.
