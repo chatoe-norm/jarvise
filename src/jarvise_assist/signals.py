@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -59,6 +60,7 @@ from jarvise_assist.store import (
     now_ms,
     previous_analysis_action,
     recent_same_idea,
+    record_blocked_signal,
     set_signal_telegram_message_id,
     write_edge,
 )
@@ -68,6 +70,15 @@ from jarvise_notify.telegram import send_message
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 FUTURES_DOWN_ALERT_MS = 30 * 60 * 1000
 SendFn = Callable[..., Any]
+logger = logging.getLogger(__name__)
+
+
+def _record_blocked_safe(conn: Any, sized: Any, *, reason: str, created_at_ms: int) -> None:
+    """Record a blocked virtual track. A failure here never stops real signals or the pause."""
+    try:
+        record_blocked_signal(conn, sized, reason=reason, created_at_ms=created_at_ms)
+    except Exception as exc:  # noqa: BLE001 — research row only
+        logger.warning("record_blocked_signal failed reason=%s type=%s", reason, type(exc).__name__)
 
 
 def _invoke_send(
@@ -410,12 +421,16 @@ def scan_signal_candidates(
     admitted, rejected = admit_signals(existing=existing, candidates=candidates, balance=balance)
     for cand in rejected:
         skipped.append({"symbol": cand.sized.symbol, "reason": "risk_cap"})
+        if persist:
+            _record_blocked_safe(conn, cand.sized, reason="risk_cap", created_at_ms=now_ms)
     admitted, margin_dropped = assign_shared_leverage(
         admitted,
         available_balance=available,
     )
     for cand in margin_dropped:
         skipped.append({"symbol": cand.sized.symbol, "reason": "margin_cap"})
+        if persist:
+            _record_blocked_safe(conn, cand.sized, reason="margin_cap", created_at_ms=now_ms)
     # A margin shrink can push the size under the exchange minimum.
     still_ok: list[SignalCandidate] = []
     for cand in admitted:
@@ -432,6 +447,8 @@ def scan_signal_candidates(
     admitted = still_ok
     return {
         "admitted": admitted,
+        "rejected": rejected,
+        "margin_dropped": margin_dropped,
         "skipped": skipped,
         "balance_usdt": float(balance),
         "available_usdt": float(available),
@@ -492,6 +509,17 @@ def run_assist_signals(
     pause_info = evaluate_pause(conn, futures=client, now_ms=ts, send=send_fn)
     settings = ensure_settings(conn)
     if is_paused(settings, now_ms=ts) or pause_info.get("paused"):
+        try:
+            scanned = scan_signal_candidates(conn, futures=client, now_ms=ts, persist=False)
+        except Exception:  # noqa: BLE001 — leave the pause payload; send nothing
+            scanned = None
+        if scanned is not None:
+            for cand in scanned["admitted"]:
+                _record_blocked_safe(conn, cand.sized, reason="streak_pause", created_at_ms=ts)
+            for cand in scanned["rejected"]:
+                _record_blocked_safe(conn, cand.sized, reason="risk_cap", created_at_ms=ts)
+            for cand in scanned["margin_dropped"]:
+                _record_blocked_safe(conn, cand.sized, reason="margin_cap", created_at_ms=ts)
         return _strip_secrets(
             {
                 "ok": True,

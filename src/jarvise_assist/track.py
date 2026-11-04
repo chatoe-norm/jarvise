@@ -95,20 +95,29 @@ def _deriv_coin(symbol: str) -> str:
     return coin
 
 
+_FUNDING_WINDOW_MS = 60_000
+
+
 def _funding_rate_at_or_before(conn: Any, symbol: str, at_ms: int) -> float | None:
-    """Nearest non-null funding_rate with event time <= at_ms (base coin or pair)."""
+    """Funding rate in the ±60s settlement window (latest timestamp, then ingested_at).
+
+    Candidates: base-coin or pair rows with ``t - 60_000 < timestamp <= t + 60_000``
+    and a non-null rate. A row at or before ``t - 60_000`` is ignored.
+    """
     pair = symbol.upper()
     coin = _deriv_coin(pair)
+    t = int(at_ms)
     row = conn.execute(
         """
         SELECT funding_rate FROM derivatives_analytics
         WHERE symbol IN (?, ?)
+          AND timestamp > ?
           AND timestamp <= ?
           AND funding_rate IS NOT NULL
         ORDER BY timestamp DESC, ingested_at DESC
         LIMIT 1
         """,
-        (coin, pair, int(at_ms)),
+        (coin, pair, t - _FUNDING_WINDOW_MS, t + _FUNDING_WINDOW_MS),
     ).fetchone()
     if row is None or row[0] is None:
         return None
