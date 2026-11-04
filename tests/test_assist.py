@@ -8,6 +8,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import (
     FuturesKeyUnsafeError,
@@ -958,6 +960,18 @@ def test_risk_cap_sends_highest_confidence_only(tmp_path: Path) -> None:
     risk_skips = [s for s in payload["skipped"] if s.get("reason") == "risk_cap"]
     assert {s["symbol"] for s in risk_skips} == {"DOGEUSDT", "XRPUSDT"}
     conn.close()
+
+
+def test_blocked_record_failure_still_sends_real_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken blocked-track write must not stop the admitted signal from going out."""
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr("jarvise_assist.signals.record_blocked_signal", boom)
+    test_risk_cap_sends_highest_confidence_only(tmp_path)
 
 
 def test_below_min_notional_does_not_raise_qty(tmp_path: Path) -> None:
