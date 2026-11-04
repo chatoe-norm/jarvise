@@ -529,6 +529,50 @@ def assist_explore(
     raise typer.Exit(run_explore_cli(json_output=json_output))
 
 
+@assist_app.command("real-report")
+def assist_real_report(
+    since_ms: Annotated[
+        int | None,
+        typer.Option("--since-ms", help="Include fills at or after this Unix ms (UTC)."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the report JSON.")] = False,
+) -> None:
+    """Sync and print the real-vs-virtual one-tap report. Read key only; no orders."""
+    from jarvise_assist.futures import build_futures_client
+    from jarvise_assist.real_trades import SPEC_START_MS, run_real_report
+    from jarvise_ingest.db import open_db
+
+    db_path = analytics_db_path()
+    if not db_path.is_file():
+        typer.echo("analytics db missing", err=True)
+        raise typer.Exit(code=2)
+    client = build_futures_client()
+    if client is None:
+        typer.echo("no read-only Binance auth", err=True)
+        raise typer.Exit(code=2)
+    conn = open_db(db_path)
+    try:
+        payload = run_real_report(
+            conn,
+            client,
+            since_ms=int(since_ms if since_ms is not None else SPEC_START_MS),
+        )
+    finally:
+        conn.close()
+    if json_output:
+        # Counts and bps only — no order ids or keys.
+        out = {
+            "ok": payload.get("ok"),
+            "summary": payload.get("summary"),
+            "lines": payload.get("lines"),
+        }
+        typer.echo(json.dumps(out, ensure_ascii=False))
+    else:
+        typer.echo(payload.get("text") or "")
+    if payload.get("ok") is False:
+        raise typer.Exit(code=1)
+
+
 report_app = typer.Typer(help="Read-only owner reports. No orders.")
 app.add_typer(report_app, name="report")
 

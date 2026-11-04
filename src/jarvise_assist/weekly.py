@@ -9,6 +9,12 @@ from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import BinanceFuturesClient, build_futures_client
+from jarvise_assist.real_trades import (
+    SPEC_START_MS,
+    format_real_lines,
+    run_real_report,
+    summarize_real_vs_virtual,
+)
 from jarvise_assist.store import (
     count_closed_tracks_all,
     count_signals_since,
@@ -32,6 +38,8 @@ def format_weekly_summary(
     real: dict[str, Any],
     closed_all: int,
     held: dict[str, Any] | None = None,
+    real_vs_virtual: dict[str, Any] | None = None,
+    real_report_error: str | None = None,
 ) -> str:
     lines = [
         "📊 ผล 7 วันที่ผ่านมา (assist)",
@@ -73,6 +81,10 @@ def format_weekly_summary(
             lines.append("สัญญาณที่ถูก hold: 0 · Expectancy —")
         else:
             lines.append(f"สัญญาณที่ถูก hold: {held_n} · Expectancy {_signed(float(held.get('mean_r') or 0.0))}R")
+    if real_report_error:
+        lines.append(f"รายงานไม้จริง: ดึงข้อมูลไม่ได้ ({real_report_error})")
+    elif real_vs_virtual is not None:
+        lines.extend(format_real_lines(real_vs_virtual))
     realized = float(real.get("realized_pnl") or 0.0)
     funding = float(real.get("funding") or 0.0)
     commission = float(real.get("commission") or 0.0)
@@ -247,7 +259,27 @@ def run_assist_weekly(
         except Exception as exc:  # noqa: BLE001
             real["error"] = type(exc).__name__
 
-    text = format_weekly_summary(counts=counts, virtual=virtual, real=real, closed_all=closed_all, held=held)
+    real_vs_virtual: dict[str, Any] | None = None
+    real_report_error: str | None = None
+    if client is not None:
+        try:
+            report = run_real_report(conn, client, since_ms=SPEC_START_MS)
+            real_vs_virtual = report["summary"]
+        except Exception as exc:  # noqa: BLE001 — never block the weekly summary
+            real_report_error = type(exc).__name__
+            real_vs_virtual = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS)
+    else:
+        real_vs_virtual = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS)
+
+    text = format_weekly_summary(
+        counts=counts,
+        virtual=virtual,
+        real=real,
+        closed_all=closed_all,
+        held=held,
+        real_vs_virtual=None if real_report_error else real_vs_virtual,
+        real_report_error=real_report_error,
+    )
     sent_ok = bool(send_fn(text))
     return {
         "ok": True,
@@ -259,5 +291,7 @@ def run_assist_weekly(
         "virtual": virtual,
         "held": held,
         "real": real,
+        "real_vs_virtual": real_vs_virtual,
+        "real_report_error": real_report_error,
         "closed_all": closed_all,
     }

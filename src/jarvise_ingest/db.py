@@ -637,6 +637,55 @@ def _migrate_assist_track_measure(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_track", "funding_missing", "INTEGER")
 
 
+def _migrate_assist_real_trades(conn: sqlite3.Connection) -> None:
+    """Confirm-mark reference on intents + durable real-vs-virtual rows. Never writes paper/live."""
+    _add_column_if_missing(conn, "assist_exec_intent", "ref_price", "TEXT")
+    _add_column_if_missing(conn, "assist_exec_intent", "ref_source", "TEXT")
+    _add_column_if_missing(conn, "assist_exec_intent", "ref_at_ms", "INTEGER")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_real_trade (
+            intent_id TEXT,
+            signal_id TEXT,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_order_id TEXT NOT NULL UNIQUE,
+            entry_client_id TEXT,
+            entry_time_ms INTEGER,
+            entry_qty REAL,
+            entry_fill_avg REAL,
+            ref_price REAL,
+            ref_source TEXT,
+            signal_entry REAL,
+            planned_stop REAL,
+            loss_at_stop REAL,
+            exit_time_ms INTEGER,
+            exit_fill_avg REAL,
+            exit_kind TEXT,
+            exit_order_ids TEXT,
+            stop_trigger REAL,
+            commission_usdt REAL,
+            commission_other_asset TEXT,
+            funding_usdt REAL,
+            realized_pnl_usdt REAL,
+            net_r_real REAL,
+            net_r_virtual REAL,
+            slip_entry_bps REAL,
+            drift_signal_bps REAL,
+            slip_stop_bps REAL,
+            status TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_real_trade_status
+        ON assist_real_trade (status, entry_time_ms)
+        """
+    )
+
+
 def _migrate_assist_execute(conn: sqlite3.Connection) -> None:
     """Owner-confirm execution intents and write logs. Separate from paper/live ledgers."""
     conn.execute(
@@ -941,6 +990,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (17, "assist_explore", _migrate_assist_explore, True),
     (18, "assist_execute", _migrate_assist_execute, True),
     (19, "assist_track_measure", _migrate_assist_track_measure, True),
+    (20, "assist_real_trades", _migrate_assist_real_trades, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
