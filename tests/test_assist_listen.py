@@ -871,12 +871,85 @@ def test_suggested_stop_uses_tick_not_sig_digits(tmp_path: Path) -> None:
         return render_open_positions(conn, futures=fake, now_ms=day)
 
     btc = one("BTCUSDT", "105000", "104523.4", "0.1")
-    assert "stop แนะนำ 104523.4 (freeze)" in btc
+    assert "stop ตั้งต้น 104523.4 (ฐาน 1R)" in btc
     assert "104523 " not in btc
     assert "e-05" not in btc
     tiny = one("DOGEUSDT", "0.00002000", "0.00001234", "0.00000001")
-    assert "stop แนะนำ 0.00001234 (freeze)" in tiny
+    assert "stop ตั้งต้น 0.00001234 (ฐาน 1R)" in tiny
     assert "e-05" not in tiny
+    conn.close()
+
+
+def test_open_positions_shows_trail_advice_now(tmp_path: Path) -> None:
+    """entry 0.07527, initial 0.07718, best closed low 0.07312 → 0.07503 (trail)."""
+    from jarvise_assist.futures import FuturesPosition
+    from jarvise_assist.store import upsert_watch_position
+    from jarvise_ingest.db import upsert_market_technicals
+
+    conn = open_db(tmp_path / "trail-now.db")
+    day = _ms_bangkok(2026, 10, 27, 14, 0)
+    entry_ts = day - 2 * 3_600_000
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "DOGEUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.07527,
+            "qty": 100.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.07718,
+            "initial_stop_source": "signal",
+            "entry_time_ms": entry_ts,
+            "no_stop_latched": 0,
+            "last_seen_ms": day,
+            "closed_at_ms": None,
+        },
+    )
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "DOGEUSDT",
+                "timestamp": entry_ts,
+                "timeframe": "1h",
+                "open": 0.07527,
+                "high": 0.0755,
+                "low": 0.07312,
+                "close": 0.074,
+                "volume": 1.0,
+            }
+        ],
+    )
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.07527"),
+        mark_price=Decimal("0.074"),
+        update_time_ms=entry_ts,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[
+            {
+                "symbol": "DOGEUSDT",
+                "type": "STOP_MARKET",
+                "side": "BUY",
+                "stopPrice": "0.07718",
+                "origQty": "100",
+                "reduceOnly": True,
+                "positionSide": "BOTH",
+                "workingType": "MARK_PRICE",
+            }
+        ],
+        ticks={"DOGEUSDT": Decimal("0.00001")},
+        steps={"DOGEUSDT": Decimal("1")},
+    )
+    text = render_open_positions(conn, futures=fake, now_ms=day)
+    assert "stop ตั้งต้น 0.07718 (ฐาน 1R)" in text
+    assert "stop แนะนำตอนนี้ 0.07503 (trail)" in text
     conn.close()
 
 

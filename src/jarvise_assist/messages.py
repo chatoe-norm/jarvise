@@ -216,11 +216,49 @@ def format_partial_stop_warning(
     )
 
 
-def format_move_stop_advice(*, symbol: str, side: str, stop: Decimal) -> str:
+def format_move_stop_advice(
+    *,
+    symbol: str,
+    side: str,
+    qty: Decimal,
+    old_stop: Decimal | None,
+    new_stop: Decimal,
+    mark: Decimal,
+    entry: Decimal,
+    initial_stop: Decimal,
+    expires_at_ms: int,
+    tick: Decimal | None = None,
+) -> str:
+    """Move-stop advice body. Levels already tick-rounded by the caller."""
     side_l = side.lower()
-    emoji = "↗️" if side_l == "long" else "↘️"
     side_label = "LONG" if side_l == "long" else "SHORT"
-    return f"{emoji} {symbol.upper()} {side_label} · เลื่อน stop → {fmt_price(stop)}"
+    if tick is not None and tick > 0:
+        old_s = _fmt_price_tick(old_stop, tick) if old_stop is not None else "ไม่มี"
+        new_s = _fmt_price_tick(new_stop, tick)
+        mark_s = _fmt_price_tick(mark, tick)
+    else:
+        old_s = fmt_price(old_stop) if old_stop is not None else "ไม่มี"
+        new_s = fmt_price(new_stop)
+        mark_s = fmt_price(mark)
+    risk = abs(entry - initial_stop)
+    if side_l == "long":
+        lock_usdt = (new_stop - entry) * qty
+    else:
+        lock_usdt = (entry - new_stop) * qty
+    if risk > 0:
+        lock_r = lock_usdt / (qty * risk) if qty != 0 else Decimal("0")
+        lock_r_s = f"{float(lock_r):+.2f}"
+    else:
+        lock_r_s = "R unknown"
+    lock_usdt_s = f"{float(lock_usdt):+.2f}"
+    hhmm = datetime.fromtimestamp(int(expires_at_ms) / 1000.0, tz=BANGKOK).strftime("%H:%M")
+    return (
+        f"{symbol.upper()} {side_label} · qty {fmt_qty(qty)}\n"
+        f"stop {old_s} → {new_s}\n"
+        f"mark {mark_s}\n"
+        f"ล็อก ≈ {lock_r_s}R ({lock_usdt_s} USDT) (ก่อนค่าธรรมเนียม)\n"
+        f"ปุ่มหมดอายุ {hhmm}"
+    )
 
 
 def format_exit_advice(

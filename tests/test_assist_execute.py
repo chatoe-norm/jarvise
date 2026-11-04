@@ -13,12 +13,17 @@ import pytest
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist.execute import (
+    MOVE_STOP_TTL_MS,
     MSG_ALREADY_CLOSED,
     MSG_BINANCE_NOT_SENT,
     MSG_BINANCE_RETRY,
     MSG_EXPIRED,
     MSG_KILL,
-    MSG_MARK_PASSED,
+    MSG_MOVE_STOP_BUFFER,
+    MSG_MOVE_STOP_KEEP,
+    MSG_MOVE_STOP_NO_ADVICE,
+    MSG_MOVE_STOP_TWO,
+    MSG_MOVE_STOP_UNKNOWN,
     MSG_OFF,
     MSG_STOP_CLOSED,
     BinanceTradeClient,
@@ -45,6 +50,7 @@ from jarvise_assist.store import (
     insert_exec_intent,
     insert_watch_advice,
     now_ms,
+    upsert_watch_position,
 )
 from jarvise_assist.watch import run_assist_watch
 from jarvise_exchange.binance_spot import BinanceAuth
@@ -424,18 +430,67 @@ def test_stop_rejected_twice_closes(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     conn.close()
 
 
+def _seed_move_stop_watch(
+    conn: Any,
+    *,
+    entry_ts: int,
+    entry: str = "0.08",
+    initial_stop: str = "0.083",
+    best_low: float = 0.076,
+    side: str = "short",
+    symbol: str = "DOGEUSDT",
+) -> None:
+    """Watch row + closed 1h bar so trail advice lands at best_low + 1R (short)."""
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": symbol,
+            "position_side": "BOTH",
+            "side": side,
+            "entry": float(entry),
+            "qty": 100.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": float(initial_stop),
+            "initial_stop_source": "signal",
+            "entry_time_ms": int(entry_ts),
+            "no_stop_latched": 0,
+            "last_seen_ms": int(entry_ts),
+            "closed_at_ms": None,
+        },
+    )
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": symbol,
+                "timestamp": int(entry_ts),
+                "timeframe": "1h",
+                "open": float(entry),
+                "high": float(entry),
+                "low": best_low,
+                "close": best_low + 0.001,
+                "volume": 1.0,
+            }
+        ],
+    )
+
+
 def test_move_stop_place_before_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "move.db")
     ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    # entry 0.08, initial 0.083, R=0.003; low 0.076 → trail 0.079
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
     intent_id = insert_exec_intent(
         conn,
         kind="move_stop",
         symbol="DOGEUSDT",
         side="short",
-        preview={"stop": "0.079", "qty": "100"},
+        preview={"stop": "0.079", "qty": "100", "advice_text": "advice"},
         created_at_ms=ts,
-        expires_at_ms=ts + 120_000,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
     claim_exec_intent(conn, intent_id)
     old = {
@@ -447,6 +502,7 @@ def test_move_stop_place_before_cancel(tmp_path: Path, monkeypatch: pytest.Monke
         "triggerPrice": "0.083",
         "quantity": "100",
         "algoId": 99,
+        "clientAlgoId": "jv-old-sl",
     }
     handlers: dict[tuple[str, str], Any] = {
         ("GET", "/fapi/v3/positionRisk"): (
@@ -470,11 +526,17 @@ def test_move_stop_place_before_cancel(tmp_path: Path, monkeypatch: pytest.Monke
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
-    result = run_move_stop_sequence(conn, intent_id, trade=trade)
+    result = run_move_stop_sequence(conn, intent_id, trade=trade, now_ms_value=ts)
     assert result.startswith("✅")
+    assert "qty ทั้งไม้" in result
     seq = [(m, p) for m, p, _ in transport.calls if m in {"POST", "DELETE"}]
     assert seq[0] == ("POST", "/fapi/v1/algoOrder")
     assert seq[1] == ("DELETE", "/fapi/v1/algoOrder")
+    place = next(c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder")
+    assert place[2].get("reduceOnly") == "true"
+    assert place[2].get("quantity") == "100"
+    assert "closePosition" not in place[2]
+    assert place[2].get("triggerPrice") == "0.079"
     conn.close()
 
 
@@ -482,14 +544,16 @@ def test_move_stop_mark_passed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "passed.db")
     ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
     intent_id = insert_exec_intent(
         conn,
         kind="move_stop",
         symbol="DOGEUSDT",
         side="short",
-        preview={"stop": "0.079", "qty": "100"},
+        preview={"stop": "0.079", "qty": "100", "advice_text": "advice"},
         created_at_ms=ts,
-        expires_at_ms=ts + 120_000,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
     handlers: dict[tuple[str, str], Any] = {
         ("GET", "/fapi/v3/positionRisk"): (
@@ -506,17 +570,14 @@ def test_move_stop_mark_passed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         ),
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.09"}),
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
-        ("GET", "/fapi/v3/balance"): (
-            200,
-            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
-        ),
-        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
-        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     sent: list[str] = []
     markups: list[Any] = []
+    edits: list[tuple[Any, ...]] = []
 
     def _send(t: str, **kw: Any) -> bool:
         sent.append(t)
@@ -529,13 +590,607 @@ def test_move_stop_mark_passed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         f"ms:{intent_id}",
         send=_send,
         answer=lambda *_a, **_k: None,
-        edit=lambda *_a, **_k: None,
+        edit=lambda *a, **k: edits.append((a, k)),
         trade=trade,
         now_ms_value=ts + 1000,
+        message={"message_id": 7},
     )
-    assert any(MSG_MARK_PASSED in t for t in sent)
-    assert markups and any("xx:" in json.dumps(m) for m in markups)
+    assert any(MSG_MOVE_STOP_BUFFER in t for t in sent)
+    assert not any("xx:" in json.dumps(m) for m in markups)
     assert not any(c[0] == "POST" for c in transport.calls)
+    assert edits  # advice buttons stripped
+    conn.close()
+
+
+def _move_stop_handlers(
+    *,
+    mark: str = "0.078",
+    entry: str = "0.08",
+    amt: str = "-100",
+    old: dict[str, Any] | None = None,
+    place: Any = None,
+    delete: Any = None,
+    open_algo: Any = None,
+) -> dict[tuple[str, str], Any]:
+    old_order = old or {
+        "symbol": "DOGEUSDT",
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "0.083",
+        "quantity": "100",
+        "algoId": 99,
+        "clientAlgoId": "jv-old-sl",
+    }
+    return {
+        ("GET", "/fapi/v3/positionRisk"): (
+            200,
+            [
+                {
+                    "symbol": "DOGEUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": amt,
+                    "entryPrice": entry,
+                    "markPrice": mark,
+                }
+            ],
+        ),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": mark}),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo if open_algo is not None else (200, [old_order]),
+        ("POST", "/fapi/v1/algoOrder"): place if place is not None else (200, {"algoId": 100}),
+        ("DELETE", "/fapi/v1/algoOrder"): delete if delete is not None else (200, {"algoId": 99}),
+    }
+
+
+def test_move_stop_widen_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "widen.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    # Trail wants 0.079 but protective is already 0.078 (tighter) — refuse widen/not tighter.
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    claim_exec_intent(conn, intent_id)
+    old = {
+        "symbol": "DOGEUSDT",
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "0.078",
+        "quantity": "100",
+        "algoId": 99,
+        "clientAlgoId": "jv-old",
+    }
+    handlers = _move_stop_handlers(old=old, mark="0.076")
+    transport = RecordingTransport(handlers)
+    result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
+    assert "กระชับ" in result or "ไม่เลื่อน" in result or "แนะนำ" in result
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_move_stop_buffer_zero_orders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "buf.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    claim_exec_intent(conn, intent_id)
+    # mark almost at stop → buffer fail
+    handlers = _move_stop_handlers(mark="0.07895")
+    transport = RecordingTransport(handlers)
+    result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
+    assert result == MSG_MOVE_STOP_BUFFER
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_move_stop_cancel_connect_error_two_stop_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "cancel-net.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "advice body"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    handlers = _move_stop_handlers(delete=httpx.ConnectError("cancel down"))
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    edits: list[str] = []
+    out = handle_exec_callback(
+        conn,
+        f"ms:{intent_id}",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda _m, t, **_: edits.append(t),
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 11},
+    )
+    assert out.get("ok") is True
+    assert any(t.startswith("✅") and MSG_MOVE_STOP_TWO in t for t in sent)
+    assert "ลองใหม่" not in "".join(sent)
+    assert edits == ["advice body"]
+    conn.close()
+
+
+def test_move_stop_place_timeout_lookup_finds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-to.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    claim_exec_intent(conn, intent_id)
+    cid = client_order_id(intent_id, "ms")
+    found = {
+        "symbol": "DOGEUSDT",
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "0.079",
+        "quantity": "100",
+        "algoId": 100,
+        "clientAlgoId": cid,
+    }
+    old = {
+        "symbol": "DOGEUSDT",
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "0.083",
+        "quantity": "100",
+        "algoId": 99,
+        "clientAlgoId": "jv-old-sl",
+    }
+    open_n = {"n": 0}
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        open_n["n"] += 1
+        # First list (before place lookup uses find after error): include old.
+        # After place timeout, lookup finds new + old; cancel then uses list with both.
+        if open_n["n"] == 1:
+            return (200, [old])
+        return (200, [old, found])
+
+    handlers = _move_stop_handlers(
+        place=httpx.ConnectError("place down"),
+        open_algo=open_algo,
+    )
+    transport = RecordingTransport(handlers)
+    result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
+    assert result.startswith("✅")
+    posts = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+    assert len(posts) == 1
+    assert any(c[0] == "DELETE" for c in transport.calls)
+    conn.close()
+
+
+def test_move_stop_place_unknown_lookup_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-unk.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    claim_exec_intent(conn, intent_id)
+    old = {
+        "symbol": "DOGEUSDT",
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "0.083",
+        "quantity": "100",
+        "algoId": 99,
+        "clientAlgoId": "jv-old-sl",
+    }
+    handlers = _move_stop_handlers(
+        place=httpx.ConnectError("place down"),
+        open_algo=(200, [old]),  # lookup never finds new
+    )
+    transport = RecordingTransport(handlers)
+    result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
+    assert MSG_MOVE_STOP_KEEP in result or MSG_MOVE_STOP_UNKNOWN in result
+    assert "stop เดิมยังอยู่" in result
+    assert not any(c[0] == "DELETE" for c in transport.calls)
+    conn.close()
+
+
+def test_move_stop_close_position_old_coexists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-cp.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    claim_exec_intent(conn, intent_id)
+    old = {
+        "symbol": "DOGEUSDT",
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "positionSide": "BOTH",
+        "closePosition": True,
+        "triggerPrice": "0.083",
+        "algoId": 99,
+        "clientAlgoId": "owner-cp",
+    }
+    handlers = _move_stop_handlers(old=old)
+    transport = RecordingTransport(handlers)
+    result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
+    assert result.startswith("✅")
+    place = next(c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder")
+    assert place[2].get("reduceOnly") == "true"
+    assert place[2].get("quantity") == "100"
+    assert "closePosition" not in place[2]
+    assert any(c[0] == "DELETE" for c in transport.calls)
+    assert "owner" in result
+    conn.close()
+
+
+def test_move_stop_4130_keeps_old(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-4130.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    claim_exec_intent(conn, intent_id)
+    handlers = _move_stop_handlers(
+        place=(400, {"code": -4130, "msg": "An open stop or take profit already exists"})
+    )
+    transport = RecordingTransport(handlers)
+    result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
+    assert "stop เดิมยังอยู่" in result
+    assert "-4130" in result
+    assert not any(c[0] == "DELETE" for c in transport.calls)
+    conn.close()
+
+
+def test_move_stop_recompute_changed_sends_new_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-recomp.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    # Button level 0.079; fresh candle low 0.074 → trail 0.077 (>1 tick away)
+    _seed_move_stop_watch(conn, entry_ts=entry_ts, best_low=0.074)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "old advice"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    handlers = _move_stop_handlers(mark="0.075")
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    markups: list[Any] = []
+
+    def _send(t: str, **kw: Any) -> int:
+        sent.append(t)
+        if "reply_markup" in kw:
+            markups.append(kw["reply_markup"])
+        return 99
+
+    out = handle_exec_callback(
+        conn,
+        f"ms:{intent_id}",
+        send=_send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    assert out.get("ok") is False
+    assert any("stop แนะนำเปลี่ยนเป็น" in t for t in sent)
+    assert any("ms:" in json.dumps(m) and "mn:" in json.dumps(m) for m in markups)
+    assert not any(c[0] == "POST" for c in transport.calls)
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "failed"
+    conn.close()
+
+
+def test_move_stop_advice_none_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-none.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    # No favorable extreme → no advice
+    _seed_move_stop_watch(conn, entry_ts=entry_ts, best_low=0.0795)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    claim_exec_intent(conn, intent_id)
+    handlers = _move_stop_handlers()
+    transport = RecordingTransport(handlers)
+    result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
+    assert result == MSG_MOVE_STOP_NO_ADVICE
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_move_stop_expired_and_mn_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-exp.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "advice body"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1000,
+    )
+    handlers = _move_stop_handlers()
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    edits: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ms:{intent_id}",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda _m, t, **_: edits.append(t),
+        trade=_client(transport),
+        now_ms_value=ts + MOVE_STOP_TTL_MS + 1,
+        message={"message_id": 3},
+    )
+    assert MSG_EXPIRED in sent
+    assert not any(c[0] == "POST" for c in transport.calls)
+    assert get_exec_intent(conn, intent_id)["status"] == "expired"
+
+    intent2 = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "advice2"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    edits.clear()
+    handle_exec_callback(
+        conn,
+        f"mn:{intent2}",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda _m, t, **_: edits.append(t),
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 4},
+    )
+    assert get_exec_intent(conn, intent2)["status"] == "cancelled"
+    assert edits == ["advice2"]
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_move_stop_already_closed_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-closed.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "advice"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    handlers = {
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ms:{intent_id}",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 5},
+    )
+    assert MSG_ALREADY_CLOSED in sent
+    assert not any(c[0] == "POST" for c in transport.calls)
+    again: list[str] = []
+    out = handle_exec_callback(
+        conn,
+        f"ms:{intent_id}",
+        send=lambda t, **_: again.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 5},
+    )
+    assert out.get("replay") is True
+    assert again == [MSG_ALREADY_CLOSED]
+    conn.close()
+
+
+def test_move_stop_long_tighten_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ms-long.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    # long: entry 100, initial 90, R=10; high 111 → trail 101 (best_high - 1R)
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 100.0,
+            "qty": 0.1,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 90.0,
+            "initial_stop_source": "signal",
+            "entry_time_ms": entry_ts,
+            "no_stop_latched": 0,
+            "last_seen_ms": entry_ts,
+            "closed_at_ms": None,
+        },
+    )
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "BTCUSDT",
+                "timestamp": entry_ts,
+                "timeframe": "1h",
+                "open": 100.0,
+                "high": 111.0,
+                "low": 99.0,
+                "close": 108.0,
+                "volume": 1.0,
+            }
+        ],
+    )
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"stop": "101", "qty": "0.1"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    claim_exec_intent(conn, intent_id)
+    old = {
+        "symbol": "BTCUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "90",
+        "quantity": "0.1",
+        "algoId": 1,
+        "clientAlgoId": "jv-btc",
+    }
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/positionRisk"): (
+            200,
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "0.1",
+                    "entryPrice": "100",
+                    "markPrice": "108",
+                }
+            ],
+        ),
+        ("GET", "/fapi/v1/exchangeInfo"): (
+            200,
+            {
+                "symbols": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "filters": [
+                            {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+                            {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                            {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                        ],
+                    }
+                ]
+            },
+        ),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "108"}),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, [old]),
+        ("POST", "/fapi/v1/algoOrder"): (200, {"algoId": 2}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 1}),
+    }
+    transport = RecordingTransport(handlers)
+    result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
+    assert result.startswith("✅"), result
+    place = next(c for c in transport.calls if c[0] == "POST")
+    assert Decimal(str(place[2]["triggerPrice"])) == Decimal("101")
     conn.close()
 
 

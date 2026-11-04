@@ -77,8 +77,15 @@ def entry_confirm_keyboard(intent_id: str) -> dict[str, Any]:
     }
 
 
-def move_stop_keyboard(intent_id: str) -> dict[str, Any]:
-    return {"inline_keyboard": [[{"text": "✅ เลื่อนให้", "callback_data": f"ms:{intent_id}"}]]}
+def move_stop_keyboard(intent_id: str, *, new_stop: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": f"✅ เลื่อน stop → {new_stop}", "callback_data": f"ms:{intent_id}"},
+                {"text": "❌ ไม่เลื่อน", "callback_data": f"mn:{intent_id}"},
+            ]
+        ]
+    }
 
 
 def exit_confirm_keyboard(intent_id: str) -> dict[str, Any]:
