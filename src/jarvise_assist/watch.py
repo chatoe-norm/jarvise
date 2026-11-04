@@ -10,6 +10,7 @@ from typing import Any
 from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_assist import ASSIST_SYMBOLS, ASSIST_TIMEFRAME
 from jarvise_assist.execute import (
+    MOVE_STOP_TTL_MS,
     PREVIEW_TTL_MS,
     assist_execute_mode,
     build_trade_client,
@@ -27,6 +28,7 @@ from jarvise_assist.futures import (
 )
 from jarvise_assist.keyboard import exit_confirm_keyboard, move_stop_keyboard
 from jarvise_assist.messages import (
+    fmt_price,
     format_exit_advice,
     format_move_stop_advice,
     format_no_stop_warning,
@@ -60,15 +62,29 @@ from jarvise_assist.store import (
     set_watch_no_stop_latched,
     upsert_watch_position,
 )
+from jarvise_assist.trail_advice import (
+    ONE_H_MS,
+    candle_extremes_after_entry,
+    current_trail_advice,
+)
 from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
 from jarvise_notify.telegram import send_telegram_message
-from jarvise_paper.profit_lock import trail_stop_with_source
 
 logger = logging.getLogger(__name__)
 
 FOUR_H_MS = 4 * 3_600_000
-ONE_H_MS = 3_600_000
 SendFn = Callable[..., Any]
+
+# Re-export for callers/tests that imported from watch.
+__all__ = (
+    "ONE_H_MS",
+    "approx_r_multiple",
+    "candle_extremes_after_entry",
+    "current_trail_advice",
+    "flush_held_watch_advice",
+    "initial_atr_stop",
+    "run_assist_watch",
+)
 
 
 def approx_r_multiple(
@@ -84,36 +100,6 @@ def approx_r_multiple(
     if side == "long":
         return (mark - entry) / risk
     return (entry - mark) / risk
-
-
-def candle_extremes_after_entry(
-    candles: list[dict[str, Any]],
-    *,
-    entry_time_ms: int,
-    now_ms: int,
-    bar_ms: int = ONE_H_MS,
-) -> tuple[float | None, float | None]:
-    """Best high/low of bars opened at or after entry and closed by now.
-
-    Bars that opened before entry are excluded so pre-entry extremes cannot
-    trip breakeven / 1R trail advice (same leak class as replay PR #179).
-    """
-    best_high: float | None = None
-    best_low: float | None = None
-    for row in candles:
-        ts = int(row["timestamp"])
-        close_ms = ts + int(bar_ms)
-        if ts < int(entry_time_ms) or close_ms > int(now_ms):
-            continue
-        high = row.get("high")
-        low = row.get("low")
-        if high is not None:
-            h = float(high)
-            best_high = h if best_high is None else max(best_high, h)
-        if low is not None:
-            lo = float(low)
-            best_low = lo if best_low is None else min(best_low, lo)
-    return best_low, best_high
 
 
 def initial_atr_stop(*, side: str, entry: Decimal, atr: Decimal) -> Decimal:
@@ -434,22 +420,36 @@ def _process_universe_position(
     mark = pos.mark_price if pos.mark_price > 0 else client.mark_price(pos.symbol)
     entry_time = int(stored.get("entry_time_ms") or now_ms)
     candles_1h = load_candles_in_range(conn, pos.symbol, "1h", since_ms=entry_time, until_ms=int(now_ms))
-    best_low, best_high = candle_extremes_after_entry(
-        candles_1h, entry_time_ms=entry_time, now_ms=now_ms, bar_ms=ONE_H_MS
+    try:
+        tick = client.symbol_filters(pos.symbol).tick_size
+    except Exception:  # noqa: BLE001
+        tick = Decimal("0.01")
+    trail = current_trail_advice(
+        side=pos.side,
+        entry=pos.entry_price,
+        initial_stop=stop_dec,
+        candles_1h=candles_1h,
+        entry_time_ms=entry_time,
+        now_ms=now_ms,
+        tick=tick,
     )
-    trail_pos = {
-        "side": pos.side,
-        "entry_price": float(pos.entry_price),
-        "initial_stop_price": float(stop_dec),
-        "stop_price": float(stop_dec),
-    }
-    trail = trail_stop_with_source(trail_pos, best_low=best_low, best_high=best_high)
     if trail is not None:
-        suggested, _source = trail
-        suggested_d = Decimal(str(suggested))
+        suggested_d, _source = trail
         tighter = suggested_d > compare_stop if pos.side == "long" else suggested_d < compare_stop
         if tighter:
-            text = format_move_stop_advice(symbol=pos.symbol, side=pos.side, stop=suggested_d)
+            expires_at = now_ms + MOVE_STOP_TTL_MS
+            text = format_move_stop_advice(
+                symbol=pos.symbol,
+                side=pos.side,
+                qty=pos.qty,
+                old_stop=protective,
+                new_stop=suggested_d,
+                mark=mark,
+                entry=pos.entry_price,
+                initial_stop=stop_dec,
+                expires_at_ms=expires_at,
+                tick=tick,
+            )
             move_markup = None
             # Buttons/intents only in live daytime sends that will not dedupe-skip.
             if (
@@ -470,11 +470,16 @@ def _process_universe_position(
                     kind="move_stop",
                     symbol=pos.symbol,
                     side=pos.side,
-                    preview={"stop": str(suggested_d), "qty": str(pos.qty)},
+                    preview={
+                        "stop": str(suggested_d),
+                        "qty": str(pos.qty),
+                        "advice_text": text,
+                        "source": _source,
+                    },
                     created_at_ms=now_ms,
-                    expires_at_ms=now_ms + PREVIEW_TTL_MS,
+                    expires_at_ms=expires_at,
                 )
-                move_markup = move_stop_keyboard(intent_id)
+                move_markup = move_stop_keyboard(intent_id, new_stop=fmt_price(suggested_d))
             status = _emit_advice(
                 conn,
                 symbol=pos.symbol,
@@ -632,7 +637,22 @@ def flush_held_watch_advice(
                 mark_watch_advice_dropped(conn, str(row["id"]))
                 dropped.append(str(row["id"]))
                 continue
-            text = format_move_stop_advice(symbol=pos.symbol, side=pos.side, stop=suggested)
+            try:
+                tick = futures.symbol_filters(pos.symbol).tick_size
+            except Exception:  # noqa: BLE001
+                tick = Decimal("0.01")
+            text = format_move_stop_advice(
+                symbol=pos.symbol,
+                side=pos.side,
+                qty=pos.qty,
+                old_stop=protective,
+                new_stop=suggested,
+                mark=mark,
+                entry=pos.entry_price,
+                initial_stop=stop_dec,
+                expires_at_ms=now_ms_value + MOVE_STOP_TTL_MS,
+                tick=tick,
+            )
             if send(text):
                 mark_watch_advice_sent(conn, str(row["id"]), sent_at_ms=now_ms_value)
                 sent.append(str(row["id"]))

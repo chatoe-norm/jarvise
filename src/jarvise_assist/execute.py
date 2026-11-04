@@ -24,8 +24,8 @@ from jarvise_assist.futures import (
     is_protective_stop,
     order_stop_price,
 )
-from jarvise_assist.keyboard import entry_confirm_keyboard, exit_confirm_keyboard
-from jarvise_assist.messages import format_signal_message
+from jarvise_assist.keyboard import entry_confirm_keyboard, move_stop_keyboard
+from jarvise_assist.messages import fmt_price, fmt_qty, format_move_stop_advice, format_signal_message
 from jarvise_assist.pause import is_paused
 from jarvise_assist.sizing import (
     ExistingIdea,
@@ -48,6 +48,7 @@ from jarvise_assist.store import (
     finish_exec_intent,
     get_exec_intent,
     get_signal,
+    get_watch_position,
     insert_exec_intent,
     insert_exec_log,
     latest_seen_idea,
@@ -55,12 +56,13 @@ from jarvise_assist.store import (
     now_ms,
     set_exec_intent_message_id,
 )
+from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_exchange.binance_spot import (
     BinanceAuth,
     load_private_key_pem,
     sign_payload,
 )
-from jarvise_ingest.db import load_latest_analysis
+from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
 from jarvise_ingest.http import ProviderError
 from jarvise_risk.caps import kill_switch_state
 
@@ -69,8 +71,14 @@ logger = logging.getLogger(__name__)
 DEMO_FAPI_BASE = "https://demo-fapi.binance.com"
 SAPI_BASE = "https://api.binance.com"
 PREVIEW_TTL_MS = 120_000
+MOVE_STOP_TTL_MS = 10 * 60_000
 TRADE_KEY_CACHE_MS = 10 * 60_000
 CLIENT_ID_MAX = 36
+MSG_MOVE_STOP_BUFFER = "stop ใหม่ใกล้ราคาเกินไป — ไม่เลื่อน"
+MSG_MOVE_STOP_NO_ADVICE = "ตอนนี้ไม่มี stop แนะนำแล้ว — ไม่เลื่อน"
+MSG_MOVE_STOP_UNKNOWN = "ไม่แน่ใจว่าวาง stop ใหม่สำเร็จ — stop เดิมยังอยู่ เช็ก Open Orders"
+MSG_MOVE_STOP_KEEP = "เลื่อน stop ไม่ได้ — stop เดิมยังอยู่"
+MSG_MOVE_STOP_TWO = "⚠️ ยกเลิก stop เดิมไม่ได้ — ตอนนี้มี 2 stop (ไม่อันตราย, reduce-only) เช็ก Open Orders"
 
 MSG_OFF = "ปิดอยู่"
 MSG_EXPIRED = "หมดเวลา — กดเหรียญใหม่"
@@ -1704,19 +1712,92 @@ def run_entry_sequence(
     )
 
 
+def _move_stop_buffer_ok(*, side: str, mark: Decimal, new_stop: Decimal, tick: Decimal) -> bool:
+    """True when the new stop is far enough from mark (max(0.1% mark, 2×tick))."""
+    min_gap = max(mark * Decimal("0.001"), tick * Decimal("2"))
+    if side == "long":
+        return mark - new_stop >= min_gap
+    return new_stop - mark >= min_gap
+
+
+def _stop_owner_label(order: dict[str, Any]) -> str:
+    cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
+    return "jv-" if cid.startswith("jv-") else "owner"
+
+
+def _cancel_old_stop_label(order: dict[str, Any]) -> str:
+    px = order_stop_price(order)
+    px_s = fmt_price(px) if px is not None else "?"
+    return f"{px_s} ({_stop_owner_label(order)})"
+
+
+def _send_fresh_move_stop_advice(
+    conn: Any,
+    *,
+    symbol: str,
+    side: str,
+    pos: FuturesPosition,
+    new_stop: Decimal,
+    source: str,
+    initial_stop: Decimal,
+    protective: Decimal | None,
+    mark: Decimal,
+    tick: Decimal,
+    now_ms_value: int,
+    send: Callable[..., Any] | None,
+) -> str | None:
+    """Insert a new move_stop intent and send advice. Returns new intent id or None."""
+    expires_at = int(now_ms_value) + MOVE_STOP_TTL_MS
+    text = format_move_stop_advice(
+        symbol=symbol,
+        side=side,
+        qty=pos.qty,
+        old_stop=protective,
+        new_stop=new_stop,
+        mark=mark,
+        entry=pos.entry_price,
+        initial_stop=initial_stop,
+        expires_at_ms=expires_at,
+        tick=tick,
+    )
+    new_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol=symbol,
+        side=side,
+        preview={
+            "stop": str(new_stop),
+            "qty": str(pos.qty),
+            "advice_text": text,
+            "source": source,
+        },
+        created_at_ms=int(now_ms_value),
+        expires_at_ms=expires_at,
+    )
+    if send is not None:
+        mid = send(text, reply_markup=move_stop_keyboard(new_id, new_stop=fmt_price(new_stop)))
+        if mid is not None:
+            set_exec_intent_message_id(conn, new_id, int(mid))
+    return new_id
+
+
 def run_move_stop_sequence(
     conn: Any,
     intent_id: str,
     *,
     trade: BinanceTradeClient,
+    send: Callable[..., Any] | None = None,
+    now_ms_value: int | None = None,
 ) -> str:
+    """Place a tighter STOP_MARKET (qty+reduceOnly), then cancel old protective stops."""
     intent = get_exec_intent(conn, intent_id)
     if intent is None:
         return "ไม่พบคำสั่ง"
     preview = intent["preview"]
     symbol = str(intent["symbol"])
     side = str(intent["side"])
-    new_stop = Decimal(str(preview["stop"]))
+    button_stop = Decimal(str(preview["stop"]))
+    ts = int(now_ms_value if now_ms_value is not None else now_ms())
     positions = trade.position_risk(symbol=symbol)
     if not positions:
         return MSG_ALREADY_CLOSED
@@ -1724,12 +1805,54 @@ def run_move_stop_sequence(
     if pos.side != side:
         return _reason_th("wrong_side")
     filters = trade.symbol_filters(symbol)
-    new_stop = round_level_to_tick(new_stop, filters.tick_size, side=side, kind="stop")
+    tick = filters.tick_size if filters.tick_size > 0 else Decimal("0.01")
+    button_stop = round_level_to_tick(button_stop, tick, side=side, kind="stop")
+
+    watch = get_watch_position(conn, symbol, pos.position_side)
+    if watch is None or watch.get("initial_stop") is None:
+        return MSG_MOVE_STOP_NO_ADVICE
+    initial_stop = Decimal(str(watch["initial_stop"]))
+    entry_time = int(watch.get("entry_time_ms") or ts)
+    candles_1h = load_candles_in_range(conn, symbol, "1h", since_ms=entry_time, until_ms=ts)
+    advice = current_trail_advice(
+        side=side,
+        entry=pos.entry_price,
+        initial_stop=initial_stop,
+        candles_1h=candles_1h,
+        entry_time_ms=entry_time,
+        now_ms=ts,
+        tick=tick,
+    )
+    if advice is None:
+        return MSG_MOVE_STOP_NO_ADVICE
+    fresh_stop, source = advice
+    if abs(fresh_stop - button_stop) > tick:
+        orders = trade.all_open_orders(symbol=symbol)
+        protective = find_protective_stop(
+            orders, symbol=symbol, position_side=pos.position_side, trade_side=side
+        )
+        mark = trade.mark_price(symbol)
+        _send_fresh_move_stop_advice(
+            conn,
+            symbol=symbol,
+            side=side,
+            pos=pos,
+            new_stop=fresh_stop,
+            source=source,
+            initial_stop=initial_stop,
+            protective=protective,
+            mark=mark,
+            tick=tick,
+            now_ms_value=ts,
+            send=send,
+        )
+        return f"stop แนะนำเปลี่ยนเป็น {fmt_price(fresh_stop)}"
+
+    new_stop = button_stop
     mark = trade.mark_price(symbol)
-    if side == "long" and mark <= new_stop:
-        return MSG_MARK_PASSED
-    if side == "short" and mark >= new_stop:
-        return MSG_MARK_PASSED
+    if not _move_stop_buffer_ok(side=side, mark=mark, new_stop=new_stop, tick=tick):
+        return MSG_MOVE_STOP_BUFFER
+
     orders = trade.all_open_orders(symbol=symbol)
     old_stops = [
         o
@@ -1738,13 +1861,16 @@ def run_move_stop_sequence(
         and order_stop_price(o) is not None
     ]
     current = find_protective_stop(orders, symbol=symbol, position_side=pos.position_side, trade_side=side)
-    if current is not None:
-        if side == "long" and new_stop <= current:
-            return _reason_th("not_tighter")
-        if side == "short" and new_stop >= current:
-            return _reason_th("not_tighter")
+    compare = current if current is not None else initial_stop
+    if side == "long" and new_stop <= compare:
+        return _reason_th("not_tighter")
+    if side == "short" and new_stop >= compare:
+        return _reason_th("not_tighter")
+
     cid = client_order_id(intent_id, "ms")
     placed = False
+    clear_reject_code: int | None = None
+    lookup_confirmed_absent = False
     try:
         algo = trade.place_algo_stop(
             symbol=symbol,
@@ -1775,20 +1901,33 @@ def run_move_stop_sequence(
             http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
             binance_code=code,
         )
-        if not _is_clear_rejection(exc):
+        if _is_clear_rejection(exc):
+            clear_reject_code = code
+        else:
             found = _safe_find_algo(trade, symbol=symbol, client_id=cid)
             if found is not None:
                 placed = True
+            else:
+                # Lookup empty or failed — do not cancel old. Empty list = confirmed absent.
+                try:
+                    again = trade.find_algo_by_client_id(symbol=symbol, client_id=cid)
+                    lookup_confirmed_absent = again is None
+                except Exception:  # noqa: BLE001
+                    lookup_confirmed_absent = False
         if not placed:
-            return f"เลื่อน stop ไม่ได้ — เก็บของเดิมไว้ ({exc})"
-    if not placed:
-        return "เลื่อน stop ไม่ได้ — เก็บของเดิมไว้"
+            if clear_reject_code is not None:
+                return f"{MSG_MOVE_STOP_KEEP} ({clear_reject_code})"
+            if lookup_confirmed_absent:
+                return MSG_MOVE_STOP_KEEP
+            return MSG_MOVE_STOP_UNKNOWN
 
-    cancel_notes: list[str] = []
+    cancelled: list[str] = []
+    cancel_failed = False
     for old in old_stops:
         algo_id = old.get("algoId") or old.get("orderId")
         if algo_id is None:
             continue
+        label = _cancel_old_stop_label(old)
         try:
             trade.cancel_algo(symbol=symbol, algo_id=algo_id)
             _log_write(
@@ -1799,19 +1938,25 @@ def run_move_stop_sequence(
                 http_status=200,
                 order_or_algo_id=str(algo_id),
             )
-        except TradeClientError as exc:
-            cancel_notes.append(str(exc))
+            cancelled.append(label)
+        except Exception as exc:  # noqa: BLE001
+            cancel_failed = True
+            code = exc.binance_code if isinstance(exc, TradeClientError) else None
             _log_write(
                 conn,
                 intent_id=intent_id,
                 step="move_stop_cancel",
                 endpoint="/fapi/v1/algoOrder",
-                http_status=exc.http_status,
-                binance_code=exc.binance_code,
+                http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+                binance_code=code,
                 order_or_algo_id=str(algo_id),
             )
-    note = f" (ยกเลิกของเดิมไม่ครบ: {'; '.join(cancel_notes)})" if cancel_notes else ""
-    return f"✅ เลื่อน stop {symbol} → {new_stop}{note}"
+    head = f"✅ เลื่อน stop {symbol} → {fmt_price(new_stop)} · qty ทั้งไม้ {fmt_qty(pos.qty)}"
+    if cancel_failed:
+        return f"{head} · {MSG_MOVE_STOP_TWO}"
+    if cancelled:
+        return f"{head} · ยกเลิก {', '.join(cancelled)}"
+    return head
 
 
 def run_exit_sequence(
@@ -2063,12 +2208,19 @@ def handle_exec_callback(
             set_exec_intent_message_id(conn, intent_id, int(new_mid))
         return {"ok": True, "preview": intent_id}
 
-    if data.startswith("en:"):
+    if data.startswith("en:") or data.startswith("mn:"):
         answer()
         intent_id = data[3:]
+        intent = get_exec_intent(conn, intent_id)
         cancel_exec_intent(conn, intent_id)
+        advice_body = None
+        if intent is not None:
+            preview = intent.get("preview") or {}
+            if isinstance(preview, dict):
+                advice_body = preview.get("advice_text")
+        edit_body = str(advice_body) if advice_body else MSG_CANCELLED
         if mid is not None:
-            edit(int(mid), MSG_CANCELLED, reply_markup={"inline_keyboard": []})
+            edit(int(mid), edit_body, reply_markup={"inline_keyboard": []})
         else:
             send(MSG_CANCELLED)
         return {"ok": True, "cancelled": intent_id}
@@ -2094,13 +2246,17 @@ def handle_exec_callback(
             answer()
             send("กำลังทำอยู่")
             return {"ok": False, "reason": "in_flight"}
-        if prefix == "ey:" and intent["expires_at_ms"] < ts:
+        if prefix in {"ey:", "ms:"} and intent["expires_at_ms"] < ts:
             finish_exec_intent(conn, intent_id, status="expired", result_text=MSG_EXPIRED)
             answer()
+            advice_body = None
+            preview = intent.get("preview") or {}
+            if isinstance(preview, dict):
+                advice_body = preview.get("advice_text")
+            edit_body = str(advice_body) if (prefix == "ms:" and advice_body) else MSG_EXPIRED
             if mid is not None:
-                edit(int(mid), MSG_EXPIRED, reply_markup={"inline_keyboard": []})
-            else:
-                send(MSG_EXPIRED)
+                edit(int(mid), edit_body, reply_markup={"inline_keyboard": []})
+            send(MSG_EXPIRED)
             return {"ok": False, "reason": "expired"}
         if not claim_exec_intent(conn, intent_id):
             # Lost race — replay stored or in-flight
@@ -2142,10 +2298,23 @@ def handle_exec_callback(
             send(text)
             return {"ok": False, "reason": "binance_unreachable"}
 
+        def _strip_ms_buttons() -> None:
+            if mid is None or prefix != "ms:":
+                return
+            preview = intent.get("preview") or {}
+            body = preview.get("advice_text") if isinstance(preview, dict) else None
+            edit(int(mid), str(body) if body else MSG_CANCELLED, reply_markup={"inline_keyboard": []})
+
         def _finish_send(result: str, *, markup: dict[str, Any] | None = None) -> dict[str, Any]:
             status = "done" if result.startswith("✅") else "failed"
             finish_exec_intent(conn, intent_id, status=status, result_text=result)
-            if mid is not None and markup is None and prefix == "ey:":
+            if prefix == "ms:":
+                _strip_ms_buttons()
+                if markup is not None:
+                    send(result, reply_markup=markup)
+                else:
+                    send(result)
+            elif mid is not None and markup is None and prefix == "ey:":
                 edit(int(mid), result, reply_markup={"inline_keyboard": []})
                 # Telegram does not notify on edits — send a new message for failures.
                 if not result.startswith("✅"):
@@ -2181,28 +2350,13 @@ def handle_exec_callback(
                 return _finish_send(result)
 
             if prefix == "ms:":
-                preview = intent["preview"]
-                new_stop = Decimal(str(preview["stop"]))
-                positions = client.position_risk(symbol=str(intent["symbol"]))
-                if positions:
-                    mark = client.mark_price(str(intent["symbol"]))
-                    side = str(intent["side"])
-                    passed = (side == "long" and mark <= new_stop) or (side == "short" and mark >= new_stop)
-                    if passed:
-                        exit_id = insert_exec_intent(
-                            conn,
-                            kind="exit",
-                            symbol=str(intent["symbol"]),
-                            side=side,
-                            preview={"qty": str(positions[0].qty)},
-                            created_at_ms=ts,
-                            expires_at_ms=ts + PREVIEW_TTL_MS,
-                        )
-                        text = MSG_MARK_PASSED
-                        finish_exec_intent(conn, intent_id, status="failed", result_text=text)
-                        send(text, reply_markup=exit_confirm_keyboard(exit_id))
-                        return {"ok": False, "reason": "mark_passed", "exit_intent": exit_id}
-                result = run_move_stop_sequence(conn, intent_id, trade=client)
+                result = run_move_stop_sequence(
+                    conn,
+                    intent_id,
+                    trade=client,
+                    send=send,
+                    now_ms_value=ts,
+                )
                 return _finish_send(result)
 
             result = run_exit_sequence(conn, intent_id, trade=client)
@@ -2212,6 +2366,8 @@ def handle_exec_callback(
             # An entry or exit may have reached Binance; tell the owner to look.
             text = MSG_HANDLER_ERROR if prefix == "ms:" else _msg_check_now(str(intent["symbol"]))
             finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+            if prefix == "ms:":
+                _strip_ms_buttons()
             send(text)
             return {"ok": False, "reason": "handler_error"}
 

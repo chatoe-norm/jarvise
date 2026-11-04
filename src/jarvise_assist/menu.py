@@ -49,7 +49,9 @@ from jarvise_assist.store import (
     latest_seen_idea,
     write_settings,
 )
+from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_assist.weekly import run_assist_weekly
+from jarvise_ingest.db import load_candles_in_range
 from jarvise_notify.telegram import send_message
 
 SendFn = Callable[..., Any]
@@ -240,15 +242,13 @@ def render_open_positions(
             continue
         watch = get_watch_position(conn, sym, pos.position_side)
         linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
+        initial_stop: float | None
         if watch and watch.get("initial_stop") is not None:
-            suggested = float(watch["initial_stop"])
-            src = "freeze"
+            initial_stop = float(watch["initial_stop"])
         elif linked is not None:
-            suggested = float(linked["stop"])
-            src = "signal"
+            initial_stop = float(linked["stop"])
         else:
-            suggested = None
-            src = None
+            initial_stop = None
         stop_info = find_protective_stop_info(
             orders,
             symbol=sym,
@@ -278,8 +278,8 @@ def render_open_positions(
         else:
             unreal_usdt = (entry - mark) * qty
         r_note = ""
-        if suggested is not None:
-            risk = abs(entry - suggested)
+        if initial_stop is not None:
+            risk = abs(entry - initial_stop)
         elif stop_info is not None:
             placed = float(stop_info.price)
             loss_side = (pos.side == "long" and placed < entry) or (pos.side == "short" and placed > entry)
@@ -332,8 +332,31 @@ def render_open_positions(
             if coverage == "partial":
                 lines.append(_partial_stop_line(covered, pos.qty))
 
-        if suggested is not None:
-            lines.append(f"stop แนะนำ {_price_text(suggested, tick)} ({src})")
+        if initial_stop is not None:
+            lines.append(f"stop ตั้งต้น {_price_text(initial_stop, tick)} (ฐาน 1R)")
+            entry_time = int(watch["entry_time_ms"]) if watch and watch.get("entry_time_ms") else now_ms
+            candles_1h = load_candles_in_range(conn, sym, "1h", since_ms=entry_time, until_ms=int(now_ms))
+            tick_d = tick if tick is not None and tick > 0 else Decimal("0.01")
+            advice = current_trail_advice(
+                side=pos.side,
+                entry=pos.entry_price,
+                initial_stop=Decimal(str(initial_stop)),
+                candles_1h=candles_1h,
+                entry_time_ms=entry_time,
+                now_ms=now_ms,
+                tick=tick_d,
+            )
+            if advice is not None:
+                advice_level, advice_src = advice
+                placed_stop = Decimal(str(stop_info.price)) if stop_info is not None else None
+                if placed_stop is None:
+                    tighter = True
+                elif pos.side == "long":
+                    tighter = advice_level > placed_stop
+                else:
+                    tighter = advice_level < placed_stop
+                if tighter:
+                    lines.append(f"stop แนะนำตอนนี้ {_price_text(advice_level, tick)} ({advice_src})")
 
         if tp_info is not None:
             tp_trig = trigger_label(tp_info.working_type) or "?"

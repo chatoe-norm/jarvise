@@ -984,14 +984,33 @@ def test_format_watch_messages() -> None:
         format_no_stop_warning(symbol="ADAUSDT", side="long", stop=Decimal("0.32"))
         == "⚠️ ADAUSDT LONG ไม่มี stop order — ตั้ง Stop-Market (Reduce-Only, Mark Price) ที่ 0.32"
     )
-    assert (
-        format_move_stop_advice(symbol="ADAUSDT", side="long", stop=Decimal("0.35"))
-        == "↗️ ADAUSDT LONG · เลื่อน stop → 0.35"
+    long_txt = format_move_stop_advice(
+        symbol="ADAUSDT",
+        side="long",
+        qty=Decimal("10"),
+        old_stop=Decimal("0.32"),
+        new_stop=Decimal("0.35"),
+        mark=Decimal("0.40"),
+        entry=Decimal("0.36"),
+        initial_stop=Decimal("0.32"),
+        expires_at_ms=1_762_000_000_000,
     )
-    assert (
-        format_move_stop_advice(symbol="ADAUSDT", side="short", stop=Decimal("0.48"))
-        == "↘️ ADAUSDT SHORT · เลื่อน stop → 0.48"
+    assert "ADAUSDT LONG · qty 10" in long_txt
+    assert "stop 0.32 → 0.35" in long_txt
+    assert "ปุ่มหมดอายุ" in long_txt
+    short_txt = format_move_stop_advice(
+        symbol="ADAUSDT",
+        side="short",
+        qty=Decimal("10"),
+        old_stop=None,
+        new_stop=Decimal("0.48"),
+        mark=Decimal("0.45"),
+        entry=Decimal("0.50"),
+        initial_stop=Decimal("0.55"),
+        expires_at_ms=1_762_000_000_000,
     )
+    assert "stop ไม่มี → 0.48" in short_txt
+    assert "ADAUSDT SHORT" in short_txt
     text = format_exit_advice(symbol="ADAUSDT", side="short", reason="flat", approx_r=Decimal("0.4"))
     assert text == "✅ ADAUSDT SHORT · ออกตอนนี้\nสัญญาณ 4h เป็น FLAT · ประมาณ 0.4R"
 
@@ -1241,7 +1260,7 @@ def test_move_stop_once_per_level(tmp_path: Path) -> None:
     sent: list[str] = []
     run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
     assert len(sent) == 1
-    assert "เลื่อน stop" in sent[0]
+    assert "stop " in sent[0] and "→" in sent[0]
     run_assist_watch(conn, futures=fake, now_ms_value=day + 60_000, send=lambda t: sent.append(t) or True)
     assert len(sent) == 1
     conn.close()
@@ -1304,7 +1323,7 @@ def test_pre_entry_extreme_does_not_move_stop(tmp_path: Path) -> None:
     )
     sent: list[str] = []
     run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
-    assert not any("เลื่อน stop" in t for t in sent)
+    assert not any("→" in t and "stop " in t and "ปุ่มหมดอายุ" in t for t in sent)
     conn.close()
 
 
@@ -1365,7 +1384,7 @@ def test_1h_candle_after_entry_moves_stop(tmp_path: Path) -> None:
     sent: list[str] = []
     run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
     assert len(sent) == 1
-    assert "เลื่อน stop" in sent[0]
+    assert "stop " in sent[0] and "→" in sent[0]
     conn.close()
 
 
