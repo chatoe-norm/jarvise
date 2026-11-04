@@ -425,17 +425,26 @@ def _fee_usdt_and_other(fill: dict[str, Any], *, fraction: float = 1.0) -> tuple
     return 0.0, None
 
 
-def _unmatched_reason(*, cid: str) -> str:
+def _logged_client_ids(conn: Any) -> set[str]:
+    """Every client id Jarvise logged when placing an order (mkt, sl, tp, ms, ex, cls)."""
+    cur = conn.execute(
+        "SELECT DISTINCT client_order_id FROM assist_exec_log WHERE client_order_id IS NOT NULL"
+    )
+    return {str(row[0]) for row in cur.fetchall() if row[0]}
+
+
+def _unmatched_reason(*, cid: str, logged: set[str]) -> str:
     """Why a traded order matched no in-window entry.
 
     A jv- market entry with a log always becomes an entry, so an unmatched one
     has no log. Only fills at or after since_ms are fetched, so an unmatched
-    jv- exit (sl0/sl1/tp/cls/ms/ex, always reduce-only) closes a position
-    whose entry opened before since_ms.
+    jv- exit (sl0/sl1/tp/cls/ms/ex, always reduce-only) that Jarvise logged
+    closes a position whose entry opened before since_ms. A jv- exit Jarvise
+    never logged is jv_no_log.
     """
     if not cid.startswith("jv-"):
         return "owner"
-    if _cid_step(cid) == "mkt":
+    if _cid_step(cid) == "mkt" or cid not in logged:
         return "jv_no_log"
     return "jv_before_start"
 
@@ -452,6 +461,7 @@ def build_real_rows(
     start = int(since_ms)
     market_logs = _log_market_by_client(conn)
     move_stop_by_cid = _move_stop_intent_by_client(conn)
+    logged_cids = _logged_client_ids(conn)
     income_cache = _complete_income_cache(conn, start)
     rows_out: list[dict[str, Any]] = []
 
@@ -771,7 +781,7 @@ def build_real_rows(
             side = "buy" if side_raw == "BUY" else "sell"
             entry_time = min(int(f.get("time") or 0) for f in fills)
             cid = str(order.get("clientOrderId") or "")
-            reason = _unmatched_reason(cid=cid)
+            reason = _unmatched_reason(cid=cid, logged=logged_cids)
             rows_out.append(
                 {
                     "intent_id": None,

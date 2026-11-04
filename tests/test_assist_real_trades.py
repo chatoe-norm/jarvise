@@ -1430,10 +1430,7 @@ def test_unmatched_owner_side_buy_sell(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_unmatched_jv_stop_of_pre_start_entry_is_before_start(tmp_path: Path) -> None:
-    """VPS DOGE case: the entry filled before since_ms, its sl0 stop filled after."""
-    conn = open_db(tmp_path / "pre.db")
-    t0 = SPEC_START_MS + 60_000
+def _sl0_stop_fill_fixture(t0: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     orders = [
         {
             "orderId": 301,
@@ -1462,6 +1459,23 @@ def test_unmatched_jv_stop_of_pre_start_entry_is_before_start(tmp_path: Path) ->
             "realizedPnl": "-0.49",
         }
     ]
+    return orders, trades
+
+
+def test_unmatched_jv_stop_of_pre_start_entry_is_before_start(tmp_path: Path) -> None:
+    """VPS DOGE case: entry and sl0 logged before since_ms; the stop filled after."""
+    conn = open_db(tmp_path / "pre.db")
+    t0 = SPEC_START_MS + 60_000
+    insert_exec_log(
+        conn,
+        intent_id="aei_abc123",
+        step="stop",
+        endpoint="/fapi/v1/algoOrder",
+        client_order_id="jv-abc123-sl0",
+        http_status=200,
+        created_at_ms=SPEC_START_MS - 3_600_000,
+    )
+    orders, trades = _sl0_stop_fill_fixture(t0)
     fake = FakeFutures(trades=trades, orders=orders)
     sync_real_trades(conn, fake, since_ms=SPEC_START_MS, until_ms=t0 + 1000)  # type: ignore[arg-type]
     row = conn.execute(
@@ -1472,6 +1486,21 @@ def test_unmatched_jv_stop_of_pre_start_entry_is_before_start(tmp_path: Path) ->
     summary = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS)
     assert summary["unmatched_jv_before_start"] == 1
     assert summary["unmatched_jv_no_log"] == 0
+    conn.close()
+
+
+def test_unmatched_jv_exit_without_any_log_is_no_log(tmp_path: Path) -> None:
+    """A jv- exit Jarvise never logged must not hide under before-start."""
+    conn = open_db(tmp_path / "nolog.db")
+    t0 = SPEC_START_MS + 60_000
+    orders, trades = _sl0_stop_fill_fixture(t0)
+    fake = FakeFutures(trades=trades, orders=orders)
+    sync_real_trades(conn, fake, since_ms=SPEC_START_MS, until_ms=t0 + 1000)  # type: ignore[arg-type]
+    row = conn.execute(
+        "SELECT status, ref_source FROM assist_real_trade WHERE entry_order_id='301'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "unmatched" and row[1] == "jv_no_log"
     conn.close()
 
 
