@@ -425,16 +425,19 @@ def _fee_usdt_and_other(fill: dict[str, Any], *, fraction: float = 1.0) -> tuple
     return 0.0, None
 
 
-def _unmatched_reason(*, cid: str, entry_time_ms: int, since_ms: int, has_log: bool) -> str:
-    if cid.startswith("jv-"):
-        if entry_time_ms < int(since_ms):
-            return "jv_before_start"
-        if _cid_step(cid) == "mkt" and not has_log:
-            return "jv_no_log"
-        if not has_log:
-            return "jv_no_log"
+def _unmatched_reason(*, cid: str) -> str:
+    """Why a traded order matched no in-window entry.
+
+    A jv- market entry with a log always becomes an entry, so an unmatched one
+    has no log. Only fills at or after since_ms are fetched, so an unmatched
+    jv- exit (sl0/sl1/tp/cls/ms/ex, always reduce-only) closes a position
+    whose entry opened before since_ms.
+    """
+    if not cid.startswith("jv-"):
+        return "owner"
+    if _cid_step(cid) == "mkt":
         return "jv_no_log"
-    return "owner"
+    return "jv_before_start"
 
 
 def build_real_rows(
@@ -768,12 +771,7 @@ def build_real_rows(
             side = "buy" if side_raw == "BUY" else "sell"
             entry_time = min(int(f.get("time") or 0) for f in fills)
             cid = str(order.get("clientOrderId") or "")
-            reason = _unmatched_reason(
-                cid=cid,
-                entry_time_ms=entry_time,
-                since_ms=start,
-                has_log=cid in market_logs,
-            )
+            reason = _unmatched_reason(cid=cid)
             rows_out.append(
                 {
                     "intent_id": None,

@@ -1430,6 +1430,51 @@ def test_unmatched_owner_side_buy_sell(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_unmatched_jv_stop_of_pre_start_entry_is_before_start(tmp_path: Path) -> None:
+    """VPS DOGE case: the entry filled before since_ms, its sl0 stop filled after."""
+    conn = open_db(tmp_path / "pre.db")
+    t0 = SPEC_START_MS + 60_000
+    orders = [
+        {
+            "orderId": 301,
+            "clientOrderId": "jv-abc123-sl0",
+            "symbol": "DOGEUSDT",
+            "side": "BUY",
+            "type": "MARKET",
+            "origType": "MARKET",
+            "stopPrice": "",
+            "time": t0,
+            "status": "FILLED",
+            "reduceOnly": True,
+        }
+    ]
+    trades = [
+        {
+            "id": 7,
+            "orderId": 301,
+            "symbol": "DOGEUSDT",
+            "side": "BUY",
+            "price": "0.0772",
+            "qty": "259",
+            "time": t0,
+            "commission": "0.01",
+            "commissionAsset": "USDT",
+            "realizedPnl": "-0.49",
+        }
+    ]
+    fake = FakeFutures(trades=trades, orders=orders)
+    sync_real_trades(conn, fake, since_ms=SPEC_START_MS, until_ms=t0 + 1000)  # type: ignore[arg-type]
+    row = conn.execute(
+        "SELECT status, side, ref_source FROM assist_real_trade WHERE entry_order_id='301'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "unmatched" and row[1] == "buy" and row[2] == "jv_before_start"
+    summary = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS)
+    assert summary["unmatched_jv_before_start"] == 1
+    assert summary["unmatched_jv_no_log"] == 0
+    conn.close()
+
+
 def test_api_error_leaves_existing_rows(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "api.db")
     _seed_jv_entry(
