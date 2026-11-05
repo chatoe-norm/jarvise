@@ -71,7 +71,7 @@
 
    After deploy, every run prints the `assist scan:` line, so the next miss answers itself.
 3. **J — read-only futures wallet card** on the Exchange page. Not started; changes `exchange_payload()` and adds a futures read call. Hold until item 2 is answered.
-4. **AGENTS.md after merge.** Once this branch is on `main`, add a Learned Workspace Facts bullet for the dashboard-audit PR (its number): FLAT without a position is not queued (`flat_no_position`, `timeout_noop`), and the jobs log line `assist scan: candidates=N skipped=[SYMBOL:reason,...]`. Do not add it before the merge.
+4. ~~AGENTS.md after merge.~~ Done: shipped as [PR #284](https://github.com/chatoe-norm/jarvise/pull/284) (merge `040ade8`, Deploy 2026-11-05T03:04:37Z, `live_trading` false, `assist_execute` off); the Learned Workspace Facts bullet was added in the follow-up docs PR.
 
 ## 4. Checks run on the branch (Windows, local)
 
