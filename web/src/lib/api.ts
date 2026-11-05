@@ -8,6 +8,9 @@ export type EvGateStatus = {
   latched?: boolean;
   latched_at_ms?: number | null;
   latch_reason?: string | null;
+  /** Sample stored when the latch fired; n/ev below are today's live values. */
+  latched_n?: number | null;
+  latched_ev?: number | null;
   min_ev?: number | null;
   min_n?: number;
   n?: number;
@@ -397,6 +400,8 @@ export type ExchangePayload = {
   priced_count?: number;
   unpriced_count?: number;
   error?: string;
+  /** JARVISE_ASSIST_EXECUTE: the futures path that can move real money. */
+  assist_execute?: "off" | "testnet" | "live" | "unknown";
 };
 
 export type NewsHome = {
@@ -593,8 +598,7 @@ export const api = {
       notebook?: unknown;
       index?: unknown;
       profile?: string;
-      notebook_id?: string;
-      url?: string;
+      notebook_alias?: string;
       at?: string;
     }>("/api/rag/sync", {
       method: "POST",

@@ -599,6 +599,18 @@ def load_analysis_explain(analysis_id: str) -> dict[str, Any] | None:
 
 
 def exchange_payload() -> dict[str, Any]:
+    # The spot balances below are not the live path; assist futures is gated by its own flag.
+    try:
+        from jarvise_assist.execute import assist_execute_mode
+
+        assist_mode = assist_execute_mode()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("assist mode read soft-fail: %s", type(exc).__name__)
+        assist_mode = "unknown"
+    return {**_spot_exchange_payload(), "assist_execute": assist_mode}
+
+
+def _spot_exchange_payload() -> dict[str, Any]:
     try:
         auth = resolve_binance_auth()
     except Exception as exc:  # noqa: BLE001
@@ -1192,8 +1204,8 @@ async def api_rag_sync(
         except Exception as local_exc:
             data = {"ok": False, "error": f"jobs failed ({exc}); local fallback failed ({local_exc})"}
 
-    data["notebook_id"] = "14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
-    data["url"] = "https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
+    # Alias only: the notebook id and Google account stay out of API responses.
+    data["notebook_alias"] = "jarvise"
     data["profile"] = "chatoe"
 
     if wants_json(request):

@@ -147,7 +147,7 @@ def test_paper_run_enqueues_without_fill(tmp_path, monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     db = tmp_path / "cli.db"
     _seed(db)
-    _seed_analysis(db)
+    _seed_long_analysis(db)
     code = main(
         [
             "run",
@@ -166,6 +166,26 @@ def test_paper_run_enqueues_without_fill(tmp_path, monkeypatch):
     try:
         assert list_approvals(conn, status="pending")
         assert list_paper_orders(conn) == []
+    finally:
+        conn.close()
+
+
+def test_paper_run_flat_without_position_is_not_an_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    db = tmp_path / "cli.db"
+    _seed(db)
+    _seed_analysis(db)  # seeded candle analyzes to FLAT
+    code = main(
+        ["run", "--symbol", "BTCUSDT", "--timeframe", "4h", "--db", str(db), "--json", "--skip-analyze"]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["errors"] == []
+    assert payload["results"][0]["queued"]["reason"] == "flat_no_position"
+    conn = open_db(db)
+    try:
+        assert list_approvals(conn, status="pending") == []
     finally:
         conn.close()
 

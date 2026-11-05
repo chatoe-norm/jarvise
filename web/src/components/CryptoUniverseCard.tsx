@@ -7,7 +7,7 @@ import { InfoTip } from "@/components/InfoTip";
 import { api, type CryptoSuitability, type UniversePayload } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { describeIssues } from "@/lib/syncIssues";
-import { cn } from "@/lib/utils";
+import { cn, formatAgeMin } from "@/lib/utils";
 
 export const POPULAR_CRYPTO_OPTIONS = [
   { symbol: "BTCUSDT", name: "Bitcoin (BTC)" },
@@ -60,7 +60,7 @@ export function CryptoUniverseCard() {
   // Sorting & Filtering State
   const [sortBy, setSortBy] = useState<string>("suitability_desc");
   const [searchQuery, setSearchQuery] = useState("");
-  const [filterTab, setFilterTab] = useState<"all" | "active" | "actionable" | "high_score">("all");
+  const [filterTab, setFilterTab] = useState<"all" | "active" | "actionable" | "high_score">("active");
 
   async function loadUniverse() {
     setLoading(true);
@@ -368,15 +368,15 @@ export function CryptoUniverseCard() {
                 </Badge>
               </div>
               <div className="text-xs text-[var(--color-muted)] flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span>บัญชี Google: <strong className="text-slate-300 font-mono">chatoe@gmail.com</strong></span>
+                <span>บัญชี Google: <strong className="text-slate-300 font-mono">c***e@gmail.com</strong></span>
                 <span>•</span>
-                <span>Notebook ID: <strong className="text-slate-300 font-mono">14e11c63-e2ee-4b49-898f-b0cc4c61cb4e</strong></span>
+                <span>Notebook: <strong className="text-slate-300 font-mono">jarvise</strong></span>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <a
-                href="https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
+                href="https://notebooklm.google.com/"
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-[var(--color-border)] bg-[#161d27] hover:bg-[#1f2937] text-xs font-mono text-sky-400 hover:text-sky-300 transition-colors"
@@ -788,7 +788,11 @@ function CryptoAssetCard({
       <div className="flex items-center justify-between pt-2 border-t border-[var(--color-border)]/50 text-xs gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-[11px] text-[var(--color-muted)] font-mono truncate">
-            {item.health.newest_age_min != null ? `อัปเดต ${item.health.newest_age_min.toFixed(0)} น.ที่แล้ว` : "—"}
+            {!item.is_active
+              ? "ไม่ได้ sync (ปิดใช้งาน)"
+              : item.health.newest_age_min != null
+                ? `อัปเดต ${formatAgeMin(item.health.newest_age_min)}ที่แล้ว`
+                : "—"}
           </span>
           {onSync && item.is_active ? (
             <button

@@ -6,6 +6,7 @@ nothing here places orders. JSON keys stay English for the SPA.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -88,6 +89,15 @@ _REGIME_LINE = {
     "chaotic": "แท่งสัญญาณอ่านแนวโน้มไม่ได้",
 }
 
+_HTF_WORD = {"trend_up": "ขาขึ้น", "trend_down": "ขาลง", "range": "ออกข้าง", "chaotic": "อ่านไม่ได้"}
+_HTF_RE = re.compile(r"\bHTF[ =](trend_up|trend_down|range|chaotic)\b")
+
+
+def _htf_regime(thesis: Any) -> str | None:
+    """HTF regime is not a column; the analyzer writes it into the thesis."""
+    match = _HTF_RE.search(str(thesis or ""))
+    return match.group(1) if match else None
+
 
 def _what_happened(
     candle: Mapping[str, Any] | None,
@@ -102,10 +112,13 @@ def _what_happened(
     if regime_line is not None:
         signal_close = _f((signal_candle or {}).get("close"))
         if signal_close is not None:
-            lines.append(f"{regime_line} (ปิด {signal_close:g})")
-        else:
-            lines.append(regime_line)
-    c = candle or {}
+            regime_line = f"{regime_line} (ปิด {signal_close:g})"
+        htf = _htf_regime((analysis or {}).get("thesis"))
+        if htf is not None:
+            regime_line += f" · กรอบใหญ่ (HTF) {_HTF_WORD.get(htf, htf)}"
+        lines.append(regime_line)
+    # Indicators come from the same bar as the signal; the newest bar can be a later one.
+    c = signal_candle or candle or {}
     close, ema20, ema200 = _f(c.get("close")), _f(c.get("ema_20")), _f(c.get("ema_200"))
     if close is None or ema20 is None or ema200 is None:
         lines.append("ตัวชี้วัดระยะยาว (EMA200) ยังไม่พร้อม — ระบบจะไม่เสนอเทรดจนกว่าข้อมูลครบ")
@@ -129,7 +142,8 @@ def _what_happened(
 
     vol = _f(c.get("volume"))
     if vol is not None and vol > 0:
-        lines.append(f"ปริมาณการซื้อขายแท่งล่าสุด: {vol:,.2f}")
+        bar = "แท่งสัญญาณ" if signal_candle else "แท่งล่าสุด"
+        lines.append(f"ปริมาณการซื้อขาย{bar}: {vol:,.2f}")
 
     reasons = list((safety or {}).get("reasons") or [])
     if reasons:
@@ -271,7 +285,7 @@ def evidence_line(gate: Mapping[str, Any] | None) -> str | None:
     n = gate.get("n")
     n_txt = "—" if n is None else str(int(n))
     ev_txt = "—" if ev is None else f"{ev:.2f}"
-    return f"หลักฐานย้อนหลัง: EV ของระบบยังติดลบ (n={n_txt}, EV {ev_txt}) — การ Approve เป็นการตัดสินใจของคุณ"
+    return f"หลักฐานย้อนหลัง: EV ของไม้ auto 30 วันยังติดลบ (n={n_txt}, EV {ev_txt}) — การ Approve เป็นการตัดสินใจของคุณ"
 
 
 def build_recommendation(

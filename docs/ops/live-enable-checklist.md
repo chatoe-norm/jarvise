@@ -1,8 +1,10 @@
 # §5.8d — Live enable checklist (owner ops)
 
-**Gate:** Keep `JARVISE_LIVE_TRADING=false` until every step below is done.
+**Two independent real-money paths.** §1–§4 and the kill-switch sections cover **spot live** only (`JARVISE_LIVE_TRADING`). The path that trades today is **assist futures** (`JARVISE_ASSIST_EXECUTE`), covered in [Assist one-tap execute key](#assist-one-tap-execute-key). `JARVISE_LIVE_TRADING=false` does **not** stop assist futures orders.
 
-## 1. Dedicated Binance sub-account + trade API key
+**Gate:** Keep `JARVISE_LIVE_TRADING=false` until every spot step below is done.
+
+## 1. Dedicated Binance sub-account + spot trade API key
 
 Capital isolation first — do **not** trade from the main account.
 
@@ -10,7 +12,7 @@ Capital isolation first — do **not** trade from the main account.
 2. Transfer in **only** what you are willing to lose on live (size-capped).
 3. On that sub-account: API Management → Create API.
 4. Permissions: **Enable Spot & Margin Trading** only.
-5. Disable / do not enable: **Withdrawals**, Internal Transfer, Universal Transfer, Futures (unless required later).
+5. Disable / do not enable: **Withdrawals**, Internal Transfer, Universal Transfer, Futures. Futures belongs on the separate assist key below, never on the spot key.
 6. Prefer IP allowlist to VPS public/Tailscale egress if available.
 7. Store as **separate** secrets from the read-only balance key:
    - `BINANCE_TRADE_API_KEY`
@@ -103,12 +105,23 @@ docker compose exec jobs jarvise exchange check-key --assist-trade --json
 ```
 
 Expect `ok: true`, `enableFutures: true`, `enableWithdrawals: false`, `ipRestrict: true`. Exit 3 = unsafe; exit 2 = missing/refused auth reason.
-5. Testnet: use a demo.binance.com futures key and set `JARVISE_ASSIST_EXECUTE=testnet` (owner only). Live assist execute uses `JARVISE_ASSIST_EXECUTE=live` after the same key audit.
+5. Futures account settings (Binance → Futures → Preferences). Jarvise probes both before every execute and refuses if either is wrong:
+   - **Position mode: One-way** (not Hedge). Probe `GET /fapi/v1/positionSide/dual` → `dualSidePosition: false`; refusal text "บัญชีต้องเป็น one-way mode" (`src/jarvise_assist/execute.py` `MSG_ONE_WAY`).
+   - **Asset mode: Single-Asset** (not Multi-Assets). Probe `GET /fapi/v1/multiAssetsMargin` → `multiAssetsMargin: false` (`MSG_MULTI_ASSETS`).
+6. Margin type and leverage: Jarvise sets **Isolated** (`marginType=ISOLATED`) and the signal's leverage on the symbol before each entry (`set_isolated`, `set_leverage`). Do not switch an assist symbol to Cross by hand while a position is open; the signal message warns when the account disagrees (`src/jarvise_assist/messages.py` `account_leverage_warning_lines`).
+7. Testnet: use a demo.binance.com futures key and set `JARVISE_ASSIST_EXECUTE=testnet` (owner only). Live assist execute uses `JARVISE_ASSIST_EXECUTE=live` after the same key audit.
 
-## Current VPS status (2026-10-01)
+## Current VPS status
 
-- Read-only key present (Ed25519 PEM); trade keys **not** set.
-- `JARVISE_LIVE_TRADING` remains **false**.
+Refreshed 2026-11-05 from the repo only; confirm on the VPS before acting (`docker compose exec jobs jarvise exchange check-key --assist-trade --json`). Do not paste `.env` values.
+
+- `JARVISE_LIVE_TRADING` remains **false** (spot live path off).
+- `BINANCE_TRADE_*` on the VPS is the **assist futures** key, composed into **jobs only** (see §1 note). The spot live path has no key wired into web.
+- Assist futures execute is gated by `JARVISE_ASSIST_EXECUTE` (`off` / `testnet` / `live`). Its current value is shown on the dashboard Exchange page.
+
+History:
+
+- 2026-10-01: read-only key present (Ed25519 PEM); trade keys not yet set.
 - Permission probe CLI shipped: `jarvise exchange check-key`.
 - Live submit refuses keys with withdraw / transfer enabled.
 - 2026-10-05: kill-switch flatten shipped, dormant while the flag is false (`jarvise trade flatten`; spec [`2026-10-05-live-killswitch-flatten-design.md`](../superpowers/specs/2026-10-05-live-killswitch-flatten-design.md)). Live stops and sells are now fee-net and `LOT_SIZE`-floored. Smoke step 8 is still open.

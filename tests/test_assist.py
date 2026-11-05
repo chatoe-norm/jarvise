@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -386,6 +387,20 @@ def test_floor_blocks_flat_and_low_conf(tmp_path: Path) -> None:
     reasons = {s["symbol"]: s["reason"] for s in payload["skipped"]}
     assert reasons.get("ETHUSDT") == "flat"
     assert reasons.get("SOLUSDT") == "low_confidence"
+    conn.close()
+
+
+def test_scan_logs_candidate_and_skip_summary(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    conn = open_db(tmp_path / "log.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    _seed_analysis(conn, symbol="ETHUSDT", action="flat", confidence=0.9, invalidation=None, ts=day - 60_000)
+    fake = FakeFutures(marks={"ETHUSDT": Decimal("2000")})
+    with caplog.at_level(logging.INFO, logger="jarvise_assist.signals"):
+        run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("assist scan:")]
+    assert len(lines) == 1
+    assert "candidates=0" in lines[0]
+    assert "ETHUSDT:flat" in lines[0]
     conn.close()
 
 

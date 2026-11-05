@@ -139,7 +139,7 @@ def load_auto_ev_gate_config() -> tuple[float | None, int]:
 def read_ev_gate_latch(conn: Any) -> dict[str, Any] | None:
     """Return the active latch, or None when the owner has not blocked the gate yet."""
     row = conn.execute(
-        "SELECT latched, latched_at_ms, reason FROM paper_ev_gate_latch WHERE id = 1"
+        "SELECT latched, latched_at_ms, reason, sample_n, sample_ev FROM paper_ev_gate_latch WHERE id = 1"
     ).fetchone()
     if row is None or not int(row[0]):
         return None
@@ -147,6 +147,9 @@ def read_ev_gate_latch(conn: Any) -> dict[str, Any] | None:
         "latched": True,
         "latched_at_ms": int(row[1]) if row[1] is not None else None,
         "reason": row[2],
+        # The sample that caused the latch; the live n/ev keep moving after it.
+        "sample_n": int(row[3]) if row[3] is not None else None,
+        "sample_ev": float(row[4]) if row[4] is not None else None,
     }
 
 
@@ -302,6 +305,8 @@ def auto_ev_gate_status(
         "latched": False,
         "latched_at_ms": None,
         "latch_reason": None,
+        "latched_n": None,
+        "latched_ev": None,
         "min_ev": threshold,
         "min_n": need_n,
         "n": 0,
@@ -329,6 +334,8 @@ def auto_ev_gate_status(
         base["enabled"] = True
         base["latched_at_ms"] = latch["latched_at_ms"]
         base["latch_reason"] = latch["reason"]
+        base["latched_n"] = latch["sample_n"]
+        base["latched_ev"] = latch["sample_ev"]
         base["reason"] = "auto_ev_gate"
     return base
 

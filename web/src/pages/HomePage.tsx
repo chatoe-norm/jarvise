@@ -553,9 +553,10 @@ export function HomePage({
           { label: "Paper equity", value: data.paper.equity, hint: "Simulated ledger" },
           { label: "Cash", value: data.paper.cash },
           {
-            label: "Expected value",
+            label: "EV ต่อไม้ (ทุกแหล่ง, ตลอดอายุ)",
             value: m.expected_value_ev,
-            hint: `${m.closed_trades ?? 0} closed trades`,
+            // Not the EV gate number: that one is auto-only over 30 days.
+            hint: `n=${m.closed_trades ?? 0} ไม้ที่ปิดแล้ว`,
           },
           {
             label: "Open positions",

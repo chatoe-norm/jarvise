@@ -1172,7 +1172,9 @@ def test_api_rag_sync(monkeypatch) -> None:
     data = resp.json()
     assert data["ok"] is True
     assert data["profile"] == "chatoe"
-    assert data["url"] == "https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
+    assert data["notebook_alias"] == "jarvise"
+    assert "notebook_id" not in data and "url" not in data
+    assert "@gmail.com" not in resp.text
 
 
 def test_api_paper_auto_decide_config(monkeypatch) -> None:

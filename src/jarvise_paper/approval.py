@@ -42,6 +42,15 @@ from jarvise_risk import (
 from jarvise_trade import live_trading_enabled, submit_live_for_approval
 
 DEFAULT_TIMEOUT_MIN = 60
+FLAT_NO_POSITION = "flat_no_position"
+
+
+def _has_pending(conn: Any, symbol: str, timeframe: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM approval_queue WHERE symbol = ? AND timeframe = ? AND status = 'pending' LIMIT 1",
+        (symbol, timeframe),
+    ).fetchone()
+    return row is not None
 
 
 def approval_timeout_ms() -> int:
@@ -211,6 +220,22 @@ def enqueue_approval(
             "ok": False,
             "skipped": True,
             "error": port,
+            "kill_switch_engaged": False,
+            "paper_only": True,
+            "symbol": symbol,
+            "timeframe": timeframe,
+        }
+    if (
+        action == "flat"
+        and get_paper_position(conn, symbol) is None
+        and not _has_pending(conn, symbol, timeframe)
+    ):
+        # Nothing to close: an approvable size-0 card would only add a fake "hold" outcome.
+        # A pending card for this pair still gets overwritten below, as before.
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": FLAT_NO_POSITION,
             "kill_switch_engaged": False,
             "paper_only": True,
             "symbol": symbol,
@@ -543,7 +568,8 @@ def expire_approvals(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
         timeframe = str(row["timeframe"])
         action = str(row.get("action") or "flat").lower()
         pos = get_paper_position(conn, symbol)
-        resolve_reason = "timeout_flat"
+        # No position → nothing was flattened; keep that distinct from a real timeout FLAT.
+        resolve_reason = "timeout_flat" if pos is not None else "timeout_noop"
         if pos is not None:
             pos_side = str(pos.get("side") or "").lower()
             # Same-side pending would be a no-op hold on approve; do not FLAT the book away.

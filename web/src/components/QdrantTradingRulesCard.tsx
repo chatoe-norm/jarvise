@@ -389,9 +389,9 @@ export function QdrantTradingRulesCard({
           <ul className="list-disc list-inside space-y-1 pl-1 text-[11px]">
             <li>
               <span className="text-[var(--color-foreground)] font-mono">Gemini NotebookLM</span>:
-              สมุดบันทึกหลัก <code className="bg-[#161d27] px-1 py-0.5 rounded">14e11c63-e2ee-4b49-898f-b0cc4c61cb4e</code> (chatoe@gmail.com)
+              สมุดบันทึกหลัก <code className="bg-[#161d27] px-1 py-0.5 rounded">jarvise</code>
               <a
-                href="https://notebook.google.com/notebook/14e11c63-e2ee-4b49-898f-b0cc4c61cb4e"
+                href="https://notebooklm.google.com/"
                 target="_blank"
                 rel="noreferrer"
                 className="ml-1 text-emerald-400 hover:underline inline-flex items-center gap-0.5"

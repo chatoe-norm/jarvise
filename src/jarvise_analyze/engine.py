@@ -81,14 +81,18 @@ def analyze_snapshot(
         confidence = _trend_confidence(rsi, side="long")
         if close < ema20:
             confidence = max(0.05, confidence - 0.1)
-        thesis = f"Trend up: EMA20>{ema200:.4g}; RSI={rsi if rsi is not None else 'n/a'}."
+        thesis = (
+            f"Trend up: EMA20 {ema20:.4g} > EMA200 {ema200:.4g}; RSI={rsi if rsi is not None else 'n/a'}."
+        )
     elif bearish_stack:
         regime = "trend_down"
         lean = "short"
         confidence = _trend_confidence(rsi, side="short")
         if close > ema20:
             confidence = max(0.05, confidence - 0.1)
-        thesis = f"Trend down: EMA20<{ema200:.4g}; RSI={rsi if rsi is not None else 'n/a'}."
+        thesis = (
+            f"Trend down: EMA20 {ema20:.4g} < EMA200 {ema200:.4g}; RSI={rsi if rsi is not None else 'n/a'}."
+        )
     else:
         regime = "range"
         lean = "flat"

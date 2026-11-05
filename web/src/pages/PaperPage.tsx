@@ -267,7 +267,11 @@ export function PaperPage({ onPositionsChanged }: { onPositionsChanged?: () => v
         items={[
           { label: "Equity", value: paper?.equity },
           { label: "Cash", value: paper?.cash },
-          { label: "EV", value: metrics?.expected_value_ev },
+          {
+            label: "EV ต่อไม้ (ทุกแหล่ง, ตลอดอายุ)",
+            value: metrics?.expected_value_ev,
+            hint: `n=${metrics?.closed_trades ?? 0}`,
+          },
           {
             label: "Win rate",
             value: metrics?.win_rate != null ? Number(metrics.win_rate) * 100 : null,

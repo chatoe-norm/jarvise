@@ -30,6 +30,23 @@ describe("evGateOwnerCopy", () => {
     assert.match(copy.detail, /ล็อกตั้งแต่ /);
     assert.match(copy.detail, /EV ของไม้ auto/);
     assert.match(copy.detail, /N=3/);
+    assert.doesNotMatch(copy.detail, /ตอนล็อก/);
+  });
+
+  it("shows the latch-time sample apart from the live one", () => {
+    const copy = evGateOwnerCopy({
+      enabled: true,
+      blocked: true,
+      latched: true,
+      latched_at_ms: Date.parse("2026-10-17T12:00:00Z"),
+      latch_reason: "auto_ev_gate",
+      latched_n: 8,
+      latched_ev: -1.234,
+      n: 10,
+      ev: -0.64795314,
+    });
+    assert.match(copy.detail, /ตอนนี้ N=10, EV -0\.65/);
+    assert.match(copy.detail, /ค่า ณ ตอนล็อก N=8, EV -1\.23/);
   });
 });
 

@@ -409,6 +409,13 @@ def scan_signal_candidates(
             )
         )
 
+    # One line per scan so a dropped floor-passing pair can be traced from container logs.
+    logger.info(
+        "assist scan: candidates=%d skipped=[%s]",
+        len(candidates),
+        ",".join(f"{s['symbol']}:{s['reason']}" for s in skipped),
+    )
+
     existing = build_existing_ideas(
         conn,
         positions=positions,
