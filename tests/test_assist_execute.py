@@ -17,6 +17,7 @@ from jarvise_assist.execute import (
     MSG_ALREADY_CLOSED,
     MSG_BINANCE_NOT_SENT,
     MSG_BINANCE_RETRY,
+    MSG_EXIT_POSITION_CHANGED,
     MSG_EXPIRED,
     MSG_KILL,
     MSG_MOVE_STOP_BUFFER,
@@ -53,7 +54,7 @@ from jarvise_assist.store import (
     now_ms,
     upsert_watch_position,
 )
-from jarvise_assist.watch import run_assist_watch
+from jarvise_assist.watch import flush_held_watch_advice, run_assist_watch
 from jarvise_exchange.binance_spot import BinanceAuth
 from jarvise_ingest.db import SCHEMA_VERSION, open_db, upsert_market_technicals
 
@@ -1220,7 +1221,7 @@ def test_exit_and_already_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         kind="exit",
         symbol="DOGEUSDT",
         side="short",
-        preview={"qty": "100"},
+        preview={"qty": "100", "entry": "0.08"},
         created_at_ms=ts,
         expires_at_ms=ts + 120_000,
     )
@@ -1239,7 +1240,7 @@ def test_exit_and_already_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         kind="exit",
         symbol="DOGEUSDT",
         side="short",
-        preview={"qty": "100"},
+        preview={"qty": "100", "entry": "0.08"},
         created_at_ms=ts,
         expires_at_ms=ts + 120_000,
     )
@@ -2412,7 +2413,7 @@ def test_exit_zero_avg_price_uses_query_or_omits(tmp_path: Path, monkeypatch: py
         kind="exit",
         symbol="DOGEUSDT",
         side="short",
-        preview={"qty": "100"},
+        preview={"qty": "100", "entry": "0.08"},
         created_at_ms=ts,
         expires_at_ms=ts + 120_000,
     )
@@ -2452,7 +2453,7 @@ def test_exit_zero_avg_price_uses_query_or_omits(tmp_path: Path, monkeypatch: py
         kind="exit",
         symbol="DOGEUSDT",
         side="short",
-        preview={"qty": "100"},
+        preview={"qty": "100", "entry": "0.08"},
         created_at_ms=ts,
         expires_at_ms=ts + 120_000,
     )
@@ -3731,4 +3732,158 @@ def test_msg_stop_closed_edits_and_sends(tmp_path: Path, monkeypatch: pytest.Mon
     assert len(sent) == 1
     assert sent[0].startswith(MSG_STOP_CLOSED)
     assert edited == sent
+    conn.close()
+
+
+def _held_exit_flush_fixtures(conn: Any, *, now: int) -> FuturesPosition:
+    """Watch row differs from live qty/entry; mark still hits target_2r for the stored stop."""
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "DOGEUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.09,
+            "qty": 50.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.083,
+            "initial_stop_source": "signal",
+            "entry_time_ms": int(now) - 3_600_000,
+            "no_stop_latched": 0,
+            "last_seen_ms": int(now),
+            "closed_at_ms": None,
+        },
+    )
+    insert_watch_advice(
+        conn,
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        kind="exit",
+        reason="target_2r",
+        level=None,
+        approx_r=2.0,
+        status="held",
+        created_at_ms=now - 60_000,
+    )
+    # Live short: risk vs initial_stop 0.083 is 0.003 → target_2r at mark <= 0.074.
+    return FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.08"),
+        mark_price=Decimal("0.074"),
+        update_time_ms=now - 3_600_000,
+    )
+
+
+def test_flush_held_exit_live_adds_xx_button(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "flush_live.db")
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    pos = _held_exit_flush_fixtures(conn, now=now)
+    fake = FakeFutures(positions=[pos])
+    captured: list[dict[str, Any]] = []
+
+    def send(text: str, **kwargs: Any) -> bool:
+        captured.append({"text": text, "kwargs": kwargs})
+        return True
+
+    out = flush_held_watch_advice(conn, futures=fake, now_ms_value=now, send=send)
+    assert len(out["sent"]) == 1
+    assert len(captured) == 1
+    markup = captured[0]["kwargs"].get("reply_markup")
+    assert markup is not None
+    buttons = markup["inline_keyboard"][0]
+    assert any(str(b.get("callback_data") or "").startswith("xx:") for b in buttons)
+    rows = conn.execute("SELECT preview_json FROM assist_exec_intent WHERE kind='exit'").fetchall()
+    assert len(rows) == 1
+    preview = json.loads(str(rows[0][0]))
+    assert preview == {"qty": "100", "entry": "0.08"}
+    conn.close()
+
+
+def test_flush_held_exit_off_sends_text_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "off")
+    conn = open_db(tmp_path / "flush_off.db")
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    pos = _held_exit_flush_fixtures(conn, now=now)
+    fake = FakeFutures(positions=[pos])
+    captured: list[dict[str, Any]] = []
+
+    def send(text: str, **kwargs: Any) -> bool:
+        captured.append({"text": text, "kwargs": kwargs})
+        return True
+
+    out = flush_held_watch_advice(conn, futures=fake, now_ms_value=now, send=send)
+    assert len(out["sent"]) == 1
+    assert captured[0]["kwargs"].get("reply_markup") is None
+    n = conn.execute("SELECT COUNT(*) FROM assist_exec_intent WHERE kind='exit'").fetchone()[0]
+    assert n == 0
+    conn.close()
+
+
+def test_exit_refuses_changed_position(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "exit_changed.db")
+    ts = now_ms()
+    live = {
+        "symbol": "DOGEUSDT",
+        "positionSide": "BOTH",
+        "positionAmt": "-100",
+        "entryPrice": "0.08",
+        "markPrice": "0.07",
+    }
+
+    def _run(preview: dict[str, str]) -> tuple[str, RecordingTransport]:
+        intent_id = insert_exec_intent(
+            conn,
+            kind="exit",
+            symbol="DOGEUSDT",
+            side="short",
+            preview=preview,
+            created_at_ms=ts,
+            expires_at_ms=ts + 120_000,
+        )
+        claim_exec_intent(conn, intent_id)
+        handlers: dict[tuple[str, str], Any] = {
+            ("GET", "/fapi/v3/positionRisk"): (200, [live]),
+            ("POST", "/fapi/v1/order"): (200, {"orderId": 9, "avgPrice": "0.07", "executedQty": "100"}),
+        }
+        transport = RecordingTransport(handlers)
+        trade = _client(transport)
+        return run_exit_sequence(conn, intent_id, trade=trade), transport
+
+    for preview in (
+        {"qty": "50", "entry": "0.08"},
+        {"qty": "100", "entry": "0.09"},
+        {"qty": "100"},
+        {"qty": "abc", "entry": "0.08"},
+    ):
+        result, transport = _run(preview)
+        assert result == MSG_EXIT_POSITION_CHANGED
+        assert not any(c[0] == "POST" for c in transport.calls)
+
+    # Matching qty and entry still closes.
+    intent_ok = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    claim_exec_intent(conn, intent_ok)
+    handlers_ok: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/positionRisk"): (200, [live]),
+        ("POST", "/fapi/v1/order"): (200, {"orderId": 9, "avgPrice": "0.07", "executedQty": "100"}),
+        ("GET", "/fapi/v1/userTrades"): (200, [{"realizedPnl": "1.0"}]),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+    }
+    transport_ok = RecordingTransport(handlers_ok)
+    result = run_exit_sequence(conn, intent_ok, trade=_client(transport_ok))
+    assert result.startswith("✅")
+    assert any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in transport_ok.calls)
     conn.close()
