@@ -86,6 +86,7 @@ MSG_EXPIRED = "หมดเวลา — กดเหรียญใหม่"
 MSG_MOVE_STOP_EXPIRED = "หมดเวลา — รอคำแนะนำรอบถัดไป หรือดู 📋 ไม้ที่ถืออยู่"
 MSG_MARK_PASSED = "ราคาผ่านจุดนี้แล้ว"
 MSG_ALREADY_CLOSED = "ไม้นี้ปิดไปแล้ว"
+MSG_EXIT_POSITION_CHANGED = "ไม้เปลี่ยนไปจากตอนที่แนะนำ — ไม่ปิด ดู 📋 ไม้ที่ถืออยู่"
 MSG_KILL = "kill switch เปิดอยู่ — ไม่ส่งคำสั่ง"
 MSG_KEY_REFUSED = "คีย์เทรดไม่ปลอดภัย — ไม่ส่งคำสั่ง"
 MSG_NO_TRADE_KEY = "ยังไม่มีคีย์เทรด — ไม่ส่งคำสั่ง"
@@ -1989,6 +1990,17 @@ def run_exit_sequence(
     pos = positions[0]
     if pos.side != side:
         return _reason_th("wrong_side")
+    # Same position only: qty and entry must match the advice preview. Never raise here —
+    # the callback already claimed the intent; an exception would leave a "check now" reply.
+    raw_preview = intent.get("preview")
+    preview: dict[str, Any] = raw_preview if isinstance(raw_preview, dict) else {}
+    try:
+        preview_qty = Decimal(str(preview["qty"]))
+        preview_entry = Decimal(str(preview["entry"]))
+    except Exception:  # noqa: BLE001 — missing/None/non-numeric counts as mismatch
+        return MSG_EXIT_POSITION_CHANGED
+    if preview_qty != pos.qty or preview_entry != pos.entry_price:
+        return MSG_EXIT_POSITION_CHANGED
     cid = client_order_id(intent_id, "ex")
     fill: dict[str, Any] | None = None
     try:

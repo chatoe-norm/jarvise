@@ -546,7 +546,7 @@ def _process_universe_position(
                 kind="exit",
                 symbol=pos.symbol,
                 side=pos.side,
-                preview={"qty": str(pos.qty)},
+                preview={"qty": str(pos.qty), "entry": str(pos.entry_price)},
                 created_at_ms=now_ms,
                 expires_at_ms=now_ms + PREVIEW_TTL_MS,
             )
@@ -624,7 +624,21 @@ def flush_held_watch_advice(
                 continue
             r_mult = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
             text = format_exit_advice(symbol=pos.symbol, side=pos.side, reason=reason, approx_r=r_mult)
-            if send(text):
+            exit_markup = None
+            if assist_execute_mode() == "live":
+                # Intent from the current position (not the held row); xx: matches qty+entry.
+                intent_id = insert_exec_intent(
+                    conn,
+                    kind="exit",
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    preview={"qty": str(pos.qty), "entry": str(pos.entry_price)},
+                    created_at_ms=now_ms_value,
+                    expires_at_ms=now_ms_value + PREVIEW_TTL_MS,
+                )
+                exit_markup = exit_confirm_keyboard(intent_id)
+            sent_ok = bool(send(text, reply_markup=exit_markup) if exit_markup is not None else send(text))
+            if sent_ok:
                 mark_watch_advice_sent(conn, str(row["id"]), sent_at_ms=now_ms_value)
                 sent.append(str(row["id"]))
             continue
