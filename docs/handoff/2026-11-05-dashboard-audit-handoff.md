@@ -1,6 +1,6 @@
 # Jarvise handoff — 2026-11-05 dashboard audit
 
-`AGENTS.md`, `CLAUDE.md` and `PROJECT_CONTEXT.md` remain the source of truth for rules. This page records the 2026-11-05 dashboard audit (read-only, against `main` at `35d7553`), what branch `fix/dashboard-audit-2026-11-05` changed, and what is still open.
+`AGENTS.md`, `CLAUDE.md` and `PROJECT_CONTEXT.md` remain the source of truth for rules. This page records the 2026-11-05 dashboard audit (read-only, against `main` at `35d7553`), what branch `fix/dashboard-audit-2026-11-05` changed (shipped as PR #284, docs follow-up PR #285), and what is still open. **Start a new session at §5.**
 
 ## 1. Status by item
 
@@ -78,3 +78,34 @@
 - `ruff check src tests`, `ruff format --check src tests`, `mypy src`: clean.
 - `pytest`: 917 passed, 1 skipped.
 - `web`: `npm run lint` clean, `npm test` 60/60, `npm run build` ok.
+
+## 5. Next session (handoff written 2026-11-05 ~03:45 UTC)
+
+### State
+
+| | |
+| --- | --- |
+| `main` | `d9e73dd` (PR #285 merge) |
+| PR #284 (code) | merged `040ade8`, Deploy finished 2026-11-05T03:04:37Z |
+| PR #285 (AGENTS.md facts + this doc) | merged `d9e73dd`, Deploy finished 2026-11-05T03:36:44Z |
+| `live_trading` | `false` (`/api/status`) |
+| `assist_execute` | `off`, so no futures order can be placed; assist only sends Telegram signals |
+| Checks at ship | ruff/format/mypy clean, pytest 917 passed / 1 skipped, web lint, npm test 60/60, build ok |
+
+### Open, in order
+
+1. **12:25 Bangkok (05:25 UTC) assist follow-up.** Cursor owes the first post-deploy run: the `assist scan:` line(s) verbatim, the `record_blocked_signal failed` count, any `run_assist_signals` traceback, or the Redis payload / `(nil)` when no scan line appears. How to read it:
+   - `candidates=0` and every pair `:flat` → the market was all FLAT. Expected; no `assist_signal` row.
+   - `candidates=0` with a floor-passing pair skipped as `open_position`, `stale_analysis`, `same_idea`, `mark:<Error>`, `size_failed` or `below_min_notional` → that is the drop reason. `below_min_notional` carries `min_notional` and `notional` in the Redis payload.
+   - `candidates>=1` → each admitted candidate must leave an `assist_signal` row (`sent`, or `held` at night 23:30–07:30 Bangkok), or a `blocked` row (`risk_cap` / `margin_cap` / `streak_pause`). A candidate with no row is a bug.
+   - No `assist scan:` line → the run returned before the scan (`assist_disabled`, `no_binance_auth`, key/futures check in `run_assist_signals`). Read the Redis payload.
+2. **ADA short from the 04:25 Bangkok run (2026-11-04 21:25 UTC), item 3.6.** Most likely unrecoverable now: the `assist scan:` line did not exist yet, `jarvise:assist_signal:last` holds only the newest run (`src/jarvise/jobs.py` writes it every run), and the 03:04Z deploy probably recreated the jobs container, which drops older `docker compose logs`. Try the §3 item 2 commands once; if nothing from 21:25Z comes back, close 3.6 as "not recoverable, now self-answering via the scan log" instead of searching further.
+3. **Repo is PUBLIC.** Owner decision: make it private, or keep it public and rewrite history. Exposed data and file list are in §3 item 1. No agent changes visibility or history.
+4. **`tmp_funding_check.py`, `tmp_ledger_ro.py`** are untracked in the Windows checkout only (`D:\Projects\jarvise`). Both open SQLite with `mode=ro` and only SELECT; `tmp_ledger_ro.py` points at the live VPS ledger path, which breaks the work-on-a-copy rule. Owner to delete or move to a scratchpad. They are not on GitHub.
+5. **J, read-only futures wallet card** on the Exchange page. On hold until items 1–2 are settled; it changes `exchange_payload()` and adds a futures read call.
+
+### Working from another machine (macOS)
+
+- `git fetch origin && git switch main && git pull`; this doc is on `main`.
+- Checks: `.venv/bin/ruff check src tests`, `.venv/bin/ruff format --check src tests`, `.venv/bin/python -m mypy src`, `.venv/bin/python -m pytest`; `cd web && npm run lint && npm test && npm run build` only if `web/` changes.
+- Hard rules unchanged: live off, VPS `.env` untouched, floors 0.55/0.70, analyzer formula, 1.5× ATR stop, `flat_exit`, `same_side_hold`, universe; work on a copy of `data/analytics/jarvise-vps-ledger-ro.db`, never the VPS ledger.
