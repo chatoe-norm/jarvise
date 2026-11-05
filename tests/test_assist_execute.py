@@ -478,7 +478,31 @@ def _seed_move_stop_watch(
     )
 
 
-def test_move_stop_place_before_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancel_algo_code_200_is_success_errors_still_raise() -> None:
+    ok_body = {"algoId": 7, "clientAlgoId": "jv-x-tp", "code": "200", "msg": "success"}
+    trade = _client(RecordingTransport({("DELETE", "/fapi/v1/algoOrder"): (200, ok_body)}))
+    assert trade.cancel_algo_by_client_id(symbol="DOGEUSDT", client_algo_id="jv-x-tp") == ok_body
+    assert trade.cancel_algo(symbol="DOGEUSDT", algo_id=7) == ok_body
+    for status, body in (
+        (400, {"code": -2011, "msg": "Unknown order sent."}),
+        (400, {"code": 200, "msg": "?"}),
+    ):
+        bad = _client(RecordingTransport({("DELETE", "/fapi/v1/algoOrder"): (status, body)}))
+        with pytest.raises(TradeClientError):
+            bad.cancel_algo(symbol="DOGEUSDT", algo_id=7)
+
+
+@pytest.mark.parametrize(
+    "delete_body",
+    [
+        {"algoId": 99},
+        # Real Binance success body for Cancel Algo Order (seen live 2026-11-05).
+        {"algoId": 99, "clientAlgoId": "jv-old-sl", "code": "200", "msg": "success"},
+    ],
+)
+def test_move_stop_place_before_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delete_body: dict[str, Any]
+) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "move.db")
     ts = now_ms()
@@ -524,13 +548,15 @@ def test_move_stop_place_before_cancel(tmp_path: Path, monkeypatch: pytest.Monke
         ("GET", "/fapi/v1/openOrders"): (200, []),
         ("GET", "/fapi/v1/openAlgoOrders"): (200, [old]),
         ("POST", "/fapi/v1/algoOrder"): (200, {"algoId": 100}),
-        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 99}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, delete_body),
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_move_stop_sequence(conn, intent_id, trade=trade, now_ms_value=ts)
     assert result.startswith("✅")
     assert "qty ทั้งไม้" in result
+    assert MSG_MOVE_STOP_TWO not in result
+    assert "ยกเลิก 0.083 (jv-)" in result
     seq = [(m, p) for m, p, _ in transport.calls if m in {"POST", "DELETE"}]
     assert seq[0] == ("POST", "/fapi/v1/algoOrder")
     assert seq[1] == ("DELETE", "/fapi/v1/algoOrder")
