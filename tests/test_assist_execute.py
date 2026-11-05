@@ -1827,6 +1827,61 @@ def test_deduped_watch_poll_inserts_no_intent(tmp_path: Path, monkeypatch: pytes
     conn.close()
 
 
+def test_watch_default_send_keeps_exit_button(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The job calls run_assist_watch without send=; the exit button must still reach Telegram."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "default_send.db")
+    day = _ms_bangkok(2026, 11, 2, 12, 0)
+    rows = [
+        {
+            "timestamp": day - (30 - i) * 4 * 3_600_000,
+            "symbol": "DOGEUSDT",
+            "timeframe": "4h",
+            "open": 0.08,
+            "high": 0.081,
+            "low": 0.079,
+            "close": 0.08,
+            "volume": 1.0,
+        }
+        for i in range(30)
+    ]
+    upsert_market_technicals(conn, rows)
+    conn.execute("UPDATE market_technicals SET atr_14=0.002 WHERE symbol='DOGEUSDT' AND timeframe='4h'")
+    conn.commit()
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("100"),
+        entry_price=Decimal("0.08"),
+        mark_price=Decimal("0.086"),
+        update_time_ms=day - 3_600_000,
+    )
+    stop_order = {
+        "symbol": "DOGEUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "0.077",
+        "quantity": "100",
+        "algoId": 9,
+    }
+    fake = FakeFutures(positions=[pos], orders=[], algo_orders=[stop_order])
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    sent: list[tuple[str, Any]] = []
+
+    def fake_send_message(text: str, *, reply_markup: Any = None, **_: Any) -> int:
+        sent.append((text, reply_markup))
+        return 1
+
+    monkeypatch.setattr("jarvise_assist.watch.send_message", fake_send_message)
+    run_assist_watch(conn, futures=fake, now_ms_value=day)
+    exits = [(t, m) for t, m in sent if "ออกตอนนี้" in t]
+    assert exits, sent
+    assert "xx:" in json.dumps(exits[0][1])
+    conn.close()
+
+
 def test_round_level_to_tick_directional() -> None:
     from jarvise_assist.sizing import round_level_to_tick
 

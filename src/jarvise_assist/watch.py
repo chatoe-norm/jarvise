@@ -68,12 +68,18 @@ from jarvise_assist.trail_advice import (
     current_trail_advice,
 )
 from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
-from jarvise_notify.telegram import send_telegram_message
+from jarvise_notify.telegram import send_message
 
 logger = logging.getLogger(__name__)
 
 FOUR_H_MS = 4 * 3_600_000
 SendFn = Callable[..., Any]
+
+
+def _default_send(text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
+    """Telegram send that keeps inline buttons (exit / move-stop)."""
+    return send_message(text, reply_markup=reply_markup) is not None
+
 
 # Re-export for callers/tests that imported from watch.
 __all__ = (
@@ -153,6 +159,10 @@ def _emit_advice(
     try:
         sent_ok = bool(send(text, reply_markup=reply_markup) if reply_markup is not None else send(text))
     except TypeError:
+        if reply_markup is not None:
+            logger.warning(
+                "assist watch: send() rejected reply_markup; %s %s sent without buttons", symbol, kind
+            )
         sent_ok = bool(send(text))
     if sent_ok:
         insert_watch_advice(
@@ -668,7 +678,7 @@ def run_assist_watch(
 ) -> dict[str, Any]:
     """Poll open futures positions and emit no-stop / move / exit advice."""
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
-    send_fn = send or send_telegram_message
+    send_fn = send or _default_send
     settings = ensure_settings(conn)
     if not settings["enabled"]:
         return _strip_secrets({"ok": True, "skipped": "assist_disabled", "paper_only": True, "at_ms": ts})
