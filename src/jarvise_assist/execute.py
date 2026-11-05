@@ -272,6 +272,9 @@ class BinanceTradeClient:
                 code = int(body["code"])
             except Exception:  # noqa: BLE001
                 code = None
+            # Algo endpoints (e.g. DELETE /fapi/v1/algoOrder) answer success as {"code": 200, "msg": "success"}.
+            if code == 200 and status < 400:
+                return body
             if allow_codes and code in allow_codes:
                 return body
             raise TradeClientError(
