@@ -105,13 +105,23 @@ export function ApprovalQueue({
   const actionable = rows.filter((r) => !isNoopFlat(r, openSymbols));
   const noop = rows.filter((r) => isNoopFlat(r, openSymbols));
 
-  function rowActions(r: ApprovalRow, card: RecommendationPayload | undefined, wide: boolean) {
+  function rowActions(
+    r: ApprovalRow,
+    card: RecommendationPayload | undefined,
+    wide: boolean,
+    decide: boolean,
+  ) {
     const btn = wide ? "flex-1" : undefined;
+    const view = (
+      <Button size="sm" variant="ghost" className={btn} onClick={() => void toggle(r)}>
+        {open[r.id] ? "ซ่อนคำแนะนำ" : "ดูคำแนะนำ"}
+      </Button>
+    );
+    // No-op FLAT cards: approving changes no position, so offer reading only.
+    if (!decide) return view;
     return (
       <>
-        <Button size="sm" variant="ghost" className={btn} onClick={() => void toggle(r)}>
-          {open[r.id] ? "ซ่อนคำแนะนำ" : "ดูคำแนะนำ"}
-        </Button>
+        {view}
         <Button
           size="sm"
           className={btn}
@@ -146,7 +156,7 @@ export function ApprovalQueue({
   }
 
   /** Phones: one card per candidate so Approve/Reject never need a sideways scroll. */
-  function renderCards(list: ApprovalRow[]) {
+  function renderCards(list: ApprovalRow[], decide: boolean) {
     return (
       <ul className="space-y-3 md:hidden">
         {list.map((r) => (
@@ -173,7 +183,7 @@ export function ApprovalQueue({
                 <dd>{expiresIn(r.expires_at_ms)}</dd>
               </div>
             </dl>
-            <div className="mt-3 flex gap-2">{rowActions(r, cards[cardKey(r)], true)}</div>
+            <div className="mt-3 flex gap-2">{rowActions(r, cards[cardKey(r)], true, decide)}</div>
             {open[r.id] ? <div className="mt-3">{recommendationBody(r)}</div> : null}
           </li>
         ))}
@@ -181,10 +191,10 @@ export function ApprovalQueue({
     );
   }
 
-  function renderTable(list: ApprovalRow[]) {
+  function renderTable(list: ApprovalRow[], decide = true) {
     return (
       <>
-      {renderCards(list)}
+      {renderCards(list, decide)}
       <div className="hidden md:block overflow-x-auto -mx-1 sm:mx-0">
         <table className="w-full min-w-[620px] text-left text-sm">
           <thead className="text-[var(--color-muted)]">
@@ -213,7 +223,7 @@ export function ApprovalQueue({
                   <td className="py-3 pr-3 tabular-nums">{formatNum(r.size_pct_equity, 2)}</td>
                   <td className="py-3 pr-3 text-[var(--color-muted)]">{expiresIn(r.expires_at_ms)}</td>
                   <td className="py-3">
-                    <div className="flex flex-wrap gap-2">{rowActions(r, card, false)}</div>
+                    <div className="flex flex-wrap gap-2">{rowActions(r, card, false, decide)}</div>
                   </td>
                 </tr>,
                 open[r.id] ? (
@@ -268,7 +278,7 @@ export function ApprovalQueue({
             <p className="mt-1 mb-2 text-xs text-[var(--color-muted)]">
               ไม่มีไม้เปิดอยู่ในเหรียญเหล่านี้ การ์ดจะหมดอายุเองตามเวลา
             </p>
-            {renderTable(noop)}
+            {renderTable(noop, false)}
           </details>
         ) : null}
       </CardContent>

@@ -29,11 +29,15 @@ export function evGateOwnerCopy(gate: EvGateStatus | null | undefined): { title:
       ? new Date(gate.latched_at_ms).toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })
       : null;
   const why = resolveReasonLabel(gate.latch_reason || gate.reason || "auto_ev_gate");
-  const sample = `ตอนนี้ N=${gate.n ?? 0}, EV ${gate.ev ?? "—"}`;
+  const ev = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
+  // Gate cohort: auto-decided trades only, rolling 30 days (feedback.py auto_ev_gate_status).
+  const sample = `EV ของไม้ auto 30 วัน ตอนนี้ N=${gate.n ?? 0}, EV ${ev(gate.ev)}`;
   if (gate.latched) {
+    const atLatch =
+      gate.latched_n != null ? ` · ค่า ณ ตอนล็อก N=${gate.latched_n}, EV ${ev(gate.latched_ev)}` : "";
     return {
       title: "เกต EV ล็อกตามกฎการเทรด",
-      detail: `ล็อกตั้งแต่ ${since ?? "—"} — ${why} (${sample})`,
+      detail: `ล็อกตั้งแต่ ${since ?? "—"} — ${why} (${sample}${atLatch})`,
     };
   }
   if (gate.blocked) {
@@ -69,6 +73,8 @@ const REASON_LABELS: Record<string, string> = {
   skipped: "ข้ามรอบ",
   timeout_flat: "หมดเวลา → FLAT",
   timeout_hold: "หมดเวลา → ถือไม้เดิม",
+  timeout_noop: "หมดเวลา — ไม่มีไม้ให้ปิด",
+  flat_no_position: "FLAT — ไม่มีไม้ให้ปิด (ไม่เข้าคิว)",
   "approval not pending": "การ์ดไม่ได้รออนุมัติแล้ว",
   "approval expired": "การ์ดหมดอายุ",
 };

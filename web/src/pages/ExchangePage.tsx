@@ -104,7 +104,7 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
             <div className="flex items-center gap-2">
               <span className="text-lg">📖</span>
               <CardTitle className="text-base font-bold text-[var(--color-foreground)]">
-                คู่มือการปรับเป็น Live Trading (เทรดจริงบน Binance Spot)
+                คู่มือเปิด Live เฉพาะ Spot (ไม่ครอบคลุม Assist Futures)
               </CardTitle>
               <Badge variant="outline" className="font-mono text-[10px]">
                 docs/ops/live-enable-checklist.md
@@ -293,6 +293,50 @@ WEB_BASIC_AUTH_PASSWORD=your_super_strong_password`;
   );
 }
 
+const ASSIST_MODE_COPY: Record<string, { text: string; danger: boolean }> = {
+  live: { text: "LIVE — กดยืนยันใน Telegram แล้วส่งคำสั่ง Futures จริง", danger: true },
+  testnet: { text: "testnet — ส่งคำสั่งไป Binance testnet เท่านั้น", danger: false },
+  off: { text: "ปิด — ไม่มีการส่งคำสั่ง Futures", danger: false },
+};
+
+/** Spot live flag and assist futures flag are independent; this page shows only Spot balances. */
+function AssistPathNotice({
+  mode,
+  liveOn,
+  statusKnown,
+}: {
+  mode: string | undefined;
+  liveOn: boolean;
+  statusKnown: boolean;
+}) {
+  const assist = mode ? ASSIST_MODE_COPY[mode] : undefined;
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-3 text-sm",
+        assist?.danger ? "border-rose-500/50 bg-rose-500/10" : "border-amber-500/40 bg-amber-500/10",
+      )}
+    >
+      <p className="font-medium">เงินจริงมีสองเส้นทางที่เปิดแยกกัน</p>
+      <ul className="mt-1 space-y-0.5 text-xs">
+        <li>
+          Assist Futures (<code className="font-mono">JARVISE_ASSIST_EXECUTE</code>):{" "}
+          <strong className={assist?.danger ? "text-rose-400" : undefined}>
+            {assist?.text ?? (mode === "unknown" ? "อ่านสถานะไม่ได้" : "—")}
+          </strong>
+        </li>
+        <li>
+          Spot (<code className="font-mono">JARVISE_LIVE_TRADING</code>):{" "}
+          <strong>{statusKnown ? (liveOn ? "ON" : "ปิด (false)") : "—"}</strong>
+        </li>
+      </ul>
+      <p className="mt-1 text-xs text-(--color-muted)">
+        LIVE_TRADING=false ไม่ได้หมายความว่าไม่มีเงินจริงขยับ — หน้านี้แสดงเฉพาะยอด Spot ไม่รวมกระเป๋า Futures
+      </p>
+    </div>
+  );
+}
+
 export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | null } = {}) {
   const [data, setData] = useState<ExchangePayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -337,7 +381,7 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
         <div>
           <h1 className="text-xl font-semibold">Exchange</h1>
           <p className="text-sm text-[var(--color-muted)]">
-            Read-only spot balances. ไม่มีการส่งคำสั่งจากหน้านี้
+            ยอด Spot อ่านอย่างเดียว ไม่มีการส่งคำสั่งจากหน้านี้ · กระเป๋า Futures ที่ Assist ใช้เทรดยังไม่แสดงที่นี่
           </p>
         </div>
         <Button variant="outline" disabled={loading} onClick={() => void load()} className="h-11 sm:h-9 pointer-coarse:min-h-11 pointer-coarse:min-w-11">
@@ -346,6 +390,8 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
       </div>
 
       {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}
+
+      <AssistPathNotice mode={data?.assist_execute} liveOn={liveOn} statusKnown={status != null} />
 
       {!data ? (
         error ? null : <p className="text-sm text-[var(--color-muted)]">Loading…</p>
@@ -356,7 +402,7 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <div className={cn("h-2.5 w-2.5 rounded-full", data.error ? "bg-rose-400" : "bg-amber-400")} />
-                  <CardTitle>Venue Gateway: Binance Spot</CardTitle>
+                  <CardTitle>Venue Gateway: Binance Spot (ไม่ใช่เส้นทาง Assist Futures)</CardTitle>
                 </div>
                 <Badge variant={liveOn ? "danger" : "ok"}>{liveOn ? "LIVE ON" : "Paper Shield Active"}</Badge>
               </div>
@@ -372,7 +418,7 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
 
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="rounded-md border border-[var(--color-border)] p-3">
-                  <div className="text-xs text-[var(--color-muted)]">Live Trading Flag</div>
+                  <div className="text-xs text-[var(--color-muted)]">Spot Live Flag (JARVISE_LIVE_TRADING)</div>
                   <div className={cn("mt-1 font-mono font-medium", liveOn ? "text-rose-400" : "text-emerald-400")}>
                     {status ? (liveOn ? "ON (true)" : "Gated (false)") : "—"}
                   </div>
@@ -390,7 +436,9 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
                   <div className="mt-1 font-mono font-medium text-[var(--color-foreground)]">
                     Spot Only{maxNotional != null ? ` · Max $${formatNum(maxNotional, 0)}` : ""}
                   </div>
-                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">No leverage / futures orders</div>
+                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">
+                    เฉพาะเส้นทาง Spot — Futures ของ Assist คุมด้วย JARVISE_ASSIST_EXECUTE
+                  </div>
                 </div>
               </div>
             </CardContent>
@@ -450,7 +498,7 @@ export function ExchangePage({ dashboard }: { dashboard?: DashboardPayload | nul
         <>
           <Card>
             <CardHeader>
-              <CardTitle>Spot ~USD</CardTitle>
+              <CardTitle>Spot ~USD (ไม่รวมกระเป๋า Futures)</CardTitle>
               <CardDescription>
                 {data.venue} · fetched {relativeAge(data.fetched_at_ms)} · total{" "}
                 {formatNum(data.total_usd)}

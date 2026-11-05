@@ -404,6 +404,112 @@ def test_timeout_opposite_side_applies_flat(tmp_path: Path) -> None:
     conn.close()
 
 
+_FLAT = {
+    "analysis_id": "flat1",
+    "symbol": "BTCUSDT",
+    "action": "flat",
+    "size_pct_equity": 0.0,
+    "regime_state": "range",
+    "confidence_score": 0.2,
+}
+
+
+def test_flat_without_position_is_not_queued(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "fnp.db")
+    ensure_paper_account(conn)
+    _seed_candle(conn, "BTCUSDT", "4h", 100.0)
+    out = enqueue_approval(conn, analysis=dict(_FLAT), timeframe="4h", now_ms=2_000)
+    assert out["ok"] is True
+    assert out["skipped"] is True
+    assert out["reason"] == "flat_no_position"
+    assert list_approvals(conn, status="pending") == []
+    assert out["kill_switch_engaged"] is False
+    conn.close()
+
+
+def test_flat_with_open_position_still_queues_and_timeout_flattens(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "fwp.db")
+    ensure_paper_account(conn)
+    _seed_candle(conn, "BTCUSDT", "4h", 100.0)
+    apply_signal(
+        conn,
+        analysis={
+            "analysis_id": "open1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "invalidation_price": 97.0,
+            "size_pct_equity": 5.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        mid_price=100.0,
+        timeframe="4h",
+        now_ms=1_000,
+    )
+    row = enqueue_approval(conn, analysis=dict(_FLAT), timeframe="4h", now_ms=2_000)
+    assert row["status"] == "pending"
+    assert row["action"] == "flat"
+    conn.execute("UPDATE approval_queue SET expires_at_ms = 1500 WHERE id = ?", (row["id"],))
+    conn.commit()
+    _seed_candle(conn, "BTCUSDT", "4h", 105.0, ts=1_700_000_100_000)
+    out = expire_approvals(conn, now_ms=3_000)
+    assert out["flat_fills"] >= 1
+    assert get_paper_position(conn, "BTCUSDT") is None
+    assert get_approval(conn, row["id"])["resolve_reason"] == "timeout_flat"
+    conn.close()
+
+
+def test_flat_overwrites_existing_pending_even_without_position(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "fop.db")
+    ensure_paper_account(conn)
+    _seed_candle(conn, "BTCUSDT", "4h", 100.0)
+    first = enqueue_approval(
+        conn,
+        analysis={
+            "analysis_id": "long1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "invalidation_price": 97.0,
+            "size_pct_equity": 5.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        timeframe="4h",
+        now_ms=2_000,
+    )
+    second = enqueue_approval(conn, analysis=dict(_FLAT), timeframe="4h", now_ms=3_000)
+    assert second["id"] == first["id"]
+    assert get_approval(conn, first["id"])["action"] == "flat"
+    conn.close()
+
+
+def test_timeout_without_position_is_noop(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "tno.db")
+    ensure_paper_account(conn)
+    _seed_candle(conn, "BTCUSDT", "4h", 100.0)
+    row = enqueue_approval(
+        conn,
+        analysis={
+            "analysis_id": "long1",
+            "symbol": "BTCUSDT",
+            "action": "long",
+            "invalidation_price": 97.0,
+            "size_pct_equity": 5.0,
+            "regime_state": "trend_up",
+            "confidence_score": 0.7,
+        },
+        timeframe="4h",
+        now_ms=2_000,
+    )
+    conn.execute("UPDATE approval_queue SET expires_at_ms = 1500 WHERE id = ?", (row["id"],))
+    conn.commit()
+    out = expire_approvals(conn, now_ms=3_000)
+    assert out["flat_fills"] == 0
+    assert get_approval(conn, row["id"])["resolve_reason"] == "timeout_noop"
+    assert list_paper_orders(conn) == []
+    conn.close()
+
+
 def test_portfolio_blocks_third_symbol_without_kill_switch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("JARVISE_MAX_OPEN_POSITIONS", "2")
     monkeypatch.setenv("JARVISE_MAX_SYMBOL_NOTIONAL_PCT", "50")

@@ -35,6 +35,7 @@ from jarvise_ingest.universe import (
     seed_named_universe,
 )
 from jarvise_paper.approval import (
+    FLAT_NO_POSITION,
     approve_approval,
     enqueue_approval,
     expire_approvals,
@@ -358,7 +359,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                     }
                 else:
                     queued = enqueue_approval(conn, analysis=analysis, timeframe=args.timeframe)
-                    if queued.get("error") or queued.get("skipped"):
+                    if queued.get("reason") == FLAT_NO_POSITION:
+                        if not args.as_json:
+                            print(f"{sym}: flat, no open position — not queued")
+                    elif queued.get("error") or queued.get("skipped"):
                         errors.append(f"{sym}: {queued.get('error') or 'risk cap blocked enqueue'}")
                         if not args.as_json:
                             print(

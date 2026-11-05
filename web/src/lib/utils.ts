@@ -53,6 +53,14 @@ export function formatThesisDisplay(thesis: unknown): string {
     });
 }
 
+/** Data age in minutes → Thai minutes / hours / days (28395 → "19 วัน"). */
+export function formatAgeMin(min: number | null | undefined): string {
+  if (min == null || !Number.isFinite(min) || min < 0) return "—";
+  if (min < 60) return `${Math.round(min)} นาที`;
+  if (min < 2880) return `${Math.floor(min / 60)} ชม.`;
+  return `${Math.floor(min / 1440)} วัน`;
+}
+
 export function relativeAge(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return "—";
   const age = Date.now() - ms;

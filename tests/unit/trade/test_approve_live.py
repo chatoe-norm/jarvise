@@ -14,6 +14,7 @@ from jarvise_ingest.db import (
     list_paper_orders,
     open_db,
     upsert_market_technicals,
+    upsert_pending_approval,
 )
 from jarvise_paper.approval import approve_approval, enqueue_approval
 
@@ -202,17 +203,20 @@ def test_approve_live_flat_skips_http(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("BINANCE_TRADE_API_SECRET", "ts")
     conn = open_db(tmp_path / "p.db")
     ensure_paper_account(conn)
-    row = enqueue_approval(
+    # enqueue_approval no longer queues FLAT without a position; put the card in directly.
+    row = upsert_pending_approval(
         conn,
-        analysis={
-            "analysis_id": "a4",
+        {
+            "id": "flat-a4",
+            "created_at_ms": 1_000,
+            "expires_at_ms": 1_000 + 3_600_000,
             "symbol": "BTCUSDT",
+            "timeframe": "4h",
+            "analysis_id": "a4",
             "action": "flat",
-            "invalidation_price": 97.0,
             "size_pct_equity": 0.0,
+            "invalidation_price": 97.0,
         },
-        timeframe="4h",
-        now_ms=1_000,
     )
     with patch("jarvise_trade.submit.place_spot_market_order") as place:
         result = approve_approval(conn, row["id"], kill_switch=False, now_ms=2_000)
