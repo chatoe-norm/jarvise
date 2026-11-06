@@ -108,19 +108,20 @@ def cap_requote_qty(
     first_loss: Decimal | None,
     balance: Decimal,
 ) -> SizedSignal:
-    """Cap a re-quote so qty never grows past the first sent idea.
+    """Cap a re-quote so loss stays at or under the first sent idea.
 
-    Prefer first_qty when positive; otherwise scale so loss_at_stop stays at
-    or under first_loss. Never raises qty. Entry, stop, and target stay put.
+    When first_loss is positive, qty may grow as the stop distance shrinks and
+    shrinks when the stop widens, keeping loss_at_stop <= first_loss. When
+    first_loss is missing, fall back to the first sent qty. Never raises qty
+    above the freshly sized trade. Entry, stop, and target stay put.
     """
     step = sized.step_size if sized.step_size is not None and sized.step_size > 0 else Decimal("1")
     cap: Decimal | None = None
-    if first_qty is not None and first_qty > 0:
+    r = abs(sized.entry - sized.stop)
+    if first_loss is not None and first_loss > 0 and r > 0:
+        cap = floor_to_step(first_loss / r, step)
+    elif first_qty is not None and first_qty > 0:
         cap = floor_to_step(first_qty, step)
-    elif first_loss is not None and first_loss > 0:
-        r = abs(sized.entry - sized.stop)
-        if r > 0:
-            cap = floor_to_step(first_loss / r, step)
     if cap is None or sized.qty <= cap:
         return sized
     qty = cap
