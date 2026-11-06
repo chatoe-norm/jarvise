@@ -338,7 +338,7 @@ def test_format_signal_message_style_a() -> None:
     assert "margin ≈" in text
     assert "ตั้ง Stop-Market (Reduce-Only, trigger = Mark Price) ทันทีหลังเข้า" in text
     assert "ตั้ง TP เป็น Mark Price เช่นกัน" in text
-    assert "หมดอายุ 20:00" in text
+    assert "ราคานี้ถึง 20:00 · กดหลังจากนั้นบอทคิดราคาใหม่" in text
     assert "api_key" not in text.lower()
 
 

@@ -126,7 +126,7 @@ def format_signal_message(
         expiry_line = f"หมดอายุ {exp_s} · ยืนยันภายใน {confirm_within_min} นาที"
     else:
         exp_s = exp.strftime("%H:%M")
-        expiry_line = f"หมดอายุ {exp_s}"
+        expiry_line = f"ราคานี้ถึง {exp_s} · กดหลังจากนั้นบอทคิดราคาใหม่"
     base = _base_asset(sized.symbol)
     notional_s = fmt_price(sized.notional.quantize(Decimal("0.01")))
     loss_s = fmt_price(sized.loss_at_stop.quantize(Decimal("0.01")))
