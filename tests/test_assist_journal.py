@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +12,7 @@ import pytest
 from tests.test_assist import FakeFutures
 
 from jarvise_assist.journal import (
+    collect_auto_checks,
     format_journal_card,
     format_journal_lines,
     journal_on_close,
@@ -26,6 +30,10 @@ from jarvise_ingest.db import SCHEMA_VERSION, open_db, upsert_analysis_output
 ENTRY = 1_700_000_000_000
 EXIT = ENTRY + 3_600_000
 NOW = EXIT + 60_000
+BANGKOK = timezone(timedelta(hours=7))
+# NOW is 06:14 Asia/Bangkok, inside the night hold. Sends use the first minute after it.
+DAYTIME = int(datetime(2023, 11, 15, 7, 30, tzinfo=BANGKOK).timestamp() * 1000)
+GAP_MS = 30 * 60 * 1000
 
 
 def test_schema_is_migration_22(tmp_path: Path) -> None:
@@ -110,6 +118,7 @@ def _trade(
     planned_stop: float | None = 2.0,
     entry_fill: float = 1.0,
     exit_fill: float | None = 0.5,
+    qty: float = 2.0,
 ) -> None:
     conn.execute(
         """
@@ -129,7 +138,7 @@ def _trade(
             intent_id,
             signal_id,
             entry_time_ms,
-            2.0,
+            qty,
             entry_fill,
             planned_stop,
             loss_at_stop,
@@ -202,15 +211,15 @@ SAMPLE_CARD = """\
 เข้า 1 → ออก 0.5
 1R = 1.00 USDT
 ผล +1.00R
-กำไร +1.00 USDT
+ผลเป็นเงิน +1.00 USDT
 ปิด: stop · คำแนะนำล่าสุด: exit (flat)
 เลื่อน stop:
-· 2 ล็อก -2.00R
+· stop เริ่ม 2 ล็อก -2.00R
 · 0.5 ล็อก +1.00R
 เหตุเข้า: EMA stack short · ความมั่นใจ 0.72
 ตรวจอัตโนมัติ:
 · เปิดไม่เกิน 2 ไม้: ผ่าน
-· สัญญาณผ่านเกณฑ์: ผ่าน
+· เข้าจากสัญญาณบอท: ผ่าน
 · มี stop: ผ่าน
 · เลื่อน stop เฉพาะทางแน่น: ผ่าน
 · ปิดตามแผน: ผ่าน
@@ -231,7 +240,7 @@ def test_card_sent_once_and_retries_until_message_id(tmp_path: Path) -> None:
     def sync(*_a: Any, **_k: Any) -> None:
         return None
 
-    first = journal_on_close(conn, [], futures=None, now_ms_value=NOW, send=send, sync_fn=sync)
+    first = journal_on_close(conn, [], futures=None, now_ms_value=DAYTIME, send=send, sync_fn=sync)
     assert first["inserted"] == ["42"]
     assert first["sent"] == []
     assert sent[0]["text"] == SAMPLE_CARD
@@ -242,13 +251,13 @@ def test_card_sent_once_and_retries_until_message_id(tmp_path: Path) -> None:
     row = conn.execute("SELECT card_message_id FROM assist_journal WHERE entry_order_id='42'").fetchone()
     assert row["card_message_id"] is None
 
-    second = journal_on_close(conn, [], futures=None, now_ms_value=NOW, send=send, sync_fn=sync)
+    second = journal_on_close(conn, [], futures=None, now_ms_value=DAYTIME, send=send, sync_fn=sync)
     assert second["sent"] == ["42"]
     assert second["synced"] is False
     row = conn.execute("SELECT card_message_id FROM assist_journal WHERE entry_order_id='42'").fetchone()
     assert row["card_message_id"] == 9
 
-    journal_on_close(conn, [], futures=None, now_ms_value=NOW, send=send, sync_fn=sync)
+    journal_on_close(conn, [], futures=None, now_ms_value=DAYTIME, send=send, sync_fn=sync)
     assert len(sent) == 2
     conn.close()
 
@@ -282,7 +291,7 @@ def test_sync_or_send_failure_does_not_break_watch(tmp_path: Path, monkeypatch: 
         raise RuntimeError("binance")
 
     monkeypatch.setattr("jarvise_assist.journal.sync_real_trades", bad_sync)
-    failed_sync = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=NOW, send=lambda _t: True)
+    failed_sync = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=DAYTIME, send=lambda _t: True)
     assert failed_sync["ok"] is True
     assert failed_sync["closed"] == [{"symbol": "ADAUSDT", "position_side": "BOTH"}]
     missing = conn.execute("SELECT 1 FROM assist_journal").fetchone()
@@ -298,7 +307,7 @@ def test_sync_or_send_failure_does_not_break_watch(tmp_path: Path, monkeypatch: 
 
     monkeypatch.setattr("jarvise_assist.journal.sync_real_trades", noop_sync)
     monkeypatch.setattr("jarvise_assist.journal.send_message", bad_send)
-    failed_send = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=NOW, send=lambda _t: True)
+    failed_send = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=DAYTIME, send=lambda _t: True)
     assert failed_send["ok"] is True
     row = conn.execute("SELECT card_message_id FROM assist_journal WHERE entry_order_id='42'").fetchone()
     assert row is not None and row["card_message_id"] is None
@@ -443,4 +452,392 @@ def test_callback_grade_tag_and_note(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert cleared["grade"] == "pass"
     assert cleared["mistake_tags"] is None
     assert cleared["note"] == "ออกเร็วไป"
+    conn.close()
+
+
+def _bkk(year: int, month: int, day: int, hour: int, minute: int) -> int:
+    dt = datetime(year, month, day, hour, minute, tzinfo=BANGKOK)
+    return int(dt.timestamp() * 1000)
+
+
+def _noop_sync(*_a: Any, **_k: Any) -> None:
+    return None
+
+
+DOGE_CARD = """\
+📘 บันทึกไม้
+🔻 DOGEUSDT · SHORT
+เข้า 0.1 → ออก 0.09
+1R = 1.00 USDT
+ผล +1.00R
+ผลเป็นเงิน +1.00 USDT
+ปิด: stop
+เลื่อน stop:
+· stop เริ่ม 0.11 ล็อก -1.00R
+เหตุเข้า: one-tap DOGE short · ความมั่นใจ 0.80
+ตรวจอัตโนมัติ:
+· เปิดไม่เกิน 2 ไม้: ผ่าน
+· เข้าจากสัญญาณบอท: ผ่าน
+· มี stop: ผ่าน
+· เลื่อน stop เฉพาะทางแน่น: ผ่าน
+· ปิดตามแผน: ผ่าน
+· ไม่เข้าตอนพักแพ้ติด: ผ่าน"""
+
+
+def test_one_tap_closed_trade_cards_once_and_skips_unmatched_buys(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "doge.db")
+    upsert_analysis_output(
+        conn,
+        {
+            "analysis_id": "an-doge",
+            "timestamp": ENTRY,
+            "symbol": "DOGEUSDT",
+            "timeframe": "4h",
+            "regime_state": "trend_down",
+            "confidence_score": 0.80,
+            "action": "sell",
+            "invalidation_price": 0.11,
+            "size_pct_equity": 1.0,
+            "thesis": "one-tap DOGE short",
+        },
+    )
+    intent_id = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"analysis_id": "an-doge", "stop": "0.11"},
+        created_at_ms=ENTRY,
+        expires_at_ms=ENTRY + 600_000,
+    )
+    _watch(conn, closed_at_ms=EXIT, symbol="DOGEUSDT", side="short")
+    _trade(
+        conn,
+        entry_order_id="doge-1",
+        symbol="DOGEUSDT",
+        side="short",
+        status="closed",
+        signal_id=None,
+        intent_id=intent_id,
+        entry_fill=0.1,
+        exit_fill=0.09,
+        planned_stop=0.11,
+        qty=100,
+        loss_at_stop=1.0,
+        net_r_real=1.0,
+        realized=1.0,
+        exit_kind="stop",
+    )
+    _trade(
+        conn,
+        entry_order_id="buy-old-1",
+        symbol="DOGEUSDT",
+        side="buy",
+        status="unmatched",
+        signal_id=None,
+        entry_fill=0.0769,
+        exit_fill=None,
+        exit_time_ms=None,
+        exit_kind="unknown",
+        loss_at_stop=None,
+        net_r_real=None,
+        realized=None,
+        planned_stop=None,
+    )
+    _trade(
+        conn,
+        entry_order_id="buy-old-2",
+        symbol="DOGEUSDT",
+        side="buy",
+        status="unmatched",
+        signal_id=None,
+        entry_fill=0.081,
+        exit_fill=None,
+        exit_time_ms=None,
+        exit_kind="unknown",
+        loss_at_stop=None,
+        net_r_real=None,
+        realized=None,
+        planned_stop=None,
+    )
+    sent: list[str] = []
+
+    def send(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+        sent.append(text)
+        return 11
+
+    result = journal_on_close(
+        conn,
+        [("DOGEUSDT", "BOTH")],
+        futures=None,
+        now_ms_value=DAYTIME,
+        send=send,
+        sync_fn=_noop_sync,
+    )
+    assert result["inserted"] == ["doge-1"]
+    assert result["sent"] == ["doge-1"]
+    assert sent == [DOGE_CARD]
+    assert "0.0769" not in sent[0]
+    stored = conn.execute(
+        "SELECT auto_checks_json FROM assist_journal WHERE entry_order_id='doge-1'"
+    ).fetchone()
+    checks = json.loads(stored["auto_checks_json"])
+    assert checks["signal_present"] is True
+    ids = {
+        row["entry_order_id"] for row in conn.execute("SELECT entry_order_id FROM assist_journal").fetchall()
+    }
+    assert ids == {"doge-1"}
+    conn.close()
+
+
+def test_closed_buy_is_never_carded_or_counted(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "buy.db")
+    _watch(conn, closed_at_ms=EXIT, symbol="ADAUSDT", side="long")
+    _trade(
+        conn,
+        entry_order_id="buy-closed",
+        side="buy",
+        status="closed",
+        signal_id=None,
+        entry_fill=0.0769,
+        exit_kind="manual",
+    )
+    _trade(
+        conn,
+        entry_order_id="hand",
+        side="long",
+        status="closed",
+        exit_kind="manual",
+        signal_id="sig1",
+    )
+    sent: list[str] = []
+
+    def send(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+        sent.append(text)
+        return 4
+
+    result = journal_on_close(
+        conn,
+        [("ADAUSDT", "BOTH")],
+        futures=None,
+        now_ms_value=DAYTIME,
+        send=send,
+        sync_fn=_noop_sync,
+    )
+    assert result["inserted"] == ["hand"]
+    assert result["sent"] == ["hand"]
+    assert "0.0769" not in sent[0]
+    checks = json.loads(
+        conn.execute("SELECT auto_checks_json FROM assist_journal WHERE entry_order_id='hand'").fetchone()[
+            "auto_checks_json"
+        ]
+    )
+    assert checks["exit_followed_plan"] is False
+    conn.execute(
+        """
+        INSERT INTO assist_journal (
+            entry_order_id, auto_checks_json, grade, mistake_tags, note,
+            card_message_id, created_at_ms, graded_at_ms
+        ) VALUES ('buy-closed', '{}', NULL, NULL, NULL, NULL, ?, NULL)
+        """,
+        (NOW,),
+    )
+    conn.commit()
+    again = journal_on_close(
+        conn,
+        [],
+        futures=None,
+        now_ms_value=DAYTIME + GAP_MS,
+        send=send,
+        sync_fn=_noop_sync,
+    )
+    assert again["sent"] == []
+    assert len(sent) == 1
+    summary = summarize_journal(conn, since_ms=0, until_ms=DAYTIME + GAP_MS)
+    assert summary["n"] == 1
+    assert summary["ungraded"] == 1
+    conn.close()
+
+
+def test_journal_runs_after_orphan_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = open_db(tmp_path / "order.db")
+    _watch(conn, closed_at_ms=None)
+    order: list[str] = []
+
+    def cancel(_trade: Any, _symbol: str) -> tuple[list[str], bool]:
+        order.append("cancel")
+        return (["algo-1"], True)
+
+    def journal(_conn: Any, _closed: list[tuple[str, str]], **_k: Any) -> dict[str, Any]:
+        order.append("journal")
+        return {"ok": True}
+
+    monkeypatch.setattr("jarvise_assist.watch.assist_execute_mode", lambda: "live")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (object(), None))
+    monkeypatch.setattr("jarvise_assist.watch.cancel_jv_orders_for_symbol", cancel)
+    monkeypatch.setattr("jarvise_assist.watch.journal_on_close", journal)
+    result = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=NOW, send=lambda _t: True)
+    assert result["ok"] is True
+    assert order == ["cancel", "journal"]
+    assert result["orphan_cancelled"] == [{"symbol": "ADAUSDT", "algo_id": "algo-1"}]
+    conn.close()
+
+
+def test_close_sync_throttles_then_gives_up(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    conn = open_db(tmp_path / "throttle.db")
+    _watch(conn, closed_at_ms=NOW)
+    calls: list[int] = []
+
+    def sync(*_a: Any, **_k: Any) -> None:
+        calls.append(1)
+
+    def run(at: int) -> None:
+        journal_on_close(
+            conn,
+            [("ADAUSDT", "BOTH")],
+            futures=None,
+            now_ms_value=at,
+            send=lambda *_a, **_k: 1,
+            sync_fn=sync,
+        )
+
+    caplog.set_level(logging.WARNING, logger="jarvise_assist.journal")
+    run(NOW)
+    run(NOW + GAP_MS - 1)
+    assert calls == [1]
+    for step in range(1, 4):
+        run(NOW + step * GAP_MS)
+    assert len(calls) == 4
+    run(NOW + 4 * GAP_MS)
+    run(NOW + 5 * GAP_MS)
+    assert len(calls) == 4
+    gave_up = [rec for rec in caplog.records if "gave up" in rec.message]
+    assert len(gave_up) == 1
+    assert conn.execute("SELECT COUNT(*) FROM assist_journal").fetchone()[0] == 0
+    summary = summarize_journal(conn, since_ms=0, until_ms=NOW + 6 * GAP_MS)
+    assert summary["n"] == 0
+    assert summary["ungraded"] == 0
+    conn.close()
+
+
+def test_no_stop_advice_inside_window_fails_stop_existed(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "stop.db")
+    _trade(conn, entry_order_id="ada", symbol="ADAUSDT", side="long")
+    ada = dict(conn.execute("SELECT * FROM assist_real_trade WHERE entry_order_id='ada'").fetchone())
+    insert_watch_advice(
+        conn,
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        kind="no_stop",
+        reason="missing",
+        level=None,
+        approx_r=None,
+        status="sent",
+        created_at_ms=ENTRY - 1,
+    )
+    assert collect_auto_checks(conn, ada)["stop_existed"] is True
+    insert_watch_advice(
+        conn,
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        kind="no_stop",
+        reason="missing",
+        level=None,
+        approx_r=None,
+        status="sent",
+        created_at_ms=ENTRY,
+    )
+    assert collect_auto_checks(conn, ada)["stop_existed"] is False
+
+    _trade(conn, entry_order_id="eth", symbol="ETHUSDT", side="short")
+    eth = dict(conn.execute("SELECT * FROM assist_real_trade WHERE entry_order_id='eth'").fetchone())
+    insert_watch_advice(
+        conn,
+        symbol="ETHUSDT",
+        position_side="BOTH",
+        kind="no_stop",
+        reason="missing",
+        level=None,
+        approx_r=None,
+        status="held",
+        created_at_ms=EXIT + 1,
+    )
+    assert collect_auto_checks(conn, eth)["stop_existed"] is True
+    insert_watch_advice(
+        conn,
+        symbol="ETHUSDT",
+        position_side="BOTH",
+        kind="no_stop",
+        reason="partial",
+        level=None,
+        approx_r=None,
+        status="sent",
+        created_at_ms=EXIT,
+    )
+    assert collect_auto_checks(conn, eth)["stop_existed"] is False
+    conn.close()
+
+
+def test_night_hold_holds_cards_until_morning(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "night.db")
+    night = _bkk(2026, 11, 6, 23, 30)
+    still_night = _bkk(2026, 11, 7, 7, 29)
+    morning = _bkk(2026, 11, 7, 7, 30)
+    entry = night - 60_000
+    _watch(conn, closed_at_ms=night, entry_time_ms=entry, symbol="ADAUSDT", side="long")
+    _trade(
+        conn,
+        entry_order_id="ada-night",
+        symbol="ADAUSDT",
+        side="long",
+        entry_time_ms=entry,
+        exit_time_ms=night,
+        signal_id="sig1",
+    )
+    _trade(
+        conn,
+        entry_order_id="eth-night",
+        symbol="ETHUSDT",
+        side="short",
+        entry_time_ms=entry,
+        exit_time_ms=night,
+        signal_id="sig2",
+    )
+    sent: list[str] = []
+
+    def send(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+        sent.append(text)
+        return 20 + len(sent)
+
+    held = journal_on_close(
+        conn,
+        [("ADAUSDT", "BOTH")],
+        futures=None,
+        now_ms_value=night,
+        send=send,
+        sync_fn=_noop_sync,
+    )
+    assert set(held["inserted"]) == {"ada-night", "eth-night"}
+    assert held["sent"] == []
+    assert sent == []
+    still = journal_on_close(
+        conn,
+        [],
+        futures=None,
+        now_ms_value=still_night,
+        send=send,
+        sync_fn=_noop_sync,
+    )
+    assert still["sent"] == []
+    assert sent == []
+    morning_run = journal_on_close(
+        conn,
+        [],
+        futures=None,
+        now_ms_value=morning,
+        send=send,
+        sync_fn=_noop_sync,
+    )
+    assert set(morning_run["sent"]) == {"ada-night", "eth-night"}
+    assert len(sent) == 2
     conn.close()

@@ -10,6 +10,7 @@ from typing import Any
 
 from jarvise_assist.messages import fmt_price
 from jarvise_assist.real_trades import sync_real_trades
+from jarvise_assist.signals import is_night_hold
 from jarvise_assist.store import ensure_settings, get_edge, now_ms
 from jarvise_notify.telegram import send_message
 
@@ -35,7 +36,7 @@ TAG_LABELS: dict[str, str] = {
 }
 CHECK_LABELS: tuple[tuple[str, str], ...] = (
     ("open_positions_ok", "เปิดไม่เกิน 2 ไม้"),
-    ("signal_present", "สัญญาณผ่านเกณฑ์"),
+    ("signal_present", "เข้าจากสัญญาณบอท"),
     ("stop_existed", "มี stop"),
     ("moves_tightened", "เลื่อน stop เฉพาะทางแน่น"),
     ("exit_followed_plan", "ปิดตามแผน"),
@@ -54,6 +55,8 @@ ADVICE_EXIT_KINDS = frozenset({"owner_exit", "emergency"})
 NOTE_MAX = 500
 RETRY_MS = 6 * 60 * 60 * 1000
 SYNC_PAD_MS = 60 * 60 * 1000
+SYNC_GAP_MS = 30 * 60 * 1000
+SYNC_MAX_ATTEMPTS = 4
 MATCH_PAD_MS = 60_000
 
 SendFn = Callable[..., Any]
@@ -128,7 +131,7 @@ def format_journal_card(
         f"เข้า {entry} → ออก {exit_px}",
         f"1R = {loss_line}",
         f"ผล {net_line}",
-        f"กำไร {pnl_line}",
+        f"ผลเป็นเงิน {pnl_line}",
         _exit_line(conn, shown),
         _timeline_block(shown),
         _thesis_line(conn, shown),
@@ -165,11 +168,10 @@ def tag_keyboard(entry_order_id: str, selected: set[str]) -> dict[str, Any]:
 def collect_auto_checks(conn: Any, trade: dict[str, Any]) -> dict[str, bool]:
     """Freeze the six checks at insert time."""
     entry_ms = _int_or_none(trade.get("entry_time_ms"))
-    symbol = str(trade.get("symbol") or "")
     side = str(trade.get("side") or "").lower()
     open_n = _open_positions_at(conn, entry_ms)
-    signal_ok = bool(trade.get("signal_id"))
-    stop_ok = _stop_was_present(conn, symbol, side)
+    signal_ok = _signal_present(conn, trade)
+    stop_ok = _stop_existed(conn, trade)
     move_stops = _done_move_stops(conn, trade)
     tightened = _moves_tightened(side, trade.get("planned_stop"), move_stops)
     exit_ok = _exit_followed_plan(conn, trade)
@@ -193,28 +195,32 @@ def journal_on_close(
     send: SendFn | None = None,
     sync_fn: SyncFn | None = None,
 ) -> dict[str, Any]:
-    """Sync the close window, insert missing rows, send each card once.
+    """Sync the close window, insert missing closed rows, send each card once.
 
-    Exceptions stay inside this function. Watch advice and pause already ran.
+    Exceptions stay inside this function. Watch advice, pause, and the live
+    orphan cancel already ran. Night hold skips the send. A close is synced at
+    most once per 30 minutes, four times, then given up.
     """
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     send_fn = send or send_message
     sync = sync_fn or sync_real_trades
-    sent = _send_pending(conn, send_fn)
-    since = _sync_since(conn, closed, ts)
+    sent = _send_pending(conn, send_fn, now_ms=ts)
+    due = _due_sync_closes(conn, closed, ts)
     synced = False
     sync_error: str | None = None
     inserted: list[str] = []
-    if since is not None:
+    if due:
+        since = _since_ms(due)
         try:
             sync(conn, futures, since_ms=since, until_ms=ts)
             synced = True
-        except Exception as exc:  # noqa: BLE001 — next poll retries; watch must continue
+        except Exception as exc:  # noqa: BLE001 — next allowed poll retries; watch must continue
             sync_error = type(exc).__name__
             logger.exception("assist journal sync failed")
         else:
             inserted = _insert_missing(conn, since_ms=since, now_ms=ts)
-            sent.extend(_send_pending(conn, send_fn))
+            sent.extend(_send_pending(conn, send_fn, now_ms=ts))
+        _record_sync_attempts(conn, due, ts)
     return {
         "ok": True,
         "synced": synced,
@@ -318,11 +324,12 @@ def summarize_journal(
                r.entry_time_ms
         FROM assist_journal j
         JOIN assist_real_trade r ON r.entry_order_id = j.entry_order_id
-        WHERE (
+        WHERE r.status = 'closed' AND r.side IN ('long', 'short')
+          AND ((
             r.exit_time_ms IS NOT NULL AND r.exit_time_ms >= ? AND r.exit_time_ms <= ?
         ) OR (
             r.exit_time_ms IS NULL AND r.entry_time_ms >= ? AND r.entry_time_ms <= ?
-        )
+        ))
         """,
         (int(since_ms), int(until_ms), int(since_ms), int(until_ms)),
     ).fetchall()
@@ -400,12 +407,17 @@ def format_journal_lines(summary: dict[str, Any]) -> list[str]:
     ]
 
 
-def _send_pending(conn: Any, send: SendFn) -> list[str]:
+def _send_pending(conn: Any, send: SendFn, *, now_ms: int) -> list[str]:
+    if is_night_hold(now_ms=int(now_ms)):
+        return []
     rows = conn.execute(
         """
-        SELECT entry_order_id FROM assist_journal
-        WHERE card_message_id IS NULL
-        ORDER BY created_at_ms
+        SELECT j.entry_order_id
+        FROM assist_journal j
+        JOIN assist_real_trade r ON r.entry_order_id = j.entry_order_id
+        WHERE j.card_message_id IS NULL
+          AND r.status = 'closed' AND r.side IN ('long', 'short')
+        ORDER BY j.created_at_ms
         """
     ).fetchall()
     sent: list[str] = []
@@ -445,7 +457,7 @@ def _insert_missing(conn: Any, *, since_ms: int, now_ms: int) -> list[str]:
                exit_fill_avg, exit_kind, realized_pnl_usdt, commission_usdt,
                funding_usdt, net_r_real, status
         FROM assist_real_trade
-        WHERE entry_time_ms >= ? AND status IN ('closed', 'unmatched')
+        WHERE entry_time_ms >= ? AND status = 'closed' AND side IN ('long', 'short')
         """,
         (int(since_ms),),
     ).fetchall()
@@ -470,15 +482,18 @@ def _insert_missing(conn: Any, *, since_ms: int, now_ms: int) -> list[str]:
     return inserted
 
 
-def _sync_since(conn: Any, closed: list[tuple[str, str]], now_ms: int) -> int | None:
-    """Earliest entry that still needs a sync, one hour earlier. None when idle."""
-    times: list[int] = []
+def _closes_needing_journal(
+    conn: Any,
+    closed: list[tuple[str, str]],
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    """Watch closes still inside the retry window with no cardable journal row."""
     seen: set[tuple[str, str]] = set()
     for symbol, position_side in closed:
         seen.add((str(symbol).upper(), str(position_side).upper()))
     fresh = conn.execute(
         """
-        SELECT symbol, position_side, entry_time_ms, closed_at_ms
+        SELECT symbol, position_side
         FROM assist_watch_position
         WHERE closed_at_ms IS NOT NULL AND closed_at_ms >= ?
         """,
@@ -486,10 +501,8 @@ def _sync_since(conn: Any, closed: list[tuple[str, str]], now_ms: int) -> int | 
     ).fetchall()
     for raw in fresh:
         row = dict(raw)
-        key = (str(row["symbol"]).upper(), str(row["position_side"]).upper())
-        seen.add(key)
-    if not seen:
-        return None
+        seen.add((str(row["symbol"]).upper(), str(row["position_side"]).upper()))
+    pending: list[dict[str, Any]] = []
     for symbol, position_side in seen:
         watch = conn.execute(
             """
@@ -507,13 +520,96 @@ def _sync_since(conn: Any, closed: list[tuple[str, str]], now_ms: int) -> int | 
             continue
         if _symbol_has_journal(conn, symbol, entry_ms, closed_ms):
             continue
-        if entry_ms is not None:
-            times.append(entry_ms)
-        else:
-            times.append(closed_ms)
-    if not times:
-        return None
+        pending.append(
+            {
+                "symbol": symbol,
+                "position_side": position_side,
+                "closed_at_ms": closed_ms,
+                "entry_ms": entry_ms,
+            }
+        )
+    return pending
+
+
+def _due_sync_closes(
+    conn: Any,
+    closed: list[tuple[str, str]],
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    """Closes allowed to sync now. The fifth look logs once and does not sync."""
+    due: list[dict[str, Any]] = []
+    for item in _closes_needing_journal(conn, closed, now_ms):
+        state = _sync_state(conn, item)
+        if int(state["attempts"]) >= SYNC_MAX_ATTEMPTS:
+            if not state["gave_up_logged"]:
+                logger.warning(
+                    "assist journal sync gave up symbol=%s position_side=%s closed_at_ms=%s",
+                    item["symbol"],
+                    item["position_side"],
+                    item["closed_at_ms"],
+                )
+                _mark_sync_gave_up(conn, item)
+            continue
+        last = state["last_attempt_ms"]
+        if last is not None and int(now_ms) - int(last) < SYNC_GAP_MS:
+            continue
+        due.append(item)
+    return due
+
+
+def _since_ms(closes: list[dict[str, Any]]) -> int:
+    times = [
+        int(item["entry_ms"]) if item["entry_ms"] is not None else int(item["closed_at_ms"])
+        for item in closes
+    ]
     return min(times) - SYNC_PAD_MS
+
+
+def _sync_state(conn: Any, item: dict[str, Any]) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT attempts, last_attempt_ms, gave_up_logged
+        FROM assist_journal_sync
+        WHERE symbol=? AND position_side=? AND closed_at_ms=?
+        """,
+        (item["symbol"], item["position_side"], int(item["closed_at_ms"])),
+    ).fetchone()
+    if row is None:
+        return {"attempts": 0, "last_attempt_ms": None, "gave_up_logged": False}
+    found = dict(row)
+    last = found.get("last_attempt_ms")
+    return {
+        "attempts": int(found.get("attempts") or 0),
+        "last_attempt_ms": None if last is None else int(last),
+        "gave_up_logged": bool(int(found.get("gave_up_logged") or 0)),
+    }
+
+
+def _record_sync_attempts(conn: Any, closes: list[dict[str, Any]], now_ms: int) -> None:
+    for item in closes:
+        conn.execute(
+            """
+            INSERT INTO assist_journal_sync (
+                symbol, position_side, closed_at_ms, attempts, last_attempt_ms, gave_up_logged
+            ) VALUES (?, ?, ?, 1, ?, 0)
+            ON CONFLICT(symbol, position_side, closed_at_ms) DO UPDATE SET
+                attempts = attempts + 1,
+                last_attempt_ms = excluded.last_attempt_ms
+            """,
+            (item["symbol"], item["position_side"], int(item["closed_at_ms"]), int(now_ms)),
+        )
+    conn.commit()
+
+
+def _mark_sync_gave_up(conn: Any, item: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        UPDATE assist_journal_sync SET gave_up_logged=1
+        WHERE symbol=? AND position_side=? AND closed_at_ms=?
+        """,
+        (item["symbol"], item["position_side"], int(item["closed_at_ms"])),
+    )
+    conn.commit()
 
 
 def _symbol_has_journal(
@@ -531,6 +627,7 @@ def _symbol_has_journal(
         SELECT 1 FROM assist_real_trade r
         JOIN assist_journal j ON j.entry_order_id = r.entry_order_id
         WHERE r.symbol=? AND r.entry_time_ms BETWEEN ? AND ?
+          AND r.status = 'closed' AND r.side IN ('long', 'short')
         LIMIT 1
         """,
         (symbol.upper(), lo, hi),
@@ -552,20 +649,32 @@ def _open_positions_at(conn: Any, entry_ms: int | None) -> int:
     return int(row[0] if row is not None else 0)
 
 
-def _stop_was_present(conn: Any, symbol: str, side: str) -> bool:
+def _signal_present(conn: Any, trade: dict[str, Any]) -> bool:
+    """A stored signal, or a one-tap intent whose preview names an analysis."""
+    if trade.get("signal_id"):
+        return True
+    preview = _intent_preview(conn, trade.get("intent_id"))
+    if preview is None:
+        return False
+    return bool(preview.get("analysis_id"))
+
+
+def _stop_existed(conn: Any, trade: dict[str, Any]) -> bool:
+    """Fail only when a no-stop warning was written during the trade."""
+    entry_ms = _int_or_none(trade.get("entry_time_ms"))
+    exit_ms = _int_or_none(trade.get("exit_time_ms"))
+    if entry_ms is None or exit_ms is None:
+        return True
     row = conn.execute(
         """
-        SELECT no_stop_latched FROM assist_watch_position
-        WHERE symbol=? AND side=?
-        ORDER BY COALESCE(closed_at_ms, last_seen_ms) DESC
+        SELECT 1 FROM assist_watch_advice
+        WHERE symbol=? AND kind='no_stop'
+          AND created_at_ms >= ? AND created_at_ms <= ?
         LIMIT 1
         """,
-        (symbol.upper(), side.lower()),
+        (str(trade.get("symbol") or "").upper(), int(entry_ms), int(exit_ms)),
     ).fetchone()
-    if row is None:
-        return False
-    latched = row["no_stop_latched"] if hasattr(row, "keys") else row[0]
-    return int(latched or 0) == 0
+    return row is None
 
 
 def _done_move_stops(conn: Any, trade: dict[str, Any]) -> list[dict[str, Any]]:
@@ -681,9 +790,11 @@ def _timeline_block(trade: dict[str, Any]) -> str:
     if not points:
         return "เลื่อน stop: ไม่มี"
     lines = ["เลื่อน stop:"]
-    for stop, locked in points:
+    planned = trade.get("planned_stop")
+    for index, (stop, locked) in enumerate(points):
         locked_txt = "ไม่ทราบ" if locked is None else f"{_signed(locked)}R"
-        lines.append(f"· {_fmt_px(stop)} ล็อก {locked_txt}")
+        label = "stop เริ่ม " if index == 0 and planned is not None else ""
+        lines.append(f"· {label}{_fmt_px(stop)} ล็อก {locked_txt}")
     return "\n".join(lines)
 
 
@@ -743,20 +854,28 @@ def _thesis_line(conn: Any, trade: dict[str, Any]) -> str:
     return f"เหตุเข้า: {text} · ความมั่นใจ {confidence:.2f}"
 
 
-def _analysis(conn: Any, trade: dict[str, Any]) -> tuple[str | None, float | None]:
-    intent_id = trade.get("intent_id")
+def _intent_preview(conn: Any, intent_id: Any) -> dict[str, Any] | None:
     if not intent_id:
-        return None, None
+        return None
     row = conn.execute(
         "SELECT preview_json FROM assist_exec_intent WHERE id=?",
         (str(intent_id),),
     ).fetchone()
     if row is None:
-        return None, None
+        return None
     raw = row["preview_json"] if hasattr(row, "keys") else row[0]
     try:
         preview = json.loads(str(raw or "{}"))
     except json.JSONDecodeError:
+        return None
+    if not isinstance(preview, dict):
+        return None
+    return preview
+
+
+def _analysis(conn: Any, trade: dict[str, Any]) -> tuple[str | None, float | None]:
+    preview = _intent_preview(conn, trade.get("intent_id"))
+    if not preview:
         return None, None
     analysis_id = preview.get("analysis_id")
     if not analysis_id:

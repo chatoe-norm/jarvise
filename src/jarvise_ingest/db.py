@@ -664,6 +664,19 @@ def _migrate_assist_journal(conn: sqlite3.Connection) -> None:
         ON assist_journal (card_message_id)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_journal_sync (
+            symbol TEXT NOT NULL,
+            position_side TEXT NOT NULL,
+            closed_at_ms INTEGER NOT NULL,
+            attempts INTEGER NOT NULL,
+            last_attempt_ms INTEGER NOT NULL,
+            gave_up_logged INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (symbol, position_side, closed_at_ms)
+        )
+        """
+    )
 
 
 def _migrate_assist_real_trades(conn: sqlite3.Connection) -> None:
