@@ -20,6 +20,7 @@ from typing import Any
 from jarvise_assist.execute import handle_exec_callback
 from jarvise_assist.explore import remove_explore_symbol, submit_explore_symbol
 from jarvise_assist.futures import build_futures_client, public_exchange_symbol
+from jarvise_assist.journal import handle_journal_callback, store_journal_note
 from jarvise_assist.keyboard import EXPLORE_RM_PREFIX, reply_keyboard
 from jarvise_assist.menu import (
     handle_menu_text,
@@ -98,6 +99,16 @@ def process_update(
             result = remove_explore_symbol(conn, data.removeprefix(EXPLORE_RM_PREFIX))
             send_fn(result["text"], reply_markup=result.get("reply_markup"))
             return result
+        if data.startswith(("jp:", "jf:", "jt:", "jd:")):
+            result = handle_journal_callback(
+                conn,
+                data,
+                edit=edit_fn,
+                now_ms_value=ts,
+                message=msg if isinstance(msg, dict) else {},
+            )
+            answer_fn(cq_id, text=result.get("toast"))
+            return result
         if data.startswith(("ec:", "ey:", "en:", "ms:", "xx:")):
 
             def _answer(text: str | None = None) -> None:
@@ -136,6 +147,17 @@ def process_update(
     if str(chat) != expected:
         return {"ignored": "foreign_chat"}
     text = str(message.get("text") or "")
+    reply = message.get("reply_to_message")
+    if isinstance(reply, dict) and reply.get("message_id") is not None:
+        noted = store_journal_note(
+            conn,
+            message_id=int(reply["message_id"]),
+            text=text,
+            now_ms_value=ts,
+        )
+        if noted:
+            send_fn("บันทึกโน้ตแล้ว")
+            return {"ok": True, "journal_note": True}
     risk_num = handle_risk_number(conn, text, send=send_fn)
     if risk_num.get("handled"):
         return risk_num

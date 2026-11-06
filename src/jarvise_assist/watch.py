@@ -26,6 +26,7 @@ from jarvise_assist.futures import (
     protective_stop_coverage,
     protective_stop_covered_qty,
 )
+from jarvise_assist.journal import journal_on_close
 from jarvise_assist.keyboard import exit_confirm_keyboard, move_stop_keyboard
 from jarvise_assist.messages import (
     fmt_price,
@@ -744,6 +745,10 @@ def run_assist_watch(
             actions=actions,
         )
     closed = mark_watch_positions_closed(conn, open_keys=open_keys, now_ms=ts)
+    try:
+        journal_on_close(conn, closed, futures=client, now_ms_value=ts)
+    except Exception:  # noqa: BLE001 — a journal failure must not stop advice or orphan cancel
+        logger.exception("assist journal failed")
     orphan_cancelled: list[dict[str, str]] = []
     if closed and assist_execute_mode() == "live":
         trade, _auth_reason = build_trade_client()

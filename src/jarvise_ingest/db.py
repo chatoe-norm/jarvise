@@ -642,6 +642,30 @@ def _migrate_assist_blocked_track(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_track", "block_reason", "TEXT")
 
 
+def _migrate_assist_journal(conn: sqlite3.Connection) -> None:
+    """Owner grade card per closed assist trade. Never copies fills or places orders."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_journal (
+            entry_order_id TEXT PRIMARY KEY,
+            auto_checks_json TEXT,
+            grade TEXT CHECK (grade IS NULL OR grade IN ('pass', 'fail')),
+            mistake_tags TEXT,
+            note TEXT,
+            card_message_id INTEGER,
+            created_at_ms INTEGER,
+            graded_at_ms INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_journal_card
+        ON assist_journal (card_message_id)
+        """
+    )
+
+
 def _migrate_assist_real_trades(conn: sqlite3.Connection) -> None:
     """Confirm-mark reference on intents + durable real-vs-virtual rows. Never writes paper/live."""
     _add_column_if_missing(conn, "assist_exec_intent", "ref_price", "TEXT")
@@ -997,6 +1021,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (19, "assist_track_measure", _migrate_assist_track_measure, True),
     (20, "assist_real_trades", _migrate_assist_real_trades, True),
     (21, "assist_blocked_track", _migrate_assist_blocked_track, True),
+    (22, "assist_journal", _migrate_assist_journal, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
