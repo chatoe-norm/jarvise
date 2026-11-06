@@ -835,7 +835,7 @@ def run_assist_morning(
         first = first_send_by_symbol.get(sized.symbol)
         if first is not None:
             text = f"{text}\n" + format_prior_idea_line(
-                label="ไอเดียเดิม (พักไว้ช่วงกลางคืน)",
+                label="ไอเดียกลางคืน",
                 entry=Decimal(str(first["entry"])),
                 stop=Decimal(str(first["stop"])),
                 qty=Decimal(str(first["qty"])),

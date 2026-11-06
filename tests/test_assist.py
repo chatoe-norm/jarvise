@@ -44,6 +44,7 @@ from jarvise_assist.sizing import (
 from jarvise_assist.store import (
     ensure_settings,
     get_edge,
+    get_signal,
     get_watch_position,
     insert_signal,
     list_held_signals,
@@ -433,6 +434,8 @@ def test_night_hold_then_morning_send(tmp_path: Path) -> None:
     assert len(held) == 1
     assert held[0]["status"] == "held"
     assert held[0]["expires_at_ms"] == next_assist_run_ms(night)
+    night_entry = held[0]["entry"]
+    night_stop = held[0]["stop"]
 
     morning = _ms_bangkok(2026, 10, 27, 8, 0)
     # Keep analysis fresh for morning.
@@ -451,10 +454,19 @@ def test_night_hold_then_morning_send(tmp_path: Path) -> None:
     assert len(sent) == 1
     assert "DOGEUSDT" in sent[0]
     assert "0.083" in sent[0]  # newest invalidation in message
-    assert "ไอเดียเดิม (พักไว้ช่วงกลางคืน): เข้า" in sent[0]
+    assert "อ้างอิงเท่านั้น ไม่ต้องตั้ง · ไอเดียกลางคืน: เข้า" in sent[0]
     assert "stop 0.0835" in sent[0]  # first held idea stop
     assert "ส่งครั้งแรก:" not in sent[0]
     assert "ไอเดียแรก" not in sent[0]
+    stored = get_signal(conn, p2["sent"][0])
+    assert stored is not None
+    assert stored["status"] == "sent"
+    stored_entry = Decimal(str(stored["entry"]))
+    stored_stop = Decimal(str(stored["stop"]))
+    assert stored_entry != Decimal(str(night_entry))
+    assert stored_stop != Decimal(str(night_stop))
+    assert stored_entry == Decimal("0.0795")
+    assert stored_stop == Decimal("0.083")
     assert list_held_signals(conn) == []
     conn.close()
 
@@ -2154,7 +2166,7 @@ def test_prior_idea_omits_missing_time_and_non_positive_stop() -> None:
         sent_at_ms=None,
         with_time=True,
     )
-    assert missing.startswith("ไอเดียที่ส่งล่าสุด:")
+    assert missing.startswith("อ้างอิงเท่านั้น ไม่ต้องตั้ง · ไอเดียที่ส่งล่าสุด:")
     assert "(" not in missing
     assert "stop" not in missing
     assert "759" in missing
@@ -2166,6 +2178,7 @@ def test_prior_idea_omits_missing_time_and_non_positive_stop() -> None:
         sent_at_ms=0,
         with_time=True,
     )
+    assert zero_time.startswith("อ้างอิงเท่านั้น ไม่ต้องตั้ง · ไอเดียที่ส่งล่าสุด:")
     assert "07:00" not in zero_time
     assert "(00:" not in zero_time
     assert "stop 0.07616" in zero_time

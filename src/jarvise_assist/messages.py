@@ -51,7 +51,7 @@ def format_prior_idea_line(
     tick_size: Decimal | None = None,
     with_time: bool = False,
 ) -> str:
-    """Owner line citing a prior idea (on-demand re-quote or morning hold)."""
+    """Owner line citing a prior idea (on-demand re-quote or morning hold). Reference only: do not place this order."""
     if tick_size is not None and tick_size > 0:
         entry_s = _fmt_price_tick(entry, tick_size)
         stop_s = _fmt_price_tick(stop, tick_size)
@@ -66,7 +66,7 @@ def format_prior_idea_line(
     body = f"เข้า {entry_s}"
     if stop > 0:
         body = f"{body} · stop {stop_s}"
-    return f"{head}: {body} · {qty_s}"
+    return f"อ้างอิงเท่านั้น ไม่ต้องตั้ง · {head}: {body} · {qty_s}"
 
 
 def fmt_qty(value: Decimal) -> str:
