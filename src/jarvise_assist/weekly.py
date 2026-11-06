@@ -9,6 +9,7 @@ from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import BinanceFuturesClient, build_futures_client
+from jarvise_assist.journal import format_journal_lines, summarize_journal
 from jarvise_assist.real_trades import (
     SPEC_START_MS,
     format_real_lines,
@@ -44,6 +45,7 @@ def format_weekly_summary(
     blocked: dict[str, dict[str, Any]] | None = None,
     real_vs_virtual: dict[str, Any] | None = None,
     real_report_error: str | None = None,
+    journal: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "📊 ผล 7 วันที่ผ่านมา (assist)",
@@ -92,6 +94,8 @@ def format_weekly_summary(
         lines.append(f"รายงานไม้จริง: ดึงข้อมูลไม่ได้ ({real_report_error})")
     elif real_vs_virtual is not None:
         lines.extend(format_real_lines(real_vs_virtual))
+    if journal is not None:
+        lines.extend(format_journal_lines(journal))
     realized = float(real.get("realized_pnl") or 0.0)
     funding = float(real.get("funding") or 0.0)
     commission = float(real.get("commission") or 0.0)
@@ -306,6 +310,7 @@ def run_assist_weekly(
     else:
         real_vs_virtual = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS)
 
+    journal = summarize_journal(conn, since_ms=week_start, until_ms=ts)
     text = format_weekly_summary(
         counts=counts,
         virtual=virtual,
@@ -315,6 +320,7 @@ def run_assist_weekly(
         blocked=blocked_by_reason or None,
         real_vs_virtual=None if real_report_error else real_vs_virtual,
         real_report_error=real_report_error,
+        journal=journal,
     )
     sent_ok = bool(send_fn(text))
     return {
@@ -330,5 +336,6 @@ def run_assist_weekly(
         "real": real,
         "real_vs_virtual": real_vs_virtual,
         "real_report_error": real_report_error,
+        "journal": journal,
         "closed_all": closed_all,
     }
