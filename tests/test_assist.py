@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -29,11 +30,14 @@ from jarvise_assist.messages import (
 )
 from jarvise_assist.signals import is_night_hold, run_assist_morning, run_assist_signals
 from jarvise_assist.sizing import (
+    MAX_LEVERAGE,
+    MAX_PORTFOLIO_RISK_PCT,
     ExistingIdea,
     SignalCandidate,
     SizedSignal,
     admit_signals,
     assign_shared_leverage,
+    cap_requote_qty,
     chase_exceeded,
     floor_to_step,
     next_4h_close_ms,
@@ -2196,25 +2200,23 @@ def test_on_demand_reason_lines_are_thai_for_size_and_mark_errors() -> None:
     assert "size_failed" not in text and "ReadTimeout" not in text
 
 
-def test_on_demand_requote_caps_qty_at_first_sent(tmp_path: Path) -> None:
-    """Mark toward stop grows raw qty; re-quote keeps first qty."""
-    from jarvise_assist.sizing import cap_requote_qty
-    from jarvise_assist.store import get_signal
-
+def test_on_demand_requote_caps_loss_at_first_sent(tmp_path: Path) -> None:
+    """Mark toward stop grows qty; re-quote keeps loss at or under the first send."""
     conn = open_db(tmp_path / "requote.db")
     now = _ms_bangkok(2026, 10, 28, 10, 0)
     sent_at = _ms_bangkok(2026, 10, 27, 20, 59)
-    # First send at entry 0.0800, stop 0.0835 → R=0.0035; 1% of 1000 = 10 → qty ≈ 2857
+    step = Decimal("1")
+    # First send at entry 0.0800, stop 0.0835 → R=0.0035; 1% of 1000 = 10.
     sid = _seed_sent_ada_short(
         conn,
         sent_at_ms=sent_at,
         entry=Decimal("0.0800"),
         stop=Decimal("0.0835"),
     )
-    # Fix symbol to DOGE for clearer qty math (ADA seed uses ADAUSDT).
     first = get_signal(conn, sid)
     assert first is not None
     first_qty = Decimal(str(first["qty"]))
+    first_loss = Decimal(str(first["loss_at_stop"]))
     # Re-size at mark closer to stop: smaller R → larger raw qty.
     raw = size_signal(
         symbol="ADAUSDT",
@@ -2223,17 +2225,20 @@ def test_on_demand_requote_caps_qty_at_first_sent(tmp_path: Path) -> None:
         stop=Decimal("0.0835"),
         balance=Decimal("1000"),
         risk_pct=Decimal("1"),
-        step_size=Decimal("1"),
+        step_size=step,
     )
     assert raw is not None
     assert raw.qty > first_qty
     capped = cap_requote_qty(
         raw,
         first_qty=first_qty,
-        first_loss=Decimal(str(first["loss_at_stop"])),
+        first_loss=first_loss,
         balance=Decimal("1000"),
     )
-    assert capped.qty == first_qty
+    expected = floor_to_step(first_loss / raw.r_distance, step)
+    assert capped.qty == expected
+    assert capped.qty > first_qty
+    assert capped.loss_at_stop <= first_loss
 
     _seed_analysis(
         conn,
@@ -2246,16 +2251,228 @@ def test_on_demand_requote_caps_qty_at_first_sent(tmp_path: Path) -> None:
     # Mark moved toward stop (short: mark up), not past chase.
     fake = FakeFutures(
         marks={"ADAUSDT": Decimal("0.0815")},
-        steps={"ADAUSDT": Decimal("1")},
+        steps={"ADAUSDT": step},
     )
     text, _ = render_anything_now(conn, futures=fake, now_ms=now)
     assert "ไอเดียที่ส่งล่าสุด (20:59): เข้า" in text
     assert "stop 0.0835" in text
     assert f"· {first_qty:g}" in text or f"· {int(first_qty)}" in text
     assert "ส่งครั้งแรก:" not in text
-    # Sized line uses capped qty.
-    assert f"ขนาด: {fmt_qty_local(first_qty)}" in text or f"ขนาด: {first_qty:g}" in text
+    # Sized line uses the loss-capped qty; the prior line still cites the first qty.
+    assert f"ขนาด: {fmt_qty_local(expected)}" in text
     conn.close()
+
+
+def test_cap_requote_tighter_stop_grows_qty_within_first_loss() -> None:
+    step = Decimal("1")
+    balance = Decimal("1000")
+    entry = Decimal("1")
+    first = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=entry,
+        stop=Decimal("0.4"),
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    tight = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=entry,
+        stop=Decimal("0.7"),
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    assert first is not None and tight is not None
+    assert tight.r_distance < first.r_distance
+    assert tight.qty > first.qty
+    capped = cap_requote_qty(
+        tight,
+        first_qty=first.qty,
+        first_loss=first.loss_at_stop,
+        balance=balance,
+    )
+    expected = floor_to_step(first.loss_at_stop / tight.r_distance, step)
+    assert capped.qty == expected
+    assert capped.qty > first.qty
+    assert capped.loss_at_stop <= first.loss_at_stop
+    assert capped.loss_at_stop == capped.qty * capped.r_distance
+    assert capped.entry == tight.entry
+    assert capped.stop == tight.stop
+    assert capped.target == tight.target
+
+
+def test_cap_requote_wider_stop_shrinks_qty_within_first_loss() -> None:
+    step = Decimal("1")
+    balance = Decimal("1000")
+    entry = Decimal("1")
+    first = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=entry,
+        stop=Decimal("0.4"),
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    wide = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=entry,
+        stop=Decimal("0.1"),
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    assert first is not None and wide is not None
+    assert wide.r_distance > first.r_distance
+    capped = cap_requote_qty(
+        wide,
+        first_qty=first.qty,
+        first_loss=first.loss_at_stop,
+        balance=balance,
+    )
+    expected = floor_to_step(first.loss_at_stop / wide.r_distance, step)
+    assert capped.qty == expected
+    assert capped.qty < first.qty
+    assert capped.loss_at_stop <= first.loss_at_stop
+    assert capped.loss_at_stop == capped.qty * capped.r_distance
+
+
+def test_cap_requote_missing_first_loss_keeps_first_qty() -> None:
+    step = Decimal("1")
+    balance = Decimal("1000")
+    entry = Decimal("1")
+    first = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=entry,
+        stop=Decimal("0.4"),
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    tight = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=entry,
+        stop=Decimal("0.7"),
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    assert first is not None and tight is not None
+    assert tight.qty > first.qty
+    capped = cap_requote_qty(
+        tight,
+        first_qty=first.qty,
+        first_loss=None,
+        balance=balance,
+    )
+    expected = floor_to_step(first.qty, step)
+    assert capped.qty == expected
+    assert capped.qty < tight.qty
+    assert capped.loss_at_stop == capped.qty * tight.r_distance
+
+
+def test_cap_requote_ada_2026_11_06_uses_first_loss() -> None:
+    """ADA 2026-11-06: first loss 0.4624, re-quote R 0.00450182, step 1."""
+    step = Decimal("1")
+    balance = Decimal("100")
+    entry = Decimal("1")
+    r = Decimal("0.00450182")
+    first_loss = Decimal("0.4624")
+    first_qty = Decimal("95")
+    sized = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=entry,
+        stop=entry - r,
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    assert sized is not None
+    assert sized.r_distance == r
+    assert sized.qty > first_qty
+    capped = cap_requote_qty(
+        sized,
+        first_qty=first_qty,
+        first_loss=first_loss,
+        balance=balance,
+    )
+    expected = floor_to_step(first_loss / r, step)
+    assert capped.qty == expected
+    assert capped.qty > first_qty
+    assert capped.loss_at_stop <= first_loss
+    assert capped.loss_at_stop == expected * r
+    notional = expected * entry
+    uncapped = int(math.ceil(float(notional / balance)))
+    assert capped.notional == notional
+    assert capped.uncapped_leverage == uncapped
+    assert capped.leverage_capped is (uncapped > MAX_LEVERAGE)
+    assert capped.leverage == (MAX_LEVERAGE if uncapped > MAX_LEVERAGE else max(1, uncapped))
+    assert capped.entry == sized.entry
+    assert capped.stop == sized.stop
+    assert capped.target == sized.target
+
+
+def test_risk_and_margin_caps_apply_after_requote_loss_cap() -> None:
+    """Qty may grow with a tighter stop; portfolio and margin caps still see that size."""
+    step = Decimal("1")
+    balance = Decimal("100")
+    entry = Decimal("10")
+    stop = Decimal("9.95")
+    fresh = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=entry,
+        stop=stop,
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    eth = size_signal(
+        symbol="ETHUSDT",
+        side="long",
+        entry=entry,
+        stop=stop,
+        balance=balance,
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    assert fresh is not None and eth is not None
+    first_qty = Decimal("1")
+    first_loss = fresh.loss_at_stop
+    capped = cap_requote_qty(fresh, first_qty=first_qty, first_loss=first_loss, balance=balance)
+    capped_eth = cap_requote_qty(eth, first_qty=first_qty, first_loss=first_loss, balance=balance)
+    expected = floor_to_step(first_loss / fresh.r_distance, step)
+    assert capped.qty == expected
+    assert capped.qty > first_qty
+    assert capped.loss_at_stop <= first_loss
+
+    budget = balance * (MAX_PORTFOLIO_RISK_PCT / Decimal("100"))
+    expected_loss = expected * fresh.r_distance
+    existing_risk = budget - expected_loss + Decimal("0.01")
+    admitted, rejected = admit_signals(
+        existing=[ExistingIdea(symbol="ETHUSDT", side="long", risk_usdt=existing_risk)],
+        candidates=[SignalCandidate(sized=capped, confidence=0.8, symbol_rank=0)],
+        balance=balance,
+    )
+    assert admitted == []
+    assert len(rejected) == 1
+
+    kept, dropped = assign_shared_leverage(
+        [
+            SignalCandidate(sized=capped, confidence=0.9, symbol_rank=0),
+            SignalCandidate(sized=capped_eth, confidence=0.7, symbol_rank=1),
+        ],
+        available_balance=Decimal("20"),
+    )
+    assert dropped
+    assert len(kept) < 2
 
 
 def fmt_qty_local(value: Decimal) -> str:
