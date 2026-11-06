@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -44,12 +45,13 @@ from jarvise_assist.execute import (
 )
 from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.listen import process_update
-from jarvise_assist.sizing import round_level_to_tick
+from jarvise_assist.sizing import floor_to_step, round_level_to_tick, size_signal
 from jarvise_assist.store import (
     claim_exec_intent,
     finish_exec_intent,
     get_exec_intent,
     insert_exec_intent,
+    insert_signal,
     insert_watch_advice,
     now_ms,
     upsert_watch_position,
@@ -2032,6 +2034,73 @@ def test_size_for_execution_requote_cap_and_chase_vs_seen(
     conn.close()
 
 
+def test_size_for_execution_risk_cap_uses_requote_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loss-capped re-quote can exceed the portfolio budget that the old qty cap fit under."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "requote_risk.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    first_qty = Decimal("100")
+    first_loss = Decimal("3")
+    first = replace(first, qty=first_qty, notional=first_qty * first.entry, loss_at_stop=first_loss)
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=now - 60_000,
+        expires_at_ms=now + 3_600_000,
+        sent_at_ms=now - 60_000,
+    )
+    # ETH long risks 38 USDT. Portfolio budget is 4% of 1000 = 40.
+    # Qty cap would keep 100 * R(0.003) = 0.3 and fit. Loss cap is 3 and does not.
+    eth_pos = {
+        "symbol": "ETHUSDT",
+        "positionSide": "BOTH",
+        "positionAmt": "1",
+        "entryPrice": "2000",
+        "markPrice": "2000",
+    }
+    eth_stop = {
+        "symbol": "ETHUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "1962",
+        "quantity": "1",
+        "algoId": 77,
+    }
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, [eth_pos]),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, [eth_stop]),
+    }
+    trade = _client(RecordingTransport(handlers))
+    sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
+    assert sized is None
+    assert reason == "risk_cap"
+    conn.close()
+
+
 def test_preview_stores_seen_and_confirm_chases_seen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from jarvise_assist.execute import _confirm_guards_entry
     from jarvise_assist.sizing import size_signal
@@ -2104,8 +2173,6 @@ def test_preview_stores_seen_and_confirm_chases_seen(tmp_path: Path, monkeypatch
 
 def test_testnet_seen_chase_uses_read_mark_not_demo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from jarvise_assist.execute import _confirm_guards_entry
-    from jarvise_assist.sizing import size_signal
-    from jarvise_assist.store import insert_signal
 
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     monkeypatch.setattr(
@@ -2126,9 +2193,9 @@ def test_testnet_seen_chase_uses_read_mark_not_demo(tmp_path: Path, monkeypatch:
         step_size=Decimal("1"),
     )
     assert first is not None
-    from dataclasses import replace
-
-    first = replace(first, qty=Decimal("100"), notional=Decimal("8"), loss_at_stop=Decimal("0.3"))
+    # Loss stays above the unmapped demo minimum: mark 0.078, stop 0.083, R=0.005
+    # needs qty >= 65 so notional clears 5. 0.5 USDT does; 0.3 floors under it.
+    first = replace(first, qty=Decimal("100"), notional=Decimal("8"), loss_at_stop=Decimal("0.5"))
     insert_signal(
         conn,
         first,
@@ -2157,7 +2224,12 @@ def test_testnet_seen_chase_uses_read_mark_not_demo(tmp_path: Path, monkeypatch:
         read_mark=Decimal("0.08"),
     )
     assert reason is None and sized is not None
-    assert sized.qty == Decimal("100")
+    # Demo price is lower, so the same percent stop is a smaller dollar R.
+    # Qty grows; loss stays at or under the first sent loss, not the first qty.
+    expected = floor_to_step(first.loss_at_stop / sized.r_distance, Decimal("1"))
+    assert sized.qty == expected
+    assert sized.qty > first.qty
+    assert sized.loss_at_stop <= first.loss_at_stop
 
     # Missing read_mark: skip seen chase even when demo mark would chase seen.
     handlers[("GET", "/fapi/v1/premiumIndex")] = (200, {"markPrice": "0.078"})
