@@ -32,7 +32,7 @@ dev = [
 ]
 rag = [
   "qdrant-client>=1.20.0",
-  "sentence-transformers>=5.6.0",
+  "sentence-transformers>=6.2.0",
   "redis>=6.0,<9",
 ]
 web = [
