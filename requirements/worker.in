@@ -6,7 +6,7 @@ cryptography>=50.0.2
 pydantic>=2.14.1
 redis==8.1.0
 qdrant-client==1.20.0
-sentence-transformers>=6.1.0
+sentence-transformers>=6.2.0
 notebooklm-mcp-cli==0.15.7
 # CVE-2026-96760: pin above fastmcp-slim's authlib 1.8.0 until that floor moves.
 authlib>=1.9.0
