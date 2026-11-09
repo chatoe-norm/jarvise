@@ -121,7 +121,16 @@ MSG_BINANCE_RETRY = "อ่าน Binance ไม่ได้ — ลองให
 MSG_BINANCE_NOT_SENT = "อ่าน Binance ไม่ได้ — ยังไม่ได้ส่งคำสั่ง กดเหรียญใหม่เพื่อดู preview ใหม่"
 MSG_OUTCOME_UNKNOWN = "ผลคำสั่งยังไม่ทราบ บอทจะตรวจต่อ ดู 📋 ไม้ที่ถืออยู่"
 MSG_ORDER_NOT_FOUND = "ไม่พบคำสั่งบน Binance"
-MSG_STOP_UNVERIFIABLE = "เข้าแล้ว แต่ยังยืนยัน stop ไม่ได้ — บอทจะตรวจต่อ ดู 📋 ไม้ที่ถืออยู่"
+
+
+def msg_stop_unverifiable(*, symbol: str, qty: Decimal, stop: Decimal) -> str:
+    """Filled, but the stop read-back is unreadable after a success response with an algo id."""
+    return (
+        f"⚠️ {symbol.upper()} qty {fmt_qty(qty)} stop {fmt_price(stop)} "
+        "เปิดแอปเช็ก stop ตอนนี้ — บอทจะตรวจซ้ำภายใน 5 นาที"
+    )
+
+
 MSG_RECOVER_STALE = "⚠️ ตรวจผลคำสั่ง {symbol} ไม่จบใน 2 ชม. — position อาจไม่มี stop เปิด Binance เช็กตอนนี้"
 MSG_RECOVER_SIDE_MISMATCH = "position {symbol} ไม่ตรงกับไม้นี้ — บอทไม่แตะ"
 MSG_RECOVER_MOVE_STOP_FAILED = "เลื่อน stop ไม่สำเร็จ — ไม่ได้ยกเลิก stop เดิม"
@@ -752,6 +761,18 @@ def _position_gone(trade: BinanceTradeClient, *, symbol: str) -> bool | None:
         return len(trade.position_risk(symbol=symbol)) == 0
     except Exception:  # noqa: BLE001
         logger.exception("position check failed during emergency close for %s", symbol)
+        return None
+
+
+def _position_flat_now(trade: BinanceTradeClient, *, symbol: str) -> bool | None:
+    """True when flat, False when open, None when the read failed.
+
+    A failed read must not block the next stop or a reduce-only close.
+    """
+    try:
+        return len(trade.position_risk(symbol=symbol)) == 0
+    except Exception:  # noqa: BLE001
+        logger.warning("position re-read failed for %s", symbol)
         return None
 
 
@@ -1613,6 +1634,45 @@ def _cancel_dup_stops_after_verified(
         )
 
 
+def _stop_attempt_tags(
+    intent_id: str,
+    client_id: str,
+    *,
+    attempt_sl1_on_unknown: bool,
+) -> list[tuple[str, str]]:
+    if not attempt_sl1_on_unknown:
+        tag = "slr"
+        if client_id.endswith("-sl0"):
+            tag = "sl0"
+        elif client_id.endswith("-sl1"):
+            tag = "sl1"
+        return [(tag, client_id)]
+    return [
+        ("sl0", client_order_id(intent_id, "sl0")),
+        ("sl1", client_order_id(intent_id, "sl1")),
+    ]
+
+
+def _read_back_stop(
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    client_id: str,
+    closing_side: str,
+    stop: Decimal,
+    qty: Decimal,
+) -> StopVerifyResult:
+    return verify_our_stop(
+        trade,
+        symbol=symbol,
+        client_id=client_id,
+        closing_side=closing_side,
+        planned_stop=stop,
+        position_qty=qty,
+        position_flat=False,
+    )
+
+
 def _place_and_verify_stop(
     trade: BinanceTradeClient,
     *,
@@ -1626,20 +1686,41 @@ def _place_and_verify_stop(
     sleep: Callable[[float], None],
     attempt_sl1_on_unknown: bool = True,
 ) -> tuple[StopVerifyResult, str | None, str | None]:
-    """Place STOP_MARKET and verify. Returns (result, verified_tag, err)."""
+    """Place STOP_MARKET and verify. Returns (result, verified_tag, err).
+
+    Emergency close is for the caller, and only when this does not return
+    VERIFIED or UNVERIFIABLE. UNVERIFIABLE means a stop POST returned a success
+    body with an algo id and the read-back could not be read. A mark-read
+    failure or ConnectError before the POST is not sent: try the next tag.
+    Any other miss tries sl1 (when enabled), then one final verify.
+    """
     close_side = _closing_side(side)
     stop_err: str | None = None
-    clear_reject_only = True
-    for attempt, tag in enumerate(("sl0", "sl1") if attempt_sl1_on_unknown else ("sl0",)):
-        scid = client_order_id(intent_id, tag) if attempt_sl1_on_unknown else client_id
-        if not attempt_sl1_on_unknown:
-            scid = client_id
+    attempts = _stop_attempt_tags(intent_id, client_id, attempt_sl1_on_unknown=attempt_sl1_on_unknown)
+    for index, (tag, scid) in enumerate(attempts):
+        if index > 0:
+            flat = _position_flat_now(trade, symbol=symbol)
+            if flat is True:
+                return StopVerifyResult.CLOSED_BY_STOP, None, stop_err
         try:
             mark = trade.mark_price(symbol)
-            if side == "long" and mark <= stop:
-                raise TradeClientError("would trigger", binance_code=-2021)
-            if side == "short" and mark >= stop:
-                raise TradeClientError("would trigger", binance_code=-2021)
+        except Exception as exc:  # noqa: BLE001 — not sent; try the next stop id
+            stop_err = type(exc).__name__
+            logger.warning("mark read failed before stop %s: %s", scid, stop_err)
+            continue
+        if (side == "long" and mark <= stop) or (side == "short" and mark >= stop):
+            stop_err = "would trigger"
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="stop",
+                endpoint="/fapi/v1/algoOrder",
+                client_order_id=scid,
+                http_status=400,
+                binance_code=-2021,
+            )
+            continue
+        try:
             algo = trade.place_algo_stop(
                 symbol=symbol,
                 side=close_side,
@@ -1648,34 +1729,28 @@ def _place_and_verify_stop(
                 order_type="STOP_MARKET",
                 client_id=scid,
             )
+        except httpx.ConnectError as exc:
+            stop_err = str(exc)
             _log_write(
                 conn,
                 intent_id=intent_id,
                 step="stop",
                 endpoint="/fapi/v1/algoOrder",
                 client_order_id=scid,
-                http_status=200,
-                order_or_algo_id=str(algo.get("algoId") or ""),
             )
-            clear_reject_only = False
-            vr = verify_our_stop(
+            vr = _read_back_stop(
                 trade,
                 symbol=symbol,
                 client_id=scid,
                 closing_side=close_side,
-                planned_stop=stop,
-                position_qty=qty,
-                position_flat=False,
+                stop=stop,
+                qty=qty,
             )
             if vr == StopVerifyResult.VERIFIED:
-                return (
-                    vr,
-                    ("sl0" if scid.endswith("-sl0") else tag if attempt_sl1_on_unknown else "slr"),
-                    None,
-                )
-            if vr == StopVerifyResult.UNVERIFIABLE:
-                return StopVerifyResult.UNVERIFIABLE, None, stop_err
-            # Placement returned 200 but verify failed → treat as not protected and retry.
+                return vr, tag, None
+            if vr == StopVerifyResult.CLOSED_BY_STOP:
+                return vr, tag, None
+            continue
         except Exception as exc:  # noqa: BLE001
             stop_err = str(exc)
             code = exc.binance_code if isinstance(exc, TradeClientError) else None
@@ -1689,33 +1764,48 @@ def _place_and_verify_stop(
                 binance_code=code,
             )
             if _is_clear_rejection(exc):
-                if isinstance(exc, TradeClientError) and exc.binance_code == -2021:
-                    break
                 continue
-            clear_reject_only = False
-            # Unknown: wait and verify before sl1.
-            if attempt == 0 and attempt_sl1_on_unknown:
+            if index == 0 and len(attempts) > 1:
                 sleep(1)
-            vr = verify_our_stop(
+            vr = _read_back_stop(
                 trade,
                 symbol=symbol,
                 client_id=scid,
                 closing_side=close_side,
-                planned_stop=stop,
-                position_qty=qty,
-                position_flat=False,
+                stop=stop,
+                qty=qty,
             )
             if vr == StopVerifyResult.VERIFIED:
-                tag_name = "sl0" if scid.endswith("-sl0") else ("sl1" if scid.endswith("-sl1") else "slr")
-                return vr, tag_name, None
-            if vr == StopVerifyResult.UNVERIFIABLE:
-                return StopVerifyResult.UNVERIFIABLE, None, stop_err
-            if not attempt_sl1_on_unknown:
-                break
-    # All attempts were allowlisted rejections → NOT_PROTECTED without requiring a GET.
-    if clear_reject_only:
-        return StopVerifyResult.NOT_PROTECTED, None, stop_err
-    # Final look across our tags (unknown attempts may have landed).
+                return vr, tag, None
+            if vr == StopVerifyResult.CLOSED_BY_STOP:
+                return vr, tag, None
+            continue
+        algo_id = str(algo.get("algoId") or "")
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="stop",
+            endpoint="/fapi/v1/algoOrder",
+            client_order_id=scid,
+            http_status=200,
+            order_or_algo_id=algo_id,
+        )
+        vr = _read_back_stop(
+            trade,
+            symbol=symbol,
+            client_id=scid,
+            closing_side=close_side,
+            stop=stop,
+            qty=qty,
+        )
+        if vr == StopVerifyResult.VERIFIED:
+            return vr, tag, None
+        if vr == StopVerifyResult.CLOSED_BY_STOP:
+            return vr, tag, None
+        if algo_id and vr == StopVerifyResult.UNVERIFIABLE:
+            return StopVerifyResult.UNVERIFIABLE, None, stop_err
+        if algo_id:
+            break
     final_vr, final_tag = _verify_stop_ids(
         trade,
         conn=conn,
@@ -1730,9 +1820,9 @@ def _place_and_verify_stop(
             trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=final_tag
         )
         return final_vr, final_tag, stop_err
-    if final_vr == StopVerifyResult.UNVERIFIABLE:
-        return final_vr, None, stop_err
-    return final_vr, None, stop_err
+    if final_vr == StopVerifyResult.CLOSED_BY_STOP:
+        return final_vr, final_tag, stop_err
+    return StopVerifyResult.NOT_PROTECTED, None, stop_err
 
 
 def _emergency_close_reply(
@@ -1984,8 +2074,13 @@ def run_entry_sequence(
     if vr == StopVerifyResult.CLOSED_BY_STOP:
         return _exec_result(MSG_ALREADY_CLOSED, status="done")
     if vr == StopVerifyResult.UNVERIFIABLE:
-        return _exec_result(MSG_STOP_UNVERIFIABLE, status="unknown")
+        return _exec_result(
+            msg_stop_unverifiable(symbol=symbol, qty=exec_qty, stop=stop),
+            status="unknown",
+        )
     if vr != StopVerifyResult.VERIFIED:
+        if _position_flat_now(trade, symbol=symbol) is True:
+            return _exec_result(MSG_ALREADY_CLOSED, status="done")
         return _emergency_close_reply(
             trade,
             conn=conn,
@@ -1997,6 +2092,8 @@ def run_entry_sequence(
             stop_err=stop_err,
             sleep=sleep,
         )
+    if _position_flat_now(trade, symbol=symbol) is True:
+        return _exec_result(MSG_ALREADY_CLOSED, status="done")
     if keep_tag is not None:
         _cancel_dup_stops_after_verified(
             trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=keep_tag
