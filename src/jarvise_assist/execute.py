@@ -181,7 +181,7 @@ def msg_recover_true_state(
         stop_text = "ไม่มี (position ไม่มี stop)"
     return (
         f"⚠️ {symbol.upper()} คำสั่งเมื่อ {_bkk_hhmm(created_at_ms)}: "
-        f"order {order_text}, position {position_text}, stop ของบอท {stop_text} "
+        f"order {order_text}, position {position_text}, stop {stop_text} "
         "— บอทหยุดติดตามแล้ว เช็กในแอป"
     )
 
@@ -544,10 +544,17 @@ class BinanceTradeClient:
             raise TradeClientError("unexpected openAlgoOrders payload", body=payload)
         return []
 
-    def open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+    def open_orders(self, *, symbol: str | None = None, strict: bool = False) -> list[dict[str, Any]]:
         params = {"symbol": symbol} if symbol else None
         payload = self.signed_get("/fapi/v1/openOrders", params)
-        return list(payload) if isinstance(payload, list) else []
+        if isinstance(payload, list):
+            return list(payload)
+        if strict:
+            raise TradeClientError(
+                "unexpected openOrders payload",
+                body=payload if isinstance(payload, dict) else {},
+            )
+        return []
 
     def all_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         return [*self.open_orders(symbol=symbol), *self.open_algo_orders(symbol=symbol)]
@@ -4067,16 +4074,13 @@ def _is_sqlite_busy(exc: BaseException) -> bool:
 
 def _aged_read_snapshot(
     trade: BinanceTradeClient,
-    conn: Any,
+    _conn: Any,
     intent: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Read order, position, and our stops. None when any read fails. Never sends."""
+    """Read order, position, and every protective stop. None when any read fails. Never sends."""
     intent_id = str(intent["id"])
     symbol = str(intent["symbol"])
-    side = str(intent["side"])
     kind = str(intent.get("kind") or "entry")
-    preview = intent["preview"] if isinstance(intent.get("preview"), dict) else {}
-    stop = Decimal(str(preview.get("stop") or "0"))
     if kind == "exit":
         cid = client_order_id(intent_id, "ex")
         query_algo = False
@@ -4103,23 +4107,25 @@ def _aged_read_snapshot(
     except Exception:  # noqa: BLE001
         return None
     try:
-        filters = trade.symbol_filters(symbol)
-        stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
+        step = trade.symbol_filters(symbol).step_size
+        plain = trade.open_orders(symbol=symbol, strict=True)
+        algos = trade.open_algo_orders(symbol=symbol, strict=True)
     except Exception:  # noqa: BLE001
-        pass
+        return None
     flat = len(positions) == 0
     qty = positions[0].qty if positions else Decimal("0")
-    vr, _tag, _open = _verify_stop_ids(
-        trade,
-        conn=conn,
-        symbol=symbol,
-        intent_id=intent_id,
-        side=side,
-        stop=stop,
-        position_qty=qty if qty > 0 else Decimal("1"),
-    )
-    if vr == StopVerifyResult.UNVERIFIABLE:
-        return None
+    stop_verified = False
+    if not flat:
+        pos = positions[0]
+        coverage = protective_stop_coverage(
+            [*plain, *algos],
+            symbol=symbol,
+            position_side=pos.position_side,
+            trade_side=pos.side,
+            position_qty=pos.qty,
+            step_size=step,
+        )
+        stop_verified = coverage == "full"
     if order is None:
         order_text = "ไม่พบ"
     else:
@@ -4133,7 +4139,7 @@ def _aged_read_snapshot(
     return {
         "order_text": order_text,
         "position_text": "แบน" if flat else fmt_qty(qty),
-        "stop_verified": (not flat) and vr == StopVerifyResult.VERIFIED,
+        "stop_verified": stop_verified,
         "position_open": not flat,
     }
 
