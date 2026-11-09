@@ -1222,13 +1222,107 @@ def set_exec_intent_ref(
 
 
 def claim_exec_intent(conn: Any, intent_id: str) -> bool:
-    """Atomic preview → confirmed. True only for the caller that won the race."""
+    """Atomic preview → confirmed. True only for the caller that won the race.
+
+    Writes a worker_claim assist_exec_log row in the same transaction so recovery
+    can see recent activity and leave a live worker alone.
+    """
     cur = conn.execute(
         """
         UPDATE assist_exec_intent SET status='confirmed'
         WHERE id=? AND status='preview'
         """,
         (intent_id,),
+    )
+    if cur.rowcount == 1:
+        conn.execute(
+            """
+            INSERT INTO assist_exec_log (
+                intent_id, step, endpoint, client_order_id, http_status,
+                binance_code, order_or_algo_id, created_at_ms
+            ) VALUES (?, 'worker_claim', 'local', NULL, NULL, NULL, NULL, ?)
+            """,
+            (intent_id, int(now_ms())),
+        )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def claim_exec_intent_for_recovery(
+    conn: Any,
+    intent_id: str,
+    *,
+    now_ms_value: int,
+    stale_after_ms: int = 10 * 60_000,
+    lease_ms: int = 4 * 60_000,
+) -> int | None:
+    """Claim unknown, leased recovering, or confirmed with no log row in 10 minutes.
+
+    recovering is claimable only when there is no recover_claim log in the last lease_ms.
+    The recover_claim INSERT runs in the same transaction as the UPDATE.
+    Returns the recover_claim log row id, or None when this caller lost the claim.
+    """
+    confirmed_cutoff = int(now_ms_value) - int(stale_after_ms)
+    lease_cutoff = int(now_ms_value) - int(lease_ms)
+    cur = conn.execute(
+        """
+        UPDATE assist_exec_intent SET status='recovering'
+        WHERE id=? AND (
+            status='unknown'
+            OR (
+                status='recovering'
+                AND NOT EXISTS (
+                    SELECT 1 FROM assist_exec_log
+                    WHERE intent_id=assist_exec_intent.id
+                      AND step='recover_claim'
+                      AND created_at_ms>?
+                )
+            )
+            OR (
+                status='confirmed'
+                AND NOT EXISTS (
+                    SELECT 1 FROM assist_exec_log
+                    WHERE intent_id=assist_exec_intent.id AND created_at_ms>=?
+                )
+            )
+        )
+        """,
+        (intent_id, lease_cutoff, confirmed_cutoff),
+    )
+    token: int | None = None
+    if cur.rowcount == 1:
+        inserted = conn.execute(
+            """
+            INSERT INTO assist_exec_log (
+                intent_id, step, endpoint, client_order_id, http_status,
+                binance_code, order_or_algo_id, created_at_ms
+            ) VALUES (?, 'recover_claim', 'local', NULL, NULL, NULL, NULL, ?)
+            """,
+            (intent_id, int(now_ms_value)),
+        )
+        token = int(inserted.lastrowid)
+    conn.commit()
+    return token
+
+
+def renew_exec_recovery_lease(
+    conn: Any,
+    intent_id: str,
+    token: int,
+    *,
+    now_ms_value: int,
+) -> bool:
+    """Extend this pass's lease only while its claim row is still the latest one."""
+    cur = conn.execute(
+        """
+        UPDATE assist_exec_log SET created_at_ms=?
+        WHERE id=? AND step='recover_claim'
+          AND id=(
+            SELECT MAX(id) FROM assist_exec_log
+            WHERE intent_id=? AND step='recover_claim'
+          )
+        """,
+        (int(now_ms_value), int(token), intent_id),
     )
     conn.commit()
     return cur.rowcount == 1
@@ -1241,24 +1335,107 @@ def finish_exec_intent(
     status: str,
     result_text: str,
     telegram_message_id: int | None = None,
-) -> None:
+    expect_status: str | None = None,
+) -> bool:
+    """Write a terminal or intermediate status. When expect_status is set, require it."""
     if telegram_message_id is not None:
-        conn.execute(
+        if expect_status is not None:
+            cur = conn.execute(
+                """
+                UPDATE assist_exec_intent
+                SET status=?, result_text=?, telegram_message_id=?
+                WHERE id=? AND status=?
+                """,
+                (status, result_text, int(telegram_message_id), intent_id, expect_status),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE assist_exec_intent
+                SET status=?, result_text=?, telegram_message_id=?
+                WHERE id=?
+                """,
+                (status, result_text, int(telegram_message_id), intent_id),
+            )
+    elif expect_status is not None:
+        cur = conn.execute(
             """
-            UPDATE assist_exec_intent
-            SET status=?, result_text=?, telegram_message_id=?
-            WHERE id=?
+            UPDATE assist_exec_intent SET status=?, result_text=? WHERE id=? AND status=?
             """,
-            (status, result_text, int(telegram_message_id), intent_id),
+            (status, result_text, intent_id, expect_status),
         )
     else:
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE assist_exec_intent SET status=?, result_text=? WHERE id=?
             """,
             (status, result_text, intent_id),
         )
     conn.commit()
+    return cur.rowcount == 1
+
+
+def symbol_has_in_flight_exec(conn: Any, symbol: str, *, exclude_id: str | None = None) -> bool:
+    """True when another intent for the symbol is confirmed/unknown/recovering."""
+    if exclude_id is not None:
+        row = conn.execute(
+            """
+            SELECT 1 FROM assist_exec_intent
+            WHERE symbol=? AND status IN ('confirmed', 'unknown', 'recovering') AND id!=?
+            LIMIT 1
+            """,
+            (symbol.upper(), exclude_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT 1 FROM assist_exec_intent
+            WHERE symbol=? AND status IN ('confirmed', 'unknown', 'recovering')
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        ).fetchone()
+    return row is not None
+
+
+def list_recoverable_exec_intents(conn: Any) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, kind, symbol, side, preview_json, created_at_ms, expires_at_ms,
+               status, result_text, telegram_message_id, ref_price, ref_source, ref_at_ms
+        FROM assist_exec_intent
+        WHERE status IN ('unknown', 'recovering', 'confirmed')
+        ORDER BY created_at_ms ASC
+        """
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        data = (
+            dict(row)
+            if hasattr(row, "keys")
+            else {
+                "id": row[0],
+                "kind": row[1],
+                "symbol": row[2],
+                "side": row[3],
+                "preview_json": row[4],
+                "created_at_ms": row[5],
+                "expires_at_ms": row[6],
+                "status": row[7],
+                "result_text": row[8],
+                "telegram_message_id": row[9],
+                "ref_price": row[10],
+                "ref_source": row[11],
+                "ref_at_ms": row[12],
+            }
+        )
+        raw = data.get("preview_json")
+        try:
+            data["preview"] = json.loads(str(raw or "{}"))
+        except Exception:  # noqa: BLE001
+            data["preview"] = {}
+        out.append(data)
+    return out
 
 
 def set_exec_intent_message_id(conn: Any, intent_id: str, message_id: int) -> None:

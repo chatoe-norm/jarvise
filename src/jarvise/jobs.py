@@ -20,6 +20,11 @@ from urllib.parse import parse_qs
 from jarvise.charts import export_candle_graphs
 from jarvise.disk import disk_edge_alerted, disk_free
 from jarvise.rag import doctrine_snippets, publish_redis_status
+from jarvise_assist.execute import (
+    assist_execute_mode,
+    build_trade_client,
+    run_exec_recovery,
+)
 from jarvise_assist.explore import execute_explore
 from jarvise_assist.listen import start_listener_thread
 from jarvise_assist.signals import run_assist_morning, run_assist_signals
@@ -44,6 +49,7 @@ from jarvise_notify import (
     notify_pending_digest,
     notify_risk_halt,
 )
+from jarvise_notify.telegram import send_message
 from jarvise_notify.weekly import WEEKLY_BUILD_FAILURE, build_weekly_report, notify_weekly_build_failure
 from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
@@ -53,6 +59,8 @@ from jarvise_paper.risk_monitor import run_risk_monitor as paper_risk_monitor
 from jarvise_paper.shadow_veto import digest_dir, run_shadow
 from jarvise_risk import kill_switch_state
 from jarvise_trade import live_risk_tick, live_trading_enabled, reconcile_live_orders
+
+logger = logging.getLogger(__name__)
 
 # Subprocess wall-clock limits (seconds). A hung CLI must never wedge n8n or the health probe.
 JOB_TIMEOUTS_S: dict[str, float] = {
@@ -497,7 +505,11 @@ def run_assist_signal_job() -> tuple[int, dict[str, Any]]:
 
 
 def run_assist_watch_job() -> tuple[int, dict[str, Any]]:
-    """Read-only futures position watch every 5 minutes. Never places orders."""
+    """Futures position watch every 5 minutes.
+
+    Watch advice stays read-only. Recovery may place ``-slr`` or the existing
+    ``-cls`` only for an intent the owner already tapped — never a new entry.
+    """
     with single_flight("assist_watch") as acquired:
         if not acquired:
             return 3, _running("assist_watch")
@@ -522,6 +534,19 @@ def run_assist_watch_job() -> tuple[int, dict[str, Any]]:
                 "error": f"{type(exc).__name__}: {exc}",
                 "paper_only": True,
                 "at_ms": now,
+            }
+        try:
+            now_recovery = int(time.time() * 1000)
+            if assist_execute_mode() in {"testnet", "live"}:
+                trade, _reason = build_trade_client()
+                if trade is not None:
+                    recovery = run_exec_recovery(conn, trade, now_recovery, send=send_message)
+                    payload["exec_recovery"] = recovery
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("assist exec recovery failed")
+            payload["exec_recovery"] = {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
             }
         finally:
             conn.close()

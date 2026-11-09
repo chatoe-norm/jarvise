@@ -5,17 +5,32 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import replace as dc_replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import httpx
 
 from jarvise_assist import ASSIST_SYMBOLS, ASSIST_TIMEFRAME
+from jarvise_assist.exec_outcome import (
+    OrderOutcome,
+    QueryFillResult,
+    QueryResultKind,
+    StopVerifyResult,
+    classify_order_body,
+    executed_qty,
+    is_clear_rejection_code,
+    verify_our_stop,
+)
+from jarvise_assist.exec_outcome import (
+    query_fill_after_unknown as _query_fill_tri,
+)
 from jarvise_assist.futures import (
     FAPI_BASE,
     FuturesPosition,
@@ -23,6 +38,7 @@ from jarvise_assist.futures import (
     find_protective_stop,
     is_protective_stop,
     order_stop_price,
+    protective_stop_coverage,
 )
 from jarvise_assist.keyboard import entry_confirm_keyboard, move_stop_keyboard
 from jarvise_assist.messages import fmt_price, fmt_qty, format_move_stop_advice, format_signal_message
@@ -44,6 +60,7 @@ from jarvise_assist.sizing import (
 from jarvise_assist.store import (
     cancel_exec_intent,
     claim_exec_intent,
+    claim_exec_intent_for_recovery,
     ensure_settings,
     finish_exec_intent,
     get_exec_intent,
@@ -52,10 +69,13 @@ from jarvise_assist.store import (
     insert_exec_intent,
     insert_exec_log,
     latest_seen_idea,
+    list_recoverable_exec_intents,
     mark_signal_taken,
     now_ms,
+    renew_exec_recovery_lease,
     set_exec_intent_message_id,
     set_exec_intent_ref,
+    symbol_has_in_flight_exec,
 )
 from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_exchange.binance_spot import (
@@ -77,7 +97,8 @@ TRADE_KEY_CACHE_MS = 10 * 60_000
 CLIENT_ID_MAX = 36
 MSG_MOVE_STOP_BUFFER = "stop ใหม่ใกล้ราคาเกินไป — ไม่เลื่อน"
 MSG_MOVE_STOP_NO_ADVICE = "ตอนนี้ไม่มี stop แนะนำแล้ว — ไม่เลื่อน"
-MSG_MOVE_STOP_UNKNOWN = "ไม่แน่ใจว่าวาง stop ใหม่สำเร็จ — stop เดิมยังอยู่ เช็ก Open Orders"
+MSG_MOVE_STOP_UNKNOWN = "ไม่แน่ใจว่าวาง stop ใหม่สำเร็จ — ยังไม่ยกเลิก stop เดิม"
+MSG_MOVE_STOP_UNKNOWN_OLD_OK = "ไม่แน่ใจว่าวาง stop ใหม่สำเร็จ — stop เดิมยังอยู่ เช็ก Open Orders"
 MSG_MOVE_STOP_KEEP = "เลื่อน stop ไม่ได้ — stop เดิมยังอยู่"
 MSG_MOVE_STOP_TWO = "⚠️ ยกเลิก stop เดิมไม่ได้ — ตอนนี้มี 2 stop (ไม่อันตราย, reduce-only) เช็ก Open Orders"
 
@@ -95,12 +116,80 @@ MSG_TRADE_REUSES_READ = "คีย์เทรดซ้ำกับคีย์�
 MSG_TRADE_PEM_FAILED = "โหลดคีย์เทรดไม่ได้"
 MSG_ONE_WAY = "บัญชีต้องเป็น one-way mode"
 MSG_MULTI_ASSETS = "บัญชีต้องปิด Multi-Assets (Single-Asset เท่านั้น)"
+MSG_ACCOUNT_MODE_UNREADABLE = "อ่านโหมดบัญชีไม่ได้ — ไม่ส่งคำสั่ง"
+MSG_MODE_UNREADABLE = "อ่านโหมดบัญชีไม่ได้ — ยังไม่ส่งคำสั่ง"
+MSG_PREORDER_MOVE = "อ่าน Binance ไม่ได้ — ยังไม่ได้ส่งคำสั่ง รอคำแนะนำรอบถัดไป หรือดู 📋 ไม้ที่ถืออยู่"
+MSG_PREORDER_EXIT = "อ่าน Binance ไม่ได้ — ยังไม่ได้ส่งคำสั่ง ดู 📋 ไม้ที่ถืออยู่"
+MSG_MOVE_STOP_OLD_UNREADABLE = "เลื่อน stop ไม่ได้ — ยืนยัน stop เดิมไม่ได้ — เช็กในแอป"
 MSG_CANCELLED = "ยกเลิกแล้ว"
 MSG_STOP_CLOSED = "วาง stop ไม่ได้ — ปิดไม้แล้วเพื่อความปลอดภัย"
 MSG_TP_KEEP = "เข้าแล้วและมี stop — วาง TP ไม่ได้ ตั้งเองได้"
 MSG_HANDLER_ERROR = "ทำคำสั่งไม่สำเร็จ — ลองใหม่หรือปิดเอง"
 MSG_BINANCE_RETRY = "อ่าน Binance ไม่ได้ — ลองใหม่อีกครั้ง"
 MSG_BINANCE_NOT_SENT = "อ่าน Binance ไม่ได้ — ยังไม่ได้ส่งคำสั่ง กดเหรียญใหม่เพื่อดู preview ใหม่"
+MSG_OUTCOME_UNKNOWN = "ผลคำสั่งยังไม่ทราบ บอทจะตรวจต่อ ดู 📋 ไม้ที่ถืออยู่"
+MSG_ORDER_NOT_FOUND = "ไม่พบคำสั่งบน Binance"
+
+
+def msg_stop_unverifiable(*, symbol: str, qty: Decimal, stop: Decimal) -> str:
+    """Filled, but the stop read-back is unreadable after a success response with an algo id."""
+    return (
+        f"⚠️ {symbol.upper()} qty {fmt_qty(qty)} stop {fmt_price(stop)} "
+        "เปิดแอปเช็ก stop ตอนนี้ — บอทจะตรวจซ้ำภายใน 5 นาที"
+    )
+
+
+MSG_RECOVER_STALE_UNREADABLE = (
+    "⚠️ ตรวจ {symbol} ไม่ได้มา 2 ชม. — เปิดแอปเช็ก position และ stop; บอทจะปลดการกันเหรียญนี้เองเมื่ออ่าน Binance ได้"
+)
+MSG_RECOVER_SIDE_MISMATCH = "position {symbol} ไม่ตรงกับไม้นี้ — บอทไม่แตะ"
+MSG_RECOVER_MOVE_STOP_FAILED = "เลื่อน stop ไม่สำเร็จ — ไม่ได้ยกเลิก stop เดิม"
+MSG_CANCEL_OLD_FAILED = "⚠️ ยกเลิก stop/TP เดิมไม่สำเร็จ — ลบในแอป"
+_BANGKOK = timezone(timedelta(hours=7))
+_STOP_TAGS = ("slr", "sl0", "sl1")
+_FINAL_ORDER_STATUSES = frozenset({"FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED"})
+RECOVER_STALE_MS = 10 * 60_000
+RECOVER_LEASE_MS = 4 * 60_000
+RECOVER_PASS_BUDGET_S = 90.0
+RECOVER_MAX_AGE_MS = 2 * 60 * 60_000
+RECOVER_NOT_FOUND_SPAN_MS = 15 * 60_000
+RECOVER_NOT_FOUND_PASSES = 3
+
+
+def _bkk_hhmm(created_at_ms: int) -> str:
+    return datetime.fromtimestamp(int(created_at_ms) / 1000, tz=_BANGKOK).strftime("%H:%M")
+
+
+def _order_is_final(order: dict[str, Any] | None) -> bool:
+    if not isinstance(order, dict):
+        return False
+    return str(order.get("status") or "").upper() in _FINAL_ORDER_STATUSES
+
+
+def msg_recover_true_state(
+    *,
+    symbol: str,
+    created_at_ms: int,
+    order_text: str,
+    position_text: str,
+    stop_verified: bool,
+    position_open: bool,
+) -> str:
+    """One read-only report after 2h. An open position with no proven stop says so."""
+    stop_text = "ยืนยันแล้ว" if stop_verified else "ไม่มี"
+    if position_open and not stop_verified:
+        stop_text = "ไม่มี (position ไม่มี stop)"
+    return (
+        f"⚠️ {symbol.upper()} คำสั่งเมื่อ {_bkk_hhmm(created_at_ms)}: "
+        f"order {order_text}, position {position_text}, stop {stop_text} "
+        "— บอทหยุดติดตามแล้ว เช็กในแอป"
+    )
+
+
+def msg_cancel_old_failed(client_ids: list[str]) -> str:
+    ids = ", ".join(client_ids)
+    return f"{MSG_CANCEL_OLD_FAILED} {ids}"
+
 
 _TRADE_AUTH_REASON_TH: dict[str, str] = {
     "no_key": MSG_NO_TRADE_KEY,
@@ -342,12 +431,23 @@ class BinanceTradeClient:
         return {"ok": True}
 
     def assert_account_modes(self) -> None:
-        dual = self.signed_get("/fapi/v1/positionSide/dual")
-        if isinstance(dual, dict) and bool(dual.get("dualSidePosition")):
-            raise TradeClientError(MSG_ONE_WAY, body=dual if isinstance(dual, dict) else {})
-        multi = self.signed_get("/fapi/v1/multiAssetsMargin")
-        if isinstance(multi, dict) and bool(multi.get("multiAssetsMargin")):
-            raise TradeClientError(MSG_MULTI_ASSETS, body=multi if isinstance(multi, dict) else {})
+        try:
+            dual = self.signed_get("/fapi/v1/positionSide/dual")
+            multi = self.signed_get("/fapi/v1/multiAssetsMargin")
+        except TradeClientError as exc:
+            if str(exc) in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_MODE_UNREADABLE}:
+                raise
+            raise TradeClientError(MSG_MODE_UNREADABLE) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise TradeClientError(MSG_MODE_UNREADABLE) from exc
+        if not isinstance(dual, dict) or type(dual.get("dualSidePosition")) is not bool:
+            raise TradeClientError(MSG_MODE_UNREADABLE, body=dual if isinstance(dual, dict) else {})
+        if dual["dualSidePosition"] is True:
+            raise TradeClientError(MSG_ONE_WAY, body=dual)
+        if not isinstance(multi, dict) or type(multi.get("multiAssetsMargin")) is not bool:
+            raise TradeClientError(MSG_MODE_UNREADABLE, body=multi if isinstance(multi, dict) else {})
+        if multi["multiAssetsMargin"] is True:
+            raise TradeClientError(MSG_MULTI_ASSETS, body=multi)
 
     def usdt_wallet_and_available(self) -> tuple[Decimal, Decimal]:
         payload = self.signed_get("/fapi/v3/balance")
@@ -433,17 +533,28 @@ class BinanceTradeClient:
         self._filters[sym] = filters
         return filters
 
-    def open_algo_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+    def open_algo_orders(self, *, symbol: str | None = None, strict: bool = False) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"algoType": "CONDITIONAL"}
         if symbol:
             params["symbol"] = symbol
         payload = self.signed_get("/fapi/v1/openAlgoOrders", params)
-        return list(payload) if isinstance(payload, list) else []
+        if isinstance(payload, list):
+            return list(payload)
+        if strict:
+            raise TradeClientError("unexpected openAlgoOrders payload", body=payload)
+        return []
 
-    def open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+    def open_orders(self, *, symbol: str | None = None, strict: bool = False) -> list[dict[str, Any]]:
         params = {"symbol": symbol} if symbol else None
         payload = self.signed_get("/fapi/v1/openOrders", params)
-        return list(payload) if isinstance(payload, list) else []
+        if isinstance(payload, list):
+            return list(payload)
+        if strict:
+            raise TradeClientError(
+                "unexpected openOrders payload",
+                body=payload if isinstance(payload, dict) else {},
+            )
+        return []
 
     def all_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         return [*self.open_orders(symbol=symbol), *self.open_algo_orders(symbol=symbol)]
@@ -471,6 +582,15 @@ class BinanceTradeClient:
             if cid == client_id:
                 return order
         return None
+
+    def query_algo_by_client_id(self, *, symbol: str, client_id: str) -> dict[str, Any]:
+        body = self.signed_get(
+            "/fapi/v1/algoOrder",
+            {"symbol": symbol.upper(), "clientAlgoId": client_id},
+        )
+        if not isinstance(body, dict):
+            raise TradeClientError("unexpected algoOrder query response")
+        return body
 
     def set_leverage(self, symbol: str, leverage: int) -> Any:
         return self.signed_post(
@@ -604,9 +724,26 @@ def _log_write(
     )
 
 
+class ExecResult(str):
+    """Thai reply that also carries the intent status for finish_exec_intent."""
+
+    def __new__(cls, text: str, *, status: str) -> ExecResult:
+        obj = str.__new__(cls, text)
+        obj.status = status
+        return obj
+
+    status: str
+
+
+def _exec_result(text: str, *, status: str) -> ExecResult:
+    return ExecResult(text, status=status)
+
+
 def _is_clear_rejection(exc: BaseException) -> bool:
-    """True when Binance returned a typed rejection (safe to treat as not filled)."""
-    return isinstance(exc, TradeClientError) and exc.binance_code is not None
+    """True when Binance returned an allowlisted final rejection (safe as not filled)."""
+    if not isinstance(exc, TradeClientError):
+        return False
+    return is_clear_rejection_code(exc.binance_code, http_status=exc.http_status)
 
 
 def _query_fill_after_unknown(
@@ -617,12 +754,12 @@ def _query_fill_after_unknown(
     conn: Any,
     intent_id: str,
     step: str,
-) -> dict[str, Any] | None:
-    """Recover a market fill after a timeout/connection error. None = not found."""
-    last_exc: BaseException | None = None
-    for _ in range(3):
-        try:
-            order = trade.query_order_by_client_id(symbol=symbol, client_id=client_id)
+    sleep: Callable[[float], None] = time.sleep,
+) -> QueryFillResult:
+    """Tri-state order query after an unknown send. Never collapses not_found into unreadable."""
+
+    def _on_attempt(i: int, exc: Exception | None, order: dict[str, Any] | None) -> None:
+        if order is not None:
             _log_write(
                 conn,
                 intent_id=intent_id,
@@ -632,9 +769,8 @@ def _query_fill_after_unknown(
                 http_status=200,
                 order_or_algo_id=str(order.get("orderId") or ""),
             )
-            return order
-        except TradeClientError as exc:
-            last_exc = exc
+            return
+        if isinstance(exc, TradeClientError):
             _log_write(
                 conn,
                 intent_id=intent_id,
@@ -644,14 +780,29 @@ def _query_fill_after_unknown(
                 http_status=exc.http_status,
                 binance_code=exc.binance_code,
             )
-            if exc.binance_code == -2013:
-                return None
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
+        elif exc is not None:
             logger.exception("order query failed for %s", client_id)
-    if last_exc is not None:
-        logger.warning("order query exhausted for %s: %s", client_id, last_exc)
-    return None
+
+    return _query_fill_tri(
+        trade,
+        symbol=symbol,
+        client_id=client_id,
+        sleep=sleep,
+        on_attempt=_on_attempt,
+    )
+
+
+def _msg_symbol_in_flight(symbol: str) -> str:
+    return f"คำสั่ง {symbol.upper()} ยังไม่จบ — ยังไม่เปิดไม้ใหม่ ดู 📋 ไม้ที่ถืออยู่"
+
+
+def _preorder_fail_text(prefix: str) -> str:
+    """Copy before any order is sent. ey: keeps the entry line. ms:/xx: never say retry."""
+    if prefix == "ms:":
+        return MSG_PREORDER_MOVE
+    if prefix == "xx:":
+        return MSG_PREORDER_EXIT
+    return MSG_BINANCE_NOT_SENT
 
 
 def _fill_from_position(
@@ -683,6 +834,18 @@ def _position_gone(trade: BinanceTradeClient, *, symbol: str) -> bool | None:
         return len(trade.position_risk(symbol=symbol)) == 0
     except Exception:  # noqa: BLE001
         logger.exception("position check failed during emergency close for %s", symbol)
+        return None
+
+
+def _position_flat_now(trade: BinanceTradeClient, *, symbol: str) -> bool | None:
+    """True when flat, False when open, None when the read failed.
+
+    A failed read must not block the next stop or a reduce-only close.
+    """
+    try:
+        return len(trade.position_risk(symbol=symbol)) == 0
+    except Exception:  # noqa: BLE001
+        logger.warning("position re-read failed for %s", symbol)
         return None
 
 
@@ -744,8 +907,12 @@ def _emergency_close_verified(
                 http_status=200,
                 order_or_algo_id=str(fill.get("orderId") or ""),
             )
-            if Decimal(str(fill.get("executedQty") or "0")) > 0:
+            filled_qty = Decimal(str(fill.get("executedQty") or "0"))
+            if filled_qty >= qty or _position_gone(trade, symbol=symbol) is True:
                 return True
+            if filled_qty > 0:
+                # Partial reduce-only fill: do not resend -cls or treat as closed.
+                return False
         except Exception as exc:  # noqa: BLE001
             code = exc.binance_code if isinstance(exc, TradeClientError) else None
             _log_write(
@@ -765,9 +932,14 @@ def _emergency_close_verified(
                     conn=conn,
                     intent_id=intent_id,
                     step=query_step,
+                    sleep=sleep,
                 )
-                if recovered is not None and Decimal(str(recovered.get("executedQty") or "0")) > 0:
-                    return True
+                if recovered.kind == QueryResultKind.FOUND and recovered.order is not None:
+                    filled_qty = executed_qty(recovered.order)
+                    if filled_qty >= qty or _position_gone(trade, symbol=symbol) is True:
+                        return True
+                    if filled_qty > 0:
+                        return False
         # -2022 (reduceOnly, no position) counts as closed only after positionRisk confirms flat.
         if _position_gone(trade, symbol=symbol) is True:
             return True
@@ -1216,6 +1388,12 @@ def create_entry_preview(
         return {"ok": False, "reason": "off", "text": MSG_OFF}
     if _kill_blocks():
         return {"ok": False, "reason": "kill_switch", "text": MSG_KILL}
+    if symbol_has_in_flight_exec(conn, symbol):
+        return {
+            "ok": False,
+            "reason": "in_flight",
+            "text": _msg_symbol_in_flight(symbol),
+        }
     auth_reason: str | None = None
     client: BinanceTradeClient | None
     if trade is not None:
@@ -1233,7 +1411,12 @@ def create_entry_preview(
             client.assert_trade_key_safe()
             client.assert_account_modes()
         except TradeClientError as exc:
-            msg = str(exc) if str(exc) in {MSG_ONE_WAY, MSG_MULTI_ASSETS} else MSG_KEY_REFUSED
+            msg = (
+                str(exc)
+                if str(exc)
+                in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_ACCOUNT_MODE_UNREADABLE, MSG_MODE_UNREADABLE}
+                else MSG_KEY_REFUSED
+            )
             return {"ok": False, "reason": "key_refused", "text": msg}
         read_mark = None
         if assist_execute_mode() == "testnet" and read_futures is not None:
@@ -1289,6 +1472,50 @@ def create_entry_preview(
     }
 
 
+def _stale_card_levels(
+    conn: Any,
+    intent: dict[str, Any],
+    trade: BinanceTradeClient,
+    *,
+    now_ms_value: int,
+    read_mark: Decimal | None = None,
+) -> str | None:
+    """After claim, refuse when latest analysis side or (live) tick-rounded stop differs.
+
+    Testnet compares side only — the preview stop is testnet-scaled.
+    Uses MSG_EXPIRED copy. A new analysis_id with the same side and stop passes.
+    """
+    preview = intent["preview"] if isinstance(intent.get("preview"), dict) else {}
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    analysis = load_latest_analysis(conn, symbol, ASSIST_TIMEFRAME)
+    if analysis is None:
+        return None  # existing guards handle missing analysis
+    action = str(analysis.get("action") or "").lower()
+    if action != side.lower():
+        return "expired"
+    mode = assist_execute_mode()
+    if mode == "testnet":
+        return None
+    if analysis.get("invalidation_price") is None:
+        return "expired"
+    try:
+        filters = trade.symbol_filters(symbol)
+    except Exception:  # noqa: BLE001
+        return None
+    stop = Decimal(str(analysis["invalidation_price"]))
+    stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
+    preview_stop = round_level_to_tick(
+        Decimal(str(preview.get("stop") or "0")),
+        filters.tick_size,
+        side=side,
+        kind="stop",
+    )
+    if stop != preview_stop:
+        return "expired"
+    return None
+
+
 def _confirm_guards_entry(
     conn: Any,
     intent: dict[str, Any],
@@ -1314,7 +1541,7 @@ def _confirm_guards_entry(
     if analysis is None or not passes_signal_floor(analysis):
         return "low_confidence"
     if str(analysis.get("action") or "").lower() != side:
-        return "flat"
+        return "expired"
     if not analysis_is_fresh(analysis, now_ms=now_ms_value):
         return "stale_analysis"
     positions = trade.position_risk()
@@ -1381,6 +1608,398 @@ def _confirm_guards_entry(
     return None
 
 
+def _placement_log_client_ids(conn: Any, intent_id: str) -> set[str]:
+    """Client ids that have a stop or recover_slr placement row."""
+    rows = conn.execute(
+        """
+        SELECT client_order_id FROM assist_exec_log
+        WHERE intent_id=? AND step IN ('stop', 'recover_slr')
+          AND client_order_id IS NOT NULL
+        """,
+        (intent_id,),
+    ).fetchall()
+    out: set[str] = set()
+    for row in rows:
+        cid = row[0] if not hasattr(row, "keys") else row["client_order_id"]
+        if cid:
+            out.add(str(cid))
+    return out
+
+
+def _verify_stop_ids(
+    trade: BinanceTradeClient,
+    *,
+    conn: Any,
+    symbol: str,
+    intent_id: str,
+    side: str,
+    stop: Decimal,
+    position_qty: Decimal,
+    tags: tuple[str, ...] = ("sl0", "sl1", "slr"),
+) -> tuple[StopVerifyResult, str | None, list[dict[str, Any]] | None]:
+    """Return (best_result, verified_tag, open_list). Prefer sl0, then slr, then sl1.
+
+    Fetches openAlgoOrders once. algoOrder GET only for tags with a placement log.
+    """
+    flat = False
+    try:
+        flat = len(trade.position_risk(symbol=symbol)) == 0
+    except Exception:  # noqa: BLE001
+        flat = False
+    try:
+        open_list = trade.open_algo_orders(symbol=symbol, strict=True)
+    except Exception:  # noqa: BLE001
+        return StopVerifyResult.UNVERIFIABLE, None, None
+    placed = _placement_log_client_ids(conn, intent_id)
+    close_side = _closing_side(side)
+    best: StopVerifyResult = StopVerifyResult.NOT_PROTECTED
+    verified_tag: str | None = None
+    saw_unverifiable = False
+    for tag in tags:
+        cid = client_order_id(intent_id, tag)
+        result = verify_our_stop(
+            trade,
+            symbol=symbol,
+            client_id=cid,
+            closing_side=close_side,
+            planned_stop=stop,
+            position_qty=position_qty,
+            position_flat=flat,
+            open_list=open_list,
+            query_if_missing=cid in placed,
+        )
+        if result == StopVerifyResult.VERIFIED:
+            if verified_tag is None or tag == "sl0":
+                verified_tag = tag
+                best = StopVerifyResult.VERIFIED
+            if tag == "sl0":
+                return StopVerifyResult.VERIFIED, "sl0", open_list
+        elif result == StopVerifyResult.CLOSED_BY_STOP:
+            return StopVerifyResult.CLOSED_BY_STOP, tag, open_list
+        elif result == StopVerifyResult.UNVERIFIABLE:
+            saw_unverifiable = True
+    if best == StopVerifyResult.VERIFIED:
+        return best, verified_tag, open_list
+    if saw_unverifiable:
+        return StopVerifyResult.UNVERIFIABLE, None, open_list
+    return StopVerifyResult.NOT_PROTECTED, None, open_list
+
+
+def _cancel_dup_stops_after_verified(
+    trade: BinanceTradeClient,
+    *,
+    conn: Any,
+    intent_id: str,
+    symbol: str,
+    keep_tag: str,
+) -> bool:
+    """Cancel other stop tags only when they were logged as placed and are still open."""
+    placed = _placement_log_client_ids(conn, intent_id)
+    try:
+        open_list = trade.open_algo_orders(symbol=symbol, strict=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("dup stop list failed %s", symbol)
+        return False
+    open_ids = {str(order.get("clientAlgoId") or order.get("clientOrderId") or "") for order in open_list}
+    all_ok = True
+    for tag in ("sl0", "sl1", "slr"):
+        if tag == keep_tag:
+            continue
+        cid = client_order_id(intent_id, tag)
+        if cid not in placed or cid not in open_ids:
+            continue
+        if not _cancel_algo_client_ok(
+            trade,
+            symbol=symbol,
+            client_algo_id=cid,
+            conn=conn,
+            intent_id=intent_id,
+            step="dup_stop_cancel",
+        ):
+            all_ok = False
+    return all_ok
+
+
+def _stop_attempt_tags(
+    intent_id: str,
+    client_id: str,
+    *,
+    attempt_sl1_on_unknown: bool,
+) -> list[tuple[str, str]]:
+    if not attempt_sl1_on_unknown:
+        tag = "slr"
+        if client_id.endswith("-sl0"):
+            tag = "sl0"
+        elif client_id.endswith("-sl1"):
+            tag = "sl1"
+        return [(tag, client_id)]
+    return [
+        ("sl0", client_order_id(intent_id, "sl0")),
+        ("sl1", client_order_id(intent_id, "sl1")),
+    ]
+
+
+def _read_back_stop(
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    client_id: str,
+    closing_side: str,
+    stop: Decimal,
+    qty: Decimal,
+) -> StopVerifyResult:
+    return verify_our_stop(
+        trade,
+        symbol=symbol,
+        client_id=client_id,
+        closing_side=closing_side,
+        planned_stop=stop,
+        position_qty=qty,
+        position_flat=False,
+    )
+
+
+def _grace_reread_stop(
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    client_id: str,
+    closing_side: str,
+    stop: Decimal,
+    qty: Decimal,
+    sleep: Callable[[float], None],
+) -> StopVerifyResult:
+    """Up to three more reads, one second apart, after a success POST looked unprotected.
+
+    -2011/-2013 stay NOT_PROTECTED. A failed or non-list read is UNVERIFIABLE.
+    """
+    last = StopVerifyResult.NOT_PROTECTED
+    for _ in range(3):
+        sleep(1)
+        last = _read_back_stop(
+            trade,
+            symbol=symbol,
+            client_id=client_id,
+            closing_side=closing_side,
+            stop=stop,
+            qty=qty,
+        )
+        if last in {
+            StopVerifyResult.VERIFIED,
+            StopVerifyResult.CLOSED_BY_STOP,
+            StopVerifyResult.UNVERIFIABLE,
+        }:
+            return last
+    return last
+
+
+def _place_and_verify_stop(
+    trade: BinanceTradeClient,
+    *,
+    conn: Any,
+    intent_id: str,
+    symbol: str,
+    side: str,
+    qty: Decimal,
+    stop: Decimal,
+    client_id: str,
+    sleep: Callable[[float], None],
+    attempt_sl1_on_unknown: bool = True,
+) -> tuple[StopVerifyResult, str | None, str | None]:
+    """Place STOP_MARKET and verify. Returns (result, verified_tag, err).
+
+    Emergency close is for the caller, and only when this does not return
+    VERIFIED or UNVERIFIABLE. UNVERIFIABLE means a stop POST returned a success
+    body with an algo id and a read-back could not be read. A success body with
+    an algo id never posts another stop tag. A mark-read failure or ConnectError
+    before the POST is not sent: try the next tag. Any other miss tries sl1
+    (when enabled), then one final verify.
+    """
+    close_side = _closing_side(side)
+    stop_err: str | None = None
+    attempts = _stop_attempt_tags(intent_id, client_id, attempt_sl1_on_unknown=attempt_sl1_on_unknown)
+    for index, (tag, scid) in enumerate(attempts):
+        if index > 0:
+            flat = _position_flat_now(trade, symbol=symbol)
+            if flat is True:
+                return StopVerifyResult.CLOSED_BY_STOP, None, stop_err
+        try:
+            mark = trade.mark_price(symbol)
+        except Exception as exc:  # noqa: BLE001 — not sent; try the next stop id
+            stop_err = type(exc).__name__
+            logger.warning("mark read failed before stop %s: %s", scid, stop_err)
+            continue
+        if (side == "long" and mark <= stop) or (side == "short" and mark >= stop):
+            stop_err = "would trigger"
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="stop",
+                endpoint="/fapi/v1/algoOrder",
+                client_order_id=scid,
+                http_status=400,
+                binance_code=-2021,
+            )
+            continue
+        try:
+            algo = trade.place_algo_stop(
+                symbol=symbol,
+                side=close_side,
+                qty=qty,
+                trigger=stop,
+                order_type="STOP_MARKET",
+                client_id=scid,
+            )
+        except httpx.ConnectError as exc:
+            stop_err = str(exc)
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="stop",
+                endpoint="/fapi/v1/algoOrder",
+                client_order_id=scid,
+            )
+            vr = _read_back_stop(
+                trade,
+                symbol=symbol,
+                client_id=scid,
+                closing_side=close_side,
+                stop=stop,
+                qty=qty,
+            )
+            if vr == StopVerifyResult.VERIFIED:
+                return vr, tag, None
+            if vr == StopVerifyResult.CLOSED_BY_STOP:
+                return vr, tag, None
+            continue
+        except Exception as exc:  # noqa: BLE001
+            stop_err = str(exc)
+            code = exc.binance_code if isinstance(exc, TradeClientError) else None
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="stop",
+                endpoint="/fapi/v1/algoOrder",
+                client_order_id=scid,
+                http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+                binance_code=code,
+            )
+            if _is_clear_rejection(exc):
+                continue
+            if index == 0 and len(attempts) > 1:
+                sleep(1)
+            vr = _read_back_stop(
+                trade,
+                symbol=symbol,
+                client_id=scid,
+                closing_side=close_side,
+                stop=stop,
+                qty=qty,
+            )
+            if vr == StopVerifyResult.VERIFIED:
+                return vr, tag, None
+            if vr == StopVerifyResult.CLOSED_BY_STOP:
+                return vr, tag, None
+            continue
+        algo_id = str(algo.get("algoId") or "")
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="stop",
+            endpoint="/fapi/v1/algoOrder",
+            client_order_id=scid,
+            http_status=200,
+            order_or_algo_id=algo_id,
+        )
+        vr = _read_back_stop(
+            trade,
+            symbol=symbol,
+            client_id=scid,
+            closing_side=close_side,
+            stop=stop,
+            qty=qty,
+        )
+        if vr == StopVerifyResult.VERIFIED:
+            return vr, tag, None
+        if vr == StopVerifyResult.CLOSED_BY_STOP:
+            return vr, tag, None
+        if algo_id and vr == StopVerifyResult.UNVERIFIABLE:
+            return StopVerifyResult.UNVERIFIABLE, None, stop_err
+        if algo_id and vr == StopVerifyResult.NOT_PROTECTED:
+            vr = _grace_reread_stop(
+                trade,
+                symbol=symbol,
+                client_id=scid,
+                closing_side=close_side,
+                stop=stop,
+                qty=qty,
+                sleep=sleep,
+            )
+            if vr == StopVerifyResult.VERIFIED:
+                return vr, tag, None
+            if vr == StopVerifyResult.CLOSED_BY_STOP:
+                return vr, tag, None
+            if vr == StopVerifyResult.UNVERIFIABLE:
+                return StopVerifyResult.UNVERIFIABLE, None, stop_err
+        if algo_id:
+            # Success with an algo id: never place another tag in this sequence.
+            break
+    final_vr, final_tag, _open_list = _verify_stop_ids(
+        trade,
+        conn=conn,
+        symbol=symbol,
+        intent_id=intent_id,
+        side=side,
+        stop=stop,
+        position_qty=qty,
+    )
+    if final_vr == StopVerifyResult.VERIFIED and final_tag is not None:
+        return final_vr, final_tag, stop_err
+    if final_vr == StopVerifyResult.CLOSED_BY_STOP:
+        return final_vr, final_tag, stop_err
+    return StopVerifyResult.NOT_PROTECTED, None, stop_err
+
+
+def _emergency_close_reply(
+    trade: BinanceTradeClient,
+    *,
+    conn: Any,
+    intent_id: str,
+    symbol: str,
+    side: str,
+    qty: Decimal,
+    stop: Decimal,
+    stop_err: str | None,
+    sleep: Callable[[float], None],
+) -> ExecResult:
+    closed = _emergency_close_verified(
+        trade,
+        conn=conn,
+        intent_id=intent_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        sleep=sleep,
+    )
+    if closed:
+        cancel_ok = _orphan_cancel_after_close(trade, conn=conn, intent_id=intent_id, symbol=symbol)
+        text = f"{MSG_STOP_CLOSED} ({stop_err or 'stop failed'})"
+        if not cancel_ok:
+            text = f"{text}\n{_orphan_cancel_warning(symbol)}"
+        return _exec_result(text, status="failed")
+    remain_qty = qty
+    try:
+        still = trade.position_risk(symbol=symbol)
+        if still:
+            remain_qty = still[0].qty
+    except Exception:  # noqa: BLE001
+        pass
+    return _exec_result(
+        _msg_close_unconfirmed(symbol, side, qty=remain_qty, stop=stop),
+        status="failed",
+    )
+
+
 def run_entry_sequence(
     conn: Any,
     intent_id: str,
@@ -1390,7 +2009,7 @@ def run_entry_sequence(
 ) -> str:
     intent = get_exec_intent(conn, intent_id)
     if intent is None:
-        return "ไม่พบคำสั่ง"
+        return _exec_result("ไม่พบคำสั่ง", status="failed")
     preview = intent["preview"]
     symbol = str(intent["symbol"])
     side = str(intent["side"])
@@ -1403,6 +2022,22 @@ def run_entry_sequence(
     target = round_level_to_tick(target, filters.tick_size, side=side, kind="target")
     open_side = _opening_side(side)
     close_side = _closing_side(side)
+
+    # Pre-send position baseline. Guard already requires flat; refuse if not.
+    try:
+        baseline = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("position baseline failed before market")
+        return _exec_result(MSG_BINANCE_NOT_SENT, status="failed")
+    if baseline:
+        return _exec_result(_reason_th("open_position"), status="failed")
+    _log_write(
+        conn,
+        intent_id=intent_id,
+        step="position_baseline",
+        endpoint="/fapi/v3/positionRisk",
+        http_status=200,
+    )
 
     # Clear stale jv- stop/TP before opening (never blocks the entry).
     try:
@@ -1417,7 +2052,7 @@ def run_entry_sequence(
         )
     except (httpx.HTTPError, ProviderError) as exc:
         logger.warning("pre-market marginType network error %s", type(exc).__name__)
-        return MSG_BINANCE_NOT_SENT
+        return _exec_result(MSG_BINANCE_NOT_SENT, status="failed")
     except TradeClientError as exc:
         _log_write(
             conn,
@@ -1428,14 +2063,14 @@ def run_entry_sequence(
             binance_code=exc.binance_code,
         )
         if exc.binance_code != -4046:
-            return f"ตั้ง isolated ไม่ได้: {_reason_th(str(exc))}"
+            return _exec_result(f"ตั้ง isolated ไม่ได้: {_reason_th(str(exc))}", status="failed")
 
     try:
         trade.set_leverage(symbol, leverage)
         _log_write(conn, intent_id=intent_id, step="leverage", endpoint="/fapi/v1/leverage", http_status=200)
     except (httpx.HTTPError, ProviderError) as exc:
         logger.warning("pre-market leverage network error %s", type(exc).__name__)
-        return MSG_BINANCE_NOT_SENT
+        return _exec_result(MSG_BINANCE_NOT_SENT, status="failed")
     except TradeClientError as exc:
         _log_write(
             conn,
@@ -1445,7 +2080,7 @@ def run_entry_sequence(
             http_status=exc.http_status,
             binance_code=exc.binance_code,
         )
-        return f"ตั้ง leverage ไม่ได้: {exc}"
+        return _exec_result(f"ตั้ง leverage ไม่ได้: {exc}", status="failed")
 
     cid = client_order_id(intent_id, "mkt")
     fill: dict[str, Any] | None = None
@@ -1460,6 +2095,51 @@ def run_entry_sequence(
             http_status=200,
             order_or_algo_id=str(fill.get("orderId") or ""),
         )
+        outcome = classify_order_body(fill)
+        if outcome == OrderOutcome.NOT_FILLED:
+            return _exec_result("เข้าไม้ไม่สำเร็จ", status="failed")
+        if outcome == OrderOutcome.UNKNOWN:
+            # executedQty 0 / NEW — query before giving up.
+            queried = _query_fill_after_unknown(
+                trade,
+                symbol=symbol,
+                client_id=cid,
+                conn=conn,
+                intent_id=intent_id,
+                step="market_query",
+                sleep=sleep,
+            )
+            if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+                if classify_order_body(queried.order) == OrderOutcome.FILLED:
+                    fill = queried.order
+                elif classify_order_body(queried.order) == OrderOutcome.NOT_FILLED:
+                    return _exec_result("เข้าไม้ไม่สำเร็จ", status="failed")
+                else:
+                    try:
+                        pos_fill = _fill_from_position(trade, symbol=symbol)
+                    except Exception:  # noqa: BLE001
+                        pos_fill = None
+                    if pos_fill is None:
+                        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+                    fill = {
+                        "executedQty": str(pos_fill[0]),
+                        "avgPrice": str(pos_fill[1]),
+                        "orderId": "",
+                    }
+            else:
+                try:
+                    pos_fill = _fill_from_position(trade, symbol=symbol)
+                except Exception:  # noqa: BLE001
+                    logger.exception("position read failed after unknown market body")
+                    return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+                if pos_fill is not None:
+                    fill = {
+                        "executedQty": str(pos_fill[0]),
+                        "avgPrice": str(pos_fill[1]),
+                        "orderId": "",
+                    }
+                else:
+                    return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
     except Exception as exc:  # noqa: BLE001
         code = exc.binance_code if isinstance(exc, TradeClientError) else None
         _log_write(
@@ -1472,7 +2152,7 @@ def run_entry_sequence(
             binance_code=code,
         )
         if _is_clear_rejection(exc):
-            return f"เข้าไม้ไม่สำเร็จ: {exc}"
+            return _exec_result(f"เข้าไม้ไม่สำเร็จ: {exc}", status="failed")
         recovered = _query_fill_after_unknown(
             trade,
             symbol=symbol,
@@ -1480,145 +2160,79 @@ def run_entry_sequence(
             conn=conn,
             intent_id=intent_id,
             step="market_query",
+            sleep=sleep,
         )
-        if recovered is not None and Decimal(str(recovered.get("executedQty") or "0")) > 0:
-            fill = recovered
+        if recovered.kind == QueryResultKind.FOUND and recovered.order is not None:
+            if classify_order_body(recovered.order) == OrderOutcome.FILLED:
+                fill = recovered.order
+            elif classify_order_body(recovered.order) == OrderOutcome.NOT_FILLED:
+                return _exec_result("เข้าไม้ไม่สำเร็จ", status="failed")
+            else:
+                fill = None
         else:
+            fill = None
+        if fill is None:
             try:
                 pos_fill = _fill_from_position(trade, symbol=symbol)
             except Exception:  # noqa: BLE001
                 logger.exception("position read failed after unknown market result")
-                return _msg_check_now(symbol)
-            if pos_fill is None:
-                return "เข้าไม้ไม่สำเร็จ"
-            fill = {
-                "executedQty": str(pos_fill[0]),
-                "avgPrice": str(pos_fill[1]),
-                "orderId": "",
-            }
+                return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+            if pos_fill is not None:
+                # Query unreadable/not_found but position present → continue to stop.
+                fill = {
+                    "executedQty": str(pos_fill[0]),
+                    "avgPrice": str(pos_fill[1]),
+                    "orderId": "",
+                }
+            else:
+                # First-burst not_found + flat (or unreadable + flat) → unknown, not failed.
+                return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
 
     assert fill is not None
-    exec_qty = Decimal(str(fill.get("executedQty") or "0"))
+    exec_qty = executed_qty(fill)
     avg = _positive_fill_price(fill)
     if exec_qty <= 0:
-        return _reason_th("zero_fill")
+        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
 
-    stop_ok = False
-    stop_err: str | None = None
-    for attempt in range(2):
-        scid = client_order_id(intent_id, f"sl{attempt}")
-        try:
-            mark = trade.mark_price(symbol)
-            if side == "long" and mark <= stop:
-                raise TradeClientError("would trigger", binance_code=-2021)
-            if side == "short" and mark >= stop:
-                raise TradeClientError("would trigger", binance_code=-2021)
-            algo = trade.place_algo_stop(
-                symbol=symbol,
-                side=close_side,
-                qty=exec_qty,
-                trigger=stop,
-                order_type="STOP_MARKET",
-                client_id=scid,
-            )
-            _log_write(
-                conn,
-                intent_id=intent_id,
-                step="stop",
-                endpoint="/fapi/v1/algoOrder",
-                client_order_id=scid,
-                http_status=200,
-                order_or_algo_id=str(algo.get("algoId") or ""),
-            )
-            stop_ok = True
-            break
-        except Exception as exc:  # noqa: BLE001
-            stop_err = str(exc)
-            code = exc.binance_code if isinstance(exc, TradeClientError) else None
-            _log_write(
-                conn,
-                intent_id=intent_id,
-                step="stop",
-                endpoint="/fapi/v1/algoOrder",
-                client_order_id=scid,
-                http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
-                binance_code=code,
-            )
-            # Unknown result: the stop may already exist under this clientAlgoId.
-            if not _is_clear_rejection(exc):
-                found = _safe_find_algo(trade, symbol=symbol, client_id=scid)
-                if found is not None:
-                    stop_ok = True
-                    break
-                # sl0 may still be landing — wait once and look again before sl1.
-                if attempt == 0:
-                    sleep(1)
-                    found = _safe_find_algo(trade, symbol=symbol, client_id=scid)
-                    if found is not None:
-                        stop_ok = True
-                        break
-            if isinstance(exc, TradeClientError) and exc.binance_code == -2021:
-                break
-
-    if not stop_ok:
-        # Final confirm: either stop may have landed after an unknown result.
-        sl0_id = client_order_id(intent_id, "sl0")
-        sl1_id = client_order_id(intent_id, "sl1")
-        found_sl0 = _safe_find_algo(trade, symbol=symbol, client_id=sl0_id)
-        found_sl1 = _safe_find_algo(trade, symbol=symbol, client_id=sl1_id)
-        if found_sl0 is not None or found_sl1 is not None:
-            stop_ok = True
-            if found_sl0 is not None and found_sl1 is not None:
-                algo_id = found_sl1.get("algoId")
-                if algo_id is not None:
-                    try:
-                        trade.cancel_algo(symbol=symbol, algo_id=algo_id)
-                        _log_write(
-                            conn,
-                            intent_id=intent_id,
-                            step="dup_stop_cancel",
-                            endpoint="/fapi/v1/algoOrder",
-                            client_order_id=sl1_id,
-                            http_status=200,
-                            order_or_algo_id=str(algo_id),
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "dup stop cancel failed %s: %s",
-                            sl1_id,
-                            type(exc).__name__,
-                        )
-                        _log_write(
-                            conn,
-                            intent_id=intent_id,
-                            step="dup_stop_cancel",
-                            endpoint="/fapi/v1/algoOrder",
-                            client_order_id=sl1_id,
-                            http_status=(exc.http_status if isinstance(exc, TradeClientError) else None),
-                            binance_code=(exc.binance_code if isinstance(exc, TradeClientError) else None),
-                            order_or_algo_id=str(algo_id),
-                        )
-
-    if not stop_ok:
-        # No stop confirmed (a stop that did land was found by lookup above).
-        # Network errors included: close reduce-only rather than leave a filled,
-        # unprotected position while the owner may not be watching.
-        closed = _emergency_close_verified(
+    vr, keep_tag, stop_err = _place_and_verify_stop(
+        trade,
+        conn=conn,
+        intent_id=intent_id,
+        symbol=symbol,
+        side=side,
+        qty=exec_qty,
+        stop=stop,
+        client_id=client_order_id(intent_id, "sl0"),
+        sleep=sleep,
+        attempt_sl1_on_unknown=True,
+    )
+    if vr == StopVerifyResult.CLOSED_BY_STOP:
+        return _exec_result(MSG_ALREADY_CLOSED, status="done")
+    if vr == StopVerifyResult.UNVERIFIABLE:
+        return _exec_result(
+            msg_stop_unverifiable(symbol=symbol, qty=exec_qty, stop=stop),
+            status="unknown",
+        )
+    if vr != StopVerifyResult.VERIFIED:
+        if _position_flat_now(trade, symbol=symbol) is True:
+            return _exec_result(MSG_ALREADY_CLOSED, status="done")
+        return _emergency_close_reply(
             trade,
             conn=conn,
             intent_id=intent_id,
             symbol=symbol,
             side=side,
             qty=exec_qty,
+            stop=stop,
+            stop_err=stop_err,
             sleep=sleep,
         )
-        if closed:
-            cancel_ok = _orphan_cancel_after_close(trade, conn=conn, intent_id=intent_id, symbol=symbol)
-            text = f"{MSG_STOP_CLOSED} ({stop_err or 'stop failed'})"
-            if not cancel_ok:
-                text = f"{text}\n{_orphan_cancel_warning(symbol)}"
-            return text
-        return _msg_close_unconfirmed(symbol, side, qty=exec_qty, stop=stop)
+    if _position_flat_now(trade, symbol=symbol) is True:
+        return _exec_result(MSG_ALREADY_CLOSED, status="done")
+    if keep_tag is not None:
+        _cancel_dup_stops_after_verified(
+            trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=keep_tag
+        )
 
     tp_note = ""
     tcid = client_order_id(intent_id, "tp")
@@ -1668,8 +2282,9 @@ def run_entry_sequence(
             conn=conn,
             intent_id=intent_id,
             step="entry_price_query",
+            sleep=sleep,
         )
-        avg = _positive_fill_price(queried)
+        avg = _positive_fill_price(queried.order if queried.kind == QueryResultKind.FOUND else None)
         if avg is not None:
             logger.info("entry fill price source=order_query intent_id=%s", intent_id)
         else:
@@ -1736,14 +2351,20 @@ def run_entry_sequence(
 
     side_l = "LONG" if side == "long" else "SHORT"
     if avg is None or avg <= 0:
-        return f"✅ เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\nstop {stop} · TP {target}{tp_note}"
+        return _exec_result(
+            f"✅ เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\nstop {stop} · TP {target}{tp_note}",
+            status="done",
+        )
     loss = abs(avg - stop) * exec_qty
-    return (
-        f"✅ เข้า {symbol} {side_l}\n"
-        f"fill {avg} × {exec_qty}\n"
-        f"stop {stop} · TP {target}\n"
-        f"ถ้าชน stop ≈ {loss.quantize(Decimal('0.01'))} USDT"
-        f"{tp_note}"
+    return _exec_result(
+        (
+            f"✅ เข้า {symbol} {side_l}\n"
+            f"fill {avg} × {exec_qty}\n"
+            f"stop {stop} · TP {target}\n"
+            f"ถ้าชน stop ≈ {loss.quantize(Decimal('0.01'))} USDT"
+            f"{tp_note}"
+        ),
+        status="done",
     )
 
 
@@ -1903,13 +2524,13 @@ def run_move_stop_sequence(
         return _reason_th("not_tighter")
 
     cid = client_order_id(intent_id, "ms")
-    placed = False
+    close_side = _closing_side(side)
+    placed_ok = False
     clear_reject_code: int | None = None
-    lookup_confirmed_absent = False
     try:
         algo = trade.place_algo_stop(
             symbol=symbol,
-            side=_closing_side(side),
+            side=close_side,
             qty=pos.qty,
             trigger=new_stop,
             order_type="STOP_MARKET",
@@ -1924,7 +2545,6 @@ def run_move_stop_sequence(
             http_status=200,
             order_or_algo_id=str(algo.get("algoId") or ""),
         )
-        placed = True
     except Exception as exc:  # noqa: BLE001
         code = exc.binance_code if isinstance(exc, TradeClientError) else None
         _log_write(
@@ -1938,23 +2558,73 @@ def run_move_stop_sequence(
         )
         if _is_clear_rejection(exc):
             clear_reject_code = code
-        else:
-            found = _safe_find_algo(trade, symbol=symbol, client_id=cid)
-            if found is not None:
-                placed = True
-            else:
-                # Lookup empty or failed — do not cancel old. Empty list = confirmed absent.
-                try:
-                    again = trade.find_algo_by_client_id(symbol=symbol, client_id=cid)
-                    lookup_confirmed_absent = again is None
-                except Exception:  # noqa: BLE001
-                    lookup_confirmed_absent = False
-        if not placed:
-            if clear_reject_code is not None:
-                return f"{MSG_MOVE_STOP_KEEP} ({clear_reject_code})"
-            if lookup_confirmed_absent:
-                return MSG_MOVE_STOP_KEEP
-            return MSG_MOVE_STOP_UNKNOWN
+        # else fall through to verify
+
+    ms_vr = verify_our_stop(
+        trade,
+        symbol=symbol,
+        client_id=cid,
+        closing_side=close_side,
+        planned_stop=new_stop,
+        position_qty=pos.qty,
+        position_flat=False,
+    )
+    if ms_vr == StopVerifyResult.VERIFIED:
+        placed_ok = True
+    elif clear_reject_code is not None:
+        old_verified = False
+        for old in old_stops:
+            old_cid = str(old.get("clientAlgoId") or old.get("clientOrderId") or "")
+            old_px = order_stop_price(old)
+            if not old_cid or old_px is None:
+                continue
+            if (
+                verify_our_stop(
+                    trade,
+                    symbol=symbol,
+                    client_id=old_cid,
+                    closing_side=close_side,
+                    planned_stop=old_px,
+                    position_qty=pos.qty,
+                    position_flat=False,
+                )
+                == StopVerifyResult.VERIFIED
+            ):
+                old_verified = True
+                break
+        if old_verified:
+            return _exec_result(f"{MSG_MOVE_STOP_KEEP} ({clear_reject_code})", status="failed")
+        return _exec_result(MSG_MOVE_STOP_OLD_UNREADABLE, status="failed")
+    else:
+        # Unknown placement and not verified — do not cancel old stops.
+        old_verified = False
+        for old in old_stops:
+            old_cid = str(old.get("clientAlgoId") or old.get("clientOrderId") or "")
+            if not old_cid:
+                continue
+            old_px = order_stop_price(old)
+            if old_px is None:
+                continue
+            if (
+                verify_our_stop(
+                    trade,
+                    symbol=symbol,
+                    client_id=old_cid,
+                    closing_side=close_side,
+                    planned_stop=old_px,
+                    position_qty=pos.qty,
+                    position_flat=False,
+                )
+                == StopVerifyResult.VERIFIED
+            ):
+                old_verified = True
+                break
+        if old_verified:
+            return _exec_result(MSG_MOVE_STOP_UNKNOWN_OLD_OK, status="unknown")
+        return _exec_result(MSG_MOVE_STOP_UNKNOWN, status="unknown")
+
+    if not placed_ok:
+        return _exec_result(MSG_MOVE_STOP_UNKNOWN, status="unknown")
 
     cancelled: list[str] = []
     cancel_failed = False
@@ -1975,7 +2645,6 @@ def run_move_stop_sequence(
             )
             cancelled.append(label)
         except Exception as exc:  # noqa: BLE001
-            cancel_failed = True
             code = exc.binance_code if isinstance(exc, TradeClientError) else None
             _log_write(
                 conn,
@@ -1986,124 +2655,39 @@ def run_move_stop_sequence(
                 binance_code=code,
                 order_or_algo_id=str(algo_id),
             )
+            if isinstance(exc, TradeClientError) and exc.binance_code in {-2011, -2013}:
+                cancelled.append(label)
+            else:
+                cancel_failed = True
     head = f"✅ เลื่อน stop {symbol} → {fmt_price(new_stop)} · qty ทั้งไม้ {fmt_qty(pos.qty)}"
     if cancel_failed:
-        return f"{head} · {MSG_MOVE_STOP_TWO}"
+        return _exec_result(f"{head} · {MSG_MOVE_STOP_TWO}", status="done")
     if cancelled:
-        return f"{head} · ยกเลิก {', '.join(cancelled)}"
-    return head
+        return _exec_result(f"{head} · ยกเลิก {', '.join(cancelled)}", status="done")
+    return _exec_result(head, status="done")
 
 
-def run_exit_sequence(
+def _cancel_exit_stops_and_tp(
+    trade: BinanceTradeClient,
+    *,
     conn: Any,
     intent_id: str,
-    *,
-    trade: BinanceTradeClient,
-) -> str:
-    intent = get_exec_intent(conn, intent_id)
-    if intent is None:
-        return "ไม่พบคำสั่ง"
-    symbol = str(intent["symbol"])
-    side = str(intent["side"])
-    positions = trade.position_risk(symbol=symbol)
-    if not positions:
-        return MSG_ALREADY_CLOSED
-    pos = positions[0]
-    if pos.side != side:
-        return _reason_th("wrong_side")
-    # Same position only: qty and entry must match the advice preview. Never raise here —
-    # the callback already claimed the intent; an exception would leave a "check now" reply.
-    raw_preview = intent.get("preview")
-    preview: dict[str, Any] = raw_preview if isinstance(raw_preview, dict) else {}
+    symbol: str,
+    side: str,
+    position_side: str,
+) -> tuple[bool, list[str]]:
+    """Cancel jv- stop/TP after a flat exit. Failed client ids are returned."""
+    all_ok = True
+    failed_ids: list[str] = []
     try:
-        preview_qty = Decimal(str(preview["qty"]))
-        preview_entry = Decimal(str(preview["entry"]))
-    except Exception:  # noqa: BLE001 — missing/None/non-numeric counts as mismatch
-        return MSG_EXIT_POSITION_CHANGED
-    if preview_qty != pos.qty or preview_entry != pos.entry_price:
-        return MSG_EXIT_POSITION_CHANGED
-    cid = client_order_id(intent_id, "ex")
-    fill: dict[str, Any] | None = None
-    try:
-        fill = trade.market_order(
-            symbol=symbol,
-            side=_closing_side(side),
-            qty=pos.qty,
-            reduce_only=True,
-            client_id=cid,
-        )
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step="exit_market",
-            endpoint="/fapi/v1/order",
-            client_order_id=cid,
-            http_status=200,
-            order_or_algo_id=str(fill.get("orderId") or ""),
-        )
-    except Exception as exc:  # noqa: BLE001
-        code = exc.binance_code if isinstance(exc, TradeClientError) else None
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step="exit_market",
-            endpoint="/fapi/v1/order",
-            client_order_id=cid,
-            http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
-            binance_code=code,
-        )
-        if _is_clear_rejection(exc):
-            return f"ปิดไม้ไม่สำเร็จ: {exc}"
-        recovered = _query_fill_after_unknown(
-            trade,
-            symbol=symbol,
-            client_id=cid,
-            conn=conn,
-            intent_id=intent_id,
-            step="exit_query",
-        )
-        if recovered is not None and Decimal(str(recovered.get("executedQty") or "0")) > 0:
-            fill = recovered
-        else:
-            try:
-                still = trade.position_risk(symbol=symbol)
-            except Exception:  # noqa: BLE001
-                still = [pos]
-            if still:
-                return "ปิดไม้ไม่สำเร็จ"
-            fill = {
-                "executedQty": str(pos.qty),
-                "avgPrice": str(pos.entry_price),
-                "orderId": "",
-            }
-
-    assert fill is not None
-    avg = _positive_fill_price(fill)
-    if avg is None:
-        queried = _query_fill_after_unknown(
-            trade,
-            symbol=symbol,
-            client_id=cid,
-            conn=conn,
-            intent_id=intent_id,
-            step="exit_price_query",
-        )
-        avg = _positive_fill_price(queried)
-        if avg is not None:
-            logger.info("exit fill price source=order_query intent_id=%s", intent_id)
-        else:
-            logger.info("exit fill price source=unknown intent_id=%s", intent_id)
-    pnl = Decimal("0")
-    try:
-        order_id = fill.get("orderId")
-        if order_id not in (None, ""):
-            pnl = trade.realized_pnl_for_order(symbol=symbol, order_id=order_id)
-    except TradeClientError:
-        pass
-
-    for order in trade.all_open_orders(symbol=symbol):
-        if not is_protective_stop(order, position_side=pos.position_side, trade_side=side):
-            # Also cancel TP (same closing side reduce-only conditionals)
+        orders = trade.all_open_orders(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return False, failed_ids
+    for order in orders:
+        cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
+        if not cid.startswith("jv-"):
+            continue
+        if not is_protective_stop(order, position_side=position_side, trade_side=side):
             otype = str(order.get("type") or order.get("orderType") or "").upper()
             if otype not in {
                 "STOP_MARKET",
@@ -2138,10 +2722,198 @@ def run_exit_sequence(
                 binance_code=exc.binance_code,
                 order_or_algo_id=str(algo_id),
             )
-    pnl_s = pnl.quantize(Decimal("0.01"))
-    if avg is None or avg <= 0:
-        return f"✅ ปิด {symbol} · PnL {pnl_s} USDT"
-    return f"✅ ปิด {symbol} @ {avg} · PnL {pnl_s} USDT"
+            if exc.binance_code not in {-2011, -2013}:
+                all_ok = False
+                failed_ids.append(cid)
+        except Exception:  # noqa: BLE001
+            all_ok = False
+            failed_ids.append(cid)
+    return all_ok, failed_ids
+
+
+def _finish_flat_exit(
+    trade: BinanceTradeClient,
+    conn: Any,
+    *,
+    intent_id: str,
+    symbol: str,
+    side: str,
+    position_side: str,
+    avg: Decimal | None,
+    pnl: Decimal | None,
+    include_pnl: bool,
+) -> ExecResult:
+    """Cancel stops after a flat exit. A failed cancel stays unknown for recovery."""
+    cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        trade,
+        conn=conn,
+        intent_id=intent_id,
+        symbol=symbol,
+        side=side,
+        position_side=position_side,
+    )
+    if include_pnl:
+        pnl_bit = " · PnL ไม่ทราบ" if pnl is None else f" · PnL {pnl.quantize(Decimal('0.01'))} USDT"
+    else:
+        pnl_bit = ""
+    if avg is not None and avg > 0:
+        text = f"✅ ปิด {symbol} @ {avg}{pnl_bit}"
+    elif include_pnl:
+        text = f"✅ ปิด {symbol}{pnl_bit}"
+    else:
+        text = f"✅ ปิด {symbol}"
+    if not cancel_ok:
+        warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+        text = f"{text}\n{warning}"
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="exit_cancel_pending",
+            endpoint="/fapi/v1/algoOrder",
+        )
+        return _exec_result(text, status="unknown")
+    return _exec_result(text, status="done")
+
+
+def _open_jv_client_ids(trade: BinanceTradeClient, symbol: str) -> list[str]:
+    try:
+        orders = trade.all_open_orders(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return []
+    ids: list[str] = []
+    for order in orders:
+        cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
+        if cid.startswith("jv-"):
+            ids.append(cid)
+    return ids
+
+
+def run_exit_sequence(
+    conn: Any,
+    intent_id: str,
+    *,
+    trade: BinanceTradeClient,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    intent = get_exec_intent(conn, intent_id)
+    if intent is None:
+        return _exec_result("ไม่พบคำสั่ง", status="failed")
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    positions = trade.position_risk(symbol=symbol)
+    if not positions:
+        return _exec_result(MSG_ALREADY_CLOSED, status="done")
+    pos = positions[0]
+    if pos.side != side:
+        return _exec_result(_reason_th("wrong_side"), status="failed")
+    # Same position only: qty and entry must match the advice preview.
+    raw_preview = intent.get("preview")
+    preview: dict[str, Any] = raw_preview if isinstance(raw_preview, dict) else {}
+    try:
+        preview_qty = Decimal(str(preview["qty"]))
+        preview_entry = Decimal(str(preview["entry"]))
+    except Exception:  # noqa: BLE001 — missing/None/non-numeric counts as mismatch
+        return _exec_result(MSG_EXIT_POSITION_CHANGED, status="failed")
+    if preview_qty != pos.qty or preview_entry != pos.entry_price:
+        return _exec_result(MSG_EXIT_POSITION_CHANGED, status="failed")
+    cid = client_order_id(intent_id, "ex")
+    fill: dict[str, Any] | None = None
+    try:
+        fill = trade.market_order(
+            symbol=symbol,
+            side=_closing_side(side),
+            qty=pos.qty,
+            reduce_only=True,
+            client_id=cid,
+        )
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="exit_market",
+            endpoint="/fapi/v1/order",
+            client_order_id=cid,
+            http_status=200,
+            order_or_algo_id=str(fill.get("orderId") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        code = exc.binance_code if isinstance(exc, TradeClientError) else None
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="exit_market",
+            endpoint="/fapi/v1/order",
+            client_order_id=cid,
+            http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+            binance_code=code,
+        )
+        if _is_clear_rejection(exc):
+            return _exec_result(f"ปิดไม้ไม่สำเร็จ: {exc}", status="failed")
+        # Fall through to query + position re-read.
+
+    queried = _query_fill_after_unknown(
+        trade,
+        symbol=symbol,
+        client_id=cid,
+        conn=conn,
+        intent_id=intent_id,
+        step="exit_query",
+        sleep=sleep,
+    )
+    if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+        fill = queried.order
+    elif fill is None and queried.kind == QueryResultKind.UNREADABLE:
+        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+
+    try:
+        still = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("position read failed after exit")
+        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+
+    avg = _positive_fill_price(fill)
+    exec_qty = executed_qty(fill) if fill is not None else Decimal("0")
+
+    if still:
+        # Partial / zero / unknown — do NOT cancel. Exit intent ids never match entry stops.
+        remaining = still[0].qty
+        if exec_qty <= 0 and queried.kind == QueryResultKind.NOT_FOUND:
+            if fill is None:
+                return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+            return _exec_result("ปิดไม้ไม่สำเร็จ", status="failed")
+        if exec_qty <= 0:
+            text = MSG_OUTCOME_UNKNOWN
+            return _exec_result(text, status="unknown")
+        return _exec_result(
+            f"ปิดบางส่วน {symbol} × {exec_qty} · เหลือ {remaining} · เช็ก stop ของส่วนที่เหลือ",
+            status="unknown",
+        )
+
+    # Flat: cancel stops/TP only after flat is confirmed. Never use entry price as fill.
+    pnl: Decimal | None
+    pnl_known = False
+    if fill is not None and exec_qty > 0:
+        pnl = Decimal("0")
+        try:
+            order_id = fill.get("orderId")
+            if order_id not in (None, ""):
+                pnl = trade.realized_pnl_for_order(symbol=symbol, order_id=order_id)
+                pnl_known = True
+        except Exception:  # noqa: BLE001 — any PnL failure still cancels and replies
+            pnl = None
+            pnl_known = False
+    else:
+        pnl = None
+    return _finish_flat_exit(
+        trade,
+        conn=conn,
+        intent_id=intent_id,
+        symbol=symbol,
+        side=side,
+        position_side=pos.position_side,
+        avg=avg if fill is not None and exec_qty > 0 else None,
+        pnl=pnl if pnl_known else None,
+        include_pnl=fill is not None and exec_qty > 0,
+    )
 
 
 def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> tuple[list[str], bool]:
@@ -2279,7 +3051,15 @@ def handle_exec_callback(
             answer()
             send("ไม่พบคำสั่ง")
             return {"ok": False}
-        if intent["status"] in {"done", "failed"}:
+        if intent["status"] in {
+            "done",
+            "failed",
+            "unknown",
+            "recovering",
+            "not_found",
+            "expired",
+            "stale",
+        }:
             answer()
             text = str(intent.get("result_text") or "ทำไปแล้ว")
             send(text)
@@ -2294,8 +3074,16 @@ def handle_exec_callback(
             return {"ok": False, "reason": "in_flight"}
         if prefix in {"ey:", "ms:"} and intent["expires_at_ms"] < ts:
             expired_text = MSG_MOVE_STOP_EXPIRED if prefix == "ms:" else MSG_EXPIRED
-            finish_exec_intent(conn, intent_id, status="expired", result_text=expired_text)
+            wrote = finish_exec_intent(
+                conn,
+                intent_id,
+                status="expired",
+                result_text=expired_text,
+                expect_status="preview",
+            )
             answer()
+            if not wrote:
+                return {"ok": False, "reason": "lost_write"}
             advice_body = None
             preview = intent.get("preview") or {}
             if isinstance(preview, dict):
@@ -2305,6 +3093,11 @@ def handle_exec_callback(
                 edit(int(mid), edit_body, reply_markup={"inline_keyboard": []})
             send(expired_text)
             return {"ok": False, "reason": "expired"}
+        if prefix == "ey:" and symbol_has_in_flight_exec(conn, str(intent["symbol"]), exclude_id=intent_id):
+            answer()
+            text = _msg_symbol_in_flight(str(intent["symbol"]))
+            send(text)
+            return {"ok": False, "reason": "in_flight"}
         if not claim_exec_intent(conn, intent_id):
             # Lost race — replay stored or in-flight
             again = get_exec_intent(conn, intent_id)
@@ -2324,22 +3117,26 @@ def handle_exec_callback(
             client, auth_reason = build_trade_client()
         if client is None:
             text = trade_auth_reason_th(auth_reason)
-            finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+            finish_exec_intent(conn, intent_id, status="failed", result_text=text, expect_status="confirmed")
             send(text)
             return {"ok": False, "reason": auth_reason or "no_key"}
         try:
             client.assert_trade_key_safe()
-            if prefix == "ey:":
-                client.assert_account_modes()
+            client.assert_account_modes()
         except TradeClientError as exc:
-            text = str(exc) if str(exc) in {MSG_ONE_WAY, MSG_MULTI_ASSETS} else MSG_KEY_REFUSED
-            finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+            text = (
+                str(exc)
+                if str(exc)
+                in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_ACCOUNT_MODE_UNREADABLE, MSG_MODE_UNREADABLE}
+                else MSG_KEY_REFUSED
+            )
+            finish_exec_intent(conn, intent_id, status="failed", result_text=text, expect_status="confirmed")
             send(text)
             return {"ok": False, "reason": "key"}
         except (httpx.HTTPError, ProviderError) as exc:
             logger.warning("exec pre-order network error %s", type(exc).__name__)
-            text = MSG_BINANCE_NOT_SENT
-            finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+            text = _preorder_fail_text(prefix)
+            finish_exec_intent(conn, intent_id, status="failed", result_text=text, expect_status="confirmed")
             if mid is not None and prefix == "ey:":
                 edit(int(mid), text, reply_markup={"inline_keyboard": []})
             send(text)
@@ -2353,8 +3150,20 @@ def handle_exec_callback(
             edit(int(mid), str(body) if body else MSG_CANCELLED, reply_markup={"inline_keyboard": []})
 
         def _finish_send(result: str, *, markup: dict[str, Any] | None = None) -> dict[str, Any]:
-            status = "done" if result.startswith("✅") else "failed"
-            finish_exec_intent(conn, intent_id, status=status, result_text=result)
+            status = (
+                result.status
+                if isinstance(result, ExecResult)
+                else ("done" if result.startswith("✅") else "failed")
+            )
+            wrote = finish_exec_intent(
+                conn,
+                intent_id,
+                status=status,
+                result_text=str(result),
+                expect_status="confirmed",
+            )
+            if not wrote:
+                return {"ok": False, "reason": "lost_write", "status": status}
             if prefix == "ms:":
                 _strip_ms_buttons()
                 if markup is not None:
@@ -2363,30 +3172,57 @@ def handle_exec_callback(
                     send(result)
             elif mid is not None and markup is None and prefix == "ey:":
                 edit(int(mid), result, reply_markup={"inline_keyboard": []})
-                # Telegram does not notify on edits — send a new message for failures.
-                if not result.startswith("✅"):
+                # Telegram does not notify on edits — send a new message for non-success.
+                if status != "done":
                     send(result)
             elif markup is not None:
                 send(result, reply_markup=markup)
             else:
                 send(result)
-            return {"ok": status == "done", "result": result}
+            return {"ok": status == "done", "result": result, "status": status}
 
         try:
             if prefix == "ey:":
                 try:
+                    stale = _stale_card_levels(conn, intent, client, now_ms_value=ts)
+                    if stale:
+                        text = _reason_th(stale)
+                        finish_exec_intent(
+                            conn,
+                            intent_id,
+                            status="expired",
+                            result_text=text,
+                            expect_status="confirmed",
+                        )
+                        if mid is not None:
+                            edit(int(mid), text, reply_markup={"inline_keyboard": []})
+                        send(text)
+                        return {"ok": False, "reason": stale}
                     guard = _confirm_guards_entry(conn, intent, client, now_ms_value=ts)
                 except (httpx.HTTPError, ProviderError) as exc:
                     logger.warning("confirm guards network error %s", type(exc).__name__)
-                    text = MSG_BINANCE_NOT_SENT
-                    finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+                    text = _preorder_fail_text(prefix)
+                    finish_exec_intent(
+                        conn,
+                        intent_id,
+                        status="failed",
+                        result_text=text,
+                        expect_status="confirmed",
+                    )
                     if mid is not None:
                         edit(int(mid), text, reply_markup={"inline_keyboard": []})
                     send(text)
                     return {"ok": False, "reason": "binance_unreachable"}
                 if guard:
                     text = _reason_th(guard)
-                    finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+                    status = "expired" if guard == "expired" else "failed"
+                    finish_exec_intent(
+                        conn,
+                        intent_id,
+                        status=status,
+                        result_text=text,
+                        expect_status="confirmed",
+                    )
                     if mid is not None:
                         edit(int(mid), text, reply_markup={"inline_keyboard": []})
                         send(text)
@@ -2410,12 +3246,1010 @@ def handle_exec_callback(
             return _finish_send(result)
         except Exception:  # noqa: BLE001
             logger.exception("exec callback failed after claim intent_id=%s", intent_id)
-            # An entry or exit may have reached Binance; tell the owner to look.
-            text = MSG_HANDLER_ERROR if prefix == "ms:" else _msg_check_now(str(intent["symbol"]))
-            finish_exec_intent(conn, intent_id, status="failed", result_text=text)
+            # If an order step was already logged, keep unknown — never MSG_HANDLER_ERROR (retry).
+            logged = conn.execute(
+                """
+                SELECT 1 FROM assist_exec_log
+                WHERE intent_id=? AND step IN (
+                    'market', 'stop', 'exit_market', 'move_stop_place', 'tp'
+                )
+                LIMIT 1
+                """,
+                (intent_id,),
+            ).fetchone()
+            if logged is not None:
+                text = MSG_OUTCOME_UNKNOWN
+                finish_exec_intent(
+                    conn,
+                    intent_id,
+                    status="unknown",
+                    result_text=text,
+                    expect_status="confirmed",
+                )
+            else:
+                text = _preorder_fail_text(prefix)
+                finish_exec_intent(
+                    conn,
+                    intent_id,
+                    status="failed",
+                    result_text=text,
+                    expect_status="confirmed",
+                )
             if prefix == "ms:":
                 _strip_ms_buttons()
             send(text)
             return {"ok": False, "reason": "handler_error"}
 
     return {"ok": False, "unhandled": data}
+
+
+def _latest_log_ms(conn: Any, intent_id: str, step: str) -> int | None:
+    row = conn.execute(
+        """
+        SELECT MAX(created_at_ms) FROM assist_exec_log
+        WHERE intent_id=? AND step=?
+        """,
+        (intent_id, step),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return int(row[0])
+
+
+def _mark_recover_found(conn: Any, intent_id: str, *, client_order_id: str | None) -> None:
+    """A FOUND order or a non-flat position resets the consecutive not-found count."""
+    _log_write(
+        conn,
+        intent_id=intent_id,
+        step="recover_found",
+        endpoint="/fapi/v1/order",
+        client_order_id=client_order_id,
+    )
+
+
+def _count_recover_not_found(conn: Any, intent_id: str) -> tuple[int, int | None]:
+    """Consecutive not-found rows after the latest recover_found marker."""
+    found_ms = _latest_log_ms(conn, intent_id, "recover_found") or 0
+    rows = conn.execute(
+        """
+        SELECT created_at_ms FROM assist_exec_log
+        WHERE intent_id=? AND step='recover_not_found' AND created_at_ms>?
+        ORDER BY created_at_ms ASC
+        """,
+        (intent_id, found_ms),
+    ).fetchall()
+    if not rows:
+        return 0, None
+    first = int(rows[0][0] if not hasattr(rows[0], "keys") else rows[0]["created_at_ms"])
+    return len(rows), first
+
+
+def _has_log_step(conn: Any, intent_id: str, step: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM assist_exec_log WHERE intent_id=? AND step=? LIMIT 1
+        """,
+        (intent_id, step),
+    ).fetchone()
+    return row is not None
+
+
+def _keep_recovering_unknown(conn: Any, intent_id: str, *, text: str | None = None) -> None:
+    """Leave the intent unknown so the next pass can claim it. Does not send."""
+    prev = get_exec_intent(conn, intent_id)
+    prev_text = str(prev.get("result_text") or "") if prev else ""
+    finish_exec_intent(
+        conn,
+        intent_id,
+        status="unknown",
+        result_text=text if text is not None else (prev_text or MSG_OUTCOME_UNKNOWN),
+        expect_status="recovering",
+    )
+
+
+def _open_stop_tags(
+    open_list: list[dict[str, Any]] | None,
+    intent_id: str,
+) -> tuple[set[str], Decimal]:
+    """Tags of this intent that are still open, and the largest stop qty among them."""
+    tags: set[str] = set()
+    best = Decimal("0")
+    if not open_list:
+        return tags, best
+    for tag in _STOP_TAGS:
+        cid = client_order_id(intent_id, tag)
+        for order in open_list:
+            got = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
+            if got != cid:
+                continue
+            tags.add(tag)
+            raw = order.get("quantity")
+            if raw is None:
+                raw = order.get("origQty")
+            try:
+                qty = Decimal(str(raw or "0"))
+            except Exception:  # noqa: BLE001
+                qty = Decimal("0")
+            if qty > best:
+                best = qty
+    return tags, best
+
+
+def _free_stop_tag(open_tags: set[str]) -> str | None:
+    for tag in _STOP_TAGS:
+        if tag not in open_tags:
+            return tag
+    return None
+
+
+def _finish_placed_recovery_stop(
+    trade: BinanceTradeClient,
+    conn: Any,
+    *,
+    intent_id: str,
+    symbol: str,
+    placed_tag: str,
+    open_tags: set[str],
+    order_final: bool,
+    send: Callable[..., Any] | None,
+) -> None:
+    """Cancel the tags that were open before this place. Done only when the market is final."""
+    failed: list[str] = []
+    for tag in open_tags:
+        if tag == placed_tag:
+            continue
+        old = client_order_id(intent_id, tag)
+        if not _cancel_algo_client_ok(
+            trade,
+            symbol=symbol,
+            client_algo_id=old,
+            conn=conn,
+            intent_id=intent_id,
+            step="dup_stop_cancel",
+        ):
+            failed.append(old)
+    if failed:
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="unknown",
+            text=msg_cancel_old_failed(failed),
+            expect_status="recovering",
+        )
+        return
+    if not order_final:
+        _keep_recovering_unknown(conn, intent_id)
+        return
+    _recovery_notify(
+        send,
+        conn,
+        intent_id,
+        status="done",
+        text=f"✅ วาง stop ปกป้อง {symbol} แล้ว",
+        expect_status="recovering",
+    )
+
+
+def _recovery_notify(
+    send: Callable[..., Any] | None,
+    conn: Any,
+    intent_id: str,
+    *,
+    status: str,
+    text: str,
+    expect_status: str,
+) -> None:
+    prev = get_exec_intent(conn, intent_id)
+    prev_text = str(prev.get("result_text") or "") if prev else ""
+    wrote = finish_exec_intent(
+        conn,
+        intent_id,
+        status=status,
+        result_text=text,
+        expect_status=expect_status,
+    )
+    if wrote and send is not None and text != prev_text:
+        send(text)
+
+
+def _recover_entry_intent(
+    conn: Any,
+    trade: BinanceTradeClient,
+    intent: dict[str, Any],
+    *,
+    now_ms_value: int,
+    send: Callable[..., Any] | None,
+    sleep: Callable[[float], None],
+) -> None:
+    intent_id = str(intent["id"])
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    preview = intent["preview"] if isinstance(intent.get("preview"), dict) else {}
+    stop = Decimal(str(preview.get("stop") or "0"))
+    try:
+        filters = trade.symbol_filters(symbol)
+        stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
+    except Exception:  # noqa: BLE001
+        pass
+    cid = client_order_id(intent_id, "mkt")
+    queried = _query_fill_after_unknown(
+        trade,
+        symbol=symbol,
+        client_id=cid,
+        conn=conn,
+        intent_id=intent_id,
+        step="recover_market_query",
+        sleep=sleep,
+    )
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return  # unreadable → stay recovering/unknown
+
+    flat = len(positions) == 0
+    if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+        _mark_recover_found(conn, intent_id, client_order_id=cid)
+        outcome = classify_order_body(queried.order)
+        if outcome == OrderOutcome.NOT_FILLED:
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="failed",
+                text="เข้าไม้ไม่สำเร็จ",
+                expect_status="recovering",
+            )
+            return
+        if outcome == OrderOutcome.FILLED and flat:
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="done",
+                text=MSG_ALREADY_CLOSED,
+                expect_status="recovering",
+            )
+            return
+    if queried.kind == QueryResultKind.UNREADABLE and flat:
+        return
+    if queried.kind == QueryResultKind.NOT_FOUND and flat:
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="recover_not_found",
+            endpoint="/fapi/v1/order",
+            client_order_id=cid,
+            binance_code=-2013,
+        )
+        n, first = _count_recover_not_found(conn, intent_id)
+        if (
+            n >= RECOVER_NOT_FOUND_PASSES
+            and first is not None
+            and (now_ms_value - first >= RECOVER_NOT_FOUND_SPAN_MS)
+        ):
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="not_found",
+                text=MSG_ORDER_NOT_FOUND,
+                expect_status="recovering",
+            )
+        return
+    if flat:
+        return
+
+    _mark_recover_found(conn, intent_id, client_order_id=cid)
+    pos = positions[0]
+    if pos.side != side:
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="failed",
+            text=MSG_RECOVER_SIDE_MISMATCH.format(symbol=symbol.upper()),
+            expect_status="recovering",
+        )
+        return
+    qty = pos.qty
+    order_final = True
+    if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+        order_final = _order_is_final(queried.order)
+    vr, keep_tag, open_list = _verify_stop_ids(
+        trade,
+        conn=conn,
+        symbol=symbol,
+        intent_id=intent_id,
+        side=side,
+        stop=stop,
+        position_qty=qty,
+    )
+    if vr == StopVerifyResult.CLOSED_BY_STOP:
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="done",
+            text=MSG_ALREADY_CLOSED,
+            expect_status="recovering",
+        )
+        return
+    if vr == StopVerifyResult.VERIFIED and order_final:
+        if keep_tag is not None:
+            _cancel_dup_stops_after_verified(
+                trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=keep_tag
+            )
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="done",
+            text=f"✅ ยืนยัน stop {symbol} แล้ว",
+            expect_status="recovering",
+        )
+        return
+    if vr == StopVerifyResult.VERIFIED and not order_final:
+        _keep_recovering_unknown(conn, intent_id)
+        return
+    if vr == StopVerifyResult.UNVERIFIABLE:
+        return
+
+    open_tags, covered = _open_stop_tags(open_list, intent_id)
+    free_tag = _free_stop_tag(open_tags)
+    if free_tag is None:
+        uncovered = qty - covered if qty > covered else qty
+        text = f"⚠️ {symbol} stop ไม่ครอบ qty {fmt_qty(uncovered)} — sl0/sl1/slr เปิดครบแล้ว เช็กในแอป"
+        if not _has_log_step(conn, intent_id, "recover_tags_full"):
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="recover_tags_full",
+                endpoint="local",
+                client_order_id=None,
+            )
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="unknown",
+                text=text,
+                expect_status="recovering",
+            )
+        else:
+            _keep_recovering_unknown(conn, intent_id, text=text)
+        return
+
+    # Place on a tag that is not still open. Prefer -slr when it is free.
+    slr = client_order_id(intent_id, free_tag)
+    try:
+        mark = trade.mark_price(symbol)
+        if side == "long" and mark <= stop:
+            raise TradeClientError("would trigger", binance_code=-2021)
+        if side == "short" and mark >= stop:
+            raise TradeClientError("would trigger", binance_code=-2021)
+        algo = trade.place_algo_stop(
+            symbol=symbol,
+            side=_closing_side(side),
+            qty=qty,
+            trigger=stop,
+            order_type="STOP_MARKET",
+            client_id=slr,
+        )
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="recover_slr",
+            endpoint="/fapi/v1/algoOrder",
+            client_order_id=slr,
+            http_status=200,
+            order_or_algo_id=str(algo.get("algoId") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        code = exc.binance_code if isinstance(exc, TradeClientError) else None
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="recover_slr",
+            endpoint="/fapi/v1/algoOrder",
+            client_order_id=slr,
+            http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+            binance_code=code,
+        )
+        vr_err = verify_our_stop(
+            trade,
+            symbol=symbol,
+            client_id=slr,
+            closing_side=_closing_side(side),
+            planned_stop=stop,
+            position_qty=qty,
+            position_flat=False,
+        )
+        if vr_err == StopVerifyResult.VERIFIED:
+            _finish_placed_recovery_stop(
+                trade,
+                conn,
+                intent_id=intent_id,
+                symbol=symbol,
+                placed_tag=free_tag,
+                open_tags=open_tags,
+                order_final=order_final,
+                send=send,
+            )
+            return
+        if vr_err == StopVerifyResult.UNVERIFIABLE:
+            return
+        reply = _emergency_close_reply(
+            trade,
+            conn=conn,
+            intent_id=intent_id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            stop=stop,
+            stop_err=str(exc),
+            sleep=sleep,
+        )
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status=reply.status,
+            text=str(reply),
+            expect_status="recovering",
+        )
+        return
+
+    vr2 = verify_our_stop(
+        trade,
+        symbol=symbol,
+        client_id=slr,
+        closing_side=_closing_side(side),
+        planned_stop=stop,
+        position_qty=qty,
+        position_flat=False,
+    )
+    if vr2 == StopVerifyResult.VERIFIED:
+        _finish_placed_recovery_stop(
+            trade,
+            conn,
+            intent_id=intent_id,
+            symbol=symbol,
+            placed_tag=free_tag,
+            open_tags=open_tags,
+            order_final=order_final,
+            send=send,
+        )
+        return
+    if vr2 == StopVerifyResult.UNVERIFIABLE:
+        return
+    reply = _emergency_close_reply(
+        trade,
+        conn=conn,
+        intent_id=intent_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        stop=stop,
+        stop_err="slr not verified",
+        sleep=sleep,
+    )
+    _recovery_notify(
+        send,
+        conn,
+        intent_id,
+        status=reply.status,
+        text=str(reply),
+        expect_status="recovering",
+    )
+
+
+def _recover_move_stop_intent(
+    conn: Any,
+    trade: BinanceTradeClient,
+    intent: dict[str, Any],
+    *,
+    now_ms_value: int,
+    send: Callable[..., Any] | None,
+) -> None:
+    intent_id = str(intent["id"])
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    preview = intent["preview"] if isinstance(intent.get("preview"), dict) else {}
+    new_stop = Decimal(str(preview.get("stop") or "0"))
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return
+    if not positions:
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="done",
+            text=MSG_ALREADY_CLOSED,
+            expect_status="recovering",
+        )
+        return
+    pos = positions[0]
+    try:
+        filters = trade.symbol_filters(symbol)
+        new_stop = round_level_to_tick(new_stop, filters.tick_size, side=side, kind="stop")
+    except Exception:  # noqa: BLE001
+        pass
+    cid = client_order_id(intent_id, "ms")
+    vr = verify_our_stop(
+        trade,
+        symbol=symbol,
+        client_id=cid,
+        closing_side=_closing_side(side),
+        planned_stop=new_stop,
+        position_qty=pos.qty,
+        position_flat=False,
+    )
+    if vr == StopVerifyResult.VERIFIED:
+        # Cancel old protective stops (same as sync path).
+        try:
+            orders = trade.all_open_orders(symbol=symbol)
+        except Exception:  # noqa: BLE001
+            orders = []
+        for old in orders:
+            old_cid = str(old.get("clientAlgoId") or old.get("clientOrderId") or "")
+            if old_cid == cid:
+                continue
+            if not is_protective_stop(old, position_side=pos.position_side, trade_side=side):
+                continue
+            algo_id = old.get("algoId") or old.get("orderId")
+            if algo_id is None:
+                continue
+            try:
+                trade.cancel_algo(symbol=symbol, algo_id=algo_id)
+                _log_write(
+                    conn,
+                    intent_id=intent_id,
+                    step="recover_move_cancel",
+                    endpoint="/fapi/v1/algoOrder",
+                    http_status=200,
+                    order_or_algo_id=str(algo_id),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="done",
+            text=f"✅ เลื่อน stop {symbol} → {fmt_price(new_stop)} · qty ทั้งไม้ {fmt_qty(pos.qty)}",
+            expect_status="recovering",
+        )
+        return
+    if vr == StopVerifyResult.NOT_PROTECTED:
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="recover_not_found",
+            endpoint="/fapi/v1/algoOrder",
+            client_order_id=cid,
+        )
+        n, first = _count_recover_not_found(conn, intent_id)
+        if (
+            n >= RECOVER_NOT_FOUND_PASSES
+            and first is not None
+            and (now_ms_value - first >= RECOVER_NOT_FOUND_SPAN_MS)
+        ):
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="failed",
+                text=MSG_RECOVER_MOVE_STOP_FAILED,
+                expect_status="recovering",
+            )
+
+
+def _recover_exit_intent(
+    conn: Any,
+    trade: BinanceTradeClient,
+    intent: dict[str, Any],
+    *,
+    now_ms_value: int,
+    send: Callable[..., Any] | None,
+    sleep: Callable[[float], None],
+) -> None:
+    intent_id = str(intent["id"])
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    cid = client_order_id(intent_id, "ex")
+    queried = _query_fill_after_unknown(
+        trade,
+        symbol=symbol,
+        client_id=cid,
+        conn=conn,
+        intent_id=intent_id,
+        step="recover_exit_query",
+        sleep=sleep,
+    )
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return
+    if _has_log_step(conn, intent_id, "exit_cancel_pending"):
+        try:
+            pending_positions = trade.position_risk(symbol=symbol)
+        except Exception:  # noqa: BLE001
+            return
+        if pending_positions:
+            if not _has_log_step(conn, intent_id, "exit_cancel_gave_up"):
+                ids = _open_jv_client_ids(trade, symbol)
+                text = f"⚠️ มี stop/TP ของบอทค้างอยู่บน {symbol} — ลบในแอปก่อน"
+                if ids:
+                    text = f"{text} {', '.join(ids)}"
+                _log_write(
+                    conn,
+                    intent_id=intent_id,
+                    step="exit_cancel_gave_up",
+                    endpoint="local",
+                )
+                _recovery_notify(
+                    send,
+                    conn,
+                    intent_id,
+                    status="failed",
+                    text=text,
+                    expect_status="recovering",
+                )
+            return
+        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+            trade,
+            conn=conn,
+            intent_id=intent_id,
+            symbol=symbol,
+            side=side,
+            position_side="BOTH",
+        )
+        if cancel_ok:
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="done",
+                text=f"✅ ปิด {symbol}",
+                expect_status="recovering",
+            )
+        else:
+            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="unknown",
+                text=f"✅ ปิด {symbol}\n{warning}",
+                expect_status="recovering",
+            )
+        return
+    if not positions:
+        fill = queried.order if queried.kind == QueryResultKind.FOUND else None
+        avg = _positive_fill_price(fill)
+        pos_side = "BOTH"
+        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+            trade,
+            conn=conn,
+            intent_id=intent_id,
+            symbol=symbol,
+            side=side,
+            position_side=pos_side,
+        )
+        if avg is not None and avg > 0:
+            text = f"✅ ปิด {symbol} @ {avg}"
+        else:
+            text = f"✅ ปิด {symbol}"
+        status = "done"
+        if not cancel_ok:
+            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+            text = f"{text}\n{warning}"
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="exit_cancel_pending",
+                endpoint="/fapi/v1/algoOrder",
+            )
+            status = "unknown"
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status=status,
+            text=text,
+            expect_status="recovering",
+        )
+        return
+    # Still open — never cancel stops/TP.
+    if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+        if classify_order_body(queried.order) == OrderOutcome.NOT_FILLED:
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="failed",
+                text="ปิดไม้ไม่สำเร็จ",
+                expect_status="recovering",
+            )
+            return
+    if queried.kind == QueryResultKind.NOT_FOUND:
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="recover_not_found",
+            endpoint="/fapi/v1/order",
+            client_order_id=cid,
+            binance_code=-2013,
+        )
+        n, first = _count_recover_not_found(conn, intent_id)
+        if (
+            n >= RECOVER_NOT_FOUND_PASSES
+            and first is not None
+            and (now_ms_value - first >= RECOVER_NOT_FOUND_SPAN_MS)
+        ):
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="failed",
+                text=f"⚠️ ปิด {symbol} ไม่สำเร็จ — position และ stop ยังเปิดอยู่",
+                expect_status="recovering",
+            )
+        return
+    if (
+        queried.kind == QueryResultKind.FOUND
+        and queried.order is not None
+        and executed_qty(queried.order) > 0
+    ):
+        pos = positions[0]
+        verified = False
+        try:
+            orders = trade.all_open_orders(symbol=symbol)
+            step = trade.symbol_filters(symbol).step_size
+            coverage = protective_stop_coverage(
+                orders,
+                symbol=symbol,
+                position_side=pos.position_side,
+                trade_side=side,
+                position_qty=pos.qty,
+                step_size=step,
+            )
+            verified = coverage == "full"
+        except Exception:  # noqa: BLE001
+            verified = False
+        stop_text = "ยืนยันแล้ว" if verified else "ยังไม่ยืนยัน"
+        text = f"⚠️ ปิดบางส่วน {symbol} เหลือ {fmt_qty(pos.qty)} · stop {stop_text}"
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="done" if verified else "unknown",
+            text=text,
+            expect_status="recovering",
+        )
+        return
+    return
+
+
+class _LeaseLost(Exception):
+    """This pass no longer owns the latest recover_claim."""
+
+
+class _LeasedTrade:
+    """Renew the recovery lease before every exchange call. Stop if the lease was lost."""
+
+    def __init__(self, inner: BinanceTradeClient, conn: Any, intent_id: str, token: int) -> None:
+        self._inner = inner
+        self._conn = conn
+        self._intent_id = intent_id
+        self._token = token
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def _call(*args: Any, **kwargs: Any) -> Any:
+            if not renew_exec_recovery_lease(
+                self._conn,
+                self._intent_id,
+                self._token,
+                now_ms_value=int(time.time() * 1000),
+            ):
+                raise _LeaseLost()
+            return attr(*args, **kwargs)
+
+        return _call
+
+
+def _is_sqlite_busy(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+def _aged_read_snapshot(
+    trade: BinanceTradeClient,
+    _conn: Any,
+    intent: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Read order, position, and every protective stop. None when any read fails. Never sends."""
+    intent_id = str(intent["id"])
+    symbol = str(intent["symbol"])
+    kind = str(intent.get("kind") or "entry")
+    if kind == "exit":
+        cid = client_order_id(intent_id, "ex")
+        query_algo = False
+    elif kind == "move_stop":
+        cid = client_order_id(intent_id, "ms")
+        query_algo = True
+    else:
+        cid = client_order_id(intent_id, "mkt")
+        query_algo = False
+    try:
+        if query_algo:
+            order: dict[str, Any] | None = trade.query_algo_by_client_id(symbol=symbol, client_id=cid)
+        else:
+            order = trade.query_order_by_client_id(symbol=symbol, client_id=cid)
+    except TradeClientError as exc:
+        if exc.binance_code in {-2011, -2013}:
+            order = None
+        else:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        step = trade.symbol_filters(symbol).step_size
+        plain = trade.open_orders(symbol=symbol, strict=True)
+        algos = trade.open_algo_orders(symbol=symbol, strict=True)
+    except Exception:  # noqa: BLE001
+        return None
+    flat = len(positions) == 0
+    qty = positions[0].qty if positions else Decimal("0")
+    stop_verified = False
+    if not flat:
+        pos = positions[0]
+        coverage = protective_stop_coverage(
+            [*plain, *algos],
+            symbol=symbol,
+            position_side=pos.position_side,
+            trade_side=pos.side,
+            position_qty=pos.qty,
+            step_size=step,
+        )
+        stop_verified = coverage == "full"
+    if order is None:
+        order_text = "ไม่พบ"
+    else:
+        filled_qty = executed_qty(order)
+        status = str(order.get("status") or order.get("algoStatus") or "").upper()
+        if status == "FILLED" or filled_qty > 0:
+            shown = filled_qty if filled_qty > 0 else qty
+            order_text = f"FILLED {fmt_qty(shown)}"
+        else:
+            order_text = "ไม่พบ"
+    return {
+        "order_text": order_text,
+        "position_text": "แบน" if flat else fmt_qty(qty),
+        "stop_verified": stop_verified,
+        "position_open": not flat,
+    }
+
+
+def _recover_aged_readonly(
+    conn: Any,
+    trade: BinanceTradeClient,
+    intent: dict[str, Any],
+    *,
+    send: Callable[..., Any] | None,
+) -> None:
+    """Older than 2h: read and report. Never place or cancel."""
+    intent_id = str(intent["id"])
+    symbol = str(intent.get("symbol") or "").upper()
+    created_at = int(intent.get("created_at_ms") or 0)
+    snap = _aged_read_snapshot(trade, conn, intent)
+    if snap is None:
+        text = MSG_RECOVER_STALE_UNREADABLE.format(symbol=symbol)
+        if not _has_log_step(conn, intent_id, "recover_stale_unread"):
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="recover_stale_unread",
+                endpoint="local",
+            )
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="unknown",
+                text=text,
+                expect_status="recovering",
+            )
+        else:
+            _keep_recovering_unknown(conn, intent_id, text=text)
+        return
+    _recovery_notify(
+        send,
+        conn,
+        intent_id,
+        status="stale",
+        text=msg_recover_true_state(
+            symbol=symbol,
+            created_at_ms=created_at,
+            order_text=str(snap["order_text"]),
+            position_text=str(snap["position_text"]),
+            stop_verified=bool(snap["stop_verified"]),
+            position_open=bool(snap["position_open"]),
+        ),
+        expect_status="recovering",
+    )
+
+
+def run_exec_recovery(
+    conn: Any,
+    trade: BinanceTradeClient,
+    now_ms_value: int,
+    send: Callable[..., Any] | None = None,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """One recovery pass for unknown/recovering/stale-confirmed intents.
+
+    Continues the same owner-tapped intent. Never sends a second -mkt entry.
+    """
+    if assist_execute_mode() == "off":
+        return {"ok": True, "skipped": "execute_off"}
+    claimed = 0
+    started = time.monotonic()
+    for intent in list_recoverable_exec_intents(conn):
+        if time.monotonic() - started >= RECOVER_PASS_BUDGET_S:
+            break
+        intent_id = str(intent["id"])
+        created_at = int(intent.get("created_at_ms") or 0)
+        try:
+            token = claim_exec_intent_for_recovery(
+                conn,
+                intent_id,
+                now_ms_value=now_ms_value,
+                stale_after_ms=RECOVER_STALE_MS,
+                lease_ms=RECOVER_LEASE_MS,
+            )
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_busy(exc):
+                logger.warning("recover claim busy intent_id=%s", intent_id)
+                continue
+            raise
+        if token is None:
+            continue
+        claimed += 1
+        leased = cast(BinanceTradeClient, _LeasedTrade(trade, conn, intent_id, token))
+        kind = str(intent.get("kind") or "")
+        try:
+            if created_at > 0 and (now_ms_value - created_at) > RECOVER_MAX_AGE_MS:
+                _recover_aged_readonly(conn, leased, intent, send=send)
+                continue
+            if kind == "entry":
+                _recover_entry_intent(conn, leased, intent, now_ms_value=now_ms_value, send=send, sleep=sleep)
+            elif kind == "move_stop":
+                _recover_move_stop_intent(conn, leased, intent, now_ms_value=now_ms_value, send=send)
+            elif kind == "exit":
+                _recover_exit_intent(conn, leased, intent, now_ms_value=now_ms_value, send=send, sleep=sleep)
+        except _LeaseLost:
+            logger.warning("recover lease lost intent_id=%s", intent_id)
+            continue
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_busy(exc):
+                logger.warning("recover busy intent_id=%s", intent_id)
+                continue
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("exec recovery failed intent_id=%s", intent_id)
+    return {"ok": True, "claimed": claimed}

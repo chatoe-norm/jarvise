@@ -13,6 +13,7 @@ from jarvise.jobs import (
     ema200_warmup_bars,
     htf_needs_history_backfill,
     ingest_timeframe_args,
+    run_assist_watch_job,
     run_ingest,
     run_ingest_health,
     run_paper_auto_decide,
@@ -730,3 +731,32 @@ def test_news_reaction_route(monkeypatch) -> None:
     handler.path = "/jobs/news-reaction"
     handler._dispatch()
     assert handler._status == 200
+
+
+def test_watch_exception_still_runs_recovery(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "watch.db"
+    open_db(db).close()
+    monkeypatch.setenv("JARVISE_DB", str(db))
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("watch down")
+
+    seen: dict[str, int] = {}
+
+    def fake_recovery(_conn, _trade, now, send=None, sleep=None):
+        seen["now"] = int(now)
+        return {"ok": True, "claimed": 0}
+
+    monkeypatch.setattr("jarvise.jobs.run_assist_watch", boom)
+    monkeypatch.setattr("jarvise.jobs.run_exec_recovery", fake_recovery)
+    monkeypatch.setattr("jarvise.jobs.build_trade_client", lambda: (object(), None))
+    monkeypatch.setattr("jarvise.jobs.assist_execute_mode", lambda: "testnet")
+    monkeypatch.setattr("jarvise.jobs._publish_best_effort", lambda *a, **k: None)
+    code, payload = run_assist_watch_job()
+    assert code == 1
+    assert payload["ok"] is False
+    assert "watch down" in payload["error"]
+    assert payload["exec_recovery"] == {"ok": True, "claimed": 0}
+    assert seen["now"] > 0
