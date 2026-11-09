@@ -1164,6 +1164,7 @@ def _preview_from_sized(
     *,
     seen_entry: Decimal | None = None,
     seen_stop: Decimal | None = None,
+    seen_signal_id: str | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "qty": str(sized.qty),
@@ -1179,6 +1180,9 @@ def _preview_from_sized(
     if seen_entry is not None and seen_stop is not None:
         out["seen_entry"] = str(seen_entry)
         out["seen_stop"] = str(seen_stop)
+        # Report link only. Does not mark the signal taken or change same_idea / in-flight.
+        if seen_signal_id:
+            out["seen_signal_id"] = str(seen_signal_id)
     return out
 
 
@@ -1447,12 +1451,18 @@ def create_entry_preview(
     seen = latest_seen_idea(conn, symbol=symbol, side=side, now_ms=ts)
     seen_entry = Decimal(str(seen["entry"])) if seen is not None else None
     seen_stop = Decimal(str(seen["stop"])) if seen is not None else None
+    seen_signal_id = str(seen["id"]) if seen is not None and seen.get("id") else None
     intent_id = insert_exec_intent(
         conn,
         kind="entry",
         symbol=symbol,
         side=side,
-        preview=_preview_from_sized(sized, seen_entry=seen_entry, seen_stop=seen_stop),
+        preview=_preview_from_sized(
+            sized,
+            seen_entry=seen_entry,
+            seen_stop=seen_stop,
+            seen_signal_id=seen_signal_id,
+        ),
         created_at_ms=ts,
         expires_at_ms=expires,
     )

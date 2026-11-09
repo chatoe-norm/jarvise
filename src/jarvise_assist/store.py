@@ -1050,8 +1050,8 @@ def close_track(
     exit_at_ms: int,
     exit_px: float,
     exit_reason: str,
-    gross_r: float,
-    net_r: float,
+    gross_r: float | None,
+    net_r: float | None,
     fee_usdt: float,
     pnl_usdt: float,
     funding_usdt: float = 0.0,
@@ -1068,8 +1068,8 @@ def close_track(
             int(exit_at_ms),
             float(exit_px),
             exit_reason,
-            float(gross_r),
-            float(net_r),
+            None if gross_r is None else float(gross_r),
+            None if net_r is None else float(net_r),
             float(fee_usdt),
             float(pnl_usdt),
             float(funding_usdt),
@@ -1088,11 +1088,13 @@ def list_closed_tracks_since(
     kind: str | None = None,
 ) -> list[dict[str, Any]]:
     sql = """
-        SELECT signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
-               exit_at_ms, exit_px, exit_reason, gross_r, net_r, fee_usdt, pnl_usdt,
-               funding_usdt, funding_missing, cohort, kind, block_reason
-        FROM assist_track
-        WHERE exit_at_ms IS NOT NULL AND exit_at_ms >= ?
+        SELECT t.signal_id, t.symbol, t.side, t.entry, t.stop, t.target, t.qty, t.sent_at_ms,
+               t.exit_at_ms, t.exit_px, t.exit_reason, t.gross_r, t.net_r, t.fee_usdt, t.pnl_usdt,
+               t.funding_usdt, t.funding_missing, t.cohort, t.kind, t.block_reason,
+               s.loss_at_stop
+        FROM assist_track t
+        LEFT JOIN assist_signal s ON s.id = t.signal_id
+        WHERE t.exit_at_ms IS NOT NULL AND t.exit_at_ms >= ?
         """
     params: list[Any] = [int(since_ms)]
     if cohort is not None:

@@ -12,6 +12,7 @@ import pytest
 from tests.test_assist import FakeFutures
 
 from jarvise_assist.journal import (
+    JOURNAL_SHIPPED_MS,
     collect_auto_checks,
     format_journal_card,
     format_journal_lines,
@@ -36,9 +37,9 @@ DAYTIME = int(datetime(2023, 11, 15, 7, 30, tzinfo=BANGKOK).timestamp() * 1000)
 GAP_MS = 30 * 60 * 1000
 
 
-def test_schema_is_migration_23(tmp_path: Path) -> None:
+def test_schema_is_migration_24(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "j.db")
-    assert SCHEMA_VERSION == 23
+    assert SCHEMA_VERSION == 24
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='assist_journal'"
     ).fetchone()
@@ -316,11 +317,12 @@ def test_sync_or_send_failure_does_not_break_watch(tmp_path: Path, monkeypatch: 
 
 def test_null_loss_is_excluded_from_r_and_weekly_numbers(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "week.db")
+    base = JOURNAL_SHIPPED_MS + 3_600_000
     rows = [
-        ("p", 100, 1.0, 2.0, "pass", None),
-        ("f", 200, 1.0, -1.0, "fail", "early_exit"),
-        ("u", 300, None, 99.0, None, None),
-        ("g", 400, 1.0, 0.5, None, None),
+        ("p", base + 100, 1.0, 2.0, "pass", None),
+        ("f", base + 200, 1.0, -1.0, "fail", "early_exit"),
+        ("u", base + 300, None, 99.0, None, None),
+        ("g", base + 400, 1.0, 0.5, None, None),
     ]
     for oid, exit_ms, loss, net, grade, tags in rows:
         _trade(
@@ -342,7 +344,7 @@ def test_null_loss_is_excluded_from_r_and_weekly_numbers(tmp_path: Path) -> None
             (oid, grade, tags, exit_ms),
         )
     conn.commit()
-    summary = summarize_journal(conn, since_ms=0, until_ms=1000)
+    summary = summarize_journal(conn, since_ms=base, until_ms=base + 1_000)
     assert summary["n"] == 4
     assert summary["known_n"] == 3
     assert summary["sum_r"] == pytest.approx(1.5)
@@ -602,6 +604,7 @@ def test_closed_buy_is_never_carded_or_counted(tmp_path: Path) -> None:
         entry_fill=0.0769,
         exit_kind="manual",
     )
+    after_journal = JOURNAL_SHIPPED_MS + 60_000
     _trade(
         conn,
         entry_order_id="hand",
@@ -609,6 +612,7 @@ def test_closed_buy_is_never_carded_or_counted(tmp_path: Path) -> None:
         status="closed",
         exit_kind="manual",
         signal_id="sig1",
+        exit_time_ms=after_journal,
     )
     sent: list[str] = []
 
@@ -653,9 +657,10 @@ def test_closed_buy_is_never_carded_or_counted(tmp_path: Path) -> None:
     )
     assert again["sent"] == []
     assert len(sent) == 1
-    summary = summarize_journal(conn, since_ms=0, until_ms=DAYTIME + GAP_MS)
+    summary = summarize_journal(conn, since_ms=0, until_ms=after_journal + 1_000)
     assert summary["n"] == 1
     assert summary["ungraded"] == 1
+    assert summary["pre_journal_n"] == 0
     conn.close()
 
 

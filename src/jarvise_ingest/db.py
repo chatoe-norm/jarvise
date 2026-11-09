@@ -642,6 +642,12 @@ def _migrate_assist_blocked_track(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_track", "block_reason", "TEXT")
 
 
+def _migrate_assist_actual_r(conn: sqlite3.Connection) -> None:
+    """Actual R next to planned R. Nullable. Does not rewrite existing rows."""
+    _add_column_if_missing(conn, "assist_real_trade", "risk_actual_usdt", "REAL")
+    _add_column_if_missing(conn, "assist_real_trade", "net_r_actual", "REAL")
+
+
 def _migrate_assist_day_loss(conn: sqlite3.Connection) -> None:
     """Day-loss pause markers on the single assist_edge row.
 
@@ -1050,6 +1056,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (21, "assist_blocked_track", _migrate_assist_blocked_track, True),
     (22, "assist_journal", _migrate_assist_journal, True),
     (23, "assist_day_loss", _migrate_assist_day_loss, True),
+    (24, "assist_actual_r", _migrate_assist_actual_r, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

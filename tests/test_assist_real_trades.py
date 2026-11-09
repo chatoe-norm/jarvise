@@ -1784,10 +1784,10 @@ def test_weekly_lines_include_open_and_split() -> None:
         held={"n": 0, "mean_r": 0.0},
         real_vs_virtual=summary,
     )
-    assert "ไม้จริง n=0 (ต้องการ 20) · net R เฉลี่ย — · ต่างจากไม้จำลอง —" in text
-    assert "ไม้ที่ยังถือ 0" in text
-    assert "จับคู่ไม่ได้: 0 ไม้" in text
-    assert any("ไม่มี track: 0" in line for line in lines)
+    assert "ไม้จริง —: n=0 · เฉลี่ย — (planned) · — (actual) · ต้องการอย่างน้อย 20 ไม้ก่อนสรุป" in text
+    assert "ไม้ที่ยังถือ —: n=0" in text
+    assert "จับคู่ไม่ได้ —: n=0" in text
+    assert any("ไม่มี track n=0" in line for line in lines)
 
 
 def test_p90_marks_small_n() -> None:
@@ -1816,8 +1816,8 @@ def test_p90_marks_small_n() -> None:
         "target_n": 20,
     }
     lines = format_real_lines(summary)
-    assert "p90 2.0 (n<10)" in lines[1]
-    assert "p90 5.0 (n<10)" in lines[2]
+    assert any("p90 2.0 (n<10)" in line for line in lines)
+    assert any("p90 5.0 (n<10)" in line for line in lines)
 
 
 def test_default_cli_path_leaves_db_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -156,6 +156,28 @@ def _funding_cost(
     return total, missing
 
 
+def virtual_risk_unusable(
+    *,
+    entry: float | None = None,
+    stop: float | None = None,
+    loss_at_stop: float | None = None,
+) -> bool:
+    """True when R is undefined: entry equals stop, or loss at the stop is <= 0."""
+    if entry is not None and stop is not None:
+        try:
+            if float(entry) == float(stop):
+                return True
+        except (TypeError, ValueError):
+            return True
+    if loss_at_stop is not None:
+        try:
+            if float(loss_at_stop) <= 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
 def _r_and_pnl(
     *,
     side: str,
@@ -165,10 +187,9 @@ def _r_and_pnl(
     qty: float,
     loss_at_stop: float,
     funding_usdt: float = 0.0,
-) -> tuple[float, float, float, float]:
-    risk = abs(entry - stop)
-    if risk <= 0 or loss_at_stop <= 0:
-        return 0.0, 0.0, _fees_usdt(entry=entry, exit_px=exit_px, qty=qty), 0.0
+) -> tuple[float | None, float | None, float, float]:
+    if virtual_risk_unusable(entry=entry, stop=stop, loss_at_stop=loss_at_stop):
+        return None, None, _fees_usdt(entry=entry, exit_px=exit_px, qty=qty), 0.0
     if side == "long":
         gross_usd = (exit_px - entry) * qty
     else:

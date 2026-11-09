@@ -12,6 +12,7 @@ from jarvise_assist.futures import BinanceFuturesClient, build_futures_client
 from jarvise_assist.journal import format_journal_lines, summarize_journal
 from jarvise_assist.real_trades import (
     SPEC_START_MS,
+    format_bkk_window,
     format_real_lines,
     run_real_report,
     summarize_real_vs_virtual,
@@ -22,7 +23,7 @@ from jarvise_assist.store import (
     list_closed_tracks_since,
     now_ms,
 )
-from jarvise_assist.track import TRACK_COHORT, resolve_open_tracks
+from jarvise_assist.track import TRACK_COHORT, resolve_open_tracks, virtual_risk_unusable
 from jarvise_notify.telegram import send_telegram_message
 
 SendFn = Callable[..., Any]
@@ -46,7 +47,12 @@ def format_weekly_summary(
     real_vs_virtual: dict[str, Any] | None = None,
     real_report_error: str | None = None,
     journal: dict[str, Any] | None = None,
+    window_start_ms: int | None = None,
+    window_end_ms: int | None = None,
 ) -> str:
+    window = None
+    if window_start_ms is not None and window_end_ms is not None:
+        window = format_bkk_window(int(window_start_ms), int(window_end_ms))
     lines = [
         "📊 ผล 7 วันที่ผ่านมา (assist)",
         (
@@ -57,13 +63,24 @@ def format_weekly_summary(
     ]
     n = int(virtual.get("n") or 0)
     if n == 0:
-        lines.append("ไม้เสมือน: ยังไม่มีที่ปิด")
+        if window is None:
+            lines.append("ไม้เสมือน: ยังไม่มีที่ปิด")
+        else:
+            lines.append(f"ไม้เสมือน {window}: n=0 · ยังไม่มีที่ปิด")
     else:
         wr = float(virtual.get("win_rate") or 0.0) * 100.0
         total_r = float(virtual.get("total_r") or 0.0)
         mean_r = float(virtual.get("mean_r") or 0.0)
         total_usdt = float(virtual.get("total_usdt") or 0.0)
-        lines.append(f"ไม้เสมือน: n={n} · ชนะ {wr:.0f}% · รวม {_signed(total_r)}R · {_signed(total_usdt)} USDT")
+        if window is None:
+            lines.append(
+                f"ไม้เสมือน: n={n} · ชนะ {wr:.0f}% · รวม {_signed(total_r)}R · {_signed(total_usdt)} USDT"
+            )
+        else:
+            lines.append(
+                f"ไม้เสมือน {window}: n={n} · ชนะ {wr:.0f}% · "
+                f"รวม {_signed(total_r)}R · {_signed(total_usdt)} USDT"
+            )
         lines.append(
             f"Expectancy {_signed(mean_r)}R/ไม้ · มัธยฐาน {_signed(float(virtual.get('median_r') or 0.0))}R · "
             f"ชนะเฉลี่ย {_r_or_dash(virtual.get('avg_win_r'))} · "
@@ -81,6 +98,13 @@ def format_weekly_summary(
         if missing:
             funding_line += f" (ไม่มีอัตรา {missing} รอบ นับเป็น 0)"
         lines.append(funding_line)
+    dropped = virtual.get("dropped_risk_n")
+    if dropped is not None:
+        drop_n = int(dropped)
+        if window is None:
+            lines.append(f"ไม้เสมือนที่ความเสี่ยง ≤ 0: n={drop_n} · ไม่นับในค่าเฉลี่ย R")
+        else:
+            lines.append(f"ไม้เสมือนที่ความเสี่ยง ≤ 0 {window}: n={drop_n} · ไม่นับในค่าเฉลี่ย R")
     if held is not None:
         held_n = int(held.get("n") or 0)
         if held_n == 0:
@@ -146,25 +170,42 @@ def _format_blocked_line(blocked: dict[str, dict[str, Any]] | None) -> str | Non
     return "ถ้าไม่บล็อก: " + " · ".join(parts)
 
 
+def _empty_virtual(*, dropped_risk_n: int = 0) -> dict[str, Any]:
+    return {
+        "n": 0,
+        "win_rate": 0.0,
+        "total_r": 0.0,
+        "mean_r": 0.0,
+        "median_r": 0.0,
+        "avg_win_r": None,
+        "avg_loss_r": None,
+        "total_usdt": 0.0,
+        "funding_usdt": 0.0,
+        "funding_missing": 0,
+        "exit_stop_original": 0,
+        "exit_stop_be": 0,
+        "exit_stop_trail": 0,
+        "exit_target_2r": 0,
+        "exit_analysis": 0,
+        "dropped_risk_n": dropped_risk_n,
+    }
+
+
 def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    if not rows:
-        return {
-            "n": 0,
-            "win_rate": 0.0,
-            "total_r": 0.0,
-            "mean_r": 0.0,
-            "median_r": 0.0,
-            "avg_win_r": None,
-            "avg_loss_r": None,
-            "total_usdt": 0.0,
-            "funding_usdt": 0.0,
-            "funding_missing": 0,
-            "exit_stop_original": 0,
-            "exit_stop_be": 0,
-            "exit_stop_trail": 0,
-            "exit_target_2r": 0,
-            "exit_analysis": 0,
-        }
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for row in rows:
+        if virtual_risk_unusable(
+            entry=row.get("entry"),
+            stop=row.get("stop"),
+            loss_at_stop=row.get("loss_at_stop"),
+        ):
+            dropped += 1
+            continue
+        kept.append(row)
+    if not kept:
+        return _empty_virtual(dropped_risk_n=dropped)
+    rows = kept
     nets = [float(r.get("net_r") or 0.0) for r in rows]
     pnls = [float(r.get("pnl_usdt") or 0.0) for r in rows]
     fundings = [float(r.get("funding_usdt") or 0.0) for r in rows]
@@ -214,6 +255,7 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "exit_stop_trail": exit_stop_trail + exit_stop_trailed,
         "exit_target_2r": exit_target,
         "exit_analysis": exit_analysis,
+        "dropped_risk_n": dropped,
     }
 
 
@@ -302,13 +344,13 @@ def run_assist_weekly(
     real_report_error: str | None = None
     if client is not None:
         try:
-            report = run_real_report(conn, client, since_ms=SPEC_START_MS)
+            report = run_real_report(conn, client, since_ms=SPEC_START_MS, until_ms=ts)
             real_vs_virtual = report["summary"]
         except Exception as exc:  # noqa: BLE001 — never block the weekly summary
             real_report_error = type(exc).__name__
-            real_vs_virtual = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS)
+            real_vs_virtual = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS, until_ms=ts)
     else:
-        real_vs_virtual = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS)
+        real_vs_virtual = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS, until_ms=ts)
 
     journal = summarize_journal(conn, since_ms=week_start, until_ms=ts)
     text = format_weekly_summary(
@@ -321,6 +363,8 @@ def run_assist_weekly(
         real_vs_virtual=None if real_report_error else real_vs_virtual,
         real_report_error=real_report_error,
         journal=journal,
+        window_start_ms=week_start,
+        window_end_ms=ts,
     )
     sent_ok = bool(send_fn(text))
     return {

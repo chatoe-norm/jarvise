@@ -9,12 +9,16 @@ from decimal import Decimal
 from typing import Any
 
 from jarvise_assist.messages import fmt_price
-from jarvise_assist.real_trades import sync_real_trades
+from jarvise_assist.real_trades import format_bkk_window, sync_real_trades
 from jarvise_assist.signals import is_night_hold
 from jarvise_assist.store import ensure_settings, get_edge, now_ms
 from jarvise_notify.telegram import send_message
 
 logger = logging.getLogger(__name__)
+
+# Deploy job "deploy" completed_at for PR #293, run 42181311569, head 148ca1a.
+# https://github.com/chatoe-norm/jarvise/actions/runs/42181311569
+JOURNAL_SHIPPED_MS = 1_793_950_811_000  # 2026-11-06T07:40:11Z
 
 MISTAKE_TAGS: tuple[str, ...] = (
     "chase",
@@ -325,14 +329,33 @@ def summarize_journal(
         FROM assist_journal j
         JOIN assist_real_trade r ON r.entry_order_id = j.entry_order_id
         WHERE r.status = 'closed' AND r.side IN ('long', 'short')
+          AND (r.exit_time_ms IS NULL OR r.exit_time_ms >= ?)
           AND ((
             r.exit_time_ms IS NOT NULL AND r.exit_time_ms >= ? AND r.exit_time_ms <= ?
         ) OR (
             r.exit_time_ms IS NULL AND r.entry_time_ms >= ? AND r.entry_time_ms <= ?
         ))
         """,
-        (int(since_ms), int(until_ms), int(since_ms), int(until_ms)),
+        (
+            int(JOURNAL_SHIPPED_MS),
+            int(since_ms),
+            int(until_ms),
+            int(since_ms),
+            int(until_ms),
+        ),
     ).fetchall()
+    pre_journal_n = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM assist_real_trade
+            WHERE status = 'closed' AND side IN ('long', 'short')
+              AND exit_time_ms IS NOT NULL
+              AND exit_time_ms < ?
+              AND exit_time_ms >= ? AND exit_time_ms <= ?
+            """,
+            (int(JOURNAL_SHIPPED_MS), int(since_ms), int(until_ms)),
+        ).fetchone()[0]
+    )
     known: list[float] = []
     pass_rs: list[float] = []
     fail_rs: list[float] = []
@@ -349,8 +372,12 @@ def summarize_journal(
                 "mistake_tags": raw[1],
                 "loss_at_stop": raw[2],
                 "net_r_real": raw[3],
+                "exit_time_ms": raw[4],
             }
         )
+        exit_ms = item.get("exit_time_ms")
+        if exit_ms is not None and int(exit_ms) < JOURNAL_SHIPPED_MS:
+            continue
         grade = item.get("grade")
         if grade == "pass":
             pass_n += 1
@@ -383,13 +410,28 @@ def summarize_journal(
         "avg_r_fail": (sum(fail_rs) / len(fail_rs)) if fail_rs else None,
         "top_tag": top,
         "ungraded": ungraded,
+        "pre_journal_n": pre_journal_n,
+        "window_start_ms": int(since_ms),
+        "window_end_ms": int(until_ms),
     }
 
 
 def format_journal_lines(summary: dict[str, Any]) -> list[str]:
     n = int(summary.get("n") or 0)
-    if n == 0:
+    pre = int(summary.get("pre_journal_n") or 0)
+    pre_line = None
+    if pre:
+        start = summary.get("window_start_ms")
+        end = summary.get("window_end_ms")
+        if start is not None and end is not None:
+            window = format_bkk_window(int(start), int(end))
+            pre_line = f"ก่อนมีบันทึก {window}: n={pre}"
+        else:
+            pre_line = f"ก่อนมีบันทึก: n={pre}"
+    if n == 0 and pre_line is None:
         return ["บันทึกไม้: ยังไม่มีที่ปิด"]
+    if n == 0 and pre_line is not None:
+        return [pre_line]
     sum_r = summary.get("sum_r")
     avg_r = summary.get("avg_r")
     sum_txt = "—" if sum_r is None else f"{_signed(float(sum_r))}R"
@@ -397,7 +439,7 @@ def format_journal_lines(summary: dict[str, Any]) -> list[str]:
     rate = summary.get("pass_rate")
     rate_txt = "—" if rate is None else f"{float(rate) * 100:.0f}%"
     top = summary.get("top_tag") or "—"
-    return [
+    lines = [
         f"บันทึกไม้: n={n} · รวม {sum_txt} · เฉลี่ย {avg_txt}",
         (
             f"ตามแผน {rate_txt} · ตามแผนเฉลี่ย {_r_or_dash(summary.get('avg_r_pass'))} · "
@@ -405,6 +447,9 @@ def format_journal_lines(summary: dict[str, Any]) -> list[str]:
         ),
         f"ผิดบ่อยสุด: {top} · ยังไม่ให้เกรด {int(summary.get('ungraded') or 0)}",
     ]
+    if pre_line is not None:
+        lines.append(pre_line)
+    return lines
 
 
 def _send_pending(conn: Any, send: SendFn, *, now_ms: int) -> list[str]:
