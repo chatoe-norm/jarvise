@@ -144,7 +144,7 @@ def _reduction_lines(sized: SizedSignal) -> list[str]:
         if reason == "step" and _step_removed_over_5pct(sized):
             lines.append("ลดขนาดเพราะ: ปัดจำนวนตาม lot step")
         elif reason == "margin_cap":
-            lines.append("ลดขนาดเพราะ: margin ไม่พอสำหรับหลายไอเดียพร้อมกัน")
+            lines.append("ลดขนาดเพราะ: margin ที่ว่างไม่พอ")
         elif reason == "requote_cap":
             lines.append(_requote_reason_line(sized))
     return lines

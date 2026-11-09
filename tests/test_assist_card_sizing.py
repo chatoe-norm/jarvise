@@ -224,7 +224,7 @@ def test_margin_line_does_not_repeat_the_leverage_line() -> None:
     shrunk = _shrink_for_max_leverage(sized, available_balance=Decimal("10"), uncapped=8)
     assert shrunk is not None
     text = format_signal_message(shrunk, expires_at_ms=EXPIRES, balance=Decimal("1000"))
-    assert "ลดขนาดเพราะ: margin ไม่พอสำหรับหลายไอเดียพร้อมกัน" in text
+    assert "ลดขนาดเพราะ: margin ที่ว่างไม่พอ" in text
     assert text.count("ขนาดเต็มต้องใช้ 8x — ลดเป็น 5x แล้ว") == 1
     assert "ลดขนาดเพราะ: ปัดจำนวนตาม lot step" not in text
 
