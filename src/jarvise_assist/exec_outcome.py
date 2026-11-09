@@ -31,6 +31,7 @@ CLEAR_REJECTION_CODES: frozenset[int] = frozenset(
         -2022,  # REDUCE_ONLY_REJECT
         -4003,  # QTY_LESS_THAN_ZERO
         -4061,  # POSITION_SIDE_NOT_MATCH
+        -4130,  # An open stop or take-profit already exists
         -4164,  # MIN_NOTIONAL
     }
 )

@@ -15,23 +15,26 @@ from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist.execute import (
     MOVE_STOP_TTL_MS,
-    MSG_ACCOUNT_MODE_UNREADABLE,
     MSG_ALREADY_CLOSED,
     MSG_BINANCE_NOT_SENT,
     MSG_BINANCE_RETRY,
     MSG_EXIT_POSITION_CHANGED,
     MSG_EXPIRED,
+    MSG_KEY_REFUSED,
     MSG_KILL,
+    MSG_MODE_UNREADABLE,
     MSG_MOVE_STOP_BUFFER,
     MSG_MOVE_STOP_EXPIRED,
+    MSG_MOVE_STOP_KEEP,
     MSG_MOVE_STOP_NO_ADVICE,
     MSG_MOVE_STOP_TWO,
-    MSG_MOVE_STOP_UNKNOWN,
     MSG_MOVE_STOP_UNKNOWN_OLD_OK,
     MSG_OFF,
     MSG_ONE_WAY,
     MSG_ORDER_NOT_FOUND,
     MSG_OUTCOME_UNKNOWN,
+    MSG_PREORDER_EXIT,
+    MSG_PREORDER_MOVE,
     MSG_RECOVER_SIDE_MISMATCH,
     MSG_RECOVER_STALE_UNREADABLE,
     MSG_STOP_CLOSED,
@@ -63,6 +66,7 @@ from jarvise_assist.sizing import (
     SignalCandidate,
     SizedSignal,
     admit_signals,
+    expected_analysis_bar_ms,
     floor_to_step,
     round_level_to_tick,
     size_signal,
@@ -1033,8 +1037,8 @@ def test_move_stop_4130_keeps_old(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     )
     transport = RecordingTransport(handlers)
     result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
-    assert "stop เดิมยังอยู่" in result or MSG_MOVE_STOP_UNKNOWN in result
-    assert "-4130" not in result
+    assert MSG_MOVE_STOP_KEEP in result
+    assert "-4130" in result
     assert not any(c[0] == "DELETE" for c in transport.calls)
     conn.close()
 
@@ -3545,8 +3549,8 @@ def test_sl0_and_sl1_both_found_cancels_sl1(tmp_path: Path, monkeypatch: pytest.
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade, sleep=_noop_sleep)
     assert result.startswith("✅")
-    deletes = [c for c in transport.calls if c[0] == "DELETE"]
-    assert any(c[2].get("clientAlgoId") == sl1 or c[2].get("algoId") in {"11", 11} for c in deletes)
+    deletes = [c for c in transport.calls if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder"]
+    assert [c[2].get("clientAlgoId") for c in deletes] == [sl1]
     steps = _exec_log_steps(conn, intent_id)
     assert "dup_stop_cancel" in steps
     assert "emergency_close" not in steps
@@ -4739,7 +4743,7 @@ def test_account_modes_unreadable_and_one_way_on_ms(tmp_path: Path, monkeypatch:
         now_ms_value=ts,
         message={"message_id": 1},
     )
-    assert any(MSG_ACCOUNT_MODE_UNREADABLE in t for t in sent)
+    assert any(MSG_MODE_UNREADABLE in t for t in sent)
     assert get_exec_intent(conn, intent_id)["status"] == "failed"
 
     intent2 = insert_exec_intent(
@@ -4846,6 +4850,192 @@ def test_stale_card_stop_change_expired_same_stop_ok(tmp_path: Path, monkeypatch
     )
     assert any(MSG_EXPIRED in t for t in sent2)
     assert get_exec_intent(conn, intent2)["status"] == "expired"
+    conn.close()
+
+
+def test_live_stale_card_stop_change_refused_same_stop_new_analysis_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    reset_trade_key_cache()
+    conn = open_db(tmp_path / "stale-live.db")
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    bar = expected_analysis_bar_ms(now)
+    _seed_doge_short(conn, ts=bar)
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/sapi/v1/account/apiRestrictions"): (
+            200,
+            {"enableFutures": True, "enableWithdrawals": False, "ipRestrict": True},
+        ),
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+    }
+    trade = _client(RecordingTransport(handlers), base="https://fapi.binance.com")
+    intent_id = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "qty": "100",
+            "stop": "0.083",
+            "target": "0.07",
+            "leverage": 5,
+            "entry": "0.08",
+            "loss_at_stop": "0.3",
+            "r_distance": "0.003",
+        },
+        created_at_ms=now,
+        expires_at_ms=now + 120_000,
+    )
+    conn.execute(
+        "UPDATE analysis_output SET invalidation_price=? WHERE symbol=?",
+        (0.09, "DOGEUSDT"),
+    )
+    conn.commit()
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ey:{intent_id}",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now,
+    )
+    assert any(MSG_EXPIRED in t for t in sent)
+    assert get_exec_intent(conn, intent_id)["status"] == "expired"
+
+    _seed_doge_short(conn, ts=bar + 1_000)
+    intent_same = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "qty": "100",
+            "stop": "0.083",
+            "target": "0.07",
+            "leverage": 5,
+            "entry": "0.08",
+            "loss_at_stop": "0.3",
+            "r_distance": "0.003",
+        },
+        created_at_ms=now + 1,
+        expires_at_ms=now + 120_000,
+    )
+    sent_same: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ey:{intent_same}",
+        send=lambda t, **_: sent_same.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now + 1,
+    )
+    assert not any(MSG_EXPIRED in t for t in sent_same)
+    assert any("ถืออยู่แล้ว" in t for t in sent_same)
+    assert get_exec_intent(conn, intent_same)["status"] != "expired"
+    conn.close()
+
+
+def test_ms_xx_preorder_failure_does_not_use_entry_retry_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "preorder-copy.db")
+    ts = now_ms()
+    move_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "advice"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    exit_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    mode_trade = _client(
+        RecordingTransport({("GET", "/fapi/v1/positionSide/dual"): httpx.ConnectError("mode")})
+    )
+    sent_mode: list[str] = []
+    mode_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "advice"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    handle_exec_callback(
+        conn,
+        f"ms:{mode_id}",
+        send=lambda t, **_: sent_mode.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=mode_trade,
+        now_ms_value=ts,
+        message={"message_id": 3},
+    )
+    assert sent_mode == [MSG_MODE_UNREADABLE]
+    assert MSG_KEY_REFUSED not in sent_mode[0]
+    trade = _client(
+        RecordingTransport(
+            {
+                ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+                ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+                ("GET", "/fapi/v3/positionRisk"): httpx.ConnectError("position"),
+            }
+        )
+    )
+    sent_ms: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ms:{move_id}",
+        send=lambda t, **_: sent_ms.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    assert sent_ms == [MSG_PREORDER_MOVE]
+    assert "ลองใหม่" not in sent_ms[0]
+    assert "กดเหรียญใหม่" not in sent_ms[0]
+    sent_xx: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"xx:{exit_id}",
+        send=lambda t, **_: sent_xx.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=ts,
+        message={"message_id": 2},
+    )
+    assert sent_xx == [MSG_PREORDER_EXIT]
+    assert "ลองใหม่" not in sent_xx[0]
     conn.close()
 
 

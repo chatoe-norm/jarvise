@@ -117,6 +117,10 @@ MSG_TRADE_PEM_FAILED = "โหลดคีย์เทรดไม่ได้"
 MSG_ONE_WAY = "บัญชีต้องเป็น one-way mode"
 MSG_MULTI_ASSETS = "บัญชีต้องปิด Multi-Assets (Single-Asset เท่านั้น)"
 MSG_ACCOUNT_MODE_UNREADABLE = "อ่านโหมดบัญชีไม่ได้ — ไม่ส่งคำสั่ง"
+MSG_MODE_UNREADABLE = "อ่านโหมดบัญชีไม่ได้ — ยังไม่ส่งคำสั่ง"
+MSG_PREORDER_MOVE = "รอคำแนะนำรอบถัดไป หรือดู 📋 ไม้ที่ถืออยู่"
+MSG_PREORDER_EXIT = "ดู 📋 ไม้ที่ถืออยู่"
+MSG_MOVE_STOP_OLD_UNREADABLE = "เลื่อน stop ไม่ได้ — ยืนยัน stop เดิมไม่ได้ — เช็กในแอป"
 MSG_CANCELLED = "ยกเลิกแล้ว"
 MSG_STOP_CLOSED = "วาง stop ไม่ได้ — ปิดไม้แล้วเพื่อความปลอดภัย"
 MSG_TP_KEEP = "เข้าแล้วและมี stop — วาง TP ไม่ได้ ตั้งเองได้"
@@ -427,14 +431,21 @@ class BinanceTradeClient:
         return {"ok": True}
 
     def assert_account_modes(self) -> None:
-        dual = self.signed_get("/fapi/v1/positionSide/dual")
+        try:
+            dual = self.signed_get("/fapi/v1/positionSide/dual")
+            multi = self.signed_get("/fapi/v1/multiAssetsMargin")
+        except TradeClientError as exc:
+            if str(exc) in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_MODE_UNREADABLE}:
+                raise
+            raise TradeClientError(MSG_MODE_UNREADABLE) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise TradeClientError(MSG_MODE_UNREADABLE) from exc
         if not isinstance(dual, dict) or type(dual.get("dualSidePosition")) is not bool:
-            raise TradeClientError(MSG_ACCOUNT_MODE_UNREADABLE, body=dual if isinstance(dual, dict) else {})
+            raise TradeClientError(MSG_MODE_UNREADABLE, body=dual if isinstance(dual, dict) else {})
         if dual["dualSidePosition"] is True:
             raise TradeClientError(MSG_ONE_WAY, body=dual)
-        multi = self.signed_get("/fapi/v1/multiAssetsMargin")
         if not isinstance(multi, dict) or type(multi.get("multiAssetsMargin")) is not bool:
-            raise TradeClientError(MSG_ACCOUNT_MODE_UNREADABLE, body=multi if isinstance(multi, dict) else {})
+            raise TradeClientError(MSG_MODE_UNREADABLE, body=multi if isinstance(multi, dict) else {})
         if multi["multiAssetsMargin"] is True:
             raise TradeClientError(MSG_MULTI_ASSETS, body=multi)
 
@@ -776,6 +787,15 @@ def _query_fill_after_unknown(
 
 def _msg_symbol_in_flight(symbol: str) -> str:
     return f"คำสั่ง {symbol.upper()} ยังไม่จบ — ยังไม่เปิดไม้ใหม่ ดู 📋 ไม้ที่ถืออยู่"
+
+
+def _preorder_fail_text(prefix: str) -> str:
+    """Copy before any order is sent. ey: keeps the entry line. ms:/xx: never say retry."""
+    if prefix == "ms:":
+        return MSG_PREORDER_MOVE
+    if prefix == "xx:":
+        return MSG_PREORDER_EXIT
+    return MSG_BINANCE_NOT_SENT
 
 
 def _fill_from_position(
@@ -1386,7 +1406,8 @@ def create_entry_preview(
         except TradeClientError as exc:
             msg = (
                 str(exc)
-                if str(exc) in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_ACCOUNT_MODE_UNREADABLE}
+                if str(exc)
+                in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_ACCOUNT_MODE_UNREADABLE, MSG_MODE_UNREADABLE}
                 else MSG_KEY_REFUSED
             )
             return {"ok": False, "reason": "key_refused", "text": msg}
@@ -1664,20 +1685,32 @@ def _cancel_dup_stops_after_verified(
     intent_id: str,
     symbol: str,
     keep_tag: str,
-) -> None:
-    """After keep_tag is VERIFIED, cancel the other stop tags of this intent."""
+) -> bool:
+    """Cancel other stop tags only when they were logged as placed and are still open."""
+    placed = _placement_log_client_ids(conn, intent_id)
+    try:
+        open_list = trade.open_algo_orders(symbol=symbol, strict=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("dup stop list failed %s", symbol)
+        return False
+    open_ids = {str(order.get("clientAlgoId") or order.get("clientOrderId") or "") for order in open_list}
+    all_ok = True
     for tag in ("sl0", "sl1", "slr"):
         if tag == keep_tag:
             continue
         cid = client_order_id(intent_id, tag)
-        _cancel_algo_client_ok(
+        if cid not in placed or cid not in open_ids:
+            continue
+        if not _cancel_algo_client_ok(
             trade,
             symbol=symbol,
             client_algo_id=cid,
             conn=conn,
             intent_id=intent_id,
             step="dup_stop_cancel",
-        )
+        ):
+            all_ok = False
+    return all_ok
 
 
 def _stop_attempt_tags(
@@ -1862,9 +1895,6 @@ def _place_and_verify_stop(
         position_qty=qty,
     )
     if final_vr == StopVerifyResult.VERIFIED and final_tag is not None:
-        _cancel_dup_stops_after_verified(
-            trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=final_tag
-        )
         return final_vr, final_tag, stop_err
     if final_vr == StopVerifyResult.CLOSED_BY_STOP:
         return final_vr, final_tag, stop_err
@@ -2483,7 +2513,29 @@ def run_move_stop_sequence(
     if ms_vr == StopVerifyResult.VERIFIED:
         placed_ok = True
     elif clear_reject_code is not None:
-        return _exec_result(f"{MSG_MOVE_STOP_KEEP} ({clear_reject_code})", status="failed")
+        old_verified = False
+        for old in old_stops:
+            old_cid = str(old.get("clientAlgoId") or old.get("clientOrderId") or "")
+            old_px = order_stop_price(old)
+            if not old_cid or old_px is None:
+                continue
+            if (
+                verify_our_stop(
+                    trade,
+                    symbol=symbol,
+                    client_id=old_cid,
+                    closing_side=close_side,
+                    planned_stop=old_px,
+                    position_qty=pos.qty,
+                    position_flat=False,
+                )
+                == StopVerifyResult.VERIFIED
+            ):
+                old_verified = True
+                break
+        if old_verified:
+            return _exec_result(f"{MSG_MOVE_STOP_KEEP} ({clear_reject_code})", status="failed")
+        return _exec_result(MSG_MOVE_STOP_OLD_UNREADABLE, status="failed")
     else:
         # Unknown placement and not verified — do not cancel old stops.
         old_verified = False
@@ -3015,7 +3067,8 @@ def handle_exec_callback(
         except TradeClientError as exc:
             text = (
                 str(exc)
-                if str(exc) in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_ACCOUNT_MODE_UNREADABLE}
+                if str(exc)
+                in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_ACCOUNT_MODE_UNREADABLE, MSG_MODE_UNREADABLE}
                 else MSG_KEY_REFUSED
             )
             finish_exec_intent(conn, intent_id, status="failed", result_text=text, expect_status="confirmed")
@@ -3023,7 +3076,7 @@ def handle_exec_callback(
             return {"ok": False, "reason": "key"}
         except (httpx.HTTPError, ProviderError) as exc:
             logger.warning("exec pre-order network error %s", type(exc).__name__)
-            text = MSG_BINANCE_NOT_SENT
+            text = _preorder_fail_text(prefix)
             finish_exec_intent(conn, intent_id, status="failed", result_text=text, expect_status="confirmed")
             if mid is not None and prefix == "ey:":
                 edit(int(mid), text, reply_markup={"inline_keyboard": []})
@@ -3089,7 +3142,7 @@ def handle_exec_callback(
                     guard = _confirm_guards_entry(conn, intent, client, now_ms_value=ts)
                 except (httpx.HTTPError, ProviderError) as exc:
                     logger.warning("confirm guards network error %s", type(exc).__name__)
-                    text = MSG_BINANCE_NOT_SENT
+                    text = _preorder_fail_text(prefix)
                     finish_exec_intent(
                         conn,
                         intent_id,
@@ -3155,7 +3208,7 @@ def handle_exec_callback(
                     expect_status="confirmed",
                 )
             else:
-                text = MSG_BINANCE_NOT_SENT
+                text = _preorder_fail_text(prefix)
                 finish_exec_intent(
                     conn,
                     intent_id,
