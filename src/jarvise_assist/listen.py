@@ -274,6 +274,7 @@ def listener_loop(
     """Blocking poll loop. Never raises out; sleeps on backoff."""
     path = Path(db_path) if db_path is not None else _default_db_path()
     fail_streak = 0
+    recovery_once = False
     while stop_event is None or not stop_event.is_set():
         try:
             if not notify_configured():
@@ -284,6 +285,21 @@ def listener_loop(
                 continue
             conn = open_db(path)
             try:
+                if not recovery_once:
+                    recovery_once = True
+                    try:
+                        from jarvise_assist.execute import (
+                            assist_execute_mode,
+                            build_trade_client,
+                            run_exec_recovery,
+                        )
+
+                        if assist_execute_mode() in {"testnet", "live"}:
+                            trade, _reason = build_trade_client()
+                            if trade is not None:
+                                run_exec_recovery(conn, trade, now_ms(), send=send_message)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("assist exec recovery on listener start failed")
                 _ensure_keyboard(conn)
                 result = poll_once(conn, get_updates_fn=get_updates_fn)
                 now = now_ms()

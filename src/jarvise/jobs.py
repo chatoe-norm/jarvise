@@ -54,6 +54,8 @@ from jarvise_paper.shadow_veto import digest_dir, run_shadow
 from jarvise_risk import kill_switch_state
 from jarvise_trade import live_risk_tick, live_trading_enabled, reconcile_live_orders
 
+logger = logging.getLogger(__name__)
+
 # Subprocess wall-clock limits (seconds). A hung CLI must never wedge n8n or the health probe.
 JOB_TIMEOUTS_S: dict[str, float] = {
     "ingest": 900.0,
@@ -497,7 +499,11 @@ def run_assist_signal_job() -> tuple[int, dict[str, Any]]:
 
 
 def run_assist_watch_job() -> tuple[int, dict[str, Any]]:
-    """Read-only futures position watch every 5 minutes. Never places orders."""
+    """Futures position watch every 5 minutes.
+
+    Watch advice stays read-only. Recovery may place ``-slr`` or the existing
+    ``-cls`` only for an intent the owner already tapped — never a new entry.
+    """
     with single_flight("assist_watch") as acquired:
         if not acquired:
             return 3, _running("assist_watch")
@@ -516,6 +522,25 @@ def run_assist_watch_job() -> tuple[int, dict[str, Any]]:
         conn = open_db(path)
         try:
             payload = run_assist_watch(conn, now_ms_value=now)
+            try:
+                from jarvise_assist.execute import (
+                    assist_execute_mode,
+                    build_trade_client,
+                    run_exec_recovery,
+                )
+                from jarvise_notify.telegram import send_message
+
+                if assist_execute_mode() in {"testnet", "live"}:
+                    trade, _reason = build_trade_client()
+                    if trade is not None:
+                        recovery = run_exec_recovery(conn, trade, now, send=send_message)
+                        payload["exec_recovery"] = recovery
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("assist exec recovery failed")
+                payload["exec_recovery"] = {
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
         except Exception as exc:  # noqa: BLE001
             payload = {
                 "ok": False,

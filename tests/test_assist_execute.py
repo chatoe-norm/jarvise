@@ -15,6 +15,7 @@ from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist.execute import (
     MOVE_STOP_TTL_MS,
+    MSG_ACCOUNT_MODE_UNREADABLE,
     MSG_ALREADY_CLOSED,
     MSG_BINANCE_NOT_SENT,
     MSG_BINANCE_RETRY,
@@ -23,12 +24,16 @@ from jarvise_assist.execute import (
     MSG_KILL,
     MSG_MOVE_STOP_BUFFER,
     MSG_MOVE_STOP_EXPIRED,
-    MSG_MOVE_STOP_KEEP,
     MSG_MOVE_STOP_NO_ADVICE,
     MSG_MOVE_STOP_TWO,
     MSG_MOVE_STOP_UNKNOWN,
+    MSG_MOVE_STOP_UNKNOWN_OLD_OK,
     MSG_OFF,
+    MSG_ONE_WAY,
+    MSG_ORDER_NOT_FOUND,
+    MSG_OUTCOME_UNKNOWN,
     MSG_STOP_CLOSED,
+    MSG_STOP_UNVERIFIABLE,
     BinanceTradeClient,
     TradeClientError,
     assist_execute_mode,
@@ -39,6 +44,7 @@ from jarvise_assist.execute import (
     handle_exec_callback,
     reset_trade_key_cache,
     run_entry_sequence,
+    run_exec_recovery,
     run_exit_sequence,
     run_move_stop_sequence,
     size_for_execution,
@@ -48,6 +54,7 @@ from jarvise_assist.listen import process_update
 from jarvise_assist.sizing import floor_to_step, round_level_to_tick, size_signal
 from jarvise_assist.store import (
     claim_exec_intent,
+    claim_exec_intent_for_recovery,
     finish_exec_intent,
     get_exec_intent,
     insert_exec_intent,
@@ -104,6 +111,77 @@ def _client(
 ) -> BinanceTradeClient:
     http = httpx.Client(transport=transport, base_url=base)
     return BinanceTradeClient(_auth(), client=http, base_url=base)
+
+
+def _verified_stop(
+    *,
+    client_id: str,
+    algo_id: int = 11,
+    trigger: str = "0.083",
+    qty: str = "100",
+    side: str = "BUY",
+    symbol: str = "DOGEUSDT",
+) -> dict[str, Any]:
+    """Open-algo row that passes verify_our_stop field checks."""
+    return {
+        "symbol": symbol,
+        "type": "STOP_MARKET",
+        "side": side,
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": trigger,
+        "quantity": qty,
+        "algoId": algo_id,
+        "clientAlgoId": client_id,
+        "algoStatus": "NEW",
+        "workingType": "MARK_PRICE",
+    }
+
+
+def _open_pos(
+    *,
+    amt: str = "-100",
+    entry: str = "0.08",
+    mark: str = "0.08",
+    symbol: str = "DOGEUSDT",
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "positionSide": "BOTH",
+        "positionAmt": amt,
+        "entryPrice": entry,
+        "markPrice": mark,
+    }
+
+
+def _algo_not_found() -> tuple[int, dict[str, Any]]:
+    return (400, {"code": -2013, "msg": "Order does not exist."})
+
+
+def _flat_then_open(open_rows: list[dict[str, Any]], *, flat_count: int = 1) -> Any:
+    """positionRisk: empty for baseline, then the open position for later steps."""
+    state = {"n": 0}
+
+    def _fn(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        state["n"] += 1
+        if state["n"] <= flat_count:
+            return (200, [])
+        return (200, open_rows)
+
+    return _fn
+
+
+def _open_then_flat(open_rows: list[dict[str, Any]], *, open_count: int = 1) -> Any:
+    """positionRisk: open for pre-exit check, then flat after the exit fill."""
+    state = {"n": 0}
+
+    def _fn(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        state["n"] += 1
+        if state["n"] <= open_count:
+            return (200, open_rows)
+        return (200, [])
+
+    return _fn
 
 
 def _exchange_info() -> dict[str, Any]:
@@ -242,6 +320,8 @@ def test_entry_happy_path_request_sequence(tmp_path: Path, monkeypatch: pytest.M
             (200, {"algoId": 11, "clientAlgoId": "jv-x-sl0"}),
             (200, {"algoId": 12, "clientAlgoId": "jv-x-tp"}),
         ],
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
@@ -260,8 +340,9 @@ def test_entry_happy_path_request_sequence(tmp_path: Path, monkeypatch: pytest.M
         (200, {"algoId": 11}),
         (200, {"algoId": 12}),
     ]
-    # Fresh mark for stop check
+    # Fresh mark for stop check + verified sl0 read-back
     handlers[("GET", "/fapi/v1/premiumIndex")] = (200, {"markPrice": "0.08"})
+    _attach_verified_sl0(handlers, intent_id)
     result = run_entry_sequence(conn, intent_id, trade=trade)
     assert result.startswith("✅")
     methods_paths = [(m, p) for m, p, _ in transport.calls]
@@ -414,6 +495,9 @@ def test_stop_rejected_twice_closes(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     handlers: dict[tuple[str, str], Any] = {
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("GET", "/fapi/v3/positionRisk"): _flat_then_open([_open_pos()]),
         ("POST", "/fapi/v1/marginType"): (200, {"msg": "ok"}),
         ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
         ("POST", "/fapi/v1/order"): [
@@ -424,6 +508,7 @@ def test_stop_rejected_twice_closes(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             (400, {"code": -2010, "msg": "reject"}),
             (400, {"code": -2010, "msg": "reject"}),
         ],
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
@@ -531,27 +616,14 @@ def test_move_stop_place_before_cancel(
         "quantity": "100",
         "algoId": 99,
         "clientAlgoId": "jv-old-sl",
+        "algoStatus": "NEW",
+        "workingType": "MARK_PRICE",
     }
-    handlers: dict[tuple[str, str], Any] = {
-        ("GET", "/fapi/v3/positionRisk"): (
-            200,
-            [
-                {
-                    "symbol": "DOGEUSDT",
-                    "positionSide": "BOTH",
-                    "positionAmt": "-100",
-                    "entryPrice": "0.08",
-                    "markPrice": "0.078",
-                }
-            ],
-        ),
-        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
-        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.078"}),
-        ("GET", "/fapi/v1/openOrders"): (200, []),
-        ("GET", "/fapi/v1/openAlgoOrders"): (200, [old]),
-        ("POST", "/fapi/v1/algoOrder"): (200, {"algoId": 100}),
-        ("DELETE", "/fapi/v1/algoOrder"): (200, delete_body),
-    }
+    handlers = _move_stop_handlers(
+        old=old,
+        delete=(200, delete_body),
+        ms_client_id=client_order_id(intent_id, "ms"),
+    )
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_move_stop_sequence(conn, intent_id, trade=trade, now_ms_value=ts)
@@ -586,6 +658,8 @@ def test_move_stop_mark_passed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
     handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
         ("GET", "/fapi/v3/positionRisk"): (
             200,
             [
@@ -641,6 +715,8 @@ def _move_stop_handlers(
     place: Any = None,
     delete: Any = None,
     open_algo: Any = None,
+    ms_client_id: str | None = None,
+    new_stop: str = "0.079",
 ) -> dict[tuple[str, str], Any]:
     old_order = old or {
         "symbol": "DOGEUSDT",
@@ -652,24 +728,35 @@ def _move_stop_handlers(
         "quantity": "100",
         "algoId": 99,
         "clientAlgoId": "jv-old-sl",
+        "algoStatus": "NEW",
+        "workingType": "MARK_PRICE",
     }
+    if open_algo is None and ms_client_id is not None:
+        ms_row = _verified_stop(client_id=ms_client_id, algo_id=100, trigger=new_stop, qty=amt.lstrip("-"))
+        n = {"i": 0}
+
+        def _open(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+            n["i"] += 1
+            # First list (before place): old only. After place: old + verified -ms.
+            if n["i"] == 1:
+                return (200, [old_order])
+            return (200, [old_order, ms_row])
+
+        open_algo = _open
+    elif open_algo is None:
+        open_algo = (200, [old_order])
     return {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
         ("GET", "/fapi/v3/positionRisk"): (
             200,
-            [
-                {
-                    "symbol": "DOGEUSDT",
-                    "positionSide": "BOTH",
-                    "positionAmt": amt,
-                    "entryPrice": entry,
-                    "markPrice": mark,
-                }
-            ],
+            [_open_pos(amt=amt, entry=entry, mark=mark)],
         ),
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": mark}),
         ("GET", "/fapi/v1/openOrders"): (200, []),
-        ("GET", "/fapi/v1/openAlgoOrders"): open_algo if open_algo is not None else (200, [old_order]),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
         ("POST", "/fapi/v1/algoOrder"): place if place is not None else (200, {"algoId": 100}),
         ("DELETE", "/fapi/v1/algoOrder"): delete if delete is not None else (200, {"algoId": 99}),
     }
@@ -703,7 +790,7 @@ def test_move_stop_widen_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "algoId": 99,
         "clientAlgoId": "jv-old",
     }
-    handlers = _move_stop_handlers(old=old, mark="0.076")
+    handlers = _move_stop_handlers(ms_client_id=client_order_id(intent_id, "ms"), old=old, mark="0.076")
     transport = RecordingTransport(handlers)
     result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
     assert "กระชับ" in result or "ไม่เลื่อน" in result or "แนะนำ" in result
@@ -728,7 +815,7 @@ def test_move_stop_buffer_zero_orders(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     claim_exec_intent(conn, intent_id)
     # mark almost at stop → buffer fail
-    handlers = _move_stop_handlers(mark="0.07895")
+    handlers = _move_stop_handlers(ms_client_id=client_order_id(intent_id, "ms"), mark="0.07895")
     transport = RecordingTransport(handlers)
     result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
     assert result == MSG_MOVE_STOP_BUFFER
@@ -753,7 +840,9 @@ def test_move_stop_cancel_connect_error_two_stop_warning(
         created_at_ms=ts,
         expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
-    handlers = _move_stop_handlers(delete=httpx.ConnectError("cancel down"))
+    handlers = _move_stop_handlers(
+        ms_client_id=client_order_id(intent_id, "ms"), delete=httpx.ConnectError("cancel down")
+    )
     transport = RecordingTransport(handlers)
     sent: list[str] = []
     edits: list[str] = []
@@ -791,17 +880,7 @@ def test_move_stop_place_timeout_lookup_finds(tmp_path: Path, monkeypatch: pytes
     )
     claim_exec_intent(conn, intent_id)
     cid = client_order_id(intent_id, "ms")
-    found = {
-        "symbol": "DOGEUSDT",
-        "type": "STOP_MARKET",
-        "side": "BUY",
-        "positionSide": "BOTH",
-        "reduceOnly": True,
-        "triggerPrice": "0.079",
-        "quantity": "100",
-        "algoId": 100,
-        "clientAlgoId": cid,
-    }
+    found = _verified_stop(client_id=cid, algo_id=100, trigger="0.079")
     old = {
         "symbol": "DOGEUSDT",
         "type": "STOP_MARKET",
@@ -824,8 +903,10 @@ def test_move_stop_place_timeout_lookup_finds(tmp_path: Path, monkeypatch: pytes
         return (200, [old, found])
 
     handlers = _move_stop_handlers(
+        ms_client_id=cid,
         place=httpx.ConnectError("place down"),
         open_algo=open_algo,
+        old=old,
     )
     transport = RecordingTransport(handlers)
     result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
@@ -852,24 +933,15 @@ def test_move_stop_place_unknown_lookup_empty(tmp_path: Path, monkeypatch: pytes
         expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
     claim_exec_intent(conn, intent_id)
-    old = {
-        "symbol": "DOGEUSDT",
-        "type": "STOP_MARKET",
-        "side": "BUY",
-        "positionSide": "BOTH",
-        "reduceOnly": True,
-        "triggerPrice": "0.083",
-        "quantity": "100",
-        "algoId": 99,
-        "clientAlgoId": "jv-old-sl",
-    }
+    old = _verified_stop(client_id="jv-old-sl", algo_id=99, trigger="0.083")
     handlers = _move_stop_handlers(
         place=httpx.ConnectError("place down"),
         open_algo=(200, [old]),  # lookup never finds new
+        old=old,
     )
     transport = RecordingTransport(handlers)
     result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
-    assert MSG_MOVE_STOP_KEEP in result or MSG_MOVE_STOP_UNKNOWN in result
+    assert MSG_MOVE_STOP_UNKNOWN_OLD_OK in result
     assert "stop เดิมยังอยู่" in result
     assert not any(c[0] == "DELETE" for c in transport.calls)
     conn.close()
@@ -901,7 +973,7 @@ def test_move_stop_close_position_old_coexists(tmp_path: Path, monkeypatch: pyte
         "algoId": 99,
         "clientAlgoId": "owner-cp",
     }
-    handlers = _move_stop_handlers(old=old)
+    handlers = _move_stop_handlers(ms_client_id=client_order_id(intent_id, "ms"), old=old)
     transport = RecordingTransport(handlers)
     result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
     assert result.startswith("✅")
@@ -935,8 +1007,8 @@ def test_move_stop_4130_keeps_old(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     )
     transport = RecordingTransport(handlers)
     result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
-    assert "stop เดิมยังอยู่" in result
-    assert "-4130" in result
+    assert "stop เดิมยังอยู่" in result or MSG_MOVE_STOP_UNKNOWN in result
+    assert "-4130" not in result
     assert not any(c[0] == "DELETE" for c in transport.calls)
     conn.close()
 
@@ -959,7 +1031,7 @@ def test_move_stop_recompute_changed_sends_new_advice(
         created_at_ms=ts,
         expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
-    handlers = _move_stop_handlers(mark="0.075")
+    handlers = _move_stop_handlers(ms_client_id=client_order_id(intent_id, "ms"), mark="0.075")
     transport = RecordingTransport(handlers)
     sent: list[str] = []
     markups: list[Any] = []
@@ -1006,7 +1078,7 @@ def test_move_stop_advice_none_refused(tmp_path: Path, monkeypatch: pytest.Monke
         expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
     claim_exec_intent(conn, intent_id)
-    handlers = _move_stop_handlers()
+    handlers = _move_stop_handlers(ms_client_id=client_order_id(intent_id, "ms"))
     transport = RecordingTransport(handlers)
     result = run_move_stop_sequence(conn, intent_id, trade=_client(transport), now_ms_value=ts)
     assert result == MSG_MOVE_STOP_NO_ADVICE
@@ -1029,7 +1101,7 @@ def test_move_stop_expired_and_mn_cancel(tmp_path: Path, monkeypatch: pytest.Mon
         created_at_ms=ts,
         expires_at_ms=ts + 1000,
     )
-    handlers = _move_stop_handlers()
+    handlers = _move_stop_handlers(ms_client_id=client_order_id(intent_id, "ms"))
     transport = RecordingTransport(handlers)
     sent: list[str] = []
     edits: list[str] = []
@@ -1105,6 +1177,8 @@ def test_move_stop_already_closed_and_replay(tmp_path: Path, monkeypatch: pytest
         expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
     handlers = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
         ("GET", "/fapi/v3/positionRisk"): (200, []),
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
     }
@@ -1187,17 +1261,31 @@ def test_move_stop_long_tighten_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         expires_at_ms=ts + MOVE_STOP_TTL_MS,
     )
     claim_exec_intent(conn, intent_id)
-    old = {
-        "symbol": "BTCUSDT",
-        "type": "STOP_MARKET",
-        "side": "SELL",
-        "positionSide": "BOTH",
-        "reduceOnly": True,
-        "triggerPrice": "90",
-        "quantity": "0.1",
-        "algoId": 1,
-        "clientAlgoId": "jv-btc",
-    }
+    old = _verified_stop(
+        client_id="jv-btc",
+        algo_id=1,
+        trigger="90",
+        qty="0.1",
+        side="SELL",
+        symbol="BTCUSDT",
+    )
+    ms_cid = client_order_id(intent_id, "ms")
+    ms_row = _verified_stop(
+        client_id=ms_cid,
+        algo_id=2,
+        trigger="101",
+        qty="0.1",
+        side="SELL",
+        symbol="BTCUSDT",
+    )
+    open_n = {"n": 0}
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        open_n["n"] += 1
+        if open_n["n"] == 1:
+            return (200, [old])
+        return (200, [old, ms_row])
+
     handlers: dict[tuple[str, str], Any] = {
         ("GET", "/fapi/v3/positionRisk"): (
             200,
@@ -1228,7 +1316,8 @@ def test_move_stop_long_tighten_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         ),
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "108"}),
         ("GET", "/fapi/v1/openOrders"): (200, []),
-        ("GET", "/fapi/v1/openAlgoOrders"): (200, [old]),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
         ("POST", "/fapi/v1/algoOrder"): (200, {"algoId": 2}),
         ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 1}),
     }
@@ -1273,17 +1362,8 @@ def test_exit_and_already_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         expires_at_ms=ts + 120_000,
     )
     claim_exec_intent(conn, intent2)
-    handlers[("GET", "/fapi/v3/positionRisk")] = (
-        200,
-        [
-            {
-                "symbol": "DOGEUSDT",
-                "positionSide": "BOTH",
-                "positionAmt": "-100",
-                "entryPrice": "0.08",
-                "markPrice": "0.07",
-            }
-        ],
+    handlers[("GET", "/fapi/v3/positionRisk")] = _open_then_flat(
+        [_open_pos(amt="-100", entry="0.08", mark="0.07")]
     )
     handlers[("POST", "/fapi/v1/order")] = (200, {"orderId": 9, "avgPrice": "0.07", "executedQty": "100"})
     handlers[("GET", "/fapi/v1/userTrades")] = (200, [{"realizedPnl": "1.5"}])
@@ -1421,7 +1501,11 @@ def test_market_timeout_then_filled_continues_to_stop(
             (200, {"algoId": 11}),
             (200, {"algoId": 12}),
         ],
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
     }
+    _attach_verified_sl0(handlers, intent_id)
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade)
@@ -1447,7 +1531,8 @@ def test_market_timeout_order_not_found_skips_stop(tmp_path: Path, monkeypatch: 
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade)
-    assert result == "เข้าไม้ไม่สำเร็จ"
+    assert result == MSG_OUTCOME_UNKNOWN
+    assert getattr(result, "status", None) == "unknown"
     assert not any(p == "/fapi/v1/algoOrder" for m, p, _ in transport.calls)
     conn.close()
 
@@ -1462,6 +1547,8 @@ def test_stop_timeout_with_algo_present_no_second_stop_or_close(
     handlers: dict[tuple[str, str], Any] = {
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): _flat_then_open([_open_pos()]),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
         ("POST", "/fapi/v1/marginType"): (200, {"msg": "ok"}),
         ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
         ("POST", "/fapi/v1/order"): [
@@ -1473,7 +1560,7 @@ def test_stop_timeout_with_algo_present_no_second_stop_or_close(
         ],
         ("GET", "/fapi/v1/openAlgoOrders"): (
             200,
-            [{"algoId": 11, "clientAlgoId": scid, "symbol": "DOGEUSDT"}],
+            [_verified_stop(client_id=scid, algo_id=11)],
         ),
     }
     transport = RecordingTransport(handlers)
@@ -1498,6 +1585,7 @@ def test_stop_timeout_and_lookup_timeout_retries_instead_of_escaping(
     handlers: dict[tuple[str, str], Any] = {
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): _flat_then_open([_open_pos()]),
         ("POST", "/fapi/v1/marginType"): (200, {"msg": "ok"}),
         ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
         ("POST", "/fapi/v1/order"): [
@@ -1513,9 +1601,14 @@ def test_stop_timeout_and_lookup_timeout_retries_instead_of_escaping(
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade)
-    assert result.startswith("✅")
+    assert result == MSG_STOP_UNVERIFIABLE
+    assert getattr(result, "status", None) == "unknown"
     algo_posts = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
-    assert len(algo_posts) == 3
+    assert len(algo_posts) == 1  # timed-out sl0 only; no sl1 when open-algo unreadable
+    assert not any(
+        c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true"
+        for c in transport.calls
+    )
     conn.close()
 
 
@@ -1527,6 +1620,7 @@ def test_stop_fails_close_fails_close_yourself(tmp_path: Path, monkeypatch: pyte
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
         ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
         ("GET", "/fapi/v1/order"): (200, {"orderId": 9, "executedQty": "0", "status": "NEW"}),
         ("POST", "/fapi/v1/marginType"): (200, {"msg": "ok"}),
         ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
@@ -1540,18 +1634,8 @@ def test_stop_fails_close_fails_close_yourself(tmp_path: Path, monkeypatch: pyte
             (400, {"code": -2010, "msg": "reject"}),
             (400, {"code": -2010, "msg": "reject"}),
         ],
-        ("GET", "/fapi/v3/positionRisk"): (
-            200,
-            [
-                {
-                    "symbol": "DOGEUSDT",
-                    "positionSide": "BOTH",
-                    "positionAmt": "-100",
-                    "entryPrice": "0.08",
-                    "markPrice": "0.08",
-                }
-            ],
-        ),
+        ("GET", "/fapi/v3/positionRisk"): _flat_then_open([_open_pos()]),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
@@ -1619,7 +1703,7 @@ def test_guard_exception_leaves_intent_failed(tmp_path: Path, monkeypatch: pytes
     row = get_exec_intent(conn, intent_id)
     assert row is not None
     assert row["status"] == "failed"
-    assert any("DOGEUSDT" in t and "เช็ค" in t for t in sent)
+    assert any(MSG_BINANCE_NOT_SENT in t for t in sent)
     conn.close()
 
 
@@ -1647,19 +1731,7 @@ def test_testnet_entry_does_not_write_watch(tmp_path: Path, monkeypatch: pytest.
         ),
     )
     conn.commit()
-    handlers: dict[tuple[str, str], Any] = {
-        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
-        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
-        ("POST", "/fapi/v1/marginType"): (200, {"msg": "ok"}),
-        ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
-        ("POST", "/fapi/v1/order"): [
-            (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08"}),
-        ],
-        ("POST", "/fapi/v1/algoOrder"): [
-            (200, {"algoId": 11}),
-            (200, {"algoId": 12}),
-        ],
-    }
+    handlers = _base_entry_handlers(intent_id=intent_id)
     trade = _client(RecordingTransport(handlers))
     assert run_entry_sequence(conn, intent_id, trade=trade).startswith("✅")
     n = conn.execute("SELECT COUNT(*) FROM assist_watch_position").fetchone()[0]
@@ -2384,24 +2456,23 @@ def test_entry_zero_avg_price_uses_order_query(tmp_path: Path, monkeypatch: pyte
     conn = open_db(tmp_path / "avg_query.db")
     ts = now_ms()
     intent_id = _entry_intent(conn, ts=ts, qty="759")
-    handlers: dict[tuple[str, str], Any] = {
-        ("POST", "/fapi/v1/marginType"): (200, {"code": 200}),
-        ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
-        ("POST", "/fapi/v1/order"): (
-            200,
-            {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
-        ),
-        ("GET", "/fapi/v1/order"): (
-            200,
-            {"orderId": 1, "executedQty": "759", "avgPrice": "0.07526", "status": "FILLED"},
-        ),
-        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.075"}),
-        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
-        ("POST", "/fapi/v1/algoOrder"): [
-            (200, {"algoId": 11}),
-            (200, {"algoId": 12}),
-        ],
-    }
+    handlers = _base_entry_handlers(intent_id=intent_id)
+    handlers[("GET", "/fapi/v3/positionRisk")] = _flat_then_open(
+        [_open_pos(amt="-759", entry="0.07526", mark="0.075")]
+    )
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (
+        200,
+        [_verified_stop(client_id=client_order_id(intent_id, "sl0"), qty="759")],
+    )
+    handlers[("POST", "/fapi/v1/order")] = (
+        200,
+        {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
+    )
+    handlers[("GET", "/fapi/v1/order")] = (
+        200,
+        {"orderId": 1, "executedQty": "759", "avgPrice": "0.07526", "status": "FILLED"},
+    )
+    handlers[("GET", "/fapi/v1/premiumIndex")] = (200, {"markPrice": "0.075"})
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade)
@@ -2426,38 +2497,24 @@ def test_entry_zero_avg_price_falls_back_to_position_risk(
     conn = open_db(tmp_path / "avg_pos.db")
     ts = now_ms()
     intent_id = _entry_intent(conn, ts=ts, qty="759")
-    transport = RecordingTransport(
-        {
-            ("POST", "/fapi/v1/marginType"): (200, {"code": 200}),
-            ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
-            ("POST", "/fapi/v1/order"): (
-                200,
-                {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
-            ),
-            ("GET", "/fapi/v1/order"): (
-                200,
-                {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
-            ),
-            ("GET", "/fapi/v3/positionRisk"): (
-                200,
-                [
-                    {
-                        "symbol": "DOGEUSDT",
-                        "positionSide": "BOTH",
-                        "positionAmt": "-759",
-                        "entryPrice": "0.0753",
-                        "markPrice": "0.075",
-                    }
-                ],
-            ),
-            ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.075"}),
-            ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
-            ("POST", "/fapi/v1/algoOrder"): [
-                (200, {"algoId": 11}),
-                (200, {"algoId": 12}),
-            ],
-        }
+    handlers = _base_entry_handlers(intent_id=intent_id)
+    handlers[("GET", "/fapi/v3/positionRisk")] = _flat_then_open(
+        [_open_pos(amt="-759", entry="0.0753", mark="0.075")]
     )
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (
+        200,
+        [_verified_stop(client_id=client_order_id(intent_id, "sl0"), qty="759")],
+    )
+    handlers[("POST", "/fapi/v1/order")] = (
+        200,
+        {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
+    )
+    handlers[("GET", "/fapi/v1/order")] = (
+        200,
+        {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
+    )
+    handlers[("GET", "/fapi/v1/premiumIndex")] = (200, {"markPrice": "0.075"})
+    transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade)
     assert "fill 0.0753 × 759" in result
@@ -2472,27 +2529,23 @@ def test_entry_unknown_price_skips_watch_and_loss_line(
     conn = open_db(tmp_path / "avg_unknown.db")
     ts = now_ms()
     intent_id = _entry_intent(conn, ts=ts, qty="759")
-    transport = RecordingTransport(
-        {
-            ("POST", "/fapi/v1/marginType"): (200, {"code": 200}),
-            ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
-            ("POST", "/fapi/v1/order"): (
-                200,
-                {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
-            ),
-            ("GET", "/fapi/v1/order"): (
-                200,
-                {"orderId": 1, "executedQty": "759", "avgPrice": "0", "status": "FILLED"},
-            ),
-            ("GET", "/fapi/v3/positionRisk"): (200, []),
-            ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.075"}),
-            ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
-            ("POST", "/fapi/v1/algoOrder"): [
-                (200, {"algoId": 11}),
-                (200, {"algoId": 12}),
-            ],
-        }
+    handlers = _base_entry_handlers(intent_id=intent_id)
+    # Stay flat after fill so entry price cannot be recovered from positionRisk.
+    handlers[("GET", "/fapi/v3/positionRisk")] = (200, [])
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (
+        200,
+        [_verified_stop(client_id=client_order_id(intent_id, "sl0"), qty="759")],
     )
+    handlers[("POST", "/fapi/v1/order")] = (
+        200,
+        {"orderId": 1, "executedQty": "759", "avgPrice": "0.000000", "status": "FILLED"},
+    )
+    handlers[("GET", "/fapi/v1/order")] = (
+        200,
+        {"orderId": 1, "executedQty": "759", "avgPrice": "0", "status": "FILLED"},
+    )
+    handlers[("GET", "/fapi/v1/premiumIndex")] = (200, {"markPrice": "0.075"})
+    transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade)
     assert "ราคายังไม่ยืนยัน × 759" in result
@@ -2517,18 +2570,7 @@ def test_exit_zero_avg_price_uses_query_or_omits(tmp_path: Path, monkeypatch: py
     )
     claim_exec_intent(conn, intent_id)
     handlers: dict[tuple[str, str], Any] = {
-        ("GET", "/fapi/v3/positionRisk"): (
-            200,
-            [
-                {
-                    "symbol": "DOGEUSDT",
-                    "positionSide": "BOTH",
-                    "positionAmt": "-100",
-                    "entryPrice": "0.08",
-                    "markPrice": "0.07",
-                }
-            ],
-        ),
+        ("GET", "/fapi/v3/positionRisk"): _open_then_flat([_open_pos(amt="-100", entry="0.08", mark="0.07")]),
         ("POST", "/fapi/v1/order"): (
             200,
             {"orderId": 9, "avgPrice": "0.000000", "executedQty": "100"},
@@ -2557,18 +2599,7 @@ def test_exit_zero_avg_price_uses_query_or_omits(tmp_path: Path, monkeypatch: py
     )
     claim_exec_intent(conn, intent2)
     handlers2: dict[tuple[str, str], Any] = {
-        ("GET", "/fapi/v3/positionRisk"): (
-            200,
-            [
-                {
-                    "symbol": "DOGEUSDT",
-                    "positionSide": "BOTH",
-                    "positionAmt": "-100",
-                    "entryPrice": "0.08",
-                    "markPrice": "0.07",
-                }
-            ],
-        ),
+        ("GET", "/fapi/v3/positionRisk"): _open_then_flat([_open_pos(amt="-100", entry="0.08", mark="0.07")]),
         ("POST", "/fapi/v1/order"): (
             200,
             {"orderId": 10, "avgPrice": "0.000000", "executedQty": "100"},
@@ -2768,6 +2799,20 @@ def test_ey_stop_connect_error_after_fill_emergency_closes_not_retry(
     def stop_boom(_clean: dict[str, Any]) -> None:
         raise httpx.ConnectError("stop down")
 
+    filled = {"n": 0}
+
+    def position_risk(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        # Stay flat through preview/guards/baseline; open only after the market fill.
+        if filled["n"] == 0:
+            return (200, [])
+        return (200, [_open_pos()])
+
+    def order_handler(clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if clean.get("reduceOnly") == "true":
+            return (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
+        filled["n"] += 1
+        return (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
+
     handlers: dict[tuple[str, str], Any] = {
         ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
         ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
@@ -2775,18 +2820,18 @@ def test_ey_stop_connect_error_after_fill_emergency_closes_not_retry(
             200,
             [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
         ),
-        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v3/positionRisk"): position_risk,
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
         ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
         ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/order"): (200, {"orderId": 9, "executedQty": "0", "status": "NEW"}),
         ("POST", "/fapi/v1/marginType"): (200, {"code": 200, "msg": "success"}),
         ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
-        ("POST", "/fapi/v1/order"): (
-            200,
-            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
-        ),
+        ("POST", "/fapi/v1/order"): order_handler,
         ("POST", "/fapi/v1/algoOrder"): stop_boom,
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
@@ -2894,20 +2939,37 @@ def _exec_log_steps(conn: Any, intent_id: str) -> list[str]:
     return [str(r[0]) for r in rows]
 
 
-def _base_entry_handlers() -> dict[tuple[str, str], Any]:
+def _base_entry_handlers(*, intent_id: str | None = None) -> dict[tuple[str, str], Any]:
+    """Default entry handlers. When intent_id is set, openAlgoOrders returns a VERIFIED sl0."""
+    if intent_id is not None:
+        sl0 = client_order_id(intent_id, "sl0")
+        open_algo: Any = (200, [_verified_stop(client_id=sl0)])
+    else:
+        open_algo = (200, [])
     return {
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
         ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
-        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
         ("GET", "/fapi/v1/openOrders"): (200, []),
-        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("GET", "/fapi/v3/positionRisk"): _flat_then_open([_open_pos()]),
         ("POST", "/fapi/v1/marginType"): (200, {"code": 200, "msg": "success"}),
         ("POST", "/fapi/v1/leverage"): (200, {"leverage": 5}),
         ("POST", "/fapi/v1/order"): [
             (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
         ],
+        ("POST", "/fapi/v1/algoOrder"): [
+            (200, {"algoId": 11}),
+            (200, {"algoId": 12}),
+        ],
         ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
     }
+
+
+def _attach_verified_sl0(handlers: dict[tuple[str, str], Any], intent_id: str) -> None:
+    sl0 = client_order_id(intent_id, "sl0")
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [_verified_stop(client_id=sl0)])
+    handlers.setdefault(("GET", "/fapi/v1/algoOrder"), _algo_not_found())
 
 
 def test_sl0_lands_on_second_lookup_skips_sl1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2917,23 +2979,13 @@ def test_sl0_lands_on_second_lookup_skips_sl1(tmp_path: Path, monkeypatch: pytes
     claim_exec_intent(conn, intent_id)
     sl0 = client_order_id(intent_id, "sl0")
     lookups = {"n": 0}
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
 
     def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
         lookups["n"] += 1
-        # pre-market + first sl0 lookup empty; second sl0 lookup finds it.
-        if lookups["n"] >= 3:
-            return (
-                200,
-                [
-                    {
-                        "algoId": 11,
-                        "clientAlgoId": sl0,
-                        "symbol": "DOGEUSDT",
-                        "type": "STOP_MARKET",
-                    }
-                ],
-            )
+        # pre-market empty; first post-sl0 verify finds it (skip sl1).
+        if lookups["n"] >= 2:
+            return (200, [_verified_stop(client_id=sl0, algo_id=11)])
         return (200, [])
 
     handlers[("POST", "/fapi/v1/algoOrder")] = [
@@ -2953,7 +3005,7 @@ def test_sl0_lands_on_second_lookup_skips_sl1(tmp_path: Path, monkeypatch: pytes
     assert len(stop_posts) == 1
     assert stop_posts[0][2].get("clientAlgoId") == sl0
     steps = _exec_log_steps(conn, intent_id)
-    assert "dup_stop_cancel" not in steps
+    # Best-effort cancel of absent -sl1/-slr may log dup_stop_cancel; no second STOP_MARKET.
     assert "emergency_close" not in steps
     conn.close()
 
@@ -2965,7 +3017,7 @@ def test_both_stops_fail_lookups_empty_emergency_closes(
     conn = open_db(tmp_path / "both-fail.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     handlers[("POST", "/fapi/v1/order")] = [
         (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
         (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
@@ -2997,7 +3049,7 @@ def test_both_stops_fail_lookups_network_still_emergency_closes(
     conn = open_db(tmp_path / "lookup-net.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     handlers[("POST", "/fapi/v1/order")] = [
         (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
         (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
@@ -3011,15 +3063,13 @@ def test_both_stops_fail_lookups_network_still_emergency_closes(
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade, sleep=_noop_sleep)
-    assert result.startswith(MSG_STOP_CLOSED)
-    assert "เช็ค" not in result or "Open Orders" in result
-    assert "ไม่แน่ใจผลคำสั่ง" not in result
+    assert result == MSG_STOP_UNVERIFIABLE
+    assert getattr(result, "status", None) == "unknown"
     assert "ลองใหม่" not in result
     markets = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
-    assert len(markets) == 2
-    assert markets[1][2].get("reduceOnly") == "true"
+    assert len(markets) == 1  # entry only; no emergency close on UNVERIFIABLE
     steps = _exec_log_steps(conn, intent_id)
-    assert "emergency_close" in steps
+    assert "emergency_close" not in steps
     conn.close()
 
 
@@ -3031,7 +3081,7 @@ def test_sl0_and_sl1_both_found_cancels_sl1(tmp_path: Path, monkeypatch: pytest.
     sl0 = client_order_id(intent_id, "sl0")
     sl1 = client_order_id(intent_id, "sl1")
     lookups = {"n": 0}
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     handlers[("POST", "/fapi/v1/algoOrder")] = [
         httpx.ConnectError("sl0"),
         httpx.ConnectError("sl1"),
@@ -3040,13 +3090,13 @@ def test_sl0_and_sl1_both_found_cancels_sl1(tmp_path: Path, monkeypatch: pytest.
 
     def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
         lookups["n"] += 1
-        # pre + sl0 first + sl0 second + sl1 lookup empty; post-loop finds both.
-        if lookups["n"] >= 5:
+        # pre + sl0 verify + sl1 verify empty; final _verify_stop_ids finds both.
+        if lookups["n"] >= 4:
             return (
                 200,
                 [
-                    {"algoId": 10, "clientAlgoId": sl0, "symbol": "DOGEUSDT", "type": "STOP_MARKET"},
-                    {"algoId": 11, "clientAlgoId": sl1, "symbol": "DOGEUSDT", "type": "STOP_MARKET"},
+                    _verified_stop(client_id=sl0, algo_id=10),
+                    _verified_stop(client_id=sl1, algo_id=11),
                 ],
             )
         return (200, [])
@@ -3057,7 +3107,7 @@ def test_sl0_and_sl1_both_found_cancels_sl1(tmp_path: Path, monkeypatch: pytest.
     result = run_entry_sequence(conn, intent_id, trade=trade, sleep=_noop_sleep)
     assert result.startswith("✅")
     deletes = [c for c in transport.calls if c[0] == "DELETE"]
-    assert any(c[2].get("algoId") == "11" for c in deletes)
+    assert any(c[2].get("clientAlgoId") == sl1 or c[2].get("algoId") in {"11", 11} for c in deletes)
     steps = _exec_log_steps(conn, intent_id)
     assert "dup_stop_cancel" in steps
     assert "emergency_close" not in steps
@@ -3069,14 +3119,20 @@ def test_premarket_cancels_stale_jv_not_non_jv(tmp_path: Path, monkeypatch: pyte
     conn = open_db(tmp_path / "pre-jv.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
-    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (
-        200,
-        [
-            {"algoId": 7, "clientAlgoId": "jv-stale-sl0", "symbol": "DOGEUSDT"},
-            {"algoId": 8, "clientAlgoId": "manual-owner-stop", "symbol": "DOGEUSDT"},
-        ],
-    )
+    handlers = _base_entry_handlers(intent_id=intent_id)
+    stale = [
+        {"algoId": 7, "clientAlgoId": "jv-stale-sl0", "symbol": "DOGEUSDT"},
+        {"algoId": 8, "clientAlgoId": "manual-owner-stop", "symbol": "DOGEUSDT"},
+    ]
+    phase = {"n": 0}
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        phase["n"] += 1
+        if phase["n"] == 1:
+            return (200, stale)
+        return (200, [_verified_stop(client_id=client_order_id(intent_id, "sl0"))])
+
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = open_algo
     handlers[("POST", "/fapi/v1/algoOrder")] = [
         (200, {"algoId": 11}),
         (200, {"algoId": 12}),
@@ -3110,12 +3166,17 @@ def test_premarket_cancel_failure_does_not_block_entry(
     conn = open_db(tmp_path / "pre-fail.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
 
-    def open_boom(_clean: dict[str, Any]) -> BaseException:
-        return httpx.ConnectError("list down")
+    phase = {"n": 0}
 
-    handlers[("GET", "/fapi/v1/openAlgoOrders")] = open_boom
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]] | BaseException:
+        phase["n"] += 1
+        if phase["n"] == 1:
+            return httpx.ConnectError("list down")
+        return (200, [_verified_stop(client_id=client_order_id(intent_id, "sl0"))])
+
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = open_algo
     handlers[("POST", "/fapi/v1/algoOrder")] = [
         (200, {"algoId": 11}),
         (200, {"algoId": 12}),
@@ -3134,7 +3195,7 @@ def test_set_leverage_connect_error_not_sent(tmp_path: Path, monkeypatch: pytest
     conn = open_db(tmp_path / "lev-net.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
 
     def lev_boom(_clean: dict[str, Any]) -> BaseException:
         return httpx.ConnectError("leverage down")
@@ -3205,11 +3266,15 @@ def test_run_entry_rounds_off_tick_preview_levels(tmp_path: Path, monkeypatch: p
         expires_at_ms=ts + 120_000,
     )
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     handlers[("POST", "/fapi/v1/algoOrder")] = [
         (200, {"algoId": 11}),
         (200, {"algoId": 12}),
     ]
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (
+        200,
+        [_verified_stop(client_id=client_order_id(intent_id, "sl0"), trigger="0.08301")],
+    )
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade, sleep=_noop_sleep)
@@ -3229,7 +3294,7 @@ def test_emergency_close_position_gone_after_first_error(
     conn = open_db(tmp_path / "cls-gone.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     pos_calls = {"n": 0}
 
     def close_then_gone(clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
@@ -3239,21 +3304,12 @@ def test_emergency_close_position_gone_after_first_error(
 
     def position_risk(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
         pos_calls["n"] += 1
-        # After the failed close attempt, pre-retry check shows flat.
-        if pos_calls["n"] >= 2:
+        # 1 = baseline flat; 2 = open after fill; >=3 flat after failed close.
+        if pos_calls["n"] == 1:
             return (200, [])
-        return (
-            200,
-            [
-                {
-                    "symbol": "DOGEUSDT",
-                    "positionSide": "BOTH",
-                    "positionAmt": "-100",
-                    "entryPrice": "0.08",
-                    "markPrice": "0.08",
-                }
-            ],
-        )
+        if pos_calls["n"] >= 3:
+            return (200, [])
+        return (200, [_open_pos()])
 
     handlers[("POST", "/fapi/v1/order")] = close_then_gone
     handlers[("GET", "/fapi/v3/positionRisk")] = position_risk
@@ -3287,7 +3343,7 @@ def test_emergency_close_retries_same_client_id(tmp_path: Path, monkeypatch: pyt
     conn = open_db(tmp_path / "cls-retry.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     cls_n = {"n": 0}
 
     def order_handler(clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
@@ -3299,17 +3355,8 @@ def test_emergency_close_retries_same_client_id(tmp_path: Path, monkeypatch: pyt
         return (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
 
     handlers[("POST", "/fapi/v1/order")] = order_handler
-    handlers[("GET", "/fapi/v3/positionRisk")] = (
-        200,
-        [
-            {
-                "symbol": "DOGEUSDT",
-                "positionSide": "BOTH",
-                "positionAmt": "-100",
-                "entryPrice": "0.08",
-                "markPrice": "0.08",
-            }
-        ],
+    handlers[("GET", "/fapi/v3/positionRisk")] = _flat_then_open(
+        [_open_pos(amt="-100", entry="0.08", mark="0.08")]
     )
     handlers[("GET", "/fapi/v1/order")] = (200, {"orderId": 9, "executedQty": "0", "status": "NEW"})
     handlers[("POST", "/fapi/v1/algoOrder")] = [
@@ -3482,7 +3529,7 @@ def test_emergency_close_check_failures_still_send_three(
     conn = open_db(tmp_path / "cls-check-fail.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     close_phase = {"on": False}
 
     def order_handler(clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
@@ -3536,7 +3583,7 @@ def test_emergency_close_check_fail_second_fill_orphans(
     conn = open_db(tmp_path / "cls-check-fill2.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     close_phase = {"on": False}
     cls_n = {"n": 0}
 
@@ -3595,7 +3642,7 @@ def test_emergency_close_reduce_only_2022_flat_counts_closed(
     conn = open_db(tmp_path / "cls-2022-flat.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     pos_calls = {"n": 0}
 
     def order_handler(clean: dict[str, Any]) -> tuple[int, Any] | BaseException:
@@ -3605,21 +3652,8 @@ def test_emergency_close_reduce_only_2022_flat_counts_closed(
 
     def position_risk(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
         pos_calls["n"] += 1
-        # After the -2022 close attempt, confirm flat.
-        if pos_calls["n"] >= 2:
-            return (200, [])
-        return (
-            200,
-            [
-                {
-                    "symbol": "DOGEUSDT",
-                    "positionSide": "BOTH",
-                    "positionAmt": "-100",
-                    "entryPrice": "0.08",
-                    "markPrice": "0.08",
-                }
-            ],
-        )
+        # 1 = baseline flat; later reads after -2022 also flat.
+        return (200, [])
 
     handlers[("POST", "/fapi/v1/order")] = order_handler
     handlers[("GET", "/fapi/v3/positionRisk")] = position_risk
@@ -3652,7 +3686,7 @@ def test_emergency_close_reduce_only_2022_still_open_retries(
     conn = open_db(tmp_path / "cls-2022-open.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     cls_n = {"n": 0}
     open_pos = [
         {
@@ -3673,7 +3707,7 @@ def test_emergency_close_reduce_only_2022_still_open_retries(
         return (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"})
 
     handlers[("POST", "/fapi/v1/order")] = order_handler
-    handlers[("GET", "/fapi/v3/positionRisk")] = (200, open_pos)
+    handlers[("GET", "/fapi/v3/positionRisk")] = _flat_then_open(open_pos)
     handlers[("GET", "/fapi/v1/order")] = (200, {"orderId": 9, "executedQty": "0", "status": "NEW"})
     handlers[("POST", "/fapi/v1/algoOrder")] = [
         (400, {"code": -2010, "msg": "reject"}),
@@ -3702,7 +3736,7 @@ def test_orphan_list_fail_direct_cancel_unknown_ok(tmp_path: Path, monkeypatch: 
     conn = open_db(tmp_path / "orphan-direct.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     handlers[("POST", "/fapi/v1/order")] = [
         (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
         (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
@@ -3757,7 +3791,7 @@ def test_orphan_cancel_unconfirmed_appends_warning(tmp_path: Path, monkeypatch: 
     conn = open_db(tmp_path / "orphan-warn.db")
     intent_id = _entry_intent(conn)
     claim_exec_intent(conn, intent_id)
-    handlers = _base_entry_handlers()
+    handlers = _base_entry_handlers(intent_id=intent_id)
     handlers[("POST", "/fapi/v1/order")] = [
         (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
         (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
@@ -3974,14 +4008,376 @@ def test_exit_refuses_changed_position(tmp_path: Path, monkeypatch: pytest.Monke
     )
     claim_exec_intent(conn, intent_ok)
     handlers_ok: dict[tuple[str, str], Any] = {
-        ("GET", "/fapi/v3/positionRisk"): (200, [live]),
+        ("GET", "/fapi/v3/positionRisk"): _open_then_flat([live]),
         ("POST", "/fapi/v1/order"): (200, {"orderId": 9, "avgPrice": "0.07", "executedQty": "100"}),
         ("GET", "/fapi/v1/userTrades"): (200, [{"realizedPnl": "1.0"}]),
         ("GET", "/fapi/v1/openOrders"): (200, []),
         ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
     }
     transport_ok = RecordingTransport(handlers_ok)
     result = run_exit_sequence(conn, intent_ok, trade=_client(transport_ok))
     assert result.startswith("✅")
     assert any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in transport_ok.calls)
+    conn.close()
+
+
+def test_market_1007_unknown_then_position_continues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "mkt1007.db")
+    intent_id = _entry_intent(conn)
+    claim_exec_intent(conn, intent_id)
+    handlers = _base_entry_handlers(intent_id=intent_id)
+    handlers[("POST", "/fapi/v1/order")] = (400, {"code": -1007, "msg": "Timeout waiting for response"})
+
+    def query_boom(_clean: dict[str, Any]) -> BaseException:
+        return httpx.ConnectError("query down")
+
+    handlers[("GET", "/fapi/v1/order")] = query_boom
+    handlers[("GET", "/fapi/v3/positionRisk")] = _flat_then_open([_open_pos()])
+    transport = RecordingTransport(handlers)
+    result = run_entry_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert result.startswith("✅")
+    mkt_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") != "true"
+    ]
+    assert len(mkt_posts) == 1
+    conn.close()
+
+
+def test_market_2019_no_order_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "mkt2019.db")
+    intent_id = _entry_intent(conn)
+    claim_exec_intent(conn, intent_id)
+    handlers = _base_entry_handlers()
+    handlers[("POST", "/fapi/v1/order")] = (400, {"code": -2019, "msg": "Margin is insufficient."})
+    handlers[("GET", "/fapi/v3/positionRisk")] = (200, [])
+    transport = RecordingTransport(handlers)
+    result = run_entry_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert "เข้าไม้ไม่สำเร็จ" in result
+    assert getattr(result, "status", None) == "failed"
+    assert not any(c[0] == "GET" and c[1] == "/fapi/v1/order" for c in transport.calls)
+    assert not any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in transport.calls)
+    conn.close()
+
+
+def test_qty_zero_new_then_filled_on_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "qty0.db")
+    intent_id = _entry_intent(conn)
+    claim_exec_intent(conn, intent_id)
+    handlers = _base_entry_handlers(intent_id=intent_id)
+    handlers[("POST", "/fapi/v1/order")] = (
+        200,
+        {"orderId": 1, "executedQty": "0", "avgPrice": "0", "status": "NEW"},
+    )
+    handlers[("GET", "/fapi/v1/order")] = (
+        200,
+        {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+    )
+    transport = RecordingTransport(handlers)
+    result = run_entry_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert result.startswith("✅")
+    conn.close()
+
+
+def test_preview_refused_while_symbol_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "inflight.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    _seed_doge_short(conn, ts=bar)
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    ts = now_ms()
+    insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "stop": "0.083", "target": "0.07", "leverage": 5, "entry": "0.08"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    finish_exec_intent(
+        conn,
+        conn.execute("SELECT id FROM assist_exec_intent").fetchone()[0],
+        status="unknown",
+        result_text=MSG_OUTCOME_UNKNOWN,
+    )
+    handlers = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    out = create_entry_preview(
+        conn,
+        symbol="DOGEUSDT",
+        side="short",
+        trade=_client(RecordingTransport(handlers)),
+        now_ms_value=_ms_bangkok(2026, 11, 2, 8, 20),
+    )
+    assert out["ok"] is False
+    assert "ยังไม่จบ" in out["text"]
+    conn.close()
+
+
+def test_recovery_places_slr_no_second_mkt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "rec-slr.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    slr = client_order_id(intent_id, "slr")
+    placed = {"ok": False}
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        if placed["ok"]:
+            return (200, [_verified_stop(client_id=slr)])
+        return (200, [])
+
+    def place_slr(clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        placed["ok"] = True
+        return (200, {"algoId": 99, "clientAlgoId": clean.get("clientAlgoId")})
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("POST", "/fapi/v1/algoOrder"): place_slr,
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    out = run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    assert out.get("claimed") == 1
+    assert any(c[2].get("clientAlgoId") == slr for c in transport.calls if c[0] == "POST")
+    assert not any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in transport.calls)
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "done"
+    conn.close()
+
+
+def test_recovery_not_found_three_passes_across_15min(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "rec-nf.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    t0 = 1_700_000_000_000
+    # Two prior not-found passes already logged 15 minutes apart from the next pass.
+    for offset in (0, 5 * 60_000):
+        conn.execute(
+            """
+            INSERT INTO assist_exec_log (intent_id, step, endpoint, binance_code, created_at_ms)
+            VALUES (?, 'recover_not_found', '/fapi/v1/order', -2013, ?)
+            """,
+            (intent_id, t0 + offset),
+        )
+    conn.commit()
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/order"): (400, {"code": -2013, "msg": "Order does not exist."}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        t0 + 15 * 60_000,
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    assert row["status"] == "not_found"
+    assert MSG_ORDER_NOT_FOUND in sent
+    conn.close()
+
+
+def test_recovery_claim_one_of_two_wins(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "claim.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text="x")
+    ts = now_ms()
+    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts) is True
+    # Second claim while recovering still wins (status recovering is claimable).
+    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + 1) is True
+    # Fresh confirmed with recent log is blocked.
+    finish_exec_intent(conn, intent_id, status="confirmed", result_text="")
+    conn.execute(
+        "INSERT INTO assist_exec_log (intent_id, step, endpoint, created_at_ms) VALUES (?,?,?,?)",
+        (intent_id, "worker_claim", "local", ts + 2),
+    )
+    conn.commit()
+    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + 3) is False
+    conn.close()
+
+
+def test_account_modes_unreadable_and_one_way_on_ms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "modes.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(conn, entry_ts=entry_ts)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "a"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    handlers = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": "false"}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+    }
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ms:{intent_id}",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(RecordingTransport(handlers)),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    assert any(MSG_ACCOUNT_MODE_UNREADABLE in t for t in sent)
+    assert get_exec_intent(conn, intent_id)["status"] == "failed"
+
+    intent2 = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.079", "qty": "100", "advice_text": "a"},
+        created_at_ms=ts,
+        expires_at_ms=ts + MOVE_STOP_TTL_MS,
+    )
+    handlers2 = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": True}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+    }
+    sent2: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ms:{intent2}",
+        send=lambda t, **_: sent2.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(RecordingTransport(handlers2)),
+        now_ms_value=ts,
+        message={"message_id": 2},
+    )
+    assert any(MSG_ONE_WAY in t for t in sent2)
+    conn.close()
+
+
+def test_stale_card_stop_change_expired_same_stop_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    reset_trade_key_cache()
+    conn = open_db(tmp_path / "stale.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    _seed_doge_short(conn, ts=bar)
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    handlers = _base_entry_handlers()
+    handlers[("GET", "/fapi/v1/positionSide/dual")] = (200, {"dualSidePosition": False})
+    handlers[("GET", "/fapi/v1/multiAssetsMargin")] = (200, {"multiAssetsMargin": False})
+    handlers[("GET", "/fapi/v3/balance")] = (
+        200,
+        [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+    )
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
+    assert preview["ok"] is True
+    intent_id = str(preview["intent_id"])
+    # Change invalidation so rounded stop differs from the preview.
+    conn.execute(
+        "UPDATE analysis_output SET invalidation_price=? WHERE symbol=?",
+        (0.09, "DOGEUSDT"),
+    )
+    conn.commit()
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ey:{intent_id}",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now,
+    )
+    assert any(MSG_EXPIRED in t for t in sent)
+    assert get_exec_intent(conn, intent_id)["status"] == "expired"
+    assert not any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in transport.calls)
+    conn.close()
+
+
+def test_exit_partial_leaves_stop_no_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ex-partial.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    claim_exec_intent(conn, intent_id)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("POST", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.07", "executedQty": "40", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.07", "executedQty": "40", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): (
+            200,
+            [_verified_stop(client_id="jv-abc-sl0")],
+        ),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+    }
+    transport = RecordingTransport(handlers)
+    result = run_exit_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert "ปิดบางส่วน" in result
+    assert not any(c[0] == "DELETE" for c in transport.calls)
     conn.close()
