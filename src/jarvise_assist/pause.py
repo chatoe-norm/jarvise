@@ -56,17 +56,6 @@ def bangkok_day_start_ms(now_ms: int) -> int:
     return int(start.timestamp() * 1000)
 
 
-def next_midnight_bangkok_ms(now_ms: int) -> int:
-    """Next 00:00 Asia/Bangkok strictly after now.
-
-    A pause at 23:58 therefore ends at the coming midnight, and the new day
-    starts at zero. Bangkok has no daylight-saving shift.
-    """
-    local = datetime.fromtimestamp(now_ms / 1000.0, tz=BANGKOK)
-    target = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    return int(target.timestamp() * 1000)
-
-
 def bangkok_week_id(now_ms: int) -> str:
     """ISO-like week id in Asia/Bangkok (Monday-start)."""
     local = datetime.fromtimestamp(now_ms / 1000.0, tz=BANGKOK)
@@ -92,22 +81,31 @@ def format_signed_r(net: Decimal) -> str:
     return f"{shown}R"
 
 
-def day_loss_pause_text(net: Decimal) -> str:
-    return f"⏸ หยุดส่ง signal ถึงเที่ยงคืน 00:00 — วันนี้ {format_signed_r(net)} ({BOT_ENTRIES_ONLY_TH})"
+def _bangkok_hhmm(ms: int) -> str:
+    local = datetime.fromtimestamp(ms / 1000.0, tz=BANGKOK)
+    return local.strftime("%H:%M")
 
 
-def day_loss_deeper_pause_text(net: Decimal) -> str:
+def day_loss_pause_text(net: Decimal, *, until_ms: int) -> str:
+    """End clock comes from the real pause time, the same way format_paused_until does."""
+    clock = _bangkok_hhmm(until_ms)
+    return f"⏸ หยุดส่ง signal ถึง {clock} — วันนี้ {format_signed_r(net)} ({BOT_ENTRIES_ONLY_TH})"
+
+
+def day_loss_deeper_pause_text(net: Decimal, *, until_ms: int) -> str:
+    clock = _bangkok_hhmm(until_ms)
     return (
-        f"⏸ หยุดส่ง signal ถึงเที่ยงคืน 00:00 — วันนี้ {format_signed_r(net)} "
-        f"ลึกกว่าตอนเปิดต่ออีก 1R ({BOT_ENTRIES_ONLY_TH})"
+        f"⏸ หยุดส่ง signal ถึง {clock} — วันนี้ {format_signed_r(net)} ลึกกว่าตอนเปิดต่ออีก 1R ({BOT_ENTRIES_ONLY_TH})"
     )
 
 
 def day_loss_resume_text(net: Decimal) -> str:
+    """Closed bot-entered trades only. Open positions are not in this number."""
     shown = format_signed_r(net)
+    note = f"จากไม้ที่ปิดแล้ว ({BOT_ENTRIES_ONLY_TH})"
     if net < 0:
-        return f"วันนี้ติดลบแล้ว {shown} ({BOT_ENTRIES_ONLY_TH})"
-    return f"วันนี้สุทธิ {shown} ({BOT_ENTRIES_ONLY_TH})"
+        return f"วันนี้ติดลบแล้ว {shown} {note}"
+    return f"วันนี้สุทธิ {shown} {note}"
 
 
 def _quantize_r(value: Any) -> Decimal:
@@ -115,8 +113,7 @@ def _quantize_r(value: Any) -> Decimal:
 
 
 def format_paused_until(paused_until_ms: int) -> str:
-    local = datetime.fromtimestamp(paused_until_ms / 1000.0, tz=BANGKOK)
-    return f"หยุดพักถึง {local.strftime('%H:%M')}"
+    return f"หยุดพักถึง {_bangkok_hhmm(paused_until_ms)}"
 
 
 def is_paused(settings: dict[str, Any], *, now_ms: int) -> bool:
@@ -127,13 +124,14 @@ def is_paused(settings: dict[str, Any], *, now_ms: int) -> bool:
 def clear_pause_manual(conn: Any, *, now_ms_value: int | None = None) -> str | None:
     """Owner toggled assist on: clear pause and suppress the auto-resume line.
 
-    When today already fired the -3R cap, the return value is a Thai warning
-    with today's bot-entered net R. The first resume from an active pause arms
-    one deeper threshold (another -1R below the net R at this resume). A later
-    toggle does not move that level and does not arm a third threshold.
+    When today already fired the -3R cap, the return value warns with today's
+    closed bot-entered net R. An active pause (paused_until_ms > now) stores
+    that net R and clears the deeper marker, so the next -1R can pause again.
+    A toggle while no pause is active does not move the stored level.
     """
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
-    was_paused = ensure_settings(conn).get("paused_until_ms") is not None
+    until = ensure_settings(conn).get("paused_until_ms")
+    was_paused = until is not None and int(until) > ts
     write_settings(conn, paused_until_ms=None)
     write_edge(conn, resume_alerted=True)
     edge = get_edge(conn)
@@ -141,8 +139,13 @@ def clear_pause_manual(conn: Any, *, now_ms_value: int | None = None) -> str | N
     if edge.get("day_pause_id") != day_id:
         return None
     net = day_bot_net_r(conn, now_ms=ts)
-    if was_paused and edge.get("day_deeper_pause_id") != day_id and edge.get("day_resume_id") != day_id:
-        write_edge(conn, day_resume_net_r=float(net), day_resume_id=day_id)
+    if was_paused:
+        write_edge(
+            conn,
+            day_resume_net_r=float(net),
+            day_resume_id=day_id,
+            day_deeper_pause_id=None,
+        )
     return day_loss_resume_text(net)
 
 
@@ -269,15 +272,15 @@ def _engage_day_pause(
     day_id: str,
     deeper: bool,
 ) -> dict[str, Any]:
-    until = next_midnight_bangkok_ms(now_ms)
+    until = next_0820_bangkok_ms(now_ms)
     write_settings(conn, paused_until_ms=until)
     if deeper:
         write_edge(conn, day_deeper_pause_id=day_id, resume_alerted=False)
-        send(day_loss_deeper_pause_text(net))
+        send(day_loss_deeper_pause_text(net, until_ms=until))
         reason = "day_loss_deeper"
     else:
         write_edge(conn, day_pause_id=day_id, resume_alerted=False)
-        send(day_loss_pause_text(net))
+        send(day_loss_pause_text(net, until_ms=until))
         reason = "day_loss"
     return {
         "paused": True,
@@ -294,10 +297,13 @@ def evaluate_day_loss_pause(
     now_ms: int,
     send: SendFn,
 ) -> dict[str, Any]:
-    """Pause on the Bangkok day's bot-entered net R. Local DB only.
+    """Pause on the Bangkok day's closed bot-entered net R. Local DB only.
 
     Call after streak and week-loss, and again after a watch journal sync.
-    Does not close positions. Fires at most once per threshold per day.
+    The -3R cap fires once per Bangkok day and lasts until the next 08:20.
+    The day sum still resets at 00:00. Each manual resume from an active pause
+    arms a new threshold 1R below the net R at that resume. Yesterday's stored
+    day id does not apply today. Does not close positions.
     """
     settings = ensure_settings(conn)
     if is_paused(settings, now_ms=now_ms):

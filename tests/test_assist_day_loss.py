@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -18,11 +19,11 @@ from jarvise_assist.pause import (
     BOT_ENTRIES_ONLY_TH,
     bangkok_day_id,
     bangkok_day_start_ms,
+    day_bot_net_r,
     evaluate_pause,
     is_paused,
     maybe_auto_resume,
     next_0820_bangkok_ms,
-    next_midnight_bangkok_ms,
 )
 from jarvise_assist.signals import run_assist_morning, run_assist_signals
 from jarvise_assist.sizing import round_level_to_tick, size_signal
@@ -52,7 +53,19 @@ def _send() -> tuple[list[str], Any]:
 
 
 def _pause_lines(sent: list[str]) -> list[str]:
-    return [text for text in sent if "หยุดส่ง signal ถึงเที่ยงคืน" in text]
+    return [text for text in sent if text.startswith("⏸") and BOT_ENTRIES_ONLY_TH in text]
+
+
+def _assert_end_clock(text: str, until_ms: int) -> None:
+    clock = f"ถึง {datetime_clock(until_ms)}"
+    assert clock in text
+    assert "เที่ยงคืน" not in text
+    assert "พรุ่งนี้" not in text
+
+
+def datetime_clock(ms: int) -> str:
+    local = datetime.fromtimestamp(ms / 1000.0, tz=timezone(timedelta(hours=7)))
+    return local.strftime("%H:%M")
 
 
 def _trade(
@@ -111,7 +124,7 @@ def test_day_sum_minus_2_9_does_not_pause(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_day_sum_minus_3_pauses_until_next_midnight_once(tmp_path: Path) -> None:
+def test_day_sum_minus_3_pauses_until_next_0820_once(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "m3.db")
     sent, send = _send()
     # exit_time_ms == now is outside [day start, now).
@@ -124,12 +137,15 @@ def test_day_sum_minus_3_pauses_until_next_midnight_once(tmp_path: Path) -> None
     conn.execute("UPDATE assist_real_trade SET exit_time_ms=? WHERE entry_order_id='edge'", (start,))
     conn.commit()
     first = evaluate_pause(conn, futures=_futures(), now_ms=NOW, send=send)
-    midnight = next_midnight_bangkok_ms(NOW)
+    until = next_0820_bangkok_ms(NOW)
     assert first["paused"] is True
     assert first["reason"] == "day_loss"
-    assert first["until_ms"] == midnight
-    assert ensure_settings(conn)["paused_until_ms"] == midnight
-    assert _pause_lines(sent) == [f"⏸ หยุดส่ง signal ถึงเที่ยงคืน 00:00 — วันนี้ -3.0R ({BOT_ENTRIES_ONLY_TH})"]
+    assert first["until_ms"] == until
+    assert ensure_settings(conn)["paused_until_ms"] == until
+    assert _pause_lines(sent) == [
+        f"⏸ หยุดส่ง signal ถึง {datetime_clock(until)} — วันนี้ -3.0R ({BOT_ENTRIES_ONLY_TH})"
+    ]
+    _assert_end_clock(_pause_lines(sent)[0], until)
     assert get_edge(conn)["day_pause_id"] == "2026-11-09"
 
     again = evaluate_pause(conn, futures=_futures(), now_ms=NOW + 1_000, send=send)
@@ -150,17 +166,18 @@ def test_next_bangkok_day_resumes_and_counts_from_zero(tmp_path: Path) -> None:
     _trade(conn, oid="d1", exit_ms=NOW - 60_000, net=-3.0)
     first = evaluate_pause(conn, futures=_futures(), now_ms=NOW, send=send)
     assert first["reason"] == "day_loss"
-    next_day = _ms_bangkok(2026, 11, 10, 0, 0)
-    assert first["until_ms"] == next_day
-    assert is_paused(ensure_settings(conn), now_ms=next_day - 1) is True
-    assert is_paused(ensure_settings(conn), now_ms=next_day) is False
-    assert maybe_auto_resume(conn, now_ms=next_day, send=send) is True
-    resumed = evaluate_pause(conn, futures=_futures(), now_ms=next_day + 1_000, send=send)
+    morning = next_0820_bangkok_ms(NOW)
+    midnight = _ms_bangkok(2026, 11, 10, 0, 0)
+    assert first["until_ms"] == morning
+    assert is_paused(ensure_settings(conn), now_ms=midnight) is True
+    assert day_bot_net_r(conn, now_ms=midnight + 1_000) == 0
+    assert maybe_auto_resume(conn, now_ms=morning, send=send) is True
+    resumed = evaluate_pause(conn, futures=_futures(), now_ms=morning + 1_000, send=send)
     assert resumed["paused"] is False
     assert resumed["day_id"] == "2026-11-10"
     assert float(resumed["net_r"]) == 0.0
-    _trade(conn, oid="d2", exit_ms=next_day + 60_000, net=-2.9)
-    later = evaluate_pause(conn, futures=_futures(), now_ms=next_day + 120_000, send=send)
+    _trade(conn, oid="d2", exit_ms=morning + 60_000, net=-2.9)
+    later = evaluate_pause(conn, futures=_futures(), now_ms=morning + 120_000, send=send)
     assert later["paused"] is False
     assert len(_pause_lines(sent)) == 1
     conn.close()
@@ -225,22 +242,43 @@ def test_exit_time_not_sync_time_assigns_the_bangkok_day(tmp_path: Path) -> None
     conn.close()
 
 
-def test_pause_at_2358_ends_at_midnight(tmp_path: Path) -> None:
+def test_pause_at_2358_lasts_until_next_0820_while_new_day_sum_is_zero(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "mid.db")
     sent, send = _send()
     at = _ms_bangkok(2026, 11, 9, 23, 58)
     _trade(conn, oid="late", exit_ms=at - 60_000, net=-3.0)
     result = evaluate_pause(conn, futures=_futures(), now_ms=at, send=send)
-    midnight = _ms_bangkok(2026, 11, 10, 0, 0)
-    assert result["until_ms"] == midnight
-    assert next_midnight_bangkok_ms(at) == midnight
+    morning = _ms_bangkok(2026, 11, 10, 8, 20)
+    midnight = _ms_bangkok(2026, 11, 10, 0, 2)
+    assert result["until_ms"] == morning
+    assert result["until_ms"] == next_0820_bangkok_ms(at)
+    _assert_end_clock(sent[0], morning)
     assert is_paused(ensure_settings(conn), now_ms=at) is True
-    assert is_paused(ensure_settings(conn), now_ms=midnight) is False
-    assert maybe_auto_resume(conn, now_ms=midnight, send=send) is True
-    nxt = evaluate_pause(conn, futures=_futures(), now_ms=midnight + 1_000, send=send)
+    assert is_paused(ensure_settings(conn), now_ms=midnight) is True
+    assert day_bot_net_r(conn, now_ms=midnight) == 0
+    assert bangkok_day_id(midnight) == "2026-11-10"
+    assert is_paused(ensure_settings(conn), now_ms=morning) is False
+    assert maybe_auto_resume(conn, now_ms=morning, send=send) is True
+    nxt = evaluate_pause(conn, futures=_futures(), now_ms=morning + 1_000, send=send)
     assert nxt["paused"] is False
     assert nxt["day_id"] == "2026-11-10"
-    assert bangkok_day_id(at) == "2026-11-09"
+    assert float(nxt["net_r"]) == 0.0
+    conn.close()
+
+
+def test_pause_at_0200_ends_0820_the_same_morning(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "early.db")
+    sent, send = _send()
+    at = _ms_bangkok(2026, 11, 9, 2, 0)
+    _trade(conn, oid="night", exit_ms=at - 60_000, net=-3.1)
+    result = evaluate_pause(conn, futures=_futures(), now_ms=at, send=send)
+    morning = _ms_bangkok(2026, 11, 9, 8, 20)
+    assert result["reason"] == "day_loss"
+    assert result["until_ms"] == morning
+    assert "-3.1R" in sent[0]
+    _assert_end_clock(sent[0], morning)
+    assert is_paused(ensure_settings(conn), now_ms=morning - 1) is True
+    assert is_paused(ensure_settings(conn), now_ms=morning) is False
     conn.close()
 
 
@@ -266,35 +304,60 @@ def test_manual_resume_same_day_warns_and_does_not_repause(tmp_path: Path) -> No
     conn.close()
 
 
-def test_further_1r_after_manual_resume_repauses_once(tmp_path: Path) -> None:
+def _resume(conn: Any, send: Any, at_ms: int) -> dict[str, Any]:
+    handle_menu_text(conn, BTN_TOGGLE, now_ms=at_ms, send=send)
+    return handle_menu_text(conn, BTN_TOGGLE, now_ms=at_ms, send=send)
+
+
+def test_each_manual_resume_arms_another_1r(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "deeper.db")
     sent, send = _send()
-    _trade(conn, oid="base", exit_ms=NOW - 180_000, net=-3.2)
-    assert evaluate_pause(conn, futures=_futures(), now_ms=NOW, send=send)["reason"] == "day_loss"
-    handle_menu_text(conn, BTN_TOGGLE, now_ms=NOW, send=send)
-    handle_menu_text(conn, BTN_TOGGLE, now_ms=NOW, send=send)
-    _trade(conn, oid="not-yet", exit_ms=NOW - 120_000, net=-0.9, symbol="ETHUSDT")
-    short = evaluate_pause(conn, futures=_futures(), now_ms=NOW, send=send)
-    assert short["paused"] is False
-    _trade(conn, oid="deeper", exit_ms=NOW - 60_000, net=-0.1, symbol="SOLUSDT")
-    deeper = evaluate_pause(conn, futures=_futures(), now_ms=NOW, send=send)
-    assert deeper["reason"] == "day_loss_deeper"
-    assert deeper["until_ms"] == next_midnight_bangkok_ms(NOW)
-    assert "ลึกกว่าตอนเปิดต่ออีก 1R" in _pause_lines(sent)[-1]
-    assert "-4.2R" in _pause_lines(sent)[-1]
-    assert get_edge(conn)["day_deeper_pause_id"] == "2026-11-09"
-    repeat = evaluate_pause(conn, futures=_futures(), now_ms=NOW + 1_000, send=send)
-    assert repeat["reason"] == "already"
-    assert len([line for line in _pause_lines(sent) if "ลึกกว่า" in line]) == 1
+    _trade(conn, oid="base", exit_ms=NOW - 180_000, net=-3.0)
+    first = evaluate_pause(conn, futures=_futures(), now_ms=NOW, send=send)
+    assert first["reason"] == "day_loss"
+    _assert_end_clock(sent[0], first["until_ms"])
+    opened = _resume(conn, send, NOW)
+    assert "วันนี้ติดลบแล้ว -3.0R" in str(opened["text"])
+    assert "จากไม้ที่ปิดแล้ว" in str(opened["text"])
+    assert get_edge(conn)["day_resume_net_r"] == pytest.approx(-3.0)
+    assert get_edge(conn)["day_deeper_pause_id"] is None
 
-    handle_menu_text(conn, BTN_TOGGLE, now_ms=NOW + 2_000, send=send)
-    second = handle_menu_text(conn, BTN_TOGGLE, now_ms=NOW + 2_000, send=send)
-    assert "วันนี้ติดลบแล้ว -4.2R" in str(second["text"])
-    assert get_edge(conn)["day_resume_net_r"] == pytest.approx(-3.2)
-    _trade(conn, oid="third", exit_ms=NOW - 10_000, net=-2.0, symbol="BNBUSDT")
-    third = evaluate_pause(conn, futures=_futures(), now_ms=NOW + 3_000, send=send)
-    assert third["paused"] is False
-    assert len([line for line in _pause_lines(sent) if "ลึกกว่า" in line]) == 1
+    # A second toggle while nothing is paused must not move the stored level.
+    idle = _resume(conn, send, NOW + 1_000)
+    assert "วันนี้ติดลบแล้ว -3.0R" in str(idle["text"])
+    assert get_edge(conn)["day_resume_net_r"] == pytest.approx(-3.0)
+
+    # An already-expired pause clock is not an active pause.
+    write_settings(conn, enabled=False, paused_until_ms=NOW - 1)
+    expired = handle_menu_text(conn, BTN_TOGGLE, now_ms=NOW + 2_000, send=send)
+    assert "วันนี้ติดลบแล้ว -3.0R" in str(expired["text"])
+    assert get_edge(conn)["day_resume_net_r"] == pytest.approx(-3.0)
+    write_settings(conn, enabled=True)
+
+    _trade(conn, oid="short", exit_ms=NOW - 120_000, net=-0.9, symbol="ETHUSDT")
+    short = evaluate_pause(conn, futures=_futures(), now_ms=NOW + 3_000, send=send)
+    assert short["paused"] is False
+    assert get_edge(conn)["day_resume_net_r"] == pytest.approx(-3.0)
+
+    _trade(conn, oid="step", exit_ms=NOW - 60_000, net=-0.1, symbol="SOLUSDT")
+    deeper = evaluate_pause(conn, futures=_futures(), now_ms=NOW + 4_000, send=send)
+    assert deeper["reason"] == "day_loss_deeper"
+    assert deeper["until_ms"] == next_0820_bangkok_ms(NOW + 4_000)
+    _assert_end_clock(_pause_lines(sent)[-1], deeper["until_ms"])
+    assert "-4.0R" in _pause_lines(sent)[-1]
+    assert "ลึกกว่าตอนเปิดต่ออีก 1R" in _pause_lines(sent)[-1]
+    assert get_edge(conn)["day_deeper_pause_id"] == "2026-11-09"
+
+    again = _resume(conn, send, NOW + 5_000)
+    assert "วันนี้ติดลบแล้ว -4.0R" in str(again["text"])
+    assert get_edge(conn)["day_resume_net_r"] == pytest.approx(-4.0)
+    assert get_edge(conn)["day_deeper_pause_id"] is None
+    _trade(conn, oid="step2", exit_ms=NOW - 10_000, net=-1.0, symbol="BNBUSDT")
+    second = evaluate_pause(conn, futures=_futures(), now_ms=NOW + 6_000, send=send)
+    assert second["reason"] == "day_loss_deeper"
+    assert second["until_ms"] == next_0820_bangkok_ms(NOW + 6_000)
+    assert "-5.0R" in _pause_lines(sent)[-1]
+    assert len([line for line in _pause_lines(sent) if "ลึกกว่า" in line]) == 2
     conn.close()
 
 
@@ -363,7 +426,10 @@ def test_day_loss_blocks_new_signals_not_exits(tmp_path: Path) -> None:
     payload = run_assist_signals(conn, futures=fake, now_ms_value=now, send=send)
     assert payload["skipped"] == "streak_pause"
     assert payload["pause"]["reason"] == "day_loss"
-    assert _pause_lines(sent) == [f"⏸ หยุดส่ง signal ถึงเที่ยงคืน 00:00 — วันนี้ -3.0R ({BOT_ENTRIES_ONLY_TH})"]
+    assert _pause_lines(sent) == [
+        f"⏸ หยุดส่ง signal ถึง {datetime_clock(payload['pause']['until_ms'])} — วันนี้ -3.0R ({BOT_ENTRIES_ONLY_TH})"
+    ]
+    _assert_end_clock(_pause_lines(sent)[0], payload["pause"]["until_ms"])
     assert conn.execute("SELECT COUNT(*) FROM assist_signal WHERE status='sent'").fetchone()[0] == 0
     sized = size_signal(
         symbol="BTCUSDT",
@@ -478,7 +544,8 @@ def test_watch_pauses_on_day_loss_in_the_same_poll_without_binance(
     assert calls["at_sync"] >= 0
     assert calls["n"] == calls["at_sync"]
     assert payload["pause"]["reason"] == "day_loss"
-    assert payload["pause"]["until_ms"] == next_midnight_bangkok_ms(day)
+    assert payload["pause"]["until_ms"] == next_0820_bangkok_ms(day)
+    _assert_end_clock(_pause_lines(sent)[0], payload["pause"]["until_ms"])
     assert len(_pause_lines(sent)) == 1
     assert any(row["symbol"] == "BTCUSDT" for row in payload["closed"])
     conn.close()
