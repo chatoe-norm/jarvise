@@ -117,7 +117,8 @@ def get_edge(conn: Any) -> dict[str, Any]:
         SELECT futures_down_since_ms, futures_down_alerted,
                permission_error_reported, key_unsafe_reported,
                streak_anchor_ms, week_pause_id,
-               listener_down_since_ms, listener_down_alerted, resume_alerted
+               listener_down_since_ms, listener_down_alerted, resume_alerted,
+               day_pause_id, day_resume_net_r, day_resume_id, day_deeper_pause_id
         FROM assist_edge WHERE id=1
         """
     ).fetchone()
@@ -141,6 +142,10 @@ def get_edge(conn: Any) -> dict[str, Any]:
             "listener_down_since_ms": None,
             "listener_down_alerted": False,
             "resume_alerted": False,
+            "day_pause_id": None,
+            "day_resume_net_r": None,
+            "day_resume_id": None,
+            "day_deeper_pause_id": None,
         }
 
     def _i(idx: int) -> Any:
@@ -160,6 +165,10 @@ def get_edge(conn: Any) -> dict[str, Any]:
         "listener_down_since_ms": int(_i(6)) if _i(6) is not None else None,
         "listener_down_alerted": _b(7),
         "resume_alerted": _b(8),
+        "day_pause_id": str(_i(9)) if _i(9) else None,
+        "day_resume_net_r": float(_i(10)) if _i(10) is not None else None,
+        "day_resume_id": str(_i(11)) if _i(11) else None,
+        "day_deeper_pause_id": str(_i(12)) if _i(12) else None,
     }
 
 
@@ -175,6 +184,10 @@ def write_edge(
     listener_down_since_ms: Any = _UNSET,
     listener_down_alerted: bool | None = None,
     resume_alerted: bool | None = None,
+    day_pause_id: Any = _UNSET,
+    day_resume_net_r: Any = _UNSET,
+    day_resume_id: Any = _UNSET,
+    day_deeper_pause_id: Any = _UNSET,
 ) -> None:
     cur = get_edge(conn)
     since = cur["futures_down_since_ms"] if futures_down_since_ms is _UNSET else futures_down_since_ms
@@ -196,14 +209,19 @@ def write_edge(
         int(listener_down_alerted) if listener_down_alerted is not None else int(cur["listener_down_alerted"])
     )
     resume = int(resume_alerted) if resume_alerted is not None else int(cur["resume_alerted"])
+    day_pause = cur["day_pause_id"] if day_pause_id is _UNSET else day_pause_id
+    day_resume_r = cur["day_resume_net_r"] if day_resume_net_r is _UNSET else day_resume_net_r
+    day_resume = cur["day_resume_id"] if day_resume_id is _UNSET else day_resume_id
+    day_deeper = cur["day_deeper_pause_id"] if day_deeper_pause_id is _UNSET else day_deeper_pause_id
     conn.execute(
         """
         INSERT INTO assist_edge (
             id, futures_down_since_ms, futures_down_alerted,
             permission_error_reported, key_unsafe_reported,
             streak_anchor_ms, week_pause_id,
-            listener_down_since_ms, listener_down_alerted, resume_alerted
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            listener_down_since_ms, listener_down_alerted, resume_alerted,
+            day_pause_id, day_resume_net_r, day_resume_id, day_deeper_pause_id
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             futures_down_since_ms=excluded.futures_down_since_ms,
             futures_down_alerted=excluded.futures_down_alerted,
@@ -213,9 +231,27 @@ def write_edge(
             week_pause_id=excluded.week_pause_id,
             listener_down_since_ms=excluded.listener_down_since_ms,
             listener_down_alerted=excluded.listener_down_alerted,
-            resume_alerted=excluded.resume_alerted
+            resume_alerted=excluded.resume_alerted,
+            day_pause_id=excluded.day_pause_id,
+            day_resume_net_r=excluded.day_resume_net_r,
+            day_resume_id=excluded.day_resume_id,
+            day_deeper_pause_id=excluded.day_deeper_pause_id
         """,
-        (since, down_alerted, perm, unsafe, streak, week, listen_since, listen_alerted, resume),
+        (
+            since,
+            down_alerted,
+            perm,
+            unsafe,
+            streak,
+            week,
+            listen_since,
+            listen_alerted,
+            resume,
+            day_pause,
+            day_resume_r,
+            day_resume,
+            day_deeper,
+        ),
     )
     conn.commit()
 

@@ -104,3 +104,73 @@ Floors 0.55 and 0.70, the analyzer formula, the 1.5× ATR stop, risk caps,
 sizing, shared leverage, `flat_exit`, `same_side_hold`, the universe,
 `ASSIST_SYMBOLS`, and the one-tap execute path. `JARVISE_LIVE_TRADING` stays
 off. No new env var. No writes to paper, live, approval, or shadow tables.
+
+## Daily 3R loss pause
+
+This sits beside the streak pause (3 consecutive losses until 08:20) and the
+week-loss pause (trading net worse than 6% until 08:20). Those two rules are
+unchanged. The day rule does not replace them. If streak or week-loss engages
+on the same call, that pause wins and the day rule waits until the assistant
+is not paused.
+
+The unit is planned R from `assist_real_trade`:
+
+`net_r_real = (realized_pnl_usdt + commission_usdt + funding_usdt) / loss_at_stop`
+
+`loss_at_stop` is the planned base stored at entry. A later stop move does not
+change the denominator.
+
+The day boundary is 00:00 Asia/Bangkok. A trade belongs to the day of its
+`exit_time_ms`, not the time it was synced or journaled. The window is
+`[today 00:00, now)`. The sum uses only bot-entered trades:
+
+- `status = 'closed'`
+- `side` is `long` or `short`
+- `loss_at_stop > 0`
+- `intent_id` is set (the one-tap entry `assist_real_trade` matched)
+
+Wins offset losses. The pause engages when that sum is `<= -3`. Only closed
+bot-entered trades are in the sum. Open positions are not.
+
+Not counted: unmatched rows, trades opened by hand in the Binance app (no
+intent), and rows with no `loss_at_stop`. A bot entry the owner later closes
+by hand still has an intent, so that result counts. The Thai pause message
+says the sum counts bot-entered trades only (`นับเฉพาะไม้ที่เข้าผ่านบอท`) and
+shows the real end clock, for example `ถึง 08:20`. It does not say midnight,
+and it does not say "tomorrow", because a pause at 02:00 ends at 08:20 the
+same morning.
+
+The pause lasts until the next 08:20 Asia/Bangkok, the same clock as the streak
+and week-loss pauses. The day sum still resets at 00:00. A pause that started
+the day before keeps running until its 08:20, while the new day's sum is
+already zero. A fill with `exit_time_ms` 23:59 that is synced at 00:02 still
+belongs to the previous day.
+
+While the pause is on, new assist signals and one-tap entries (`ec:` / `ey:`,
+already gated by `is_paused`) are blocked. Open positions are not closed.
+Watch advice, move-stop (`ms:`), and exit (`xx:`) are not blocked.
+
+The -3R pause fires at most once per Bangkok day. Migration 23 adds nullable
+columns on the single `assist_edge` row (`day_pause_id`, `day_resume_net_r`,
+`day_resume_id`, `day_deeper_pause_id`) with null defaults. Existing row values
+are not rewritten. A new Bangkok day ignores those stored values because they
+still carry yesterday's day id.
+
+Manual resume is the owner turning the assistant back on while a pause is
+active (`paused_until_ms > now`). That clears `paused_until_ms` and does not
+re-pause on the same -3R. If today already hit the cap, the resume reply warns
+with the day's current net R of closed bot-entered trades only, for example
+`วันนี้ติดลบแล้ว -3.2R จากไม้ที่ปิดแล้ว`. Every such resume stores that net R
+and clears the deeper marker, which arms a new threshold 1R lower
+(`<= snapshot - 1`). The next further -1R pauses again until the next 08:20.
+A resume when no pause is active, including an already-expired
+`paused_until_ms`, does not move the stored level. An automatic resume at
+08:20 on the same Bangkok day as the day-loss pause also arms a new -1R
+threshold.
+
+Watch runs the day-loss check again immediately after `journal_on_close`, from
+SQLite only, so a close that reaches -3R pauses in that same poll.
+
+The jobs skip key stays `streak_pause`. That string is the existing any-pause
+gate, including blocked virtual tracks. The pause payload `reason` is
+`day_loss` or `day_loss_deeper`. No new env var.

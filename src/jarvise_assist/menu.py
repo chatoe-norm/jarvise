@@ -132,7 +132,7 @@ def handle_menu_text(
         send_fn(msg, reply_markup=markup)
         return {"handled": True, "kind": kind}
     if kind == "toggle":
-        body = toggle_enabled(conn)
+        body = toggle_enabled(conn, now_ms_value=now_ms)
         settings = ensure_settings(conn)
         send_fn(body, reply_markup=reply_keyboard(settings["risk_pct"]))
         return {"handled": True, "kind": kind, "text": body}
@@ -144,13 +144,15 @@ def handle_menu_text(
     return {"handled": False}
 
 
-def toggle_enabled(conn: Any) -> str:
+def toggle_enabled(conn: Any, *, now_ms_value: int | None = None) -> str:
     settings = ensure_settings(conn)
     if settings["enabled"]:
         write_settings(conn, enabled=False)
         return "⏸ ผู้ช่วยปิดแล้ว — จะไม่ส่ง signal ใหม่"
     write_settings(conn, enabled=True)
-    clear_pause_manual(conn)
+    note = clear_pause_manual(conn, now_ms_value=now_ms_value)
+    if note:
+        return f"▶️ ผู้ช่วยเปิดแล้ว — {note}"
     return "▶️ ผู้ช่วยเปิดแล้ว"
 
 
