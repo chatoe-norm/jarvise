@@ -941,7 +941,7 @@ _REASON_TH: dict[str, str] = {
     "key_refused": MSG_KEY_REFUSED,
     "no_trade_key": MSG_NO_TRADE_KEY,
     "chase": "ราคาวิ่งไปแล้ว",
-    "requote_cap_zero": "จำกัดความเสียหายแล้วขนาดเหลือศูนย์",
+    "requote_cap_zero": "จำกัดตามไอเดียแรกแล้วขนาดเหลือ 0 — ไม่ส่ง",
     "requote_no_baseline": "ไม่มีขนาดอ้างอิงจากไอเดียแรก",
     "paused": "หยุดชั่วคราวจากแพ้ติดกัน",
     "expired": MSG_EXPIRED,

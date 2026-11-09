@@ -71,7 +71,7 @@ ON_DEMAND_REASON_TH: dict[str, str] = {
     "margin_cap": "margin ไม่พอ",
     "size_failed": "คำนวณขนาดไม้ไม่ได้",
     "same_idea": "ส่งไปแล้วใน 24 ชม.",
-    "requote_cap_zero": "จำกัดความเสียหายแล้วขนาดเหลือศูนย์",
+    "requote_cap_zero": "จำกัดตามไอเดียแรกแล้วขนาดเหลือ 0 — ไม่ส่ง",
     "requote_no_baseline": "ไม่มีขนาดอ้างอิงจากไอเดียแรก",
 }
 

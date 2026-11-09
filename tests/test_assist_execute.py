@@ -2161,7 +2161,7 @@ def test_size_for_execution_requote_cap_zero_sends_no_post(
     )
     assert out.get("ok") is False
     assert out.get("reason") == "requote_cap_zero"
-    assert any("จำกัดความเสียหายแล้วขนาดเหลือศูนย์" in t for t in sent)
+    assert any("จำกัดตามไอเดียแรกแล้วขนาดเหลือ 0 — ไม่ส่ง" in t for t in sent)
     assert [c for c in transport.calls if c[0] == "POST"] == []
     conn.close()
 

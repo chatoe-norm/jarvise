@@ -369,6 +369,7 @@ def scan_signal_candidates(
                     step_size=futures.step_size(symbol),
                     min_qty=Decimal("0"),
                     min_notional=Decimal("0"),
+                    tick_size=Decimal("0"),
                 )
         except Exception as exc:  # noqa: BLE001
             skipped.append({"symbol": symbol, "reason": f"mark:{type(exc).__name__}"})
@@ -711,6 +712,7 @@ def run_assist_morning(
                     step_size=client.step_size(symbol),
                     min_qty=Decimal("0"),
                     min_notional=Decimal("0"),
+                    tick_size=Decimal("0"),
                 )
         except Exception:  # noqa: BLE001
             mark_signal_expired(conn, str(row["id"]))

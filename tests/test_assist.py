@@ -43,6 +43,7 @@ from jarvise_assist.sizing import (
     next_4h_close_ms,
     next_assist_run_ms,
     passes_signal_floor,
+    round_level_to_tick,
     size_signal,
 )
 from jarvise_assist.store import (
@@ -2816,9 +2817,10 @@ def test_on_demand_requote_below_min_notional_reason_line(
     conn.close()
 
 
-def test_on_demand_requote_cap_zero_reason_line(tmp_path: Path) -> None:
+def test_on_demand_requote_cap_zero_reason_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from dataclasses import replace
 
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "ondemand_cap0.db")
     now = _ms_bangkok(2026, 10, 28, 10, 0)
     sent_at = _ms_bangkok(2026, 10, 27, 20, 59)
@@ -2853,9 +2855,10 @@ def test_on_demand_requote_cap_zero_reason_line(tmp_path: Path) -> None:
         marks={"DOGEUSDT": Decimal("0.08")},
         steps={"DOGEUSDT": Decimal("1")},
     )
-    text, _ = render_anything_now(conn, futures=fake, now_ms=now)
-    assert "DOGEUSDT จำกัดความเสียหายแล้วขนาดเหลือศูนย์" in text
+    text, markup = render_anything_now(conn, futures=fake, now_ms=now)
+    assert "DOGEUSDT จำกัดตามไอเดียแรกแล้วขนาดเหลือ 0 — ไม่ส่ง" in text
     assert "ขนาด:" not in text
+    assert markup is None or "ec:DOGEUSDT" not in json.dumps(markup)
     conn.close()
 
 
@@ -2908,4 +2911,238 @@ def test_scan_sizes_on_rounded_stop(tmp_path: Path) -> None:
     assert unrounded is not None
     assert unrounded.qty * abs(entry - rounded_stop) > balance * (risk_pct / Decimal("100"))
     assert any("Stop: 101" in t for t in sent)
+    conn.close()
+
+
+class _NoSymbolFilters:
+    """Delegates to FakeFutures but has no symbol_filters attribute (hasattr is False)."""
+
+    def __init__(self, inner: FakeFutures) -> None:
+        object.__setattr__(self, "_inner", inner)
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "symbol_filters":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+def test_scan_fallback_tick_zero_leaves_stop(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "scan_fb.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    raw_stop = Decimal("0.078443")
+    entry = Decimal("0.076")
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=float(raw_stop),
+        ts=day - 60_000,
+    )
+    inner = FakeFutures(
+        marks={"DOGEUSDT": entry},
+        steps={"DOGEUSDT": Decimal("1")},
+        ticks={"DOGEUSDT": Decimal("0.01")},  # ignored: wrapper has no symbol_filters
+    )
+    fake = _NoSymbolFilters(inner)
+    payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    created = [c for c in (payload.get("created") or []) if c.get("symbol") == "DOGEUSDT"]
+    assert created
+    row = get_signal(conn, created[0]["id"])
+    assert row is not None
+    assert Decimal(str(row["stop"])) == raw_stop
+    conn.close()
+
+
+def test_morning_fallback_tick_zero_leaves_stop(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "morning_fb.db")
+    night = _ms_bangkok(2026, 10, 26, 23, 45)
+    morning = _ms_bangkok(2026, 10, 27, 8, 20)
+    bar = _ms_bangkok(2026, 10, 27, 3, 0)
+    raw_stop = Decimal("0.078443")
+    entry = Decimal("0.076")
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=float(raw_stop),
+        ts=bar,
+    )
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=entry,
+        stop=raw_stop,
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    sid = insert_signal(
+        conn,
+        first,
+        status="held",
+        created_at_ms=night,
+        expires_at_ms=next_assist_run_ms(night),
+    )
+    inner = FakeFutures(
+        marks={"DOGEUSDT": entry},
+        steps={"DOGEUSDT": Decimal("1")},
+        ticks={"DOGEUSDT": Decimal("0.01")},
+    )
+    fake = _NoSymbolFilters(inner)
+    sent: list[str] = []
+    payload = run_assist_morning(
+        conn, futures=fake, now_ms_value=morning, send=lambda t: sent.append(t) or True
+    )
+    assert sid in (payload.get("sent") or [])
+    assert sid not in (payload.get("expired") or [])
+    row = get_signal(conn, sid)
+    assert row is not None
+    assert row["status"] == "sent"
+    assert Decimal(str(row["stop"])) == raw_stop
+    conn.close()
+
+
+@pytest.mark.parametrize("side,expected_stop", [("long", "0.07844"), ("short", "0.07845")])
+def test_scan_tick_rounds_stop_to_card_and_row(tmp_path: Path, side: str, expected_stop: str) -> None:
+    conn = open_db(tmp_path / f"scan_tick_{side}.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    raw_stop = Decimal("0.078443")
+    tick = Decimal("0.00001")
+    expected = Decimal(expected_stop)
+    assert round_level_to_tick(raw_stop, tick, side=side, kind="stop") == expected
+    entry = Decimal("0.080") if side == "long" else Decimal("0.076")
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action=side,
+        confidence=0.72,
+        invalidation=float(raw_stop),
+        ts=day - 60_000,
+    )
+    fake = FakeFutures(
+        marks={"DOGEUSDT": entry},
+        steps={"DOGEUSDT": Decimal("1")},
+        ticks={"DOGEUSDT": tick},
+    )
+    sent: list[str] = []
+    payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
+    created = [c for c in (payload.get("created") or []) if c.get("symbol") == "DOGEUSDT"]
+    assert created
+    row = get_signal(conn, created[0]["id"])
+    assert row is not None
+    stored = Decimal(str(row["stop"]))
+    assert stored == expected
+    assert any(f"Stop: {expected_stop}" in t for t in sent)
+    conn.close()
+
+
+@pytest.mark.parametrize("side,expected_stop", [("long", "0.07844"), ("short", "0.07845")])
+def test_morning_tick_rounds_stop_to_card_signal_and_track(
+    tmp_path: Path, side: str, expected_stop: str
+) -> None:
+    conn = open_db(tmp_path / f"morning_tick_{side}.db")
+    night = _ms_bangkok(2026, 10, 26, 23, 45)
+    morning = _ms_bangkok(2026, 10, 27, 8, 20)
+    bar = _ms_bangkok(2026, 10, 27, 3, 0)
+    raw_stop = Decimal("0.078443")
+    tick = Decimal("0.00001")
+    expected = Decimal(expected_stop)
+    entry = Decimal("0.080") if side == "long" else Decimal("0.076")
+    # Held stop already on-grid so chase uses a safe prior level; morning re-sizes on analysis stop.
+    held_stop = Decimal("0.07844") if side == "long" else Decimal("0.07845")
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action=side,
+        confidence=0.72,
+        invalidation=float(raw_stop),
+        ts=bar,
+    )
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side=side,
+        entry=entry,
+        stop=held_stop,
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    sid = insert_signal(
+        conn,
+        first,
+        status="held",
+        created_at_ms=night,
+        expires_at_ms=next_assist_run_ms(night),
+    )
+    fake = FakeFutures(
+        marks={"DOGEUSDT": entry},
+        steps={"DOGEUSDT": Decimal("1")},
+        ticks={"DOGEUSDT": tick},
+    )
+    sent: list[str] = []
+    payload = run_assist_morning(
+        conn, futures=fake, now_ms_value=morning, send=lambda t: sent.append(t) or True
+    )
+    assert sid not in (payload.get("expired") or [])
+    row = get_signal(conn, sid)
+    assert row is not None
+    assert row["status"] == "sent"
+    assert Decimal(str(row["stop"])) == expected
+    track = conn.execute(
+        "SELECT stop, sent_at_ms, kind FROM assist_track WHERE signal_id=?",
+        (sid,),
+    ).fetchone()
+    assert track is not None
+    assert Decimal(str(track[0])) == expected
+    assert track[2] == "sent"
+    assert any(f"Stop: {expected_stop}" in t for t in sent)
+    conn.close()
+
+
+def test_on_demand_requote_no_baseline_reason_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ondemand_nobase.db")
+    now = _ms_bangkok(2026, 10, 28, 10, 0)
+    sent_at = _ms_bangkok(2026, 10, 27, 20, 59)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.75,
+        invalidation=0.083,
+        ts=now - 7 * 3_600_000,
+    )
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    first = replace(first, qty=Decimal("0"), notional=Decimal("0"), loss_at_stop=Decimal("0"))
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=sent_at,
+        expires_at_ms=next_assist_run_ms(sent_at),
+        sent_at_ms=sent_at,
+    )
+    fake = FakeFutures(
+        marks={"DOGEUSDT": Decimal("0.08")},
+        steps={"DOGEUSDT": Decimal("1")},
+    )
+    text, markup = render_anything_now(conn, futures=fake, now_ms=now)
+    assert "DOGEUSDT ไม่มีขนาดอ้างอิงจากไอเดียแรก" in text
+    assert "ขนาด:" not in text
+    assert markup is None or "ec:DOGEUSDT" not in json.dumps(markup)
     conn.close()
