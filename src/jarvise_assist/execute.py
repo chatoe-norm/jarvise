@@ -941,6 +941,8 @@ _REASON_TH: dict[str, str] = {
     "key_refused": MSG_KEY_REFUSED,
     "no_trade_key": MSG_NO_TRADE_KEY,
     "chase": "ราคาวิ่งไปแล้ว",
+    "requote_cap_zero": "จำกัดตามไอเดียแรกแล้วขนาดเหลือ 0 — ไม่ส่ง",
+    "requote_no_baseline": "ไม่มีขนาดอ้างอิงจากไอเดียแรก",
     "paused": "หยุดชั่วคราวจากแพ้ติดกัน",
     "expired": MSG_EXPIRED,
     "off": MSG_OFF,
@@ -1131,12 +1133,14 @@ def size_for_execution(
             return None, "chase"
         first_qty = Decimal(str(seen["qty"])) if seen.get("qty") is not None else None
         first_loss = Decimal(str(seen["loss_at_stop"])) if seen.get("loss_at_stop") is not None else None
-        sized = cap_requote_qty(
+        sized, cap_reason = cap_requote_qty(
             sized,
             first_qty=first_qty,
             first_loss=first_loss,
             balance=balance,
         )
+        if sized is None:
+            return None, cap_reason
     if below_min_notional(
         qty=sized.qty,
         notional=sized.notional,
@@ -1161,7 +1165,21 @@ def size_for_execution(
     if margin_dropped or not admitted:
         return None, "margin_cap"
     final = admitted[0].sized
-    # Confirm must send the preview numbers; keep qty/stop/target from sizing, leverage shared.
+    # Preview must match the qty that margin admit kept; leverage comes from final.
+    qty = sized.qty
+    notional = sized.notional
+    loss = sized.loss_at_stop
+    if final.qty < sized.qty:
+        qty = final.qty
+        notional = final.notional
+        loss = final.loss_at_stop
+        if below_min_notional(
+            qty=qty,
+            notional=notional,
+            min_qty=filters.min_qty,
+            min_notional=filters.min_notional,
+        ):
+            return None, "below_min_notional"
     return (
         SizedSignal(
             symbol=sized.symbol,
@@ -1169,10 +1187,10 @@ def size_for_execution(
             entry=sized.entry,
             stop=sized.stop,
             target=sized.target,
-            qty=sized.qty,
-            notional=sized.notional,
+            qty=qty,
+            notional=notional,
             leverage=final.leverage,
-            loss_at_stop=sized.loss_at_stop,
+            loss_at_stop=loss,
             risk_pct=sized.risk_pct,
             r_distance=sized.r_distance,
             leverage_capped=final.leverage_capped,
