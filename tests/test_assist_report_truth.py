@@ -39,7 +39,7 @@ from jarvise_assist.store import (
 )
 from jarvise_assist.track import TRACK_COHORT, _r_and_pnl, resolve_open_tracks
 from jarvise_assist.weekly import format_weekly_summary, summarize_virtual
-from jarvise_ingest.db import open_db, schema_version, upsert_market_technicals
+from jarvise_ingest.db import SCHEMA_VERSION, open_db, schema_version, upsert_market_technicals
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 WINDOW_START = int(datetime(2026, 11, 1, tzinfo=BANGKOK).timestamp() * 1000)
@@ -664,7 +664,7 @@ def test_actual_r_migration_is_additive(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 25
+    assert schema_version(conn) == SCHEMA_VERSION
     row = conn.execute(
         """
         SELECT net_r_real, entry_time_ms, risk_actual_usdt, net_r_actual

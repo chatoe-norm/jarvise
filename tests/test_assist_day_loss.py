@@ -37,7 +37,7 @@ from jarvise_assist.store import (
     write_settings,
 )
 from jarvise_assist.watch import run_assist_watch
-from jarvise_ingest.db import open_db, schema_version, upsert_market_technicals
+from jarvise_ingest.db import SCHEMA_VERSION, open_db, schema_version, upsert_market_technicals
 
 NOW = _ms_bangkok(2026, 11, 9, 15, 0)
 
@@ -615,7 +615,7 @@ def test_day_loss_migration_is_additive(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 25
+    assert schema_version(conn) == SCHEMA_VERSION
     row = conn.execute(
         """
         SELECT streak_anchor_ms, week_pause_id, resume_alerted,

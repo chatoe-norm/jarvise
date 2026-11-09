@@ -409,6 +409,17 @@ def _open_track_for_symbol_side(
 _BLOCKED_REASONS = frozenset({"risk_cap", "margin_cap", "streak_pause"})
 
 
+def _sizing_column_values(sized: SizedSignal) -> tuple[Any, ...]:
+    reasons = list(sized.reduce_reasons)
+    return (
+        None if sized.balance_usdt is None else float(sized.balance_usdt),
+        float(sized.risk_pct),
+        None if sized.budget_usdt is None else float(sized.budget_usdt),
+        json.dumps(reasons) if reasons else None,
+        sized.requote_anchor_id,
+    )
+
+
 def record_blocked_signal(
     conn: Any,
     sized: SizedSignal,
@@ -433,11 +444,13 @@ def record_blocked_signal(
         INSERT INTO assist_signal (
             id, analysis_id, symbol, side, entry, stop, target, qty, notional,
             leverage, loss_at_stop, created_at_ms, expires_at_ms, status, sent_at_ms,
-            leverage_capped, uncapped_leverage
+            leverage_capped, uncapped_leverage,
+            balance_usdt, risk_pct, budget_usdt, reduce_reasons, requote_anchor_id
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, 'blocked', ?,
-            ?, ?
+            ?, ?,
+            ?, ?, ?, ?, ?
         )
         """,
         (
@@ -457,6 +470,7 @@ def record_blocked_signal(
             ts,
             1 if sized.leverage_capped else 0,
             int(sized.uncapped_leverage),
+            *_sizing_column_values(sized),
         ),
     )
     cohort = _track_cohort()
@@ -499,11 +513,13 @@ def insert_signal(
         INSERT INTO assist_signal (
             id, analysis_id, symbol, side, entry, stop, target, qty, notional,
             leverage, loss_at_stop, created_at_ms, expires_at_ms, status, sent_at_ms,
-            leverage_capped, uncapped_leverage
+            leverage_capped, uncapped_leverage,
+            balance_usdt, risk_pct, budget_usdt, reduce_reasons, requote_anchor_id
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
-            ?, ?
+            ?, ?,
+            ?, ?, ?, ?, ?
         )
         """,
         (
@@ -524,6 +540,7 @@ def insert_signal(
             sent_at_ms,
             1 if sized.leverage_capped else 0,
             int(sized.uncapped_leverage),
+            *_sizing_column_values(sized),
         ),
     )
     if status in {"held", "sent"}:
@@ -596,7 +613,12 @@ def mark_signal_sent(
             loss_at_stop=?,
             expires_at_ms=?,
             leverage_capped=?,
-            uncapped_leverage=?
+            uncapped_leverage=?,
+            balance_usdt=?,
+            risk_pct=?,
+            budget_usdt=?,
+            reduce_reasons=?,
+            requote_anchor_id=?
         WHERE id=?
         """,
         (
@@ -611,6 +633,7 @@ def mark_signal_sent(
             int(expires_at_ms),
             1 if sized.leverage_capped else 0,
             int(sized.uncapped_leverage),
+            *_sizing_column_values(sized),
             signal_id,
         ),
     )

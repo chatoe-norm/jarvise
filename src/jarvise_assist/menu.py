@@ -202,6 +202,13 @@ def _partial_stop_line(covered: Decimal, qty: Decimal) -> str:
     return f"⚠️ stop ครอบแค่ {fmt_qty(covered)}/{fmt_qty(qty)}"
 
 
+def _append_position_block(lines: list[str], number: int, symbol: str, details: list[str]) -> None:
+    lines.append("")
+    lines.append(f"{number}. {symbol}")
+    for detail in details:
+        lines.append(f"• {detail}")
+
+
 def render_open_positions(
     conn: Any,
     *,
@@ -219,7 +226,7 @@ def render_open_positions(
     if not positions:
         return "ไม่มีไม้ที่ถืออยู่"
     lines = ["📋 ไม้ที่ถืออยู่"]
-    for pos in positions:
+    for number, pos in enumerate(positions, start=1):
         sym = pos.symbol
         step, tick = _step_and_tick(client, sym)
         coverage = protective_stop_coverage(
@@ -238,11 +245,12 @@ def render_open_positions(
         )
         side_l = "LONG" if pos.side == "long" else "SHORT"
         if sym not in ASSIST_SYMBOLS:
-            lines.append(f"{sym} {side_l} · qty {fmt_qty(pos.qty)} · no data, no advice")
+            outside = [f"{side_l} · qty {fmt_qty(pos.qty)} · no data, no advice"]
             if coverage == "none":
-                lines.append(_NO_STOP_LINE)
+                outside.append(_NO_STOP_LINE)
             elif coverage == "partial":
-                lines.append(_partial_stop_line(covered, pos.qty))
+                outside.append(_partial_stop_line(covered, pos.qty))
+            _append_position_block(lines, number, sym, outside)
             continue
         watch = get_watch_position(conn, sym, pos.position_side)
         linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
@@ -275,8 +283,10 @@ def render_open_positions(
             if pos.liquidation_price is not None and pos.liquidation_price > 0
             else None
         )
-        lines.append(f"{sym} {side_l}")
-        lines.append(f"qty {fmt_qty(pos.qty)} · เข้า {_price_text(pos.entry_price, tick)} · mark {mark_s}")
+        details = [
+            f"{side_l} · qty {fmt_qty(pos.qty)}",
+            f"เข้า {_price_text(pos.entry_price, tick)} · mark {mark_s}",
+        ]
         if pos.side == "long":
             unreal_usdt = (mark - entry) * qty
         else:
@@ -302,22 +312,24 @@ def render_open_positions(
             r_s = _signed_r_one(r_mult) + r_note
         else:
             r_s = "R unknown"
-        lines.append(f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s} (ก่อนค่าธรรมเนียม)")
+        unrealized = f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s} (ก่อนค่าธรรมเนียม)"
 
         if coverage == "none":
-            lines.append(_NO_STOP_LINE)
+            details.append(_NO_STOP_LINE)
         elif stop_info is None:
-            lines.append("stop แบบ trailing")
+            details.append("stop แบบ trailing")
             if coverage == "partial":
-                lines.append(_partial_stop_line(covered, pos.qty))
+                details.append(_partial_stop_line(covered, pos.qty))
         else:
-            prot = float(stop_info.price)
             stop_trig = trigger_label(stop_info.working_type)
             stop_px = _price_text(stop_info.price, tick)
             if stop_trig is not None:
-                lines.append(f"stop ที่ตั้งไว้ {stop_px} · trigger {stop_trig}")
+                details.append(f"stop ที่ตั้งไว้ {stop_px} · trigger {stop_trig}")
             else:
-                lines.append(f"stop ที่ตั้งไว้ {stop_px}")
+                details.append(f"stop ที่ตั้งไว้ {stop_px}")
+        details.append(unrealized)
+        if stop_info is not None and coverage != "none":
+            prot = float(stop_info.price)
             lock_qty = covered_qty if coverage == "partial" else qty
             if pos.side == "long":
                 lock_usdt = (prot - entry) * lock_qty
@@ -332,12 +344,12 @@ def render_open_positions(
             if coverage == "partial":
                 uncovered = pos.qty - min(covered, pos.qty)
                 lock_line = f"{lock_line} · อีก {fmt_qty(uncovered)} ไม่มี stop"
-            lines.append(lock_line)
+            details.append(lock_line)
             if coverage == "partial":
-                lines.append(_partial_stop_line(covered, pos.qty))
+                details.append(_partial_stop_line(covered, pos.qty))
 
         if initial_stop is not None:
-            lines.append(f"stop ตั้งต้น {_price_text(initial_stop, tick)} (ฐาน 1R)")
+            details.append(f"stop ตั้งต้น {_price_text(initial_stop, tick)} (ฐาน 1R)")
             entry_time = int(watch["entry_time_ms"]) if watch and watch.get("entry_time_ms") else now_ms
             candles_1h = load_candles_in_range(conn, sym, "1h", since_ms=entry_time, until_ms=int(now_ms))
             tick_d = tick if tick is not None and tick > 0 else Decimal("0.01")
@@ -360,11 +372,11 @@ def render_open_positions(
                 else:
                     tighter = advice_level < placed_stop
                 if tighter:
-                    lines.append(f"stop แนะนำตอนนี้ {_price_text(advice_level, tick)} ({advice_src})")
+                    details.append(f"stop แนะนำตอนนี้ {_price_text(advice_level, tick)} ({advice_src})")
 
         if tp_info is not None:
             tp_trig = trigger_label(tp_info.working_type) or "?"
-            lines.append(f"TP {_price_text(tp_info.price, tick)} · trigger {tp_trig}")
+            details.append(f"TP {_price_text(tp_info.price, tick)} · trigger {tp_trig}")
             if (
                 stop_info is not None
                 and stop_info.working_type is not None
@@ -372,10 +384,11 @@ def render_open_positions(
                 and stop_info.working_type != tp_info.working_type
             ):
                 stop_trig = trigger_label(stop_info.working_type) or stop_info.working_type
-                lines.append(f"⚠️ stop กับ TP คนละ trigger ({stop_trig} / {tp_trig})")
+                details.append(f"⚠️ stop กับ TP คนละ trigger ({stop_trig} / {tp_trig})")
 
         if liq_s is not None:
-            lines.append(f"liquidation {liq_s}")
+            details.append(f"liquidation {liq_s}")
+        _append_position_block(lines, number, sym, details)
     return "\n".join(lines)
 
 
@@ -427,11 +440,14 @@ def _render_on_demand_idea(
             return f"{sized.symbol} ราคาวิ่งไปแล้ว — ไม่แนะนำไล่", False
         first_qty = Decimal(str(seen["qty"])) if seen.get("qty") is not None else None
         first_loss = Decimal(str(seen["loss_at_stop"])) if seen.get("loss_at_stop") is not None else None
+        anchor_ms = seen.get("sent_at_ms") or seen.get("created_at_ms")
         sized, cap_reason = cap_requote_qty(
             sized,
             first_qty=first_qty,
             first_loss=first_loss,
             balance=balance,
+            anchor_id=str(seen["id"]) if seen.get("id") else None,
+            anchor_sent_at_ms=int(anchor_ms) if anchor_ms else None,
         )
         if sized is None:
             return _reason_line(cand.sized.symbol, cap_reason or "requote_no_baseline"), False

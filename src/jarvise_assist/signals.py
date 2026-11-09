@@ -754,11 +754,14 @@ def run_assist_morning(
             continue
         first_qty = Decimal(str(row["qty"])) if row.get("qty") is not None else None
         first_loss = Decimal(str(row["loss_at_stop"])) if row.get("loss_at_stop") is not None else None
+        anchor_ms = row.get("sent_at_ms") or row.get("created_at_ms")
         sized, cap_reason = cap_requote_qty(
             sized,
             first_qty=first_qty,
             first_loss=first_loss,
             balance=balance,
+            anchor_id=str(row["id"]),
+            anchor_sent_at_ms=int(anchor_ms) if anchor_ms else None,
         )
         if sized is None:
             mark_signal_expired(conn, str(row["id"]))
