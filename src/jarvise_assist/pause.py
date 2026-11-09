@@ -150,7 +150,13 @@ def clear_pause_manual(conn: Any, *, now_ms_value: int | None = None) -> str | N
 
 
 def maybe_auto_resume(conn: Any, *, now_ms: int, send: SendFn) -> bool:
-    """Clear expired pause and send the resume line once. Returns True when resumed."""
+    """Clear expired pause and send the resume line once. Returns True when resumed.
+
+    A same-day day-loss pause that ends at 08:20 also arms the next -1R
+    threshold, the same store clear_pause_manual uses for an active pause.
+    A pause from an earlier day, or a streak/week pause with no day-loss
+    pause today, does not move that level.
+    """
     settings = ensure_settings(conn)
     until = settings.get("paused_until_ms")
     if until is None:
@@ -159,8 +165,19 @@ def maybe_auto_resume(conn: Any, *, now_ms: int, send: SendFn) -> bool:
         return False
     edge = get_edge(conn)
     write_settings(conn, paused_until_ms=None)
+    day_id = bangkok_day_id(now_ms)
+    note: str | None = None
+    if edge.get("day_pause_id") == day_id:
+        net = day_bot_net_r(conn, now_ms=now_ms)
+        write_edge(
+            conn,
+            day_resume_net_r=float(net),
+            day_resume_id=day_id,
+            day_deeper_pause_id=None,
+        )
+        note = day_loss_resume_text(net)
     if not edge["resume_alerted"]:
-        send(RESUME_TEXT)
+        send(RESUME_TEXT if note is None else f"{RESUME_TEXT} — {note}")
         write_edge(conn, resume_alerted=True)
         return True
     write_edge(conn, resume_alerted=True)

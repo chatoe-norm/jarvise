@@ -164,7 +164,9 @@ with the day's current net R of closed bot-entered trades only, for example
 and clears the deeper marker, which arms a new threshold 1R lower
 (`<= snapshot - 1`). The next further -1R pauses again until the next 08:20.
 A resume when no pause is active, including an already-expired
-`paused_until_ms`, does not move the stored level.
+`paused_until_ms`, does not move the stored level. An automatic resume at
+08:20 on the same Bangkok day as the day-loss pause also arms a new -1R
+threshold.
 
 Watch runs the day-loss check again immediately after `journal_on_close`, from
 SQLite only, so a close that reaches -3R pauses in that same poll.

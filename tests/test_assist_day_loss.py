@@ -17,6 +17,7 @@ from jarvise_assist.keyboard import BTN_TOGGLE
 from jarvise_assist.menu import handle_menu_text
 from jarvise_assist.pause import (
     BOT_ENTRIES_ONLY_TH,
+    RESUME_TEXT,
     bangkok_day_id,
     bangkok_day_start_ms,
     day_bot_net_r,
@@ -279,6 +280,58 @@ def test_pause_at_0200_ends_0820_the_same_morning(tmp_path: Path) -> None:
     _assert_end_clock(sent[0], morning)
     assert is_paused(ensure_settings(conn), now_ms=morning - 1) is True
     assert is_paused(ensure_settings(conn), now_ms=morning) is False
+    conn.close()
+
+
+def test_auto_resume_at_0820_arms_another_1r_same_day(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "autoarm.db")
+    sent, send = _send()
+    at = _ms_bangkok(2026, 11, 9, 2, 0)
+    morning = _ms_bangkok(2026, 11, 9, 8, 20)
+    _trade(conn, oid="night", exit_ms=at - 60_000, net=-3.0)
+    paused = evaluate_pause(conn, futures=_futures(), now_ms=at, send=send)
+    assert paused["reason"] == "day_loss"
+    assert paused["until_ms"] == morning
+    assert maybe_auto_resume(conn, now_ms=morning, send=send) is True
+    assert sent[-1] == f"{RESUME_TEXT} — วันนี้ติดลบแล้ว -3.0R จากไม้ที่ปิดแล้ว ({BOT_ENTRIES_ONLY_TH})"
+    edge = get_edge(conn)
+    assert edge["day_resume_id"] == "2026-11-09"
+    assert edge["day_resume_net_r"] == pytest.approx(-3.0)
+    assert edge["day_deeper_pause_id"] is None
+    assert ensure_settings(conn)["paused_until_ms"] is None
+
+    _trade(conn, oid="short", exit_ms=morning + 60_000, net=-0.9, symbol="ETHUSDT")
+    short = evaluate_pause(conn, futures=_futures(), now_ms=morning + 120_000, send=send)
+    assert short["paused"] is False
+
+    _trade(conn, oid="step", exit_ms=morning + 180_000, net=-0.1, symbol="SOLUSDT")
+    later = morning + 240_000
+    deeper = evaluate_pause(conn, futures=_futures(), now_ms=later, send=send)
+    assert deeper["reason"] == "day_loss_deeper"
+    assert deeper["until_ms"] == next_0820_bangkok_ms(later)
+    assert deeper["until_ms"] == _ms_bangkok(2026, 11, 10, 8, 20)
+    conn.close()
+
+
+def test_auto_resume_of_yesterday_pause_does_not_arm(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "yday.db")
+    sent, send = _send()
+    at = _ms_bangkok(2026, 11, 9, 23, 58)
+    _trade(conn, oid="late", exit_ms=at - 60_000, net=-3.0)
+    paused = evaluate_pause(conn, futures=_futures(), now_ms=at, send=send)
+    morning = _ms_bangkok(2026, 11, 10, 8, 20)
+    assert paused["until_ms"] == morning
+    assert get_edge(conn)["day_pause_id"] == "2026-11-09"
+    assert maybe_auto_resume(conn, now_ms=morning, send=send) is True
+    assert sent[-1] == RESUME_TEXT
+    edge = get_edge(conn)
+    assert edge["day_resume_id"] is None
+    assert edge["day_resume_net_r"] is None
+    assert edge["day_deeper_pause_id"] is None
+    _trade(conn, oid="today", exit_ms=morning + 60_000, net=-1.0, symbol="ETHUSDT")
+    nxt = evaluate_pause(conn, futures=_futures(), now_ms=morning + 120_000, send=send)
+    assert nxt["paused"] is False
+    assert get_edge(conn)["day_resume_id"] is None
     conn.close()
 
 
