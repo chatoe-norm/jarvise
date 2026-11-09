@@ -33,8 +33,6 @@ from jarvise_assist.execute import (
     MSG_ONE_WAY,
     MSG_ORDER_NOT_FOUND,
     MSG_OUTCOME_UNKNOWN,
-    MSG_PREORDER_EXIT,
-    MSG_PREORDER_MOVE,
     MSG_RECOVER_SIDE_MISMATCH,
     MSG_RECOVER_STALE_UNREADABLE,
     MSG_STOP_CLOSED,
@@ -3442,9 +3440,7 @@ def test_stop_post_success_unreadable_readback_stays_unknown(
     conn.close()
 
 
-def test_stop_success_not_found_then_verified_no_sl1(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stop_success_not_found_then_verified_no_sl1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "sl-grace-ok.db")
     intent_id = _entry_intent(conn)
@@ -5106,15 +5102,14 @@ def test_ms_xx_preorder_failure_does_not_use_entry_retry_copy(
     )
     assert sent_mode == [MSG_MODE_UNREADABLE]
     assert MSG_KEY_REFUSED not in sent_mode[0]
-    trade = _client(
-        RecordingTransport(
-            {
-                ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
-                ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
-                ("GET", "/fapi/v3/positionRisk"): httpx.ConnectError("position"),
-            }
-        )
+    preorder_transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+            ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+            ("GET", "/fapi/v3/positionRisk"): httpx.ConnectError("position"),
+        }
     )
+    trade = _client(preorder_transport)
     sent_ms: list[str] = []
     handle_exec_callback(
         conn,
@@ -5126,9 +5121,9 @@ def test_ms_xx_preorder_failure_does_not_use_entry_retry_copy(
         now_ms_value=ts,
         message={"message_id": 1},
     )
-    assert sent_ms == [MSG_PREORDER_MOVE]
+    assert sent_ms == ["อ่าน Binance ไม่ได้ — ยังไม่ได้ส่งคำสั่ง รอคำแนะนำรอบถัดไป หรือดู 📋 ไม้ที่ถืออยู่"]
     assert "ลองใหม่" not in sent_ms[0]
-    assert "กดเหรียญใหม่" not in sent_ms[0]
+    assert get_exec_intent(conn, move_id)["status"] == "failed"
     sent_xx: list[str] = []
     handle_exec_callback(
         conn,
@@ -5140,8 +5135,12 @@ def test_ms_xx_preorder_failure_does_not_use_entry_retry_copy(
         now_ms_value=ts,
         message={"message_id": 2},
     )
-    assert sent_xx == [MSG_PREORDER_EXIT]
+    assert sent_xx == ["อ่าน Binance ไม่ได้ — ยังไม่ได้ส่งคำสั่ง ดู 📋 ไม้ที่ถืออยู่"]
     assert "ลองใหม่" not in sent_xx[0]
+    assert get_exec_intent(conn, exit_id)["status"] == "failed"
+    assert not any(
+        c[0] == "POST" and c[1] in {"/fapi/v1/order", "/fapi/v1/algoOrder"} for c in preorder_transport.calls
+    )
     conn.close()
 
 
@@ -5443,7 +5442,9 @@ def _protective_order(
     }
 
 
-def _run_aged(conn: Any, intent_id: str, handlers: dict[tuple[str, str], Any], created: int) -> tuple[str, str]:
+def _run_aged(
+    conn: Any, intent_id: str, handlers: dict[tuple[str, str], Any], created: int
+) -> tuple[str, str]:
     sent: list[str] = []
     run_exec_recovery(
         conn,
@@ -5511,9 +5512,7 @@ def test_aged_entry_covered_by_later_move_stop_is_verified(
     conn.close()
 
 
-def test_aged_entry_take_profit_only_is_not_a_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_aged_entry_take_profit_only_is_not_a_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "aged-tp.db")
     created = 1_700_000_000_000
