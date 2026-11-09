@@ -642,6 +642,20 @@ def _migrate_assist_blocked_track(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_track", "block_reason", "TEXT")
 
 
+def _migrate_assist_day_loss(conn: sqlite3.Connection) -> None:
+    """Day-loss pause markers on the single assist_edge row.
+
+    Nullable defaults only. Existing streak, week, and resume values are not rewritten.
+    """
+    for name, typ in (
+        ("day_pause_id", "TEXT DEFAULT NULL"),
+        ("day_resume_net_r", "REAL DEFAULT NULL"),
+        ("day_resume_id", "TEXT DEFAULT NULL"),
+        ("day_deeper_pause_id", "TEXT DEFAULT NULL"),
+    ):
+        _add_column_if_missing(conn, "assist_edge", name, typ)
+
+
 def _migrate_assist_journal(conn: sqlite3.Connection) -> None:
     """Owner grade card per closed assist trade. Never copies fills or places orders."""
     conn.execute(
@@ -1035,6 +1049,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (20, "assist_real_trades", _migrate_assist_real_trades, True),
     (21, "assist_blocked_track", _migrate_assist_blocked_track, True),
     (22, "assist_journal", _migrate_assist_journal, True),
+    (23, "assist_day_loss", _migrate_assist_day_loss, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

@@ -36,9 +36,9 @@ DAYTIME = int(datetime(2023, 11, 15, 7, 30, tzinfo=BANGKOK).timestamp() * 1000)
 GAP_MS = 30 * 60 * 1000
 
 
-def test_schema_is_migration_22(tmp_path: Path) -> None:
+def test_schema_is_migration_23(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "j.db")
-    assert SCHEMA_VERSION == 22
+    assert SCHEMA_VERSION == 23
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='assist_journal'"
     ).fetchone()

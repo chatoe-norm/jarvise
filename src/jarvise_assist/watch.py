@@ -35,7 +35,7 @@ from jarvise_assist.messages import (
     format_no_stop_warning,
     format_partial_stop_warning,
 )
-from jarvise_assist.pause import evaluate_pause, maybe_auto_resume
+from jarvise_assist.pause import evaluate_day_loss_pause, evaluate_pause, maybe_auto_resume
 from jarvise_assist.signals import (
     _alert_key_unsafe,
     _alert_permission,
@@ -761,6 +761,10 @@ def run_assist_watch(
         journal_on_close(conn, closed, futures=client, now_ms_value=ts)
     except Exception:  # noqa: BLE001 — a journal failure must not stop advice or orphan cancel
         logger.exception("assist journal failed")
+    # Same poll as the close: local rows only, no extra Binance read.
+    day_pause = evaluate_day_loss_pause(conn, now_ms=ts, send=send_fn)
+    if day_pause.get("reason") in {"day_loss", "day_loss_deeper"}:
+        pause_info = day_pause
     return _strip_secrets(
         {
             "ok": True,
