@@ -338,6 +338,89 @@ def notify_risk_halt(reason: str, *, client: httpx.Client | None = None) -> bool
         return False
 
 
+def _hours_text(hours: float | None) -> str:
+    if hours is None:
+        return "—"
+    text = f"{float(hours):.1f}"
+    if text.endswith(".0"):
+        return text[:-2]
+    return text
+
+
+def _usd_text(amount: float) -> str:
+    text = f"{float(amount):.2f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def format_digest_stale_message(*, hours: float | None, filename: str | None) -> str:
+    if not filename:
+        return "⚠️ OpenClaw ไม่ได้เขียนข่าวมา (ไม่มีไฟล์) — เช็กเครดิต OpenRouter และ log ของ openclaw"
+    return (
+        f"⚠️ OpenClaw ไม่ได้เขียนข่าวมา {_hours_text(hours)} ชม. (ล่าสุด {filename}) "
+        "— เช็กเครดิต OpenRouter และ log ของ openclaw"
+    )
+
+
+def format_digest_recovered_message(filename: str) -> str:
+    return f"✅ OpenClaw เขียนข่าวได้แล้ว ({filename})"
+
+
+def notify_digest_freshness(
+    *,
+    stale: bool,
+    hours: float | None,
+    filename: str | None,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Digest freshness edge alert. Quiet mode does not suppress."""
+    if not notify_configured():
+        return False
+    if stale:
+        text = format_digest_stale_message(hours=hours, filename=filename)
+    else:
+        text = format_digest_recovered_message(filename or "ไม่มีไฟล์")
+    try:
+        return send_telegram_message(text, client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify digest freshness soft-fail: %s", type(exc).__name__)
+        return False
+
+
+def format_openrouter_credit_message(
+    *,
+    kind: str,
+    remaining: float | None = None,
+    status: str | None = None,
+) -> str:
+    if kind == "low":
+        shown = "—" if remaining is None else _usd_text(remaining)
+        return f"⚠️ เครดิต OpenRouter เหลือ {shown} USD — เติมก่อนหมด (OpenClaw และ shadow veto ใช้ key นี้)"
+    if kind == "ok":
+        shown = "—" if remaining is None else _usd_text(remaining)
+        return f"✅ เครดิต OpenRouter เหลือ {shown} USD"
+    return f"อ่านสถานะ OpenRouter ไม่ได้: {status or 'unknown'}"
+
+
+def notify_openrouter_credit(
+    *,
+    kind: str,
+    remaining: float | None = None,
+    status: str | None = None,
+    client: httpx.Client | None = None,
+) -> bool:
+    """OpenRouter credit edge alert. Quiet mode does not suppress."""
+    if not notify_configured():
+        return False
+    text = format_openrouter_credit_message(kind=kind, remaining=remaining, status=status)
+    try:
+        return send_telegram_message(text, client=client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify openrouter credit soft-fail: %s", type(exc).__name__)
+        return False
+
+
 def notify_disk_space(
     *,
     low: bool,
