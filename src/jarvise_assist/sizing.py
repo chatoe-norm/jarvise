@@ -1,7 +1,8 @@
-"""Position sizing for trade-assistant signals. Pure functions, no I/O."""
+"""Position sizing for trade-assistant signals. Pure helpers; one warning on re-quote."""
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,8 @@ from decimal import ROUND_DOWN, Decimal
 from typing import Any, Literal
 
 from jarvise_analyze.engine import CONFIDENCE_THRESHOLD
+
+logger = logging.getLogger(__name__)
 
 MAX_LEVERAGE = 5
 CHASE_R = Decimal("0.3")
@@ -107,28 +110,37 @@ def cap_requote_qty(
     first_qty: Decimal | None,
     first_loss: Decimal | None,
     balance: Decimal,
-) -> SizedSignal:
+) -> tuple[SizedSignal | None, str | None]:
     """Cap a re-quote so loss stays at or under the first sent idea.
 
     When first_loss is positive, qty may grow as the stop distance shrinks and
     shrinks when the stop widens, keeping loss_at_stop <= first_loss. When
     first_loss is missing, fall back to the first sent qty. Never raises qty
     above the freshly sized trade. Entry, stop, and target stay put.
+
+    Returns (None, reason) when the floored cap is zero (requote_cap_zero) or
+    neither baseline is usable (requote_no_baseline).
     """
     step = sized.step_size if sized.step_size is not None and sized.step_size > 0 else Decimal("1")
+    r = abs(sized.entry - sized.stop)
+    loss_ok = first_loss is not None and first_loss.is_finite() and first_loss > 0
+    qty_ok = first_qty is not None and first_qty.is_finite() and first_qty > 0
+    if not loss_ok and not qty_ok:
+        logger.warning("requote_no_baseline symbol=%s", sized.symbol)
+        return None, "requote_no_baseline"
     cap: Decimal | None = None
-    r = abs(sized.entry - sized.stop)
-    if first_loss is not None and first_loss > 0 and r > 0:
+    if loss_ok and r > 0:
+        assert first_loss is not None
         cap = floor_to_step(first_loss / r, step)
-    elif first_qty is not None and first_qty > 0:
+    elif qty_ok:
+        assert first_qty is not None
         cap = floor_to_step(first_qty, step)
+    if cap is not None and cap <= 0:
+        return None, "requote_cap_zero"
     if cap is None or sized.qty <= cap:
-        return sized
+        return sized, None
     qty = cap
-    if qty <= 0:
-        return sized
     notional = qty * sized.entry
-    r = abs(sized.entry - sized.stop)
     loss = qty * r
     if balance > 0:
         uncapped = int(math.ceil(float(notional / balance)))
@@ -136,14 +148,17 @@ def cap_requote_qty(
         uncapped = sized.uncapped_leverage
     leverage_capped = uncapped > MAX_LEVERAGE
     leverage = MAX_LEVERAGE if leverage_capped else max(1, uncapped)
-    return replace(
-        sized,
-        qty=qty,
-        notional=notional,
-        loss_at_stop=loss,
-        leverage=leverage,
-        leverage_capped=leverage_capped,
-        uncapped_leverage=uncapped,
+    return (
+        replace(
+            sized,
+            qty=qty,
+            notional=notional,
+            loss_at_stop=loss,
+            leverage=leverage,
+            leverage_capped=leverage_capped,
+            uncapped_leverage=uncapped,
+        ),
+        None,
     )
 
 

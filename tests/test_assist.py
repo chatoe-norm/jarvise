@@ -2229,12 +2229,13 @@ def test_on_demand_requote_caps_loss_at_first_sent(tmp_path: Path) -> None:
     )
     assert raw is not None
     assert raw.qty > first_qty
-    capped = cap_requote_qty(
+    capped, reason = cap_requote_qty(
         raw,
         first_qty=first_qty,
         first_loss=first_loss,
         balance=Decimal("1000"),
     )
+    assert reason is None and capped is not None
     expected = floor_to_step(first_loss / raw.r_distance, step)
     assert capped.qty == expected
     assert capped.qty > first_qty
@@ -2288,12 +2289,13 @@ def test_cap_requote_tighter_stop_grows_qty_within_first_loss() -> None:
     assert first is not None and tight is not None
     assert tight.r_distance < first.r_distance
     assert tight.qty > first.qty
-    capped = cap_requote_qty(
+    capped, reason = cap_requote_qty(
         tight,
         first_qty=first.qty,
         first_loss=first.loss_at_stop,
         balance=balance,
     )
+    assert reason is None and capped is not None
     expected = floor_to_step(first.loss_at_stop / tight.r_distance, step)
     assert capped.qty == expected
     assert capped.qty > first.qty
@@ -2328,12 +2330,13 @@ def test_cap_requote_wider_stop_shrinks_qty_within_first_loss() -> None:
     )
     assert first is not None and wide is not None
     assert wide.r_distance > first.r_distance
-    capped = cap_requote_qty(
+    capped, reason = cap_requote_qty(
         wide,
         first_qty=first.qty,
         first_loss=first.loss_at_stop,
         balance=balance,
     )
+    assert reason is None and capped is not None
     expected = floor_to_step(first.loss_at_stop / wide.r_distance, step)
     assert capped.qty == expected
     assert capped.qty < first.qty
@@ -2365,12 +2368,13 @@ def test_cap_requote_missing_first_loss_keeps_first_qty() -> None:
     )
     assert first is not None and tight is not None
     assert tight.qty > first.qty
-    capped = cap_requote_qty(
+    capped, reason = cap_requote_qty(
         tight,
         first_qty=first.qty,
         first_loss=None,
         balance=balance,
     )
+    assert reason is None and capped is not None
     expected = floor_to_step(first.qty, step)
     assert capped.qty == expected
     assert capped.qty < tight.qty
@@ -2397,12 +2401,13 @@ def test_cap_requote_ada_2026_11_06_uses_first_loss() -> None:
     assert sized is not None
     assert sized.r_distance == r
     assert sized.qty > first_qty
-    capped = cap_requote_qty(
+    capped, reason = cap_requote_qty(
         sized,
         first_qty=first_qty,
         first_loss=first_loss,
         balance=balance,
     )
+    assert reason is None and capped is not None
     expected = floor_to_step(first_loss / r, step)
     assert capped.qty == expected
     assert capped.qty > first_qty
@@ -2446,8 +2451,10 @@ def test_risk_and_margin_caps_apply_after_requote_loss_cap() -> None:
     assert fresh is not None and eth is not None
     first_qty = Decimal("1")
     first_loss = fresh.loss_at_stop
-    capped = cap_requote_qty(fresh, first_qty=first_qty, first_loss=first_loss, balance=balance)
-    capped_eth = cap_requote_qty(eth, first_qty=first_qty, first_loss=first_loss, balance=balance)
+    capped, reason = cap_requote_qty(fresh, first_qty=first_qty, first_loss=first_loss, balance=balance)
+    capped_eth, reason_eth = cap_requote_qty(eth, first_qty=first_qty, first_loss=first_loss, balance=balance)
+    assert reason is None and capped is not None
+    assert reason_eth is None and capped_eth is not None
     expected = floor_to_step(first_loss / fresh.r_distance, step)
     assert capped.qty == expected
     assert capped.qty > first_qty
@@ -2553,4 +2560,352 @@ def test_leverage_warning_and_config_failure_soft(tmp_path: Path) -> None:
     text2, _ = render_anything_now(conn, futures=fake, now_ms=now)
     assert "ADAUSDT" in text2
     assert "บัญชีตั้ง" not in text2
+    conn.close()
+
+
+def test_cap_requote_floors_to_zero_fails_closed() -> None:
+    """Usable first_loss that floors to 0 does not fall back to first_qty."""
+    step = Decimal("1")
+    fresh = size_signal(
+        symbol="DOGEUSDT",
+        side="long",
+        entry=Decimal("1"),
+        stop=Decimal("0"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    assert fresh is not None
+    # R = 1; first_loss 0.01 floors to 0 lots even with a usable first_qty.
+    capped, reason = cap_requote_qty(
+        fresh,
+        first_qty=Decimal("10"),
+        first_loss=Decimal("0.01"),
+        balance=Decimal("1000"),
+    )
+    assert capped is None
+    assert reason == "requote_cap_zero"
+
+
+@pytest.mark.parametrize(
+    "first_qty,first_loss",
+    [
+        (Decimal("0"), Decimal("0")),
+        (Decimal("-1"), Decimal("-2")),
+        (Decimal("NaN"), Decimal("NaN")),
+        (Decimal("Infinity"), Decimal("Infinity")),
+        (None, None),
+        (Decimal("0"), None),
+        (None, Decimal("0")),
+    ],
+)
+def test_cap_requote_unusable_baselines_fail_closed(
+    first_qty: Decimal | None,
+    first_loss: Decimal | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fresh = size_signal(
+        symbol="DOGEUSDT",
+        side="long",
+        entry=Decimal("1"),
+        stop=Decimal("0.5"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert fresh is not None
+    with caplog.at_level(logging.WARNING, logger="jarvise_assist.sizing"):
+        capped, reason = cap_requote_qty(
+            fresh,
+            first_qty=first_qty,
+            first_loss=first_loss,
+            balance=Decimal("1000"),
+        )
+    assert capped is None
+    assert reason == "requote_no_baseline"
+    assert any(
+        "requote_no_baseline" in r.getMessage() and "DOGEUSDT" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_cap_requote_zero_loss_falls_back_to_first_qty() -> None:
+    step = Decimal("1")
+    fresh = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=Decimal("1"),
+        stop=Decimal("0.7"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    assert fresh is not None
+    first_qty = Decimal("5")
+    assert fresh.qty > first_qty
+    capped, reason = cap_requote_qty(
+        fresh,
+        first_qty=first_qty,
+        first_loss=Decimal("0"),
+        balance=Decimal("1000"),
+    )
+    assert reason is None and capped is not None
+    assert capped.qty == floor_to_step(first_qty, step)
+    assert capped.qty <= fresh.qty
+
+
+def test_cap_requote_nan_loss_falls_back_to_first_qty() -> None:
+    step = Decimal("1")
+    fresh = size_signal(
+        symbol="ADAUSDT",
+        side="long",
+        entry=Decimal("1"),
+        stop=Decimal("0.7"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=step,
+    )
+    assert fresh is not None
+    first_qty = Decimal("8")
+    capped, reason = cap_requote_qty(
+        fresh,
+        first_qty=first_qty,
+        first_loss=Decimal("NaN"),
+        balance=Decimal("1000"),
+    )
+    assert reason is None and capped is not None
+    assert capped.qty == floor_to_step(first_qty, step)
+    assert capped.qty <= fresh.qty
+
+
+def test_morning_expires_on_requote_cap_zero(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    conn = open_db(tmp_path / "morning_cap0.db")
+    night = _ms_bangkok(2026, 10, 26, 23, 45)
+    morning = _ms_bangkok(2026, 10, 27, 8, 20)
+    bar = _ms_bangkok(2026, 10, 27, 3, 0)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=0.083,
+        ts=bar,
+    )
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    # Loss floors to 0 on R=0.003 with step 1; qty stays positive so DB NOT NULL holds.
+    held = replace(first, qty=Decimal("10"), notional=Decimal("0.8"), loss_at_stop=Decimal("0.001"))
+    sid = insert_signal(
+        conn,
+        held,
+        status="held",
+        created_at_ms=night,
+        expires_at_ms=next_assist_run_ms(night),
+    )
+    fake = FakeFutures(
+        marks={"DOGEUSDT": Decimal("0.08")},
+        steps={"DOGEUSDT": Decimal("1")},
+    )
+    sent: list[str] = []
+    p = run_assist_morning(conn, futures=fake, now_ms_value=morning, send=lambda t: sent.append(t) or True)
+    assert sid in p["expired"]
+    assert sent == []
+    conn.close()
+
+
+def test_morning_expires_when_requote_under_min_notional(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    conn = open_db(tmp_path / "morning_cap_min.db")
+    night = _ms_bangkok(2026, 10, 26, 23, 45)
+    morning = _ms_bangkok(2026, 10, 27, 8, 20)
+    bar = _ms_bangkok(2026, 10, 27, 3, 0)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=0.083,
+        ts=bar,
+    )
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    # Cap leaves qty=1 (notional 0.08) under min_notional 5; fresh size alone clears the min.
+    held = replace(first, qty=Decimal("100"), notional=Decimal("8"), loss_at_stop=Decimal("0.003"))
+    sid = insert_signal(
+        conn,
+        held,
+        status="held",
+        created_at_ms=night,
+        expires_at_ms=next_assist_run_ms(night),
+    )
+    fake = FakeFutures(
+        marks={"DOGEUSDT": Decimal("0.08")},
+        steps={"DOGEUSDT": Decimal("1")},
+        min_notional={"DOGEUSDT": Decimal("5")},
+    )
+    sent: list[str] = []
+    p = run_assist_morning(conn, futures=fake, now_ms_value=morning, send=lambda t: sent.append(t) or True)
+    assert sid in p["expired"]
+    assert sent == []
+    conn.close()
+
+
+def test_on_demand_requote_below_min_notional_reason_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ondemand_min.db")
+    now = _ms_bangkok(2026, 10, 28, 10, 0)
+    sent_at = _ms_bangkok(2026, 10, 27, 20, 59)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.75,
+        invalidation=0.083,
+        ts=now - 7 * 3_600_000,
+    )
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    first = replace(first, qty=Decimal("100"), notional=Decimal("8"), loss_at_stop=Decimal("0.003"))
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=sent_at,
+        expires_at_ms=next_assist_run_ms(sent_at),
+        sent_at_ms=sent_at,
+    )
+    fake = FakeFutures(
+        marks={"DOGEUSDT": Decimal("0.08")},
+        steps={"DOGEUSDT": Decimal("1")},
+        min_notional={"DOGEUSDT": Decimal("5")},
+    )
+    text, markup = render_anything_now(conn, futures=fake, now_ms=now)
+    assert "DOGEUSDT ไม้เล็กกว่าขั้นต่ำ" in text
+    assert "ขนาด:" not in text
+    assert markup is None or "ec:DOGEUSDT" not in json.dumps(markup)
+    conn.close()
+
+
+def test_on_demand_requote_cap_zero_reason_line(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    conn = open_db(tmp_path / "ondemand_cap0.db")
+    now = _ms_bangkok(2026, 10, 28, 10, 0)
+    sent_at = _ms_bangkok(2026, 10, 27, 20, 59)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.75,
+        invalidation=0.083,
+        ts=now - 7 * 3_600_000,
+    )
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    first = replace(first, qty=Decimal("10"), notional=Decimal("0.8"), loss_at_stop=Decimal("0.001"))
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=sent_at,
+        expires_at_ms=next_assist_run_ms(sent_at),
+        sent_at_ms=sent_at,
+    )
+    fake = FakeFutures(
+        marks={"DOGEUSDT": Decimal("0.08")},
+        steps={"DOGEUSDT": Decimal("1")},
+    )
+    text, _ = render_anything_now(conn, futures=fake, now_ms=now)
+    assert "DOGEUSDT จำกัดความเสียหายแล้วขนาดเหลือศูนย์" in text
+    assert "ขนาด:" not in text
+    conn.close()
+
+
+def test_scan_sizes_on_rounded_stop(tmp_path: Path) -> None:
+    """Daytime scan sizes qty on the outward-rounded stop, not the raw invalidation."""
+    conn = open_db(tmp_path / "scan_round.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.72,
+        invalidation=100.4,
+        ts=day - 60_000,
+    )
+    balance = Decimal("1000")
+    risk_pct = Decimal("1")
+    entry = Decimal("100")
+    tick = Decimal("1")
+    fake = FakeFutures(
+        balance=balance,
+        marks={"DOGEUSDT": entry},
+        steps={"DOGEUSDT": Decimal("1")},
+        ticks={"DOGEUSDT": tick},
+    )
+    sent: list[str] = []
+    payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
+    assert payload.get("ok") is True
+    created = payload.get("created") or []
+    doge = [c for c in created if c.get("symbol") == "DOGEUSDT"]
+    assert doge
+    row = get_signal(conn, doge[0]["id"])
+    assert row is not None
+    rounded_stop = Decimal("101")
+    loss = Decimal(str(row["loss_at_stop"]))
+    qty = Decimal(str(row["qty"]))
+    assert Decimal(str(row["stop"])) == rounded_stop
+    assert loss == qty * abs(entry - rounded_stop)
+    assert loss <= balance * (risk_pct / Decimal("100"))
+    # Counterfactual: sizing on the unrounded stop would overshoot the risk budget at the rounded R.
+    unrounded = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=entry,
+        stop=Decimal("100.4"),
+        balance=balance,
+        risk_pct=risk_pct,
+        step_size=Decimal("1"),
+    )
+    assert unrounded is not None
+    assert unrounded.qty * abs(entry - rounded_stop) > balance * (risk_pct / Decimal("100"))
+    assert any("Stop: 101" in t for t in sent)
     conn.close()

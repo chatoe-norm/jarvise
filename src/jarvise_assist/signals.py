@@ -44,6 +44,7 @@ from jarvise_assist.sizing import (
     next_assist_run_ms,
     passes_signal_floor,
     position_risk_usdt,
+    round_level_to_tick,
     size_signal,
 )
 from jarvise_assist.store import (
@@ -372,11 +373,17 @@ def scan_signal_candidates(
         except Exception as exc:  # noqa: BLE001
             skipped.append({"symbol": symbol, "reason": f"mark:{type(exc).__name__}"})
             continue
+        stop = round_level_to_tick(
+            Decimal(str(analysis["invalidation_price"])),
+            filters.tick_size,
+            side=side,
+            kind="stop",
+        )
         sized = size_signal(
             symbol=symbol,
             side=side,
             entry=mark,
-            stop=Decimal(str(analysis["invalidation_price"])),
+            stop=stop,
             balance=balance,
             risk_pct=risk_pct,
             step_size=filters.step_size,
@@ -723,7 +730,12 @@ def run_assist_morning(
             mark_signal_expired(conn, str(row["id"]))
             expired.append(str(row["id"]))
             continue
-        new_stop = Decimal(str(analysis["invalidation_price"]))
+        new_stop = round_level_to_tick(
+            Decimal(str(analysis["invalidation_price"])),
+            filters.tick_size,
+            side=side,
+            kind="stop",
+        )
         sized = size_signal(
             symbol=symbol,
             side=side,
@@ -740,12 +752,16 @@ def run_assist_morning(
             continue
         first_qty = Decimal(str(row["qty"])) if row.get("qty") is not None else None
         first_loss = Decimal(str(row["loss_at_stop"])) if row.get("loss_at_stop") is not None else None
-        sized = cap_requote_qty(
+        sized, cap_reason = cap_requote_qty(
             sized,
             first_qty=first_qty,
             first_loss=first_loss,
             balance=balance,
         )
+        if sized is None:
+            mark_signal_expired(conn, str(row["id"]))
+            expired.append(str(row["id"]))
+            continue
         filters_by_symbol[symbol] = filters
         first_send_by_symbol[symbol] = {
             "entry": entry0,

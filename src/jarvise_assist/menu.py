@@ -40,7 +40,7 @@ from jarvise_assist.messages import (
 )
 from jarvise_assist.pause import clear_pause_manual, format_paused_until, is_paused
 from jarvise_assist.signals import scan_signal_candidates
-from jarvise_assist.sizing import cap_requote_qty, chase_exceeded, next_assist_run_ms
+from jarvise_assist.sizing import below_min_notional, cap_requote_qty, chase_exceeded, next_assist_run_ms
 from jarvise_assist.store import (
     clamp_stored_risk_pct,
     ensure_settings,
@@ -71,6 +71,8 @@ ON_DEMAND_REASON_TH: dict[str, str] = {
     "margin_cap": "margin ไม่พอ",
     "size_failed": "คำนวณขนาดไม้ไม่ได้",
     "same_idea": "ส่งไปแล้วใน 24 ชม.",
+    "requote_cap_zero": "จำกัดความเสียหายแล้วขนาดเหลือศูนย์",
+    "requote_no_baseline": "ไม่มีขนาดอ้างอิงจากไอเดียแรก",
 }
 
 
@@ -411,22 +413,33 @@ def _render_on_demand_idea(
     balance: Decimal,
     tick_size: Decimal | None = None,
     account_config: Any = None,
-) -> str:
+    filters: Any = None,
+) -> tuple[str, bool]:
+    """Return (text, offer_entry). offer_entry is False for reason lines."""
     sized = cand.sized
     seen = latest_seen_idea(conn, symbol=sized.symbol, side=sized.side, now_ms=now_ms)
     if seen is not None:
         entry = Decimal(str(seen["entry"]))
         stop = Decimal(str(seen["stop"]))
         if chase_exceeded(side=sized.side, entry=entry, stop=stop, mark=sized.entry):
-            return f"{sized.symbol} ราคาวิ่งไปแล้ว — ไม่แนะนำไล่"
+            return f"{sized.symbol} ราคาวิ่งไปแล้ว — ไม่แนะนำไล่", False
         first_qty = Decimal(str(seen["qty"])) if seen.get("qty") is not None else None
         first_loss = Decimal(str(seen["loss_at_stop"])) if seen.get("loss_at_stop") is not None else None
-        sized = cap_requote_qty(
+        sized, cap_reason = cap_requote_qty(
             sized,
             first_qty=first_qty,
             first_loss=first_loss,
             balance=balance,
         )
+        if sized is None:
+            return _reason_line(cand.sized.symbol, cap_reason or "requote_no_baseline"), False
+        if filters is not None and below_min_notional(
+            qty=sized.qty,
+            notional=sized.notional,
+            min_qty=filters.min_qty,
+            min_notional=filters.min_notional,
+        ):
+            return _reason_line(sized.symbol, "below_min_notional"), False
         body = format_signal_message(
             sized,
             expires_at_ms=expires_at_ms,
@@ -434,13 +447,16 @@ def _render_on_demand_idea(
             tick_size=tick_size,
             account_config=account_config,
         )
-        return f"{body}\n{_format_first_send_line(seen, tick_size=tick_size)}"
-    return format_signal_message(
-        sized,
-        expires_at_ms=expires_at_ms,
-        balance=balance,
-        tick_size=tick_size,
-        account_config=account_config,
+        return f"{body}\n{_format_first_send_line(seen, tick_size=tick_size)}", True
+    return (
+        format_signal_message(
+            sized,
+            expires_at_ms=expires_at_ms,
+            balance=balance,
+            tick_size=tick_size,
+            account_config=account_config,
+        ),
+        True,
     )
 
 
@@ -481,15 +497,20 @@ def render_anything_now(
     balance = Decimal(str(result.get("balance_usdt") or 0))
     expires = next_assist_run_ms(now_ms)
     configs = safe_symbol_configs(client)
+    filters_by_symbol: dict[str, Any] = {}
     ticks: dict[str, Decimal] = {}
     for cand in admitted:
         sym = cand.sized.symbol
         try:
-            ticks[sym] = client.symbol_filters(sym).tick_size
+            flt = client.symbol_filters(sym)
+            filters_by_symbol[sym] = flt
+            ticks[sym] = flt.tick_size
         except Exception:  # noqa: BLE001
             ticks[sym] = Decimal("0")
-    blocks = [
-        _render_on_demand_idea(
+    blocks: list[str] = []
+    offered: list[tuple[str, str]] = []
+    for cand in admitted:
+        text, offer_entry = _render_on_demand_idea(
             conn,
             cand,
             now_ms=now_ms,
@@ -497,12 +518,14 @@ def render_anything_now(
             balance=balance,
             tick_size=ticks.get(cand.sized.symbol) or None,
             account_config=configs.get(cand.sized.symbol),
+            filters=filters_by_symbol.get(cand.sized.symbol),
         )
-        for cand in admitted
-    ]
+        blocks.append(text)
+        if offer_entry:
+            offered.append((cand.sized.symbol, cand.sized.side))
     markup = None
-    if execution_buttons_enabled(conn):
-        markup = anything_now_keyboard([(c.sized.symbol, c.sized.side) for c in admitted])
+    if execution_buttons_enabled(conn) and offered:
+        markup = anything_now_keyboard(offered)
     return "\n\n".join(blocks), markup
 
 

@@ -2101,6 +2101,256 @@ def test_size_for_execution_risk_cap_uses_requote_loss(
     conn.close()
 
 
+def test_size_for_execution_requote_cap_zero_sends_no_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "cap_zero.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    first = replace(first, qty=Decimal("10"), notional=Decimal("0.8"), loss_at_stop=Decimal("0.001"))
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=now - 60_000,
+        expires_at_ms=now + 3_600_000,
+        sent_at_ms=now - 60_000,
+    )
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
+    assert sized is None
+    assert reason == "requote_cap_zero"
+
+    sent: list[str] = []
+    out = handle_exec_callback(
+        conn,
+        "ec:DOGEUSDT:s",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now,
+    )
+    assert out.get("ok") is False
+    assert out.get("reason") == "requote_cap_zero"
+    assert any("จำกัดความเสียหายแล้วขนาดเหลือศูนย์" in t for t in sent)
+    assert [c for c in transport.calls if c[0] == "POST"] == []
+    conn.close()
+
+
+def test_size_for_execution_requote_under_min_notional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "cap_min.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    first = replace(first, qty=Decimal("100"), notional=Decimal("8"), loss_at_stop=Decimal("0.003"))
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=now - 60_000,
+        expires_at_ms=now + 3_600_000,
+        sent_at_ms=now - 60_000,
+    )
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    trade = _client(RecordingTransport(handlers))
+    sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
+    assert sized is None
+    assert reason == "below_min_notional"
+    conn.close()
+
+
+def test_size_for_execution_short_stop_round_keeps_requote_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "round_cap.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_analysis(
+        conn,
+        symbol="DOGEUSDT",
+        action="short",
+        confidence=0.8,
+        invalidation=0.0831,
+        ts=bar,
+    )
+    first_loss = Decimal("1")
+    first = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.083"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    first = replace(first, qty=Decimal("200"), notional=Decimal("16"), loss_at_stop=first_loss)
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=now - 60_000,
+        expires_at_ms=now + 3_600_000,
+        sent_at_ms=now - 60_000,
+    )
+    info = {
+        "symbols": [
+            {
+                "symbol": "DOGEUSDT",
+                "filters": [
+                    {"filterType": "LOT_SIZE", "stepSize": "1", "minQty": "1"},
+                    {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.001"},
+                ],
+            }
+        ]
+    }
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, info),
+    }
+    trade = _client(RecordingTransport(handlers))
+    sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
+    assert reason is None and sized is not None
+    assert sized.stop == Decimal("0.084")
+    r_rounded = abs(sized.entry - sized.stop)
+    assert r_rounded == Decimal("0.004")
+    fresh = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.08"),
+        stop=Decimal("0.084"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert fresh is not None
+    assert sized.loss_at_stop == sized.qty * r_rounded
+    assert sized.loss_at_stop <= first_loss
+    assert sized.qty <= floor_to_step(first_loss / r_rounded, Decimal("1"))
+    assert sized.qty <= fresh.qty
+    conn.close()
+
+
+def test_size_for_execution_returns_margin_shrunk_qty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "margin_qty.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "10000", "availableBalance": "20"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
+    assert reason is None and sized is not None
+    assert sized.qty == Decimal("1250")
+    assert sized.notional == Decimal("100")
+    assert sized.loss_at_stop == Decimal("1250") * Decimal("0.003")
+    assert sized.leverage == 5
+    preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
+    assert preview["ok"] is True
+    assert "ขนาด: 1250" in str(preview["text"])
+    assert preview["sized"].qty == Decimal("1250")
+    conn.close()
+
+
+def test_size_for_execution_margin_shrink_under_min_notional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "margin_min.db")
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    # available 0.1 → max notional 0.5 → qty floor 6 → notional 0.48 < min 5.
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "10000", "availableBalance": "0.1"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+    }
+    trade = _client(RecordingTransport(handlers))
+    sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
+    assert sized is None
+    assert reason == "below_min_notional"
+    conn.close()
+
+
 def test_preview_stores_seen_and_confirm_chases_seen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from jarvise_assist.execute import _confirm_guards_entry
     from jarvise_assist.sizing import size_signal
