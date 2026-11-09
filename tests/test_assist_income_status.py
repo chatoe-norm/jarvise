@@ -649,7 +649,7 @@ def test_reconcile_uses_assist_symbols_and_caps_unattributed(
     lines = format_real_lines(summary)
     detail = [line for line in lines if line.startswith("· ") and "COMMISSION" in line]
     assert len(detail) == 10
-    assert any(line.startswith("และอีก 2 รายการ") for line in lines)
+    assert "และอีก 2 รายการ" in lines
     assert any(line.startswith("· ") and "income ขาด" in line for line in lines)
     assert all("ETHUSDT" not in line for line in lines)
     conn.close()

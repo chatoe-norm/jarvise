@@ -1562,7 +1562,7 @@ def _reconcile_lines(summary: dict[str, Any], window: str) -> list[str]:
         )
     rest = un_n - len(shown)
     if rest > 0:
-        lines.append(f"และอีก {rest} รายการ {window}: n={rest}")
+        lines.append(f"และอีก {rest} รายการ")
     missing = rec.get("missing")
     if isinstance(missing, list):
         for item in missing:
