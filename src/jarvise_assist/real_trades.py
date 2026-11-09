@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import statistics
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -11,8 +12,25 @@ from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import FAPI_HISTORY_WINDOW_MS, BinanceFuturesClient
 from jarvise_assist.sizing import round_level_to_tick
 from jarvise_assist.store import now_ms
-from jarvise_assist.track import TRACK_COHORT
+from jarvise_assist.track import TRACK_COHORT, virtual_risk_unusable
 from jarvise_ingest.db import transaction
+
+# Asia/Bangkok has no DST. A fixed offset avoids the tzdata package.
+_BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+_THAI_MONTHS = (
+    "ม.ค.",
+    "ก.พ.",
+    "มี.ค.",
+    "เม.ย.",
+    "พ.ค.",
+    "มิ.ย.",
+    "ก.ค.",
+    "ส.ค.",
+    "ก.ย.",
+    "ต.ค.",
+    "พ.ย.",
+    "ธ.ค.",
+)
 
 # Deploy of PR #280 / P5 gate sample start (2026-11-04T13:51:27Z).
 SPEC_START_MS = 1_793_800_287_000
@@ -286,16 +304,97 @@ def _intent_preview(conn: Any, intent_id: str) -> dict[str, Any]:
     return data
 
 
+def linked_signal_id(preview: dict[str, Any]) -> str | None:
+    """Card ``signal_id`` when the tap had one, otherwise the seen idea id."""
+    card = preview.get("signal_id")
+    if card:
+        return str(card)
+    seen = preview.get("seen_signal_id")
+    if seen:
+        return str(seen)
+    return None
+
+
+def _risk_actual(
+    *,
+    closed: bool,
+    planned_stop: float | None,
+    entry_fill_avg: float | None,
+    entry_qty: float | None,
+    net_usdt: float,
+) -> tuple[float | None, float | None]:
+    """Return (risk_actual_usdt, net_r_actual). net_r_actual is None when R is undefined."""
+    if not closed or planned_stop is None or entry_fill_avg is None or entry_qty is None:
+        return None, None
+    risk = abs(float(entry_fill_avg) - float(planned_stop)) * float(entry_qty)
+    if risk <= 0:
+        return risk, None
+    return risk, net_usdt / risk
+
+
+def _label_pair_roles(rows: list[dict[str, Any]]) -> None:
+    """First real trade for a signal is the pair. Later ones are re_entry.
+
+    Order is entry_time_ms, then entry_order_id. Unmatched rows are never re_entry.
+    The flag is report-only and is not stored.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        row["re_entry"] = False
+        if str(row.get("status") or "") not in {"closed", "open"}:
+            continue
+        if str(row.get("side") or "") not in {"long", "short"}:
+            continue
+        sid = row.get("signal_id")
+        if not sid:
+            continue
+        groups.setdefault(str(sid), []).append(row)
+    for group in groups.values():
+        group.sort(key=lambda r: (int(r.get("entry_time_ms") or 0), str(r.get("entry_order_id") or "")))
+        for extra in group[1:]:
+            extra["re_entry"] = True
+
+
+def format_bkk_window(start_ms: int, end_ms: int) -> str:
+    """Bangkok calendar dates for a report window, e.g. ``01–07 พ.ย. (เวลาไทย)``."""
+    start = datetime.fromtimestamp(int(start_ms) / 1000.0, tz=_BANGKOK)
+    end = datetime.fromtimestamp(int(end_ms) / 1000.0, tz=_BANGKOK)
+    start_m = _THAI_MONTHS[start.month - 1]
+    end_m = _THAI_MONTHS[end.month - 1]
+    if (start.year, start.month, start.day) == (end.year, end.month, end.day):
+        body = f"{start.day:02d} {start_m}"
+    elif start.year == end.year and start.month == end.month:
+        body = f"{start.day:02d}–{end.day:02d} {start_m}"
+    elif start.year == end.year:
+        body = f"{start.day:02d} {start_m}–{end.day:02d} {end_m}"
+    else:
+        body = f"{start.day:02d} {start_m} {start.year}–{end.day:02d} {end_m} {end.year}"
+    return f"{body} (เวลาไทย)"
+
+
 def _virtual_net_r(conn: Any, signal_id: str | None) -> float | None:
     if not signal_id:
         return None
     row = conn.execute(
-        "SELECT net_r FROM assist_track WHERE signal_id=?",
+        """
+        SELECT t.net_r, t.entry, t.stop, s.loss_at_stop
+        FROM assist_track t
+        LEFT JOIN assist_signal s ON s.id = t.signal_id
+        WHERE t.signal_id=?
+        """,
         (signal_id,),
     ).fetchone()
-    if row is None or row[0] is None:
+    if row is None:
         return None
-    return float(row[0])
+    if hasattr(row, "keys"):
+        net, entry, stop, loss = row["net_r"], row["entry"], row["stop"], row["loss_at_stop"]
+    else:
+        net, entry, stop, loss = row[0], row[1], row[2], row[3]
+    if virtual_risk_unusable(entry=entry, stop=stop, loss_at_stop=loss):
+        return None
+    if net is None:
+        return None
+    return float(net)
 
 
 def _has_sent_track(conn: Any, signal_id: str | None) -> bool:
@@ -506,7 +605,7 @@ def build_real_rows(
                 side = "long" if side == "buy" else "short"
             if side not in {"long", "short"}:
                 side = "long" if str(order.get("side") or "").upper() == "BUY" else "short"
-            signal_id = preview.get("signal_id")
+            signal_id = linked_signal_id(preview)
             signal_entry = float(preview["entry"]) if preview.get("entry") is not None else None
             planned_stop = float(preview["stop"]) if preview.get("stop") is not None else None
             loss_at_stop = float(preview["loss_at_stop"]) if preview.get("loss_at_stop") is not None else None
@@ -691,9 +790,17 @@ def build_real_rows(
                 exit_kind = None
 
             loss = entry.get("loss_at_stop")
+            net_usdt = realized + commission_usdt + funding_usdt
             net_r_real = None
             if closed and loss is not None and float(loss) > 0:
-                net_r_real = (realized + commission_usdt + funding_usdt) / float(loss)
+                net_r_real = net_usdt / float(loss)
+            risk_actual, net_r_actual = _risk_actual(
+                closed=closed,
+                planned_stop=entry.get("planned_stop"),
+                entry_fill_avg=entry.get("entry_fill_avg"),
+                entry_qty=entry.get("entry_qty"),
+                net_usdt=net_usdt,
+            )
             net_r_virtual = _virtual_net_r(conn, entry.get("signal_id"))
             slip_entry = None
             if entry.get("ref_price") is not None:
@@ -760,6 +867,8 @@ def build_real_rows(
                     "funding_usdt": funding_usdt if closed else None,
                     "realized_pnl_usdt": realized if closed else None,
                     "net_r_real": net_r_real,
+                    "risk_actual_usdt": risk_actual,
+                    "net_r_actual": net_r_actual,
                     "net_r_virtual": net_r_virtual,
                     "slip_entry_bps": slip_entry,
                     "drift_signal_bps": drift,
@@ -808,6 +917,8 @@ def build_real_rows(
                     "funding_usdt": None,
                     "realized_pnl_usdt": None,
                     "net_r_real": None,
+                    "risk_actual_usdt": None,
+                    "net_r_actual": None,
                     "net_r_virtual": None,
                     "slip_entry_bps": None,
                     "drift_signal_bps": None,
@@ -817,6 +928,7 @@ def build_real_rows(
                 }
             )
 
+    _label_pair_roles(rows_out)
     return rows_out
 
 
@@ -845,6 +957,8 @@ _INSERT_COLS = (
     "funding_usdt",
     "realized_pnl_usdt",
     "net_r_real",
+    "risk_actual_usdt",
+    "net_r_actual",
     "net_r_virtual",
     "slip_entry_bps",
     "drift_signal_bps",
@@ -908,31 +1022,90 @@ def _fmt_bps(value: float | None, *, n: int | None = None) -> str:
     return text
 
 
+def _in_report_window(row: dict[str, Any], *, since_ms: int, until_ms: int | None) -> bool:
+    raw = row.get("entry_time_ms")
+    if raw is None:
+        return False
+    entered = int(raw)
+    if entered < int(since_ms):
+        return False
+    if until_ms is not None and entered > int(until_ms):
+        return False
+    return True
+
+
+def _virtual_gap_counts(
+    conn: Any,
+    *,
+    since_ms: int,
+    until_ms: int | None,
+    linked_signal_ids: set[str],
+) -> tuple[int, int]:
+    """Closed sent tracks in the window: (no real trade, risk <= 0)."""
+    sql = """
+        SELECT t.signal_id, t.entry, t.stop, s.loss_at_stop
+        FROM assist_track t
+        LEFT JOIN assist_signal s ON s.id = t.signal_id
+        WHERE t.exit_at_ms IS NOT NULL
+          AND t.exit_at_ms >= ?
+          AND t.cohort = ?
+          AND t.kind = 'sent'
+    """
+    params: list[Any] = [int(since_ms), TRACK_COHORT]
+    if until_ms is not None:
+        sql += " AND t.exit_at_ms <= ?"
+        params.append(int(until_ms))
+    unpaired = 0
+    dropped = 0
+    for row in conn.execute(sql, params):
+        if hasattr(row, "keys"):
+            sid, entry, stop, loss = row["signal_id"], row["entry"], row["stop"], row["loss_at_stop"]
+        else:
+            sid, entry, stop, loss = row[0], row[1], row[2], row[3]
+        if virtual_risk_unusable(entry=entry, stop=stop, loss_at_stop=loss):
+            dropped += 1
+            continue
+        if str(sid) not in linked_signal_ids:
+            unpaired += 1
+    return unpaired, dropped
+
+
+def _is_diff_pair(row: dict[str, Any]) -> bool:
+    """Closed sent-track row used in the real-vs-virtual difference."""
+    if row.get("re_entry"):
+        return False
+    if row.get("commission_other_asset"):
+        return False
+    if row.get("net_r_real") is None or row.get("net_r_virtual") is None:
+        return False
+    return True
+
+
 def summarize_real_vs_virtual(
-    conn: Any, *, since_ms: int = SPEC_START_MS, rows: list[dict[str, Any]] | None = None
+    conn: Any,
+    *,
+    since_ms: int = SPEC_START_MS,
+    until_ms: int | None = None,
+    rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Closed cohort-linked rows plus unmatched/open/unknown counts since the gate start."""
     if rows is None:
-        raw = conn.execute(
-            """
-            SELECT intent_id, signal_id, symbol, side, entry_order_id, entry_client_id,
-                   entry_time_ms, entry_qty, entry_fill_avg, ref_price, ref_source,
-                   signal_entry, planned_stop, loss_at_stop, exit_time_ms, exit_fill_avg,
-                   exit_kind, exit_order_ids, stop_trigger, commission_usdt,
-                   commission_other_asset, funding_usdt, realized_pnl_usdt,
-                   net_r_real, net_r_virtual, slip_entry_bps, drift_signal_bps,
-                   slip_stop_bps, status, updated_at_ms
-            FROM assist_real_trade
-            WHERE entry_time_ms >= ?
-            """,
-            (int(since_ms),),
-        ).fetchall()
+        col_sql = ", ".join(_INSERT_COLS)
+        sql = f"SELECT {col_sql} FROM assist_real_trade WHERE entry_time_ms >= ?"
+        params: list[Any] = [int(since_ms)]
+        if until_ms is not None:
+            sql += " AND entry_time_ms <= ?"
+            params.append(int(until_ms))
+        raw = conn.execute(sql, params).fetchall()
         rows = []
         for r in raw:
             if hasattr(r, "keys"):
                 rows.append(dict(r))
             else:
                 rows.append(dict(zip(_INSERT_COLS, r, strict=True)))
+    else:
+        rows = [r for r in rows if _in_report_window(r, since_ms=since_ms, until_ms=until_ms)]
+    _label_pair_roles(rows)
 
     closed_cohort: list[dict[str, Any]] = []
     unmatched_by: dict[str, int] = {
@@ -974,6 +1147,8 @@ def summarize_real_vs_virtual(
         closed_cohort.append(r)
 
     nets: list[float] = []
+    actuals: list[float] = []
+    slip_rs: list[float] = []
     diffs: list[float] = []
     entry_slips: list[float] = []
     drifts: list[float] = []
@@ -988,7 +1163,11 @@ def summarize_real_vs_virtual(
         virt = r.get("net_r_virtual")
         if net_r is not None and not other:
             nets.append(float(net_r))
-            if virt is not None:
+            actual = r.get("net_r_actual")
+            if actual is not None:
+                actuals.append(float(actual))
+                slip_rs.append(float(actual) - float(net_r))
+            if virt is not None and not r.get("re_entry"):
                 diffs.append(float(net_r) - float(virt))
         slip_e = r.get("slip_entry_bps")
         if slip_e is not None:
@@ -1005,10 +1184,41 @@ def summarize_real_vs_virtual(
             stop_slips.append(float(r["slip_stop_bps"]))
 
     unmatched_n = sum(unmatched_by.values())
+    linked_ids = {
+        str(r["signal_id"])
+        for r in rows
+        if r.get("signal_id")
+        and str(r.get("status") or "") in {"closed", "open"}
+        and str(r.get("side") or "") in {"long", "short"}
+    }
+    n_virtual_without, virtual_dropped_n = _virtual_gap_counts(
+        conn,
+        since_ms=since_ms,
+        until_ms=until_ms,
+        linked_signal_ids=linked_ids,
+    )
+    pair_rows = [r for r in closed_cohort if _is_diff_pair(r)]
+    closed_real_n = sum(
+        1
+        for r in rows
+        if str(r.get("status") or "") == "closed" and str(r.get("side") or "") in {"long", "short"}
+    )
+    n_re_entry = sum(1 for r in rows if r.get("re_entry"))
+    window_end = int(until_ms) if until_ms is not None else now_ms()
     return {
         "closed_n": len(closed_cohort),
         "mean_net_r": statistics.mean(nets) if nets else None,
+        "mean_net_r_actual": statistics.mean(actuals) if actuals else None,
+        "mean_slip_r": statistics.mean(slip_rs) if slip_rs else None,
+        "slip_r_n": len(slip_rs),
         "mean_diff_r": statistics.mean(diffs) if diffs else None,
+        "n_pairs": len(pair_rows),
+        "n_real_without_pair": closed_real_n - len(pair_rows),
+        "n_virtual_without_real": n_virtual_without,
+        "n_re_entry": n_re_entry,
+        "virtual_dropped_n": virtual_dropped_n,
+        "window_start_ms": int(since_ms),
+        "window_end_ms": window_end,
         "mean_slip_entry_bps": statistics.mean(entry_slips) if entry_slips else None,
         "p90_slip_entry_bps": _p90(entry_slips),
         "entry_slip_n": len(entry_slips),
@@ -1031,46 +1241,65 @@ def summarize_real_vs_virtual(
     }
 
 
+def _r_text(value: Any) -> str:
+    if value is None:
+        return "—"
+    return _signed_r(float(value))
+
+
+def _report_window(summary: dict[str, Any]) -> str:
+    start = summary.get("window_start_ms")
+    end = summary.get("window_end_ms")
+    if start is None or end is None:
+        return "—"
+    return format_bkk_window(int(start), int(end))
+
+
 def format_real_lines(summary: dict[str, Any]) -> list[str]:
+    """Real-vs-virtual block. Each line states the unit, the Bangkok window, and n."""
+    window = _report_window(summary)
     n = int(summary.get("closed_n") or 0)
     target = int(summary.get("target_n") or REAL_SAMPLE_TARGET)
-    if n == 0 or summary.get("mean_net_r") is None:
-        mean_r = "—"
-    else:
-        mean_r = _signed_r(float(summary["mean_net_r"]))
-    if summary.get("mean_diff_r") is None:
-        diff_r = "—"
-    else:
-        diff_r = _signed_r(float(summary["mean_diff_r"]))
-    lines = [
-        f"ไม้จริง n={n} (ต้องการ {target}) · net R เฉลี่ย {mean_r} · ต่างจากไม้จำลอง {diff_r}",
-    ]
+    planned = _r_text(summary.get("mean_net_r"))
+    actual = _r_text(summary.get("mean_net_r_actual"))
     entry_n = int(summary.get("entry_slip_n") or 0)
     stop_n = int(summary.get("stop_n") or 0)
+    slip_n = int(summary.get("slip_r_n") or 0)
     mean_e_s = _fmt_bps(summary.get("mean_slip_entry_bps"))
     p90_e_s = _fmt_bps(summary.get("p90_slip_entry_bps"), n=entry_n)
     mean_d_s = _fmt_bps(summary.get("mean_drift_bps"))
-    lines.append(
-        f"slip เข้า เฉลี่ย {mean_e_s} bps · p90 {p90_e_s} "
-        f"(อ้างอิง confirm_mark {int(summary.get('confirm_n') or 0)} / "
-        f"preview {int(summary.get('preview_n') or 0)}) · "
-        f"ราคาวิ่งจากสัญญาณ เฉลี่ย {mean_d_s} bps"
-    )
     mean_s_s = _fmt_bps(summary.get("mean_slip_stop_bps"))
     p90_s_s = _fmt_bps(summary.get("p90_slip_stop_bps"), n=stop_n)
-    lines.append(f"slip stop เฉลี่ย {mean_s_s} bps · p90 {p90_s_s} (n={stop_n})")
-    lines.append(f"ไม้ที่ยังถือ {int(summary.get('open_n') or 0)}")
-    lines.append(
-        f"จับคู่ไม่ได้: {int(summary.get('unmatched_n') or 0)} ไม้ "
-        f"(ก่อนเริ่ม {int(summary.get('unmatched_jv_before_start') or 0)} · "
-        f"ไม่มี log {int(summary.get('unmatched_jv_no_log') or 0)} · "
-        f"เจ้าของ {int(summary.get('unmatched_owner') or 0)}) · "
-        f"exit ไม่ทราบชนิด: {int(summary.get('unknown_n') or 0)} · "
-        f"ไม่มี track: {int(summary.get('unlinked_n') or 0)} · "
-        f"ค่าธรรมเนียมนอก USDT: {int(summary.get('non_usdt_fee_n') or 0)} · "
-        f"stop ไม่มี trigger: {int(summary.get('stop_trigger_missing_n') or 0)}"
-    )
-    return lines
+    return [
+        (f"ไม้จริง {window}: n={n} · เฉลี่ย {planned} (planned) · {actual} (actual) · ต้องการ {target}"),
+        f"slippage ใน R {window}: n={slip_n} · เฉลี่ย {_r_text(summary.get('mean_slip_r'))}",
+        (
+            f"คู่จริง-จำลอง {window}: n={int(summary.get('n_pairs') or 0)} · "
+            f"ต่างเฉลี่ย {_r_text(summary.get('mean_diff_r'))}"
+        ),
+        f"ไม้จริงที่ไม่มีคู่ {window}: n={int(summary.get('n_real_without_pair') or 0)}",
+        f"ไม้จำลองที่ไม่มีไม้จริง {window}: n={int(summary.get('n_virtual_without_real') or 0)}",
+        f"re_entry {window}: n={int(summary.get('n_re_entry') or 0)}",
+        (f"ไม้จำลองที่ความเสี่ยง ≤ 0 {window}: n={int(summary.get('virtual_dropped_n') or 0)} · ไม่นับในค่าเฉลี่ย R"),
+        (
+            f"slip เข้า {window}: n={entry_n} · เฉลี่ย {mean_e_s} bps · p90 {p90_e_s} bps "
+            f"(อ้างอิง confirm_mark {int(summary.get('confirm_n') or 0)} / "
+            f"preview {int(summary.get('preview_n') or 0)}) · "
+            f"ราคาวิ่งจากสัญญาณ เฉลี่ย {mean_d_s} bps"
+        ),
+        f"slip stop {window}: n={stop_n} · เฉลี่ย {mean_s_s} bps · p90 {p90_s_s} bps",
+        f"ไม้ที่ยังถือ {window}: n={int(summary.get('open_n') or 0)}",
+        (
+            f"จับคู่ไม่ได้ {window}: n={int(summary.get('unmatched_n') or 0)} "
+            f"(ก่อนเริ่ม {int(summary.get('unmatched_jv_before_start') or 0)} · "
+            f"ไม่มี log {int(summary.get('unmatched_jv_no_log') or 0)} · "
+            f"เจ้าของ {int(summary.get('unmatched_owner') or 0)}) · "
+            f"exit ไม่ทราบชนิด n={int(summary.get('unknown_n') or 0)} · "
+            f"ไม่มี track n={int(summary.get('unlinked_n') or 0)} · "
+            f"ค่าธรรมเนียมนอก USDT n={int(summary.get('non_usdt_fee_n') or 0)} · "
+            f"stop ไม่มี trigger n={int(summary.get('stop_trigger_missing_n') or 0)}"
+        ),
+    ]
 
 
 def run_real_report(
@@ -1078,12 +1307,13 @@ def run_real_report(
     client: BinanceFuturesClient,
     *,
     since_ms: int = SPEC_START_MS,
+    until_ms: int | None = None,
     sync: bool = True,
 ) -> dict[str, Any]:
     """Sync (optional) and summarize. ``sync=False`` builds in memory and never writes."""
     if sync:
-        sync_result = sync_real_trades(conn, client, since_ms=since_ms)
-        summary = summarize_real_vs_virtual(conn, since_ms=since_ms)
+        sync_result = sync_real_trades(conn, client, since_ms=since_ms, until_ms=until_ms)
+        summary = summarize_real_vs_virtual(conn, since_ms=since_ms, until_ms=until_ms)
         lines = format_real_lines(summary)
         return {
             "ok": True,
@@ -1092,8 +1322,8 @@ def run_real_report(
             "lines": lines,
             "text": "\n".join(lines),
         }
-    rows = build_real_rows(conn, client, since_ms=since_ms)
-    summary = summarize_real_vs_virtual(conn, since_ms=since_ms, rows=rows)
+    rows = build_real_rows(conn, client, since_ms=since_ms, until_ms=until_ms)
+    summary = summarize_real_vs_virtual(conn, since_ms=since_ms, until_ms=until_ms, rows=rows)
     lines = format_real_lines(summary)
     return {
         "ok": True,
