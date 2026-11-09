@@ -3442,6 +3442,112 @@ def test_stop_post_success_unreadable_readback_stays_unknown(
     conn.close()
 
 
+def test_stop_success_not_found_then_verified_no_sl1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "sl-grace-ok.db")
+    intent_id = _entry_intent(conn)
+    sl0 = client_order_id(intent_id, "sl0")
+    reads = {"n": 0}
+
+    def algo_query(_clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return _algo_not_found()
+        return (
+            200,
+            _verified_stop(client_id=sl0, algo_id=11),
+        )
+
+    handlers = _base_entry_handlers()
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [])
+    handlers[("GET", "/fapi/v1/algoOrder")] = algo_query
+    handlers[("POST", "/fapi/v1/algoOrder")] = [
+        (200, {"algoId": 11, "clientAlgoId": sl0}),
+        (200, {"algoId": 12}),
+    ]
+    transport = RecordingTransport(handlers)
+    result = run_entry_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert result.startswith("✅")
+    stop_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("type") == "STOP_MARKET"
+    ]
+    assert [c[2].get("clientAlgoId") for c in stop_posts] == [sl0]
+    assert not any(str(c[2].get("newClientOrderId") or "").endswith("-cls") for c in transport.calls)
+    assert reads["n"] == 2
+    conn.close()
+
+
+def test_stop_success_not_protected_all_reads_emergency_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "sl-grace-cls.db")
+    intent_id = _entry_intent(conn)
+    sl0 = client_order_id(intent_id, "sl0")
+    handlers = _base_entry_handlers()
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [])
+    handlers[("GET", "/fapi/v1/algoOrder")] = _algo_not_found()
+    handlers[("POST", "/fapi/v1/order")] = [
+        (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
+        (200, {"orderId": 2, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
+    ]
+    handlers[("POST", "/fapi/v1/algoOrder")] = [(200, {"algoId": 11, "clientAlgoId": sl0})]
+    transport = RecordingTransport(handlers)
+    result = run_entry_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert result.startswith(MSG_STOP_CLOSED)
+    stop_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("type") == "STOP_MARKET"
+    ]
+    assert [c[2].get("clientAlgoId") for c in stop_posts] == [sl0]
+    assert any(
+        c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and c[2].get("clientAlgoId") == sl0
+        for c in transport.calls
+    )
+    conn.close()
+
+
+def test_stop_success_not_protected_then_unverifiable_stays_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "sl-grace-unread.db")
+    intent_id = _entry_intent(conn)
+    sl0 = client_order_id(intent_id, "sl0")
+    reads = {"n": 0}
+
+    def algo_query(_clean: dict[str, Any]) -> tuple[int, dict[str, Any]] | BaseException:
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return _algo_not_found()
+        return httpx.ConnectError("algo read down")
+
+    handlers = _base_entry_handlers()
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [])
+    handlers[("GET", "/fapi/v1/algoOrder")] = algo_query
+    handlers[("POST", "/fapi/v1/order")] = [
+        (200, {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"}),
+    ]
+    handlers[("POST", "/fapi/v1/algoOrder")] = [(200, {"algoId": 11, "clientAlgoId": sl0})]
+    transport = RecordingTransport(handlers)
+    result = run_entry_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert result == msg_stop_unverifiable(symbol="DOGEUSDT", qty=Decimal("100"), stop=Decimal("0.083"))
+    assert getattr(result, "status", None) == "unknown"
+    stop_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("type") == "STOP_MARKET"
+    ]
+    assert [c[2].get("clientAlgoId") for c in stop_posts] == [sl0]
+    assert not any(str(c[2].get("newClientOrderId") or "").endswith("-cls") for c in transport.calls)
+    conn.close()
+
+
 def test_position_flat_before_sl1_sends_nothing_further(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

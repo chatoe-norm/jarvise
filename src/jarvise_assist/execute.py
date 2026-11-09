@@ -1752,6 +1752,40 @@ def _read_back_stop(
     )
 
 
+def _grace_reread_stop(
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    client_id: str,
+    closing_side: str,
+    stop: Decimal,
+    qty: Decimal,
+    sleep: Callable[[float], None],
+) -> StopVerifyResult:
+    """Up to three more reads, one second apart, after a success POST looked unprotected.
+
+    -2011/-2013 stay NOT_PROTECTED. A failed or non-list read is UNVERIFIABLE.
+    """
+    last = StopVerifyResult.NOT_PROTECTED
+    for _ in range(3):
+        sleep(1)
+        last = _read_back_stop(
+            trade,
+            symbol=symbol,
+            client_id=client_id,
+            closing_side=closing_side,
+            stop=stop,
+            qty=qty,
+        )
+        if last in {
+            StopVerifyResult.VERIFIED,
+            StopVerifyResult.CLOSED_BY_STOP,
+            StopVerifyResult.UNVERIFIABLE,
+        }:
+            return last
+    return last
+
+
 def _place_and_verify_stop(
     trade: BinanceTradeClient,
     *,
@@ -1769,9 +1803,10 @@ def _place_and_verify_stop(
 
     Emergency close is for the caller, and only when this does not return
     VERIFIED or UNVERIFIABLE. UNVERIFIABLE means a stop POST returned a success
-    body with an algo id and the read-back could not be read. A mark-read
-    failure or ConnectError before the POST is not sent: try the next tag.
-    Any other miss tries sl1 (when enabled), then one final verify.
+    body with an algo id and a read-back could not be read. A success body with
+    an algo id never posts another stop tag. A mark-read failure or ConnectError
+    before the POST is not sent: try the next tag. Any other miss tries sl1
+    (when enabled), then one final verify.
     """
     close_side = _closing_side(side)
     stop_err: str | None = None
@@ -1883,7 +1918,24 @@ def _place_and_verify_stop(
             return vr, tag, None
         if algo_id and vr == StopVerifyResult.UNVERIFIABLE:
             return StopVerifyResult.UNVERIFIABLE, None, stop_err
+        if algo_id and vr == StopVerifyResult.NOT_PROTECTED:
+            vr = _grace_reread_stop(
+                trade,
+                symbol=symbol,
+                client_id=scid,
+                closing_side=close_side,
+                stop=stop,
+                qty=qty,
+                sleep=sleep,
+            )
+            if vr == StopVerifyResult.VERIFIED:
+                return vr, tag, None
+            if vr == StopVerifyResult.CLOSED_BY_STOP:
+                return vr, tag, None
+            if vr == StopVerifyResult.UNVERIFIABLE:
+                return StopVerifyResult.UNVERIFIABLE, None, stop_err
         if algo_id:
+            # Success with an algo id: never place another tag in this sequence.
             break
     final_vr, final_tag, _open_list = _verify_stop_ids(
         trade,
