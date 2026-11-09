@@ -648,6 +648,18 @@ def _migrate_assist_actual_r(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_real_trade", "net_r_actual", "REAL")
 
 
+def _migrate_assist_card_sizing(conn: sqlite3.Connection) -> None:
+    """Sizing inputs on assist_signal. Nullable. Does not rewrite existing rows."""
+    for name, typ in (
+        ("balance_usdt", "REAL"),
+        ("risk_pct", "REAL"),
+        ("budget_usdt", "REAL"),
+        ("reduce_reasons", "TEXT"),
+        ("requote_anchor_id", "TEXT"),
+    ):
+        _add_column_if_missing(conn, "assist_signal", name, typ)
+
+
 def _migrate_assist_income_status(conn: sqlite3.Connection) -> None:
     """Income completeness on closed real trades. Nullable. Does not rewrite existing rows.
 
@@ -1067,6 +1079,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (23, "assist_day_loss", _migrate_assist_day_loss, True),
     (24, "assist_actual_r", _migrate_assist_actual_r, True),
     (25, "assist_income_status", _migrate_assist_income_status, True),
+    (26, "assist_card_sizing", _migrate_assist_card_sizing, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

@@ -27,7 +27,7 @@ from jarvise_assist.real_trades import (
 from jarvise_assist.store import ensure_settings, upsert_watch_position
 from jarvise_assist.track import TRACK_COHORT
 from jarvise_assist.watch import run_assist_watch
-from jarvise_ingest.db import open_db, schema_version
+from jarvise_ingest.db import SCHEMA_VERSION, open_db, schema_version
 
 HOUR = 3_600_000
 
@@ -732,7 +732,7 @@ def test_income_status_migration_is_additive(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 25
+    assert schema_version(conn) == SCHEMA_VERSION
     row = conn.execute(
         """
         SELECT net_r_real, entry_time_ms, income_status

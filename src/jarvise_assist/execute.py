@@ -1176,6 +1176,13 @@ def _preview_from_sized(
         "r_distance": str(sized.r_distance),
         "analysis_id": sized.analysis_id,
         "step_size": str(sized.step_size) if sized.step_size is not None else None,
+        "balance_usdt": None if sized.balance_usdt is None else str(sized.balance_usdt),
+        "risk_pct": str(sized.risk_pct),
+        "budget_usdt": None if sized.budget_usdt is None else str(sized.budget_usdt),
+        "reduce_reasons": list(sized.reduce_reasons),
+        "requote_anchor_id": sized.requote_anchor_id,
+        "requote_anchor_sent_at_ms": sized.requote_anchor_sent_at_ms,
+        "requote_first_loss": None if sized.requote_first_loss is None else str(sized.requote_first_loss),
     }
     if seen_entry is not None and seen_stop is not None:
         out["seen_entry"] = str(seen_entry)
@@ -1309,11 +1316,14 @@ def size_for_execution(
             return None, "chase"
         first_qty = Decimal(str(seen["qty"])) if seen.get("qty") is not None else None
         first_loss = Decimal(str(seen["loss_at_stop"])) if seen.get("loss_at_stop") is not None else None
+        anchor_ms = seen.get("sent_at_ms") or seen.get("created_at_ms")
         sized, cap_reason = cap_requote_qty(
             sized,
             first_qty=first_qty,
             first_loss=first_loss,
             balance=balance,
+            anchor_id=str(seen["id"]) if seen.get("id") else None,
+            anchor_sent_at_ms=int(anchor_ms) if anchor_ms else None,
         )
         if sized is None:
             return None, cap_reason
@@ -1342,37 +1352,25 @@ def size_for_execution(
         return None, "margin_cap"
     final = admitted[0].sized
     # Preview must match the qty that margin admit kept; leverage comes from final.
-    qty = sized.qty
-    notional = sized.notional
-    loss = sized.loss_at_stop
     if final.qty < sized.qty:
-        qty = final.qty
-        notional = final.notional
-        loss = final.loss_at_stop
         if below_min_notional(
-            qty=qty,
-            notional=notional,
+            qty=final.qty,
+            notional=final.notional,
             min_qty=filters.min_qty,
             min_notional=filters.min_notional,
         ):
             return None, "below_min_notional"
+        preview_sized = final
+    else:
+        preview_sized = sized
     return (
-        SizedSignal(
-            symbol=sized.symbol,
-            side=sized.side,
-            entry=sized.entry,
+        dc_replace(
+            preview_sized,
             stop=sized.stop,
             target=sized.target,
-            qty=qty,
-            notional=notional,
             leverage=final.leverage,
-            loss_at_stop=loss,
-            risk_pct=sized.risk_pct,
-            r_distance=sized.r_distance,
             leverage_capped=final.leverage_capped,
             uncapped_leverage=final.uncapped_leverage,
-            analysis_id=sized.analysis_id,
-            step_size=filters.step_size,
         ),
         None,
     )

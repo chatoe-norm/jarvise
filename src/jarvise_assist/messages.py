@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jarvise_assist.futures import SymbolAccountConfig
-from jarvise_assist.sizing import SizedSignal, round_level_to_tick
+from jarvise_assist.sizing import SizedSignal, floor_to_step, round_level_to_tick
 
 # Asia/Bangkok has no DST; avoid the tzdata package on Windows.
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -102,6 +102,54 @@ def account_leverage_warning_lines(
     return lines
 
 
+def _budget_line(sized: SizedSignal, balance: Decimal | None) -> str | None:
+    bal = sized.balance_usdt if sized.balance_usdt is not None else balance
+    if bal is None or bal <= 0:
+        return None
+    budget = sized.budget_usdt
+    if budget is None:
+        budget = bal * (sized.risk_pct / Decimal("100"))
+    return f"ฐาน: Futures {fmt_price(bal)} USDT × {fmt_price(sized.risk_pct)}% = งบ {fmt_price(budget)} USDT"
+
+
+def _step_removed_over_5pct(sized: SizedSignal) -> bool:
+    budget = sized.budget_usdt
+    step = sized.step_size
+    if budget is None or budget <= 0 or step is None or step <= 0 or sized.r_distance <= 0:
+        return False
+    raw_qty = budget / sized.r_distance
+    floored = floor_to_step(raw_qty, step)
+    removed = (raw_qty - floored) * sized.r_distance
+    return removed > budget * Decimal("0.05")
+
+
+def _requote_reason_line(sized: SizedSignal) -> str:
+    when = ""
+    if sized.requote_anchor_sent_at_ms:
+        hhmm = datetime.fromtimestamp(int(sized.requote_anchor_sent_at_ms) / 1000.0, tz=BANGKOK).strftime(
+            "%H:%M"
+        )
+        when = f" {hhmm}"
+    loss = sized.requote_first_loss
+    loss_s = fmt_price(loss.quantize(Decimal("0.01"))) if loss is not None else "?"
+    return f"ลดขนาดเพราะ: เพดาน re-quote จากไอเดีย {sized.symbol}{when} (เสี่ยงครั้งแรก {loss_s} USDT)"
+
+
+def _reduction_lines(sized: SizedSignal) -> list[str]:
+    budget = sized.budget_usdt
+    if budget is None or budget <= 0 or sized.loss_at_stop >= budget * Decimal("0.95"):
+        return []
+    lines: list[str] = []
+    for reason in sized.reduce_reasons:
+        if reason == "step" and _step_removed_over_5pct(sized):
+            lines.append("ลดขนาดเพราะ: ปัดจำนวนตาม lot step")
+        elif reason == "margin_cap":
+            lines.append("ลดขนาดเพราะ: margin ที่ว่างไม่พอ")
+        elif reason == "requote_cap":
+            lines.append(_requote_reason_line(sized))
+    return lines
+
+
 def format_signal_message(
     sized: SizedSignal,
     *,
@@ -153,14 +201,22 @@ def format_signal_message(
         f"Stop: {stop_s} ({stop_sign}{float(stop_pct):.1f}%)",
         f"เป้า: {target_s} (2R)",
         f"ขนาด: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT",
-        f"Leverage ที่ต้องใช้: {lev}x (isolated — บัญชีต้องเป็น Single-Asset ไม่ใช่ Multi-Assets)",
-        f"margin ≈ {margin_s} USDT",
-        f"ถ้าชน stop เสีย: {loss_s} USDT ({fmt_price(loss_pct)}%)",
-        expiry_line,
-        STOP_INSTRUCTION,
-        TP_INSTRUCTION,
-        "ตั้ง TP/SL ที่เดียว (ใน order หรือ Position TP/SL) — ตั้งทั้งสองที่จะได้ stop 2 ตัว",
     ]
+    budget_line = _budget_line(sized, balance)
+    if budget_line is not None:
+        lines.append(budget_line)
+    lines.extend(
+        [
+            f"Leverage ที่ต้องใช้: {lev}x (isolated — บัญชีต้องเป็น Single-Asset ไม่ใช่ Multi-Assets)",
+            f"margin ≈ {margin_s} USDT",
+            f"ถ้าชน stop เสีย: {loss_s} USDT ({fmt_price(loss_pct)}%)",
+            *_reduction_lines(sized),
+            expiry_line,
+            STOP_INSTRUCTION,
+            TP_INSTRUCTION,
+            "ตั้ง TP/SL ที่เดียว (ใน order หรือ Position TP/SL) — ตั้งทั้งสองที่จะได้ stop 2 ตัว",
+        ]
+    )
     for warn in account_leverage_warning_lines(sized, account_config):
         lines.insert(lines.index(STOP_INSTRUCTION), warn)
     if sized.leverage_capped:

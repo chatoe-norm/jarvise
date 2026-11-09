@@ -14,6 +14,7 @@ from jarvise_analyze.engine import CONFIDENCE_THRESHOLD
 logger = logging.getLogger(__name__)
 
 MAX_LEVERAGE = 5
+_REASON_ORDER = ("step", "leverage_cap", "margin_cap", "requote_cap")
 CHASE_R = Decimal("0.3")
 TARGET_R = Decimal("2")
 MAX_OPEN_IDEAS = 2
@@ -62,6 +63,18 @@ class SizedSignal:
     uncapped_leverage: int
     analysis_id: str | None
     step_size: Decimal | None = None
+    balance_usdt: Decimal | None = None
+    budget_usdt: Decimal | None = None
+    reduce_reasons: tuple[str, ...] = ()
+    requote_anchor_id: str | None = None
+    requote_anchor_sent_at_ms: int | None = None
+    requote_first_loss: Decimal | None = None
+
+
+def _with_reason(reasons: tuple[str, ...], reason: str) -> tuple[str, ...]:
+    present = set(reasons)
+    present.add(reason)
+    return tuple(code for code in _REASON_ORDER if code in present)
 
 
 def floor_to_step(qty: Decimal, step: Decimal) -> Decimal:
@@ -110,6 +123,8 @@ def cap_requote_qty(
     first_qty: Decimal | None,
     first_loss: Decimal | None,
     balance: Decimal,
+    anchor_id: str | None = None,
+    anchor_sent_at_ms: int | None = None,
 ) -> tuple[SizedSignal | None, str | None]:
     """Cap a re-quote so loss stays at or under the first sent idea.
 
@@ -148,6 +163,8 @@ def cap_requote_qty(
         uncapped = sized.uncapped_leverage
     leverage_capped = uncapped > MAX_LEVERAGE
     leverage = MAX_LEVERAGE if leverage_capped else max(1, uncapped)
+    reasons = _with_reason(sized.reduce_reasons, "requote_cap")
+    stored_loss = first_loss if loss_ok else None
     return (
         replace(
             sized,
@@ -157,6 +174,10 @@ def cap_requote_qty(
             leverage=leverage,
             leverage_capped=leverage_capped,
             uncapped_leverage=uncapped,
+            reduce_reasons=reasons,
+            requote_anchor_id=anchor_id,
+            requote_anchor_sent_at_ms=anchor_sent_at_ms,
+            requote_first_loss=stored_loss,
         ),
         None,
     )
@@ -204,14 +225,20 @@ def size_signal(
     qty = floor_to_step(raw_qty, step_size)
     if qty <= 0:
         return None
+    reasons: tuple[str, ...] = ()
+    if qty < raw_qty:
+        reasons = _with_reason(reasons, "step")
     notional = qty * entry
     uncapped = int(math.ceil(float(notional / balance)))
     leverage_capped = uncapped > MAX_LEVERAGE
     if leverage_capped:
+        pre_cap_qty = qty
         max_notional = balance * Decimal(MAX_LEVERAGE)
         qty = floor_to_step(max_notional / entry, step_size)
         if qty <= 0:
             return None
+        if qty < pre_cap_qty:
+            reasons = _with_reason(reasons, "leverage_cap")
         notional = qty * entry
         leverage = MAX_LEVERAGE
     else:
@@ -237,6 +264,9 @@ def size_signal(
         uncapped_leverage=uncapped,
         analysis_id=analysis_id,
         step_size=step_size,
+        balance_usdt=balance,
+        budget_usdt=risk_usdt,
+        reduce_reasons=reasons,
     )
 
 
@@ -423,6 +453,9 @@ def _shrink_for_max_leverage(
         return None
     notional = qty * sized.entry
     loss = qty * sized.r_distance
+    reasons = sized.reduce_reasons
+    if qty < sized.qty:
+        reasons = _with_reason(reasons, "margin_cap")
     return replace(
         sized,
         qty=qty,
@@ -431,6 +464,7 @@ def _shrink_for_max_leverage(
         loss_at_stop=loss,
         leverage_capped=True,
         uncapped_leverage=max(sized.uncapped_leverage, uncapped),
+        reduce_reasons=reasons,
     )
 
 

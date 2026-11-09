@@ -673,13 +673,15 @@ def test_open_positions_menu_sample(tmp_path: Path) -> None:
     )
     text = render_open_positions(conn, futures=fake, now_ms=day)
     assert "📋 ไม้ที่ถืออยู่" in text
-    assert "BTCUSDT LONG" in text
+    assert "1. BTCUSDT" in text
+    assert "• LONG · qty" in text
     assert "ยังไม่ปิด:" in text and "USDT · ≈" in text
     assert "stop ที่ตั้งไว้ 92 · trigger Mark" in text
     assert "ถ้าโดน stop: ล็อก ≈" in text
     assert "TP 120 · trigger Mark" in text
     assert "liquidation 80" in text
-    assert "PEPEUSDT LONG · qty 1000 · no data, no advice" in text
+    assert "2. PEPEUSDT" in text
+    assert "• LONG · qty 1000 · no data, no advice" in text
     assert "(ก่อนค่าธรรมเนียม)" in text
     assert risk_button_label(2.0).startswith("⚙️")
     conn.close()
@@ -826,7 +828,8 @@ def test_open_positions_stop_coverage_samples(tmp_path: Path) -> None:
         update_time_ms=day,
     )
     bare = render(outsider, [])
-    assert "PEPEUSDT LONG · qty 1000 · no data, no advice" in bare
+    assert "1. PEPEUSDT" in bare
+    assert "• LONG · qty 1000 · no data, no advice" in bare
     assert "⚠️ ยังไม่มี stop — ตั้ง Stop-Market (Reduce-Only, Mark) ทันที" in bare
     assert "mark " not in bare
 
@@ -844,7 +847,8 @@ def test_open_positions_stop_coverage_samples(tmp_path: Path) -> None:
             }
         ],
     )
-    assert "PEPEUSDT LONG · qty 1000 · no data, no advice" in covered_out
+    assert "1. PEPEUSDT" in covered_out
+    assert "• LONG · qty 1000 · no data, no advice" in covered_out
     assert "⚠️" not in covered_out
     conn.close()
 
@@ -1104,7 +1108,8 @@ def test_open_positions_lock_r_vs_unrealized_and_trigger_mismatch(tmp_path: Path
         ],
     )
     text = render_open_positions(conn, futures=fake, now_ms=day)
-    assert "ADAUSDT SHORT" in text
+    assert "1. ADAUSDT" in text
+    assert "• SHORT · qty" in text
     assert "ยังไม่ปิด: +11.60 USDT · ≈ +1.2R" in text
     assert "stop ที่ตั้งไว้ 0.1971 · trigger Last" in text
     assert "ล็อก ≈ +0.56R" in text

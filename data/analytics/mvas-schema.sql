@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 25).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 26).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -371,7 +371,12 @@ CREATE TABLE IF NOT EXISTS assist_signal (
     sent_at_ms INTEGER,
     leverage_capped INTEGER NOT NULL DEFAULT 0,
     uncapped_leverage INTEGER,
-    telegram_message_id INTEGER
+    telegram_message_id INTEGER,
+    balance_usdt REAL,
+    risk_pct REAL,
+    budget_usdt REAL,
+    reduce_reasons TEXT,
+    requote_anchor_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_assist_signal_symbol_status
     ON assist_signal (symbol, status);
