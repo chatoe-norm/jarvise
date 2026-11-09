@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from jarvise.freshness import RISK_MONITOR_STALE_AFTER_MIN, dashboard_freshness
+from jarvise.ops_watch import DIGEST_STALE_AFTER_H
 from jarvise_ingest.db import (
     get_paper_account,
     list_paper_orders_asc,
@@ -200,6 +201,33 @@ def _digest_age_hours(directory: Path, *, now_ms: int) -> float | None:
     return (now_ms / 1000.0 - latest.stat().st_mtime) / 3600.0
 
 
+def _ops_credit_line(snapshot_bits: dict[str, Any]) -> dict[str, str]:
+    """Digest age plus OpenRouter remaining. Uses the last ingest-health blob when present."""
+    health = (
+        snapshot_bits.get("ingest_health") if isinstance(snapshot_bits.get("ingest_health"), dict) else None
+    )
+    if isinstance(health, dict) and "digest_stale" in health:
+        age = health.get("digest_age_h")
+        stale = bool(health.get("digest_stale"))
+        remaining = health.get("openrouter_remaining")
+        low = bool(health.get("openrouter_low"))
+        error = health.get("openrouter_error")
+    else:
+        age = snapshot_bits.get("digest_age_hours")
+        stale = age is None or float(age) > DIGEST_STALE_AFTER_H
+        remaining = None
+        low = False
+        error = None
+    age_txt = "—" if age is None else _num(age, 1)
+    usd_txt = "—" if remaining is None else _num(remaining, 2)
+    line = f"ข่าว {age_txt} ชม. · OpenRouter เหลือ {usd_txt} USD"
+    if stale or low:
+        return {"line": line, "level": MARK_DO, "note": line}
+    if error:
+        return {"line": line, "level": MARK_LOOK, "note": "อ่านเครดิต OpenRouter ไม่ได้"}
+    return {"line": line, "level": MARK_OK, "note": ""}
+
+
 def _health_items(
     snapshot_bits: dict[str, Any], *, now_ms: int, freshness: dict[str, Any]
 ) -> list[dict[str, str]]:
@@ -239,6 +267,8 @@ def _health_items(
         )
     else:
         items.append({"line": f"ข่าว อายุ {_num(digest_age, 1)} ชม.", "level": MARK_OK, "note": ""})
+
+    items.append(_ops_credit_line(snapshot_bits))
 
     risk = snapshot_bits.get("risk_monitor")
     risk_age = _age_min((risk or {}).get("at_ms") if isinstance(risk, dict) else None, now_ms)

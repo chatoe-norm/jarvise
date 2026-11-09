@@ -19,6 +19,12 @@ from urllib.parse import parse_qs
 
 from jarvise.charts import export_candle_graphs
 from jarvise.disk import disk_edge_alerted, disk_free
+from jarvise.ops_watch import (
+    digest_edge_alerted,
+    digest_status,
+    fetch_openrouter_credit,
+    openrouter_edge_alerted,
+)
 from jarvise.rag import doctrine_snippets, publish_redis_status
 from jarvise_assist.execute import (
     assist_execute_mode,
@@ -43,9 +49,11 @@ from jarvise_ingest.health import ingest_health
 from jarvise_ingest.indicators import warm_from
 from jarvise_notify import (
     notify_auto_decide,
+    notify_digest_freshness,
     notify_disk_space,
     notify_ingest_health,
     notify_job_failure,
+    notify_openrouter_credit,
     notify_pending_digest,
     notify_risk_halt,
 )
@@ -759,6 +767,10 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
     max_age = _fenv("JARVISE_INGEST_HEALTH_MAX_AGE_MIN", 60.0)
     disk = disk_free(path)
     disk_alert: str | None = None
+    digest = digest_status(digest_dir())
+    credit = fetch_openrouter_credit(os.environ.get("OPENROUTER_API_KEY") or "")
+    digest_alert: str | None = None
+    openrouter_alert: str | None = None
     if not path.exists():
         payload: dict[str, Any] = {
             "ok": False,
@@ -791,6 +803,36 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
                         free_bytes=disk.get("disk_free_bytes"),
                     ):
                         disk_alert = "ok"
+            digest_edge = digest_edge_alerted(conn, bool(digest["digest_stale"]))
+            if digest_edge == "stale":
+                if notify_digest_freshness(
+                    stale=True,
+                    hours=digest.get("digest_age_h"),
+                    filename=digest.get("digest_newest"),
+                ):
+                    digest_alert = "stale"
+            elif digest_edge == "ok":
+                if notify_digest_freshness(
+                    stale=False,
+                    hours=digest.get("digest_age_h"),
+                    filename=digest.get("digest_newest"),
+                ):
+                    digest_alert = "ok"
+            credit_edge = openrouter_edge_alerted(
+                conn,
+                low=bool(credit["openrouter_low"]),
+                error=credit.get("openrouter_error"),
+                remaining=credit.get("openrouter_remaining"),
+            )
+            if credit_edge == "low":
+                if notify_openrouter_credit(kind="low", remaining=credit.get("openrouter_remaining")):
+                    openrouter_alert = "low"
+            elif credit_edge == "error":
+                if notify_openrouter_credit(kind="error", status=str(credit.get("openrouter_error") or "")):
+                    openrouter_alert = "error"
+            elif credit_edge == "ok":
+                if notify_openrouter_credit(kind="ok", remaining=credit.get("openrouter_remaining")):
+                    openrouter_alert = "ok"
         finally:
             conn.close()
     payload["disk_free_bytes"] = disk.get("disk_free_bytes")
@@ -800,6 +842,10 @@ def run_ingest_health() -> tuple[int, dict[str, Any]]:
     if disk.get("disk_error"):
         payload["disk_error"] = disk["disk_error"]
     payload["disk_alert"] = disk_alert
+    payload.update(digest)
+    payload.update(credit)
+    payload["digest_alert"] = digest_alert
+    payload["openrouter_alert"] = openrouter_alert
     payload["telegram_sent"] = notify_ingest_health(payload)
     _publish_best_effort("jarvise:ingest:health", payload)
     return 0, payload
