@@ -33,7 +33,7 @@ from jarvise_assist.execute import (
     MSG_ORDER_NOT_FOUND,
     MSG_OUTCOME_UNKNOWN,
     MSG_RECOVER_SIDE_MISMATCH,
-    MSG_RECOVER_STALE,
+    MSG_RECOVER_STALE_UNREADABLE,
     MSG_STOP_CLOSED,
     RECOVER_LEASE_MS,
     RECOVER_MAX_AGE_MS,
@@ -45,6 +45,7 @@ from jarvise_assist.execute import (
     client_order_id,
     create_entry_preview,
     handle_exec_callback,
+    msg_recover_true_state,
     msg_stop_unverifiable,
     reset_trade_key_cache,
     run_entry_sequence,
@@ -55,7 +56,16 @@ from jarvise_assist.execute import (
 )
 from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.listen import process_update
-from jarvise_assist.sizing import floor_to_step, round_level_to_tick, size_signal
+from jarvise_assist.sizing import (
+    MAX_OPEN_IDEAS,
+    ExistingIdea,
+    SignalCandidate,
+    SizedSignal,
+    admit_signals,
+    floor_to_step,
+    round_level_to_tick,
+    size_signal,
+)
 from jarvise_assist.store import (
     claim_exec_intent,
     claim_exec_intent_for_recovery,
@@ -5017,6 +5027,7 @@ def test_recovery_opposite_side_mismatch_no_order(tmp_path: Path, monkeypatch: p
 
 
 def test_recovery_older_than_2h_stale_no_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Age > 2h with a readable book reports the true state and sends no order."""
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "stale-2h.db")
     created = 1_700_000_000_000
@@ -5026,6 +5037,8 @@ def test_recovery_older_than_2h_stale_no_transport(tmp_path: Path, monkeypatch: 
         ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
         ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
         ("GET", "/fapi/v1/order"): (200, {"orderId": 1, "status": "FILLED", "executedQty": "100"}),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
     }
     transport = RecordingTransport(handlers)
     sent: list[str] = []
@@ -5040,9 +5053,364 @@ def test_recovery_older_than_2h_stale_no_transport(tmp_path: Path, monkeypatch: 
     row = get_exec_intent(conn, intent_id)
     assert row is not None and row["status"] == "stale"
     assert len(sent) == 1
-    assert MSG_RECOVER_STALE.format(symbol="DOGEUSDT") in sent[0]
-    assert transport.calls == []
+    assert sent[0] == msg_recover_true_state(
+        symbol="DOGEUSDT",
+        created_at_ms=created,
+        order_text="FILLED 100",
+        position_text="100",
+        stop_verified=False,
+        position_open=True,
+    )
+    assert "position ไม่มี stop" in sent[0]
+    assert not any(c[0] == "POST" for c in transport.calls)
+    assert not any(c[0] == "DELETE" for c in transport.calls)
     assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is False
+    conn.close()
+
+
+def test_recovery_older_than_2h_unreadable_then_readable_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "stale-unread.db")
+    created = 1_700_000_000_000
+    intent_id = _entry_intent(conn, ts=created)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    phase = {"readable": False}
+
+    def position(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]] | BaseException:
+        if not phase["readable"]:
+            return httpx.ConnectError("position down")
+        return (200, [_open_pos()])
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): position,
+        ("GET", "/fapi/v1/order"): (200, {"orderId": 1, "status": "FILLED", "executedQty": "100"}),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    trade = _client(transport)
+    now = created + RECOVER_MAX_AGE_MS + 1
+
+    def send(text: str, **_kwargs: Any) -> bool:
+        sent.append(text)
+        return True
+
+    run_exec_recovery(conn, trade, now, send=send, sleep=_noop_sleep)
+    assert sent == [MSG_RECOVER_STALE_UNREADABLE.format(symbol="DOGEUSDT")]
+    assert get_exec_intent(conn, intent_id)["status"] == "unknown"
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is True
+    assert not any(c[0] == "POST" for c in transport.calls)
+    run_exec_recovery(conn, trade, now + 1_000, send=send, sleep=_noop_sleep)
+    assert sent == [MSG_RECOVER_STALE_UNREADABLE.format(symbol="DOGEUSDT")]
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is True
+    phase["readable"] = True
+    run_exec_recovery(conn, trade, now + 2_000, send=send, sleep=_noop_sleep)
+    assert len(sent) == 2
+    assert "FILLED 100" in sent[1]
+    assert "position ไม่มี stop" in sent[1]
+    assert get_exec_intent(conn, intent_id)["status"] == "stale"
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is False
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_stale_open_position_still_blocks_new_entry_and_watch_alerts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Releasing the unknown block does not allow another entry on an open, unprotected position."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "stale-guard.db")
+    created = 1_700_000_000_000
+    intent_id = _entry_intent(conn, ts=created)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (200, {"orderId": 1, "status": "FILLED", "executedQty": "100"}),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    now = created + RECOVER_MAX_AGE_MS + 1
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        trade,
+        now,
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] == "stale"
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is False
+    assert any("position ไม่มี stop" in t for t in sent)
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    _seed_doge_short(conn, ts=bar)
+    preview = create_entry_preview(
+        conn,
+        symbol="DOGEUSDT",
+        side="short",
+        trade=trade,
+        now_ms_value=_ms_bangkok(2026, 11, 2, 8, 20),
+    )
+    assert preview["ok"] is False
+    assert preview["reason"] == "open_position"
+    ideas = [
+        ExistingIdea(symbol="DOGEUSDT", side="short", risk_usdt=Decimal("1")),
+        ExistingIdea(symbol="BTCUSDT", side="long", risk_usdt=Decimal("1")),
+    ]
+    assert len(ideas) == MAX_OPEN_IDEAS
+    candidate = SignalCandidate(
+        sized=SizedSignal(
+            symbol="ETHUSDT",
+            side="long",
+            entry=Decimal("1"),
+            stop=Decimal("0.9"),
+            target=Decimal("1.2"),
+            qty=Decimal("1"),
+            notional=Decimal("1"),
+            leverage=1,
+            loss_at_stop=Decimal("0.1"),
+            risk_pct=Decimal("1"),
+            r_distance=Decimal("0.1"),
+            leverage_capped=False,
+            uncapped_leverage=1,
+            analysis_id=None,
+        ),
+        confidence=0.8,
+        symbol_rank=0,
+    )
+    admitted, rejected = admit_signals(existing=ideas, candidates=[candidate], balance=Decimal("1000"))
+    assert admitted == []
+    assert rejected == [candidate]
+    day = _ms_bangkok(2026, 11, 2, 12, 0)
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "DOGEUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.08,
+            "qty": 100.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.083,
+            "initial_stop_source": "signal",
+            "entry_time_ms": day - 3_600_000,
+            "no_stop_latched": 0,
+            "last_seen_ms": day - 3_600_000,
+            "closed_at_ms": None,
+        },
+    )
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.08"),
+        mark_price=Decimal("0.08"),
+        update_time_ms=day - 3_600_000,
+    )
+    fake = FakeFutures(positions=[pos], marks={"DOGEUSDT": Decimal("0.08")})
+    watch_sent: list[str] = []
+    first = run_assist_watch(
+        conn, futures=fake, now_ms_value=day, send=lambda t, **_: watch_sent.append(t) or True
+    )
+    assert any(a.get("action") == "no_stop" for a in first["actions"])
+    assert len(watch_sent) == 1
+    run_assist_watch(
+        conn,
+        futures=fake,
+        now_ms_value=day + 5 * 60_000,
+        send=lambda t, **_: watch_sent.append(t) or True,
+    )
+    assert len(watch_sent) == 1
+    conn.close()
+
+
+def test_recovery_not_found_reset_by_found_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "nf-reset.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    t0 = 1_700_000_000_000
+    for offset in (0, 5 * 60_000):
+        conn.execute(
+            """
+            INSERT INTO assist_exec_log (intent_id, step, endpoint, binance_code, created_at_ms)
+            VALUES (?, 'recover_not_found', '/fapi/v1/order', -2013, ?)
+            """,
+            (intent_id, t0 + offset),
+        )
+    conn.commit()
+    found_handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "0", "status": "NEW", "avgPrice": "0"},
+        ),
+    }
+    run_exec_recovery(
+        conn,
+        _client(RecordingTransport(found_handlers)),
+        t0 + 10 * 60_000,
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] != "not_found"
+    found_row = conn.execute(
+        "SELECT 1 FROM assist_exec_log WHERE intent_id=? AND step='recover_found'",
+        (intent_id,),
+    ).fetchone()
+    assert found_row is not None
+    missing: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/order"): (400, {"code": -2013, "msg": "Order does not exist."}),
+    }
+    run_exec_recovery(
+        conn,
+        _client(RecordingTransport(missing)),
+        t0 + 10 * 60_000 + RECOVER_LEASE_MS,
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] != "not_found"
+    conn.close()
+
+
+def test_recovery_partial_fill_grows_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "partial-grow.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    slr = client_order_id(intent_id, "slr")
+    sl0 = client_order_id(intent_id, "sl0")
+    state: dict[str, Any] = {"pos": "40", "status": "PARTIALLY_FILLED", "stops": []}
+
+    def position(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        return (200, [_open_pos(amt=f"-{state['pos']}")])
+
+    def order_query(_clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        return (
+            200,
+            {
+                "orderId": 1,
+                "executedQty": state["pos"],
+                "avgPrice": "0.08",
+                "status": state["status"],
+            },
+        )
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        return (
+            200,
+            [_verified_stop(client_id=cid, qty=qty) for cid, qty in state["stops"]],
+        )
+
+    def place(clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        cid = str(clean.get("clientAlgoId"))
+        qty = str(clean.get("quantity"))
+        state["stops"] = [(c, q) for c, q in state["stops"] if c != cid]
+        state["stops"].append((cid, qty))
+        return (200, {"algoId": 7, "clientAlgoId": cid})
+
+    def delete(clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        cid = str(clean.get("clientAlgoId") or "")
+        state["stops"] = [(c, q) for c, q in state["stops"] if c != cid]
+        return (200, {"algoId": 0, "code": "200", "msg": "success"})
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): position,
+        ("GET", "/fapi/v1/order"): order_query,
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("POST", "/fapi/v1/algoOrder"): place,
+        ("DELETE", "/fapi/v1/algoOrder"): delete,
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    run_exec_recovery(conn, trade, now_ms(), send=lambda *_a, **_k: True, sleep=_noop_sleep)
+    assert get_exec_intent(conn, intent_id)["status"] == "unknown"
+    stop_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("type") == "STOP_MARKET"
+    ]
+    assert [(c[2].get("clientAlgoId"), c[2].get("quantity")) for c in stop_posts] == [(slr, "40")]
+    state["pos"] = "100"
+    run_exec_recovery(conn, trade, now_ms(), send=lambda *_a, **_k: True, sleep=_noop_sleep)
+    assert get_exec_intent(conn, intent_id)["status"] == "unknown"
+    stop_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("type") == "STOP_MARKET"
+    ]
+    assert stop_posts[-1][2].get("clientAlgoId") == sl0
+    assert stop_posts[-1][2].get("quantity") == "100"
+    assert any(c[0] == "DELETE" and c[2].get("clientAlgoId") == slr for c in transport.calls)
+    state["status"] = "FILLED"
+    run_exec_recovery(conn, trade, now_ms(), send=lambda *_a, **_k: True, sleep=_noop_sleep)
+    assert get_exec_intent(conn, intent_id)["status"] == "done"
+    conn.close()
+
+
+def test_recovery_partial_exit_reports_remaining_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "rec-ex-partial.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08", "stop": "0.083"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos(amt="-60")]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "executedQty": "40", "avgPrice": "0.07", "status": "PARTIALLY_FILLED"},
+        ),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        ts,
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    assert any("เหลือ 60" in t and "ยังไม่ยืนยัน" in t for t in sent)
+    assert get_exec_intent(conn, intent_id)["status"] == "unknown"
+    assert not any(c[0] == "POST" for c in transport.calls)
     conn.close()
 
 

@@ -8,6 +8,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import replace as dc_replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from jarvise_assist.futures import (
     find_protective_stop,
     is_protective_stop,
     order_stop_price,
+    protective_stop_coverage,
 )
 from jarvise_assist.keyboard import entry_confirm_keyboard, move_stop_keyboard
 from jarvise_assist.messages import fmt_price, fmt_qty, format_move_stop_advice, format_signal_message
@@ -131,15 +133,57 @@ def msg_stop_unverifiable(*, symbol: str, qty: Decimal, stop: Decimal) -> str:
     )
 
 
-MSG_RECOVER_STALE = "⚠️ ตรวจผลคำสั่ง {symbol} ไม่จบใน 2 ชม. — position อาจไม่มี stop เปิด Binance เช็กตอนนี้"
+MSG_RECOVER_STALE_UNREADABLE = (
+    "⚠️ ตรวจ {symbol} ไม่ได้มา 2 ชม. — เปิดแอปเช็ก position และ stop; บอทจะปลดการกันเหรียญนี้เองเมื่ออ่าน Binance ได้"
+)
 MSG_RECOVER_SIDE_MISMATCH = "position {symbol} ไม่ตรงกับไม้นี้ — บอทไม่แตะ"
 MSG_RECOVER_MOVE_STOP_FAILED = "เลื่อน stop ไม่สำเร็จ — ไม่ได้ยกเลิก stop เดิม"
+MSG_CANCEL_OLD_FAILED = "⚠️ ยกเลิก stop/TP เดิมไม่สำเร็จ — ลบในแอป"
+_BANGKOK = timezone(timedelta(hours=7))
+_STOP_TAGS = ("slr", "sl0", "sl1")
+_FINAL_ORDER_STATUSES = frozenset({"FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED"})
 RECOVER_STALE_MS = 10 * 60_000
 RECOVER_LEASE_MS = 4 * 60_000
 RECOVER_PASS_BUDGET_S = 90.0
 RECOVER_MAX_AGE_MS = 2 * 60 * 60_000
 RECOVER_NOT_FOUND_SPAN_MS = 15 * 60_000
 RECOVER_NOT_FOUND_PASSES = 3
+
+
+def _bkk_hhmm(created_at_ms: int) -> str:
+    return datetime.fromtimestamp(int(created_at_ms) / 1000, tz=_BANGKOK).strftime("%H:%M")
+
+
+def _order_is_final(order: dict[str, Any] | None) -> bool:
+    if not isinstance(order, dict):
+        return False
+    return str(order.get("status") or "").upper() in _FINAL_ORDER_STATUSES
+
+
+def msg_recover_true_state(
+    *,
+    symbol: str,
+    created_at_ms: int,
+    order_text: str,
+    position_text: str,
+    stop_verified: bool,
+    position_open: bool,
+) -> str:
+    """One read-only report after 2h. An open position with no proven stop says so."""
+    stop_text = "ยืนยันแล้ว" if stop_verified else "ไม่มี"
+    if position_open and not stop_verified:
+        stop_text = "ไม่มี (position ไม่มี stop)"
+    return (
+        f"⚠️ {symbol.upper()} คำสั่งเมื่อ {_bkk_hhmm(created_at_ms)}: "
+        f"order {order_text}, position {position_text}, stop ของบอท {stop_text} "
+        "— บอทหยุดติดตามแล้ว เช็กในแอป"
+    )
+
+
+def msg_cancel_old_failed(client_ids: list[str]) -> str:
+    ids = ", ".join(client_ids)
+    return f"{MSG_CANCEL_OLD_FAILED} {ids}"
+
 
 _TRADE_AUTH_REASON_TH: dict[str, str] = {
     "no_key": MSG_NO_TRADE_KEY,
@@ -1562,8 +1606,8 @@ def _verify_stop_ids(
     stop: Decimal,
     position_qty: Decimal,
     tags: tuple[str, ...] = ("sl0", "sl1", "slr"),
-) -> tuple[StopVerifyResult, str | None]:
-    """Return (best_result, verified_tag). Prefer sl0, then slr, then sl1.
+) -> tuple[StopVerifyResult, str | None, list[dict[str, Any]] | None]:
+    """Return (best_result, verified_tag, open_list). Prefer sl0, then slr, then sl1.
 
     Fetches openAlgoOrders once. algoOrder GET only for tags with a placement log.
     """
@@ -1575,7 +1619,7 @@ def _verify_stop_ids(
     try:
         open_list = trade.open_algo_orders(symbol=symbol, strict=True)
     except Exception:  # noqa: BLE001
-        return StopVerifyResult.UNVERIFIABLE, None
+        return StopVerifyResult.UNVERIFIABLE, None, None
     placed = _placement_log_client_ids(conn, intent_id)
     close_side = _closing_side(side)
     best: StopVerifyResult = StopVerifyResult.NOT_PROTECTED
@@ -1599,16 +1643,16 @@ def _verify_stop_ids(
                 verified_tag = tag
                 best = StopVerifyResult.VERIFIED
             if tag == "sl0":
-                return StopVerifyResult.VERIFIED, "sl0"
+                return StopVerifyResult.VERIFIED, "sl0", open_list
         elif result == StopVerifyResult.CLOSED_BY_STOP:
-            return StopVerifyResult.CLOSED_BY_STOP, tag
+            return StopVerifyResult.CLOSED_BY_STOP, tag, open_list
         elif result == StopVerifyResult.UNVERIFIABLE:
             saw_unverifiable = True
     if best == StopVerifyResult.VERIFIED:
-        return best, verified_tag
+        return best, verified_tag, open_list
     if saw_unverifiable:
-        return StopVerifyResult.UNVERIFIABLE, None
-    return StopVerifyResult.NOT_PROTECTED, None
+        return StopVerifyResult.UNVERIFIABLE, None, open_list
+    return StopVerifyResult.NOT_PROTECTED, None, open_list
 
 
 def _cancel_dup_stops_after_verified(
@@ -1806,7 +1850,7 @@ def _place_and_verify_stop(
             return StopVerifyResult.UNVERIFIABLE, None, stop_err
         if algo_id:
             break
-    final_vr, final_tag = _verify_stop_ids(
+    final_vr, final_tag, _open_list = _verify_stop_ids(
         trade,
         conn=conn,
         symbol=symbol,
@@ -3061,19 +3105,152 @@ def handle_exec_callback(
     return {"ok": False, "unhandled": data}
 
 
+def _latest_log_ms(conn: Any, intent_id: str, step: str) -> int | None:
+    row = conn.execute(
+        """
+        SELECT MAX(created_at_ms) FROM assist_exec_log
+        WHERE intent_id=? AND step=?
+        """,
+        (intent_id, step),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return int(row[0])
+
+
+def _mark_recover_found(conn: Any, intent_id: str, *, client_order_id: str | None) -> None:
+    """A FOUND order or a non-flat position resets the consecutive not-found count."""
+    _log_write(
+        conn,
+        intent_id=intent_id,
+        step="recover_found",
+        endpoint="/fapi/v1/order",
+        client_order_id=client_order_id,
+    )
+
+
 def _count_recover_not_found(conn: Any, intent_id: str) -> tuple[int, int | None]:
+    """Consecutive not-found rows after the latest recover_found marker."""
+    found_ms = _latest_log_ms(conn, intent_id, "recover_found") or 0
     rows = conn.execute(
         """
         SELECT created_at_ms FROM assist_exec_log
-        WHERE intent_id=? AND step='recover_not_found'
+        WHERE intent_id=? AND step='recover_not_found' AND created_at_ms>?
         ORDER BY created_at_ms ASC
         """,
-        (intent_id,),
+        (intent_id, found_ms),
     ).fetchall()
     if not rows:
         return 0, None
     first = int(rows[0][0] if not hasattr(rows[0], "keys") else rows[0]["created_at_ms"])
     return len(rows), first
+
+
+def _has_log_step(conn: Any, intent_id: str, step: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM assist_exec_log WHERE intent_id=? AND step=? LIMIT 1
+        """,
+        (intent_id, step),
+    ).fetchone()
+    return row is not None
+
+
+def _keep_recovering_unknown(conn: Any, intent_id: str, *, text: str | None = None) -> None:
+    """Leave the intent unknown so the next pass can claim it. Does not send."""
+    prev = get_exec_intent(conn, intent_id)
+    prev_text = str(prev.get("result_text") or "") if prev else ""
+    finish_exec_intent(
+        conn,
+        intent_id,
+        status="unknown",
+        result_text=text if text is not None else (prev_text or MSG_OUTCOME_UNKNOWN),
+        expect_status="recovering",
+    )
+
+
+def _open_stop_tags(
+    open_list: list[dict[str, Any]] | None,
+    intent_id: str,
+) -> tuple[set[str], Decimal]:
+    """Tags of this intent that are still open, and the largest stop qty among them."""
+    tags: set[str] = set()
+    best = Decimal("0")
+    if not open_list:
+        return tags, best
+    for tag in _STOP_TAGS:
+        cid = client_order_id(intent_id, tag)
+        for order in open_list:
+            got = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
+            if got != cid:
+                continue
+            tags.add(tag)
+            raw = order.get("quantity")
+            if raw is None:
+                raw = order.get("origQty")
+            try:
+                qty = Decimal(str(raw or "0"))
+            except Exception:  # noqa: BLE001
+                qty = Decimal("0")
+            if qty > best:
+                best = qty
+    return tags, best
+
+
+def _free_stop_tag(open_tags: set[str]) -> str | None:
+    for tag in _STOP_TAGS:
+        if tag not in open_tags:
+            return tag
+    return None
+
+
+def _finish_placed_recovery_stop(
+    trade: BinanceTradeClient,
+    conn: Any,
+    *,
+    intent_id: str,
+    symbol: str,
+    placed_tag: str,
+    open_tags: set[str],
+    order_final: bool,
+    send: Callable[..., Any] | None,
+) -> None:
+    """Cancel the tags that were open before this place. Done only when the market is final."""
+    failed: list[str] = []
+    for tag in open_tags:
+        if tag == placed_tag:
+            continue
+        old = client_order_id(intent_id, tag)
+        if not _cancel_algo_client_ok(
+            trade,
+            symbol=symbol,
+            client_algo_id=old,
+            conn=conn,
+            intent_id=intent_id,
+            step="dup_stop_cancel",
+        ):
+            failed.append(old)
+    if failed:
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="unknown",
+            text=msg_cancel_old_failed(failed),
+            expect_status="recovering",
+        )
+        return
+    if not order_final:
+        _keep_recovering_unknown(conn, intent_id)
+        return
+    _recovery_notify(
+        send,
+        conn,
+        intent_id,
+        status="done",
+        text=f"✅ วาง stop ปกป้อง {symbol} แล้ว",
+        expect_status="recovering",
+    )
 
 
 def _recovery_notify(
@@ -3134,6 +3311,7 @@ def _recover_entry_intent(
 
     flat = len(positions) == 0
     if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+        _mark_recover_found(conn, intent_id, client_order_id=cid)
         outcome = classify_order_body(queried.order)
         if outcome == OrderOutcome.NOT_FILLED:
             _recovery_notify(
@@ -3184,6 +3362,7 @@ def _recover_entry_intent(
     if flat:
         return
 
+    _mark_recover_found(conn, intent_id, client_order_id=cid)
     pos = positions[0]
     if pos.side != side:
         _recovery_notify(
@@ -3196,7 +3375,10 @@ def _recover_entry_intent(
         )
         return
     qty = pos.qty
-    vr, keep_tag = _verify_stop_ids(
+    order_final = True
+    if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+        order_final = _order_is_final(queried.order)
+    vr, keep_tag, open_list = _verify_stop_ids(
         trade,
         conn=conn,
         symbol=symbol,
@@ -3215,7 +3397,7 @@ def _recover_entry_intent(
             expect_status="recovering",
         )
         return
-    if vr == StopVerifyResult.VERIFIED:
+    if vr == StopVerifyResult.VERIFIED and order_final:
         if keep_tag is not None:
             _cancel_dup_stops_after_verified(
                 trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=keep_tag
@@ -3229,11 +3411,39 @@ def _recover_entry_intent(
             expect_status="recovering",
         )
         return
+    if vr == StopVerifyResult.VERIFIED and not order_final:
+        _keep_recovering_unknown(conn, intent_id)
+        return
     if vr == StopVerifyResult.UNVERIFIABLE:
         return
 
-    # NOT_PROTECTED: place -slr at preview stop for current qty.
-    slr = client_order_id(intent_id, "slr")
+    open_tags, covered = _open_stop_tags(open_list, intent_id)
+    free_tag = _free_stop_tag(open_tags)
+    if free_tag is None:
+        uncovered = qty - covered if qty > covered else qty
+        text = f"⚠️ {symbol} stop ไม่ครอบ qty {fmt_qty(uncovered)} — sl0/sl1/slr เปิดครบแล้ว เช็กในแอป"
+        if not _has_log_step(conn, intent_id, "recover_tags_full"):
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="recover_tags_full",
+                endpoint="local",
+                client_order_id=None,
+            )
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="unknown",
+                text=text,
+                expect_status="recovering",
+            )
+        else:
+            _keep_recovering_unknown(conn, intent_id, text=text)
+        return
+
+    # Place on a tag that is not still open. Prefer -slr when it is free.
+    slr = client_order_id(intent_id, free_tag)
     try:
         mark = trade.mark_price(symbol)
         if side == "long" and mark <= stop:
@@ -3278,16 +3488,15 @@ def _recover_entry_intent(
             position_flat=False,
         )
         if vr_err == StopVerifyResult.VERIFIED:
-            _cancel_dup_stops_after_verified(
-                trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag="slr"
-            )
-            _recovery_notify(
-                send,
+            _finish_placed_recovery_stop(
+                trade,
                 conn,
-                intent_id,
-                status="done",
-                text=f"✅ วาง stop ปกป้อง {symbol} แล้ว",
-                expect_status="recovering",
+                intent_id=intent_id,
+                symbol=symbol,
+                placed_tag=free_tag,
+                open_tags=open_tags,
+                order_final=order_final,
+                send=send,
             )
             return
         if vr_err == StopVerifyResult.UNVERIFIABLE:
@@ -3323,14 +3532,15 @@ def _recover_entry_intent(
         position_flat=False,
     )
     if vr2 == StopVerifyResult.VERIFIED:
-        _cancel_dup_stops_after_verified(trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag="slr")
-        _recovery_notify(
-            send,
+        _finish_placed_recovery_stop(
+            trade,
             conn,
-            intent_id,
-            status="done",
-            text=f"✅ วาง stop ปกป้อง {symbol} แล้ว",
-            expect_status="recovering",
+            intent_id=intent_id,
+            symbol=symbol,
+            placed_tag=free_tag,
+            open_tags=open_tags,
+            order_final=order_final,
+            send=send,
         )
         return
     if vr2 == StopVerifyResult.UNVERIFIABLE:
@@ -3546,7 +3756,161 @@ def _recover_exit_intent(
                 expect_status="recovering",
             )
         return
+    if (
+        queried.kind == QueryResultKind.FOUND
+        and queried.order is not None
+        and executed_qty(queried.order) > 0
+    ):
+        pos = positions[0]
+        verified = False
+        try:
+            orders = trade.all_open_orders(symbol=symbol)
+            step = trade.symbol_filters(symbol).step_size
+            coverage = protective_stop_coverage(
+                orders,
+                symbol=symbol,
+                position_side=pos.position_side,
+                trade_side=side,
+                position_qty=pos.qty,
+                step_size=step,
+            )
+            verified = coverage == "full"
+        except Exception:  # noqa: BLE001
+            verified = False
+        stop_text = "ยืนยันแล้ว" if verified else "ยังไม่ยืนยัน"
+        text = f"⚠️ ปิดบางส่วน {symbol} เหลือ {fmt_qty(pos.qty)} · stop {stop_text}"
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status="done" if verified else "unknown",
+            text=text,
+            expect_status="recovering",
+        )
+        return
     return
+
+
+def _aged_read_snapshot(
+    trade: BinanceTradeClient,
+    conn: Any,
+    intent: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Read order, position, and our stops. None when any read fails. Never sends."""
+    intent_id = str(intent["id"])
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    kind = str(intent.get("kind") or "entry")
+    preview = intent["preview"] if isinstance(intent.get("preview"), dict) else {}
+    stop = Decimal(str(preview.get("stop") or "0"))
+    if kind == "exit":
+        cid = client_order_id(intent_id, "ex")
+        query_algo = False
+    elif kind == "move_stop":
+        cid = client_order_id(intent_id, "ms")
+        query_algo = True
+    else:
+        cid = client_order_id(intent_id, "mkt")
+        query_algo = False
+    try:
+        if query_algo:
+            order: dict[str, Any] | None = trade.query_algo_by_client_id(symbol=symbol, client_id=cid)
+        else:
+            order = trade.query_order_by_client_id(symbol=symbol, client_id=cid)
+    except TradeClientError as exc:
+        if exc.binance_code in {-2011, -2013}:
+            order = None
+        else:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        filters = trade.symbol_filters(symbol)
+        stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
+    except Exception:  # noqa: BLE001
+        pass
+    flat = len(positions) == 0
+    qty = positions[0].qty if positions else Decimal("0")
+    vr, _tag, _open = _verify_stop_ids(
+        trade,
+        conn=conn,
+        symbol=symbol,
+        intent_id=intent_id,
+        side=side,
+        stop=stop,
+        position_qty=qty if qty > 0 else Decimal("1"),
+    )
+    if vr == StopVerifyResult.UNVERIFIABLE:
+        return None
+    if order is None:
+        order_text = "ไม่พบ"
+    else:
+        filled_qty = executed_qty(order)
+        status = str(order.get("status") or order.get("algoStatus") or "").upper()
+        if status == "FILLED" or filled_qty > 0:
+            shown = filled_qty if filled_qty > 0 else qty
+            order_text = f"FILLED {fmt_qty(shown)}"
+        else:
+            order_text = "ไม่พบ"
+    return {
+        "order_text": order_text,
+        "position_text": "แบน" if flat else fmt_qty(qty),
+        "stop_verified": (not flat) and vr == StopVerifyResult.VERIFIED,
+        "position_open": not flat,
+    }
+
+
+def _recover_aged_readonly(
+    conn: Any,
+    trade: BinanceTradeClient,
+    intent: dict[str, Any],
+    *,
+    send: Callable[..., Any] | None,
+) -> None:
+    """Older than 2h: read and report. Never place or cancel."""
+    intent_id = str(intent["id"])
+    symbol = str(intent.get("symbol") or "").upper()
+    created_at = int(intent.get("created_at_ms") or 0)
+    snap = _aged_read_snapshot(trade, conn, intent)
+    if snap is None:
+        text = MSG_RECOVER_STALE_UNREADABLE.format(symbol=symbol)
+        if not _has_log_step(conn, intent_id, "recover_stale_unread"):
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="recover_stale_unread",
+                endpoint="local",
+            )
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="unknown",
+                text=text,
+                expect_status="recovering",
+            )
+        else:
+            _keep_recovering_unknown(conn, intent_id, text=text)
+        return
+    _recovery_notify(
+        send,
+        conn,
+        intent_id,
+        status="stale",
+        text=msg_recover_true_state(
+            symbol=symbol,
+            created_at_ms=created_at,
+            order_text=str(snap["order_text"]),
+            position_text=str(snap["position_text"]),
+            stop_verified=bool(snap["stop_verified"]),
+            position_open=bool(snap["position_open"]),
+        ),
+        expect_status="recovering",
+    )
 
 
 def run_exec_recovery(
@@ -3580,15 +3944,7 @@ def run_exec_recovery(
             ):
                 continue
             claimed += 1
-            symbol = str(intent.get("symbol") or "").upper()
-            _recovery_notify(
-                send,
-                conn,
-                intent_id,
-                status="stale",
-                text=MSG_RECOVER_STALE.format(symbol=symbol),
-                expect_status="recovering",
-            )
+            _recover_aged_readonly(conn, trade, intent, send=send)
             continue
         if not claim_exec_intent_for_recovery(
             conn,
