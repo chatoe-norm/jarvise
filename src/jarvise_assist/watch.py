@@ -36,6 +36,7 @@ from jarvise_assist.messages import (
     format_partial_stop_warning,
 )
 from jarvise_assist.pause import evaluate_day_loss_pause, evaluate_pause, maybe_auto_resume
+from jarvise_assist.real_trades import refresh_incomplete_income
 from jarvise_assist.signals import (
     _alert_key_unsafe,
     _alert_permission,
@@ -761,6 +762,10 @@ def run_assist_watch(
         journal_on_close(conn, closed, futures=client, now_ms_value=ts)
     except Exception:  # noqa: BLE001 — a journal failure must not stop advice or orphan cancel
         logger.exception("assist journal failed")
+    try:
+        refresh_incomplete_income(conn, client, now_ms=ts)
+    except Exception:  # noqa: BLE001 — income refresh must not stop advice, journal, or pauses
+        logger.exception("assist income refresh failed")
     # Same poll as the close: local rows only, no extra Binance read.
     day_pause = evaluate_day_loss_pause(conn, now_ms=ts, send=send_fn)
     if day_pause.get("reason") in {"day_loss", "day_loss_deeper"}:

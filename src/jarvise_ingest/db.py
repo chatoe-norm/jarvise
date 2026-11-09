@@ -648,6 +648,15 @@ def _migrate_assist_actual_r(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_real_trade", "net_r_actual", "REAL")
 
 
+def _migrate_assist_income_status(conn: sqlite3.Connection) -> None:
+    """Income completeness on closed real trades. Nullable. Does not rewrite existing rows.
+
+    NULL means the row was written before this column existed. The next sync
+    sets complete, pending, or missing. Commission has no pending state.
+    """
+    _add_column_if_missing(conn, "assist_real_trade", "income_status", "TEXT")
+
+
 def _migrate_assist_day_loss(conn: sqlite3.Connection) -> None:
     """Day-loss pause markers on the single assist_edge row.
 
@@ -1057,6 +1066,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (22, "assist_journal", _migrate_assist_journal, True),
     (23, "assist_day_loss", _migrate_assist_day_loss, True),
     (24, "assist_actual_r", _migrate_assist_actual_r, True),
+    (25, "assist_income_status", _migrate_assist_income_status, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
