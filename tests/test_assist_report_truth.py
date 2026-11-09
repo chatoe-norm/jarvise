@@ -463,19 +463,25 @@ def test_closed_real_without_virtual_counts_as_unpaired(tmp_path: Path) -> None:
         """
         INSERT INTO assist_real_trade (
             symbol, side, entry_order_id, entry_client_id, status, updated_at_ms,
-            entry_time_ms, signal_id, net_r_real, net_r_virtual
-        ) VALUES ('BTCUSDT', 'long', 'paired', 'jv-pair-mkt', 'closed', ?, ?, 'as_pair', 0.5, 0.4)
+            entry_time_ms, exit_time_ms, income_status, signal_id, net_r_real, net_r_virtual
+        ) VALUES (
+            'BTCUSDT', 'long', 'paired', 'jv-pair-mkt', 'closed', ?, ?, ?, 'complete',
+            'as_pair', 0.5, 0.4
+        )
         """,
-        (ts, ts),
+        (ts, ts, ts + 1_500),
     )
     conn.execute(
         """
         INSERT INTO assist_real_trade (
             symbol, side, entry_order_id, entry_client_id, status, updated_at_ms,
-            entry_time_ms, signal_id, net_r_real, net_r_virtual
-        ) VALUES ('ETHUSDT', 'long', 'solo', 'jv-solo-mkt', 'closed', ?, ?, NULL, -0.3, NULL)
+            entry_time_ms, exit_time_ms, income_status, signal_id, net_r_real, net_r_virtual
+        ) VALUES (
+            'ETHUSDT', 'long', 'solo', 'jv-solo-mkt', 'closed', ?, ?, ?, 'complete',
+            NULL, -0.3, NULL
+        )
         """,
-        (ts + 1, ts + 1),
+        (ts + 1, ts + 1, ts + 1_600),
     )
     conn.commit()
     summary = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS, until_ms=ts + 10_000)
@@ -658,7 +664,7 @@ def test_actual_r_migration_is_additive(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 24
+    assert schema_version(conn) == 25
     row = conn.execute(
         """
         SELECT net_r_real, entry_time_ms, risk_actual_usdt, net_r_actual

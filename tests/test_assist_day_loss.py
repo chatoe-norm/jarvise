@@ -615,7 +615,7 @@ def test_day_loss_migration_is_additive(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 24
+    assert schema_version(conn) == 25
     row = conn.execute(
         """
         SELECT streak_anchor_ms, week_pause_id, resume_alerted,

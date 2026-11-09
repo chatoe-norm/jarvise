@@ -100,10 +100,80 @@ job `deploy`, field `completed_at`. Head `148ca1a55355fb82acff0b3302325175431a15
 the merge of PR #293. A trade is before the journal when `exit_time_ms` is
 strictly less than that instant.
 
-## PR-C2 (later)
+## PR-C2
 
-Income timing and reconcile are not this PR. The agreed rule, for that PR:
+Income status, exit-time windows, and the reconcile. This PR does not place,
+cancel, or edit an order. It does not change sizing, risk caps, pause
+thresholds, floors, the analyzer, stops, or trail rules. No new environment
+variable.
 
-A closed trade with no `REALIZED_PNL` or no `COMMISSION` income yet is
-`pending`. Absent `FUNDING_FEE` counts as 0. Income still absent 24 h after
-exit becomes `missing` and is listed in the reconcile, not left pending.
+### Why commission has no pending state
+
+Each `userTrades` fill already carries `realizedPnl` at fill time. Commission
+is taken from those fills (`commission` / `commissionAsset`), which the sync
+already stores. There is no income row to wait for, so commission cannot be
+`pending`. `FUNDING_FEE` that has not been published counts as 0 and does not
+make a trade `pending`. Only `REALIZED_PNL` income can arrive after the fill.
+
+### Income status
+
+Migration 25 adds nullable `income_status` TEXT on `assist_real_trade`. It does
+not rewrite existing rows. A closed trade is one of:
+
+- `complete` — every exit fill whose `realizedPnl` is nonzero has a matching
+  `REALIZED_PNL` income row (`tradeId`).
+- `pending` — that match is missing and `now - exit_time_ms` is at most 24 h.
+- `missing` — the match is still missing more than 24 h after the exit.
+
+Open trades and unmatched orders stay NULL.
+
+Until the status is `complete`, `realized_pnl_usdt` is the sum of the exit
+fills' `realizedPnl`, scaled by `exit_trade_fractions` the same way income is
+scaled. `net_r_real` uses that figure at once, so the journal card and the
+daily 3R pause are right before income arrives. When every required income row
+is present, the stored realized value is replaced by the income sum and the
+status becomes `complete`.
+
+`_complete_income_cache` serves only rows with `income_status='complete'`.
+A `pending` row, a `missing` row, and a closed row whose status is still NULL
+(written before this PR) are rebuilt on the next sync. A NULL row is not left
+at realized 0 just because the column is already filled.
+
+### Refresh
+
+`run_assist_watch` re-syncs closed rows whose status is NULL, `pending`, or
+`missing` and whose exit is within the last 7 days. The refresh runs at most
+once per 30 minutes in total. It uses the journal sync gap (`30 * 60 * 1000`)
+and one sentinel row in `assist_journal_sync`. It does not give up after a
+fixed number of attempts: a row leaves the set when it becomes `complete` or
+its exit is older than 7 days.
+
+Missing rows older than 7 days are not refetched. They stay `missing` and are
+listed in the reconcile. A refresh failure does not block watch advice, the
+orphan cancel, the journal, or the pause check.
+
+The daily 3R pause still reads `net_r_real`. The pause rules are unchanged.
+If the refresh corrects a row that exited on today's Bangkok day,
+`evaluate_day_loss_pause` in that same watch pass sees the new day sum and
+pauses when it reaches the limit. A correction from an earlier day does not
+pause.
+
+### Report windows
+
+Closed real rows and virtual rows are in the report window when their exit
+time is in `[window start, window end]`. Open real trades are counted on
+their own line and are not part of the window stats. `_label_pair_roles` runs
+on every synced row before that filter. The first trade for a signal, ordered
+by entry time, is the pair even when that entry is outside the window. A later
+trade that exits inside the window is still `re_entry`.
+
+The R stats — mean planned R, mean actual R, the pairs difference, and entry
+slip in R — skip `pending` and `missing` trades. The block shows
+`รอข้อมูล income n=…` and `income ขาด n=…`.
+
+The reconcile is for the same window. It sums Binance `REALIZED_PNL`,
+`COMMISSION`, and `FUNDING_FEE` for `jarvise_assist.ASSIST_SYMBOLS` (the tuple,
+not a hard-coded list) and sets those totals next to the sums stored on the
+trades. Income rows that match no trade are listed with symbol, Bangkok time,
+category, and amount, at most 10 lines, plus a count of the rest. Missing
+trades are listed in that block.

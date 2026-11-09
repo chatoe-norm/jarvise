@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import statistics
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -14,6 +15,8 @@ from jarvise_assist.sizing import round_level_to_tick
 from jarvise_assist.store import now_ms
 from jarvise_assist.track import TRACK_COHORT, virtual_risk_unusable
 from jarvise_ingest.db import transaction
+
+logger = logging.getLogger(__name__)
 
 # Asia/Bangkok has no DST. A fixed offset avoids the tzdata package.
 _BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -35,6 +38,16 @@ _THAI_MONTHS = (
 # Deploy of PR #280 / P5 gate sample start (2026-11-04T13:51:27Z).
 SPEC_START_MS = 1_793_800_287_000
 REAL_SAMPLE_TARGET = 20
+# REALIZED_PNL income can lag the fill. Commission is already on the fill.
+INCOME_PENDING_MS = 24 * 60 * 60 * 1000
+INCOME_REFRESH_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000
+# Same 30-minute gap as journal.SYNC_GAP_MS. One sentinel row, not per trade.
+INCOME_REFRESH_GAP_MS = 30 * 60 * 1000
+INCOME_CATEGORIES = ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE")
+_INCOME_REFRESH_SYMBOL = "*"
+_INCOME_REFRESH_SIDE = "INCOME"
+_INCOME_REFRESH_CLOSED_AT = 0
+_R_INCOME_SKIP = frozenset({"pending", "missing"})
 
 
 def time_windows(
@@ -438,33 +451,109 @@ def _has_sent_track(conn: Any, signal_id: str | None) -> bool:
     return row is not None
 
 
+def _income_number_cache(
+    conn: Any,
+    sql: str,
+    params: tuple[Any, ...],
+) -> dict[str, dict[str, float]]:
+    cur = conn.execute(sql, params)
+    out: dict[str, dict[str, float]] = {}
+    for row in cur.fetchall():
+        if hasattr(row, "keys"):
+            oid = str(row["entry_order_id"])
+            funding = row["funding_usdt"]
+            realized = row["realized_pnl_usdt"]
+        else:
+            oid = str(row[0])
+            funding = row[1]
+            realized = row[2]
+        out[oid] = {
+            "funding_usdt": 0.0 if funding is None else float(funding),
+            "realized_pnl_usdt": 0.0 if realized is None else float(realized),
+        }
+    return out
+
+
 def _complete_income_cache(conn: Any, since_ms: int) -> dict[str, dict[str, float]]:
-    """Closed rows that already have both income fields — reuse and skip refetch."""
-    cur = conn.execute(
+    """Closed rows whose REALIZED_PNL income already matched. Skip the refetch.
+
+    Pending, missing, and NULL (rows written before income_status) are not
+    served. A stored realized of 0 is not evidence that income arrived.
+    """
+    return _income_number_cache(
+        conn,
         """
         SELECT entry_order_id, funding_usdt, realized_pnl_usdt
         FROM assist_real_trade
         WHERE status='closed'
           AND entry_time_ms >= ?
-          AND funding_usdt IS NOT NULL
+          AND income_status = 'complete'
           AND realized_pnl_usdt IS NOT NULL
         """,
         (int(since_ms),),
     )
-    out: dict[str, dict[str, float]] = {}
-    for row in cur.fetchall():
-        if hasattr(row, "keys"):
-            oid = str(row["entry_order_id"])
-            out[oid] = {
-                "funding_usdt": float(row["funding_usdt"]),
-                "realized_pnl_usdt": float(row["realized_pnl_usdt"]),
-            }
-        else:
-            out[str(row[0])] = {
-                "funding_usdt": float(row[1]),
-                "realized_pnl_usdt": float(row[2]),
-            }
+
+
+def _frozen_missing_income(conn: Any, since_ms: int, now_ms: int) -> dict[str, dict[str, float]]:
+    """Missing rows older than 7 days. Keep the stored numbers. Do not refetch."""
+    cutoff = int(now_ms) - INCOME_REFRESH_LOOKBACK_MS
+    return _income_number_cache(
+        conn,
+        """
+        SELECT entry_order_id, funding_usdt, realized_pnl_usdt
+        FROM assist_real_trade
+        WHERE status='closed'
+          AND entry_time_ms >= ?
+          AND income_status = 'missing'
+          AND exit_time_ms IS NOT NULL
+          AND exit_time_ms < ?
+        """,
+        (int(since_ms), cutoff),
+    )
+
+
+def _sum_income_by_trade(income_rows: list[dict[str, Any]]) -> dict[int, float]:
+    out: dict[int, float] = {}
+    for row in income_rows:
+        try:
+            tid = int(row.get("tradeId") or 0)
+        except (TypeError, ValueError):
+            tid = 0
+        if tid <= 0:
+            continue
+        try:
+            amount = float(row.get("income") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        out[tid] = out.get(tid, 0.0) + amount
     return out
+
+
+def _income_status_for_close(
+    *,
+    needed: set[int],
+    matched: dict[int, float],
+    exit_time_ms: int,
+    now_ms: int,
+) -> str:
+    """complete when every nonzero exit fill has a REALIZED_PNL row.
+
+    Absent FUNDING_FEE is not an input. Commission is taken from fills.
+    """
+    if not needed or needed <= set(matched):
+        return "complete"
+    if int(now_ms) - int(exit_time_ms) > INCOME_PENDING_MS:
+        return "missing"
+    return "pending"
+
+
+def _scaled_income(matched: dict[int, float], fractions: dict[int, float]) -> float:
+    total = 0.0
+    for tid, frac in fractions.items():
+        if frac <= 0 or tid not in matched:
+            continue
+        total += matched[tid] * float(frac)
+    return total
 
 
 def _trade_side_buy_sell(side: str) -> tuple[str, str]:
@@ -589,6 +678,7 @@ def build_real_rows(
     move_stop_by_cid = _move_stop_intent_by_client(conn)
     logged_cids = _logged_client_ids(conn)
     income_cache = _complete_income_cache(conn, start)
+    frozen_missing = _frozen_missing_income(conn, start, end)
     rows_out: list[dict[str, Any]] = []
 
     for symbol in ASSIST_SYMBOLS:
@@ -674,6 +764,8 @@ def build_real_rows(
                     "entry_trade_ids": {int(f.get("id") or 0) for f in fills},
                     "exit_trade_ids": set(),
                     "exit_trade_fractions": {},  # trade_id -> fraction taken
+                    "fill_realized_usdt": 0.0,
+                    "pnl_trade_ids": set(),
                     "commission_usdt": 0.0,
                     "other_assets": [],
                     "entry_fills": fills,
@@ -724,6 +816,13 @@ def build_real_rows(
                     entry["exit_trade_fractions"][tid] = (
                         float(entry["exit_trade_fractions"].get(tid) or 0) + fraction
                     )
+                try:
+                    pnl = float(t.get("realizedPnl") or 0)
+                except (TypeError, ValueError):
+                    pnl = 0.0
+                entry["fill_realized_usdt"] += pnl * fraction
+                if tid and _realized_pnl_nonzero(t):
+                    entry["pnl_trade_ids"].add(tid)
                 usdt, other = _fee_usdt_and_other(t, fraction=fraction)
                 entry["commission_usdt"] += usdt
                 if other:
@@ -768,9 +867,12 @@ def build_real_rows(
             other_assets: list[str] = list(entry["other_assets"])
             funding_usdt = 0.0
             realized = 0.0
+            income_status: str | None = None
             exit_time: int | None
             exit_avg: float | None
-            cached = income_cache.get(str(entry["entry_order_id"]))
+            order_key = str(entry["entry_order_id"])
+            cached = income_cache.get(order_key)
+            frozen = frozen_missing.get(order_key)
             if closed:
                 exit_avg = exit_avg_f
                 exit_time = max(
@@ -781,9 +883,15 @@ def build_real_rows(
                     ),
                     default=int(entry["entry_time_ms"]),
                 )
+                fill_realized = float(entry["fill_realized_usdt"])
                 if cached is not None:
                     funding_usdt = cached["funding_usdt"]
                     realized = cached["realized_pnl_usdt"]
+                    income_status = "complete"
+                elif frozen is not None:
+                    funding_usdt = frozen["funding_usdt"]
+                    realized = frozen["realized_pnl_usdt"]
+                    income_status = "missing"
                 else:
                     income_fund = fetch_income_range(
                         client,
@@ -803,14 +911,20 @@ def build_real_rows(
                         end_ms=exit_time + 1,
                         income_type="REALIZED_PNL",
                     )
-                    for row in income_pnl:
-                        try:
-                            tid = int(row.get("tradeId") or 0)
-                        except (TypeError, ValueError):
-                            tid = 0
-                        frac = float(entry["exit_trade_fractions"].get(tid) or 0)
-                        if frac > 0:
-                            realized += float(row.get("income") or 0) * frac
+                    matched = _sum_income_by_trade(income_pnl)
+                    needed = {int(tid) for tid in entry["pnl_trade_ids"]}
+                    income_status = _income_status_for_close(
+                        needed=needed,
+                        matched=matched,
+                        exit_time_ms=exit_time,
+                        now_ms=end,
+                    )
+                    if income_status == "complete" and needed:
+                        realized = _scaled_income(matched, entry["exit_trade_fractions"])
+                    else:
+                        # Fills already carry realizedPnl. Income replaces that
+                        # only once every nonzero exit fill has a row.
+                        realized = fill_realized
             else:
                 exit_time = None
                 exit_avg = None
@@ -859,6 +973,12 @@ def build_real_rows(
             exit_meta: dict[str, Any] | None = None
             if entry["exit_order_ids"]:
                 exit_meta = {"order_ids": list(dict.fromkeys(entry["exit_order_ids"]))}
+                trade_ids = sorted(int(tid) for tid in entry["exit_trade_ids"] if tid)
+                entry_trade_ids = sorted(int(tid) for tid in entry["entry_trade_ids"] if tid)
+                if trade_ids:
+                    exit_meta["trade_ids"] = trade_ids
+                if entry_trade_ids:
+                    exit_meta["entry_trade_ids"] = entry_trade_ids
                 if entry.get("stop_detail"):
                     exit_meta["stop_detail"] = entry["stop_detail"]
                 if entry.get("stop_source"):
@@ -900,6 +1020,7 @@ def build_real_rows(
                     "slip_entry_bps": slip_entry,
                     "drift_signal_bps": drift,
                     "slip_stop_bps": slip_stop,
+                    "income_status": income_status,
                     "status": "closed" if closed else "open",
                     "updated_at_ms": end,
                 }
@@ -950,6 +1071,7 @@ def build_real_rows(
                     "slip_entry_bps": None,
                     "drift_signal_bps": None,
                     "slip_stop_bps": None,
+                    "income_status": None,
                     "status": "unmatched",
                     "updated_at_ms": end,
                 }
@@ -990,6 +1112,7 @@ _INSERT_COLS = (
     "slip_entry_bps",
     "drift_signal_bps",
     "slip_stop_bps",
+    "income_status",
     "status",
     "updated_at_ms",
 )
@@ -1049,16 +1172,43 @@ def _fmt_bps(value: float | None, *, n: int | None = None) -> str:
     return text
 
 
-def _in_report_window(row: dict[str, Any], *, since_ms: int, until_ms: int | None) -> bool:
-    raw = row.get("entry_time_ms")
+def _time_in_window(raw: Any, *, since_ms: int, until_ms: int | None) -> bool:
     if raw is None:
         return False
-    entered = int(raw)
-    if entered < int(since_ms):
+    stamp = int(raw)
+    if stamp < int(since_ms):
         return False
-    if until_ms is not None and entered > int(until_ms):
+    if until_ms is not None and stamp > int(until_ms):
         return False
     return True
+
+
+def _in_report_window(row: dict[str, Any], *, since_ms: int, until_ms: int | None) -> bool:
+    """Entry-time window. Unmatched orders have no exit."""
+    return _time_in_window(row.get("entry_time_ms"), since_ms=since_ms, until_ms=until_ms)
+
+
+def _exit_in_report_window(row: dict[str, Any], *, since_ms: int, until_ms: int | None) -> bool:
+    """Closed real rows belong to the window by exit time, inclusive."""
+    return _time_in_window(row.get("exit_time_ms"), since_ms=since_ms, until_ms=until_ms)
+
+
+def _load_real_rows(conn: Any) -> list[dict[str, Any]]:
+    """Every synced real row. Pair roles need the full history, not one window."""
+    col_sql = ", ".join(_INSERT_COLS)
+    raw = conn.execute(f"SELECT {col_sql} FROM assist_real_trade").fetchall()
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if hasattr(item, "keys"):
+            rows.append(dict(item))
+        else:
+            rows.append(dict(zip(_INSERT_COLS, item, strict=True)))
+    return rows
+
+
+def _income_blocks_r(row: dict[str, Any]) -> bool:
+    """Pending and missing trades stay out of the R averages."""
+    return str(row.get("income_status") or "") in _R_INCOME_SKIP
 
 
 def _virtual_gap_counts(
@@ -1068,7 +1218,7 @@ def _virtual_gap_counts(
     until_ms: int | None,
     linked_signal_ids: set[str],
 ) -> tuple[int, int]:
-    """Closed sent tracks in the window: (no real trade, risk <= 0)."""
+    """Sent tracks whose exit is in the window: (no real trade, risk <= 0)."""
     sql = """
         SELECT t.signal_id, t.entry, t.stop, s.loss_at_stop
         FROM assist_track t
@@ -1099,6 +1249,10 @@ def _virtual_gap_counts(
 
 def _is_diff_pair(row: dict[str, Any]) -> bool:
     """Closed sent-track row used in the real-vs-virtual difference."""
+    if _income_blocks_r(row):
+        return False
+    if str(row.get("income_status") or "") != "complete":
+        return False
     if row.get("re_entry"):
         return False
     if row.get("commission_other_asset"):
@@ -1115,24 +1269,22 @@ def summarize_real_vs_virtual(
     until_ms: int | None = None,
     rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Closed cohort-linked rows plus unmatched/open/unknown counts since the gate start."""
-    if rows is None:
-        col_sql = ", ".join(_INSERT_COLS)
-        sql = f"SELECT {col_sql} FROM assist_real_trade WHERE entry_time_ms >= ?"
-        params: list[Any] = [int(since_ms)]
-        if until_ms is not None:
-            sql += " AND entry_time_ms <= ?"
-            params.append(int(until_ms))
-        raw = conn.execute(sql, params).fetchall()
-        rows = []
-        for r in raw:
-            if hasattr(r, "keys"):
-                rows.append(dict(r))
-            else:
-                rows.append(dict(zip(_INSERT_COLS, r, strict=True)))
-    else:
-        rows = [r for r in rows if _in_report_window(r, since_ms=since_ms, until_ms=until_ms)]
-    _label_pair_roles(rows)
+    """Window stats by exit time. Pair roles are labelled on the full history first."""
+    all_rows = _load_real_rows(conn) if rows is None else list(rows)
+    _label_pair_roles(all_rows)
+    open_n = sum(1 for r in all_rows if str(r.get("status") or "") == "open")
+    window_rows: list[dict[str, Any]] = []
+    for r in all_rows:
+        status = str(r.get("status") or "")
+        if status == "open":
+            continue
+        if status == "unmatched":
+            if _in_report_window(r, since_ms=since_ms, until_ms=until_ms):
+                window_rows.append(r)
+            continue
+        if status == "closed" and _exit_in_report_window(r, since_ms=since_ms, until_ms=until_ms):
+            window_rows.append(r)
+    rows = window_rows
 
     closed_cohort: list[dict[str, Any]] = []
     unmatched_by: dict[str, int] = {
@@ -1140,17 +1292,15 @@ def summarize_real_vs_virtual(
         "jv_no_log": 0,
         "owner": 0,
     }
-    open_n = 0
     unknown_n = 0
     unlinked_n = 0
     stop_trigger_missing_n = 0
     non_usdt_fee_n = 0
+    income_pending_n = 0
+    income_missing_n = 0
 
     for r in rows:
         status = str(r.get("status") or "")
-        if status == "open":
-            open_n += 1
-            continue
         if status == "unmatched":
             reason = str(r.get("ref_source") or "owner")
             if reason not in unmatched_by:
@@ -1158,6 +1308,13 @@ def summarize_real_vs_virtual(
             unmatched_by[reason] += 1
             continue
         if status != "closed":
+            continue
+        income_state = str(r.get("income_status") or "")
+        if income_state == "pending":
+            income_pending_n += 1
+        elif income_state == "missing":
+            income_missing_n += 1
+        if _income_blocks_r(r) or income_state != "complete":
             continue
         if str(r.get("exit_kind") or "") == "unknown":
             unknown_n += 1
@@ -1187,7 +1344,7 @@ def summarize_real_vs_virtual(
             non_usdt_fee_n += 1
         net_r = r.get("net_r_real")
         virt = r.get("net_r_virtual")
-        if net_r is not None and not other:
+        if net_r is not None and not other and not _income_blocks_r(r):
             nets.append(float(net_r))
             actual = r.get("net_r_actual")
             if actual is not None:
@@ -1211,7 +1368,7 @@ def summarize_real_vs_virtual(
     unmatched_n = sum(unmatched_by.values())
     linked_ids = {
         str(r["signal_id"])
-        for r in rows
+        for r in all_rows
         if r.get("signal_id")
         and str(r.get("status") or "") in {"closed", "open"}
         and str(r.get("side") or "") in {"long", "short"}
@@ -1226,12 +1383,16 @@ def summarize_real_vs_virtual(
     closed_real_n = sum(
         1
         for r in rows
-        if str(r.get("status") or "") == "closed" and str(r.get("side") or "") in {"long", "short"}
+        if str(r.get("status") or "") == "closed"
+        and str(r.get("side") or "") in {"long", "short"}
+        and str(r.get("income_status") or "") == "complete"
     )
     n_re_entry = sum(1 for r in rows if r.get("re_entry"))
     entry_slip_rs: list[float] = []
     for r in rows:
         if str(r.get("status") or "") != "closed":
+            continue
+        if _income_blocks_r(r) or str(r.get("income_status") or "") != "complete":
             continue
         value = slip_entry_r(
             side=str(r.get("side") or ""),
@@ -1274,6 +1435,8 @@ def summarize_real_vs_virtual(
         "unlinked_n": unlinked_n,
         "non_usdt_fee_n": non_usdt_fee_n,
         "stop_trigger_missing_n": stop_trigger_missing_n,
+        "income_pending_n": income_pending_n,
+        "income_missing_n": income_missing_n,
         "target_n": REAL_SAMPLE_TARGET,
     }
 
@@ -1282,6 +1445,22 @@ def _r_text(value: Any) -> str:
     if value is None:
         return "—"
     return _signed_r(float(value))
+
+
+def format_bkk_stamp(ms: int) -> str:
+    """Bangkok clock for one income row, e.g. ``09 พ.ย. 14:05``."""
+    stamp = datetime.fromtimestamp(int(ms) / 1000.0, tz=_BANGKOK)
+    month = _THAI_MONTHS[stamp.month - 1]
+    return f"{stamp.day:02d} {month} {stamp.hour:02d}:{stamp.minute:02d}"
+
+
+def _fmt_usdt(value: Any) -> str:
+    if value is None:
+        return "—"
+    number = float(value)
+    if number > 0:
+        return f"+{number:.2f}"
+    return f"{number:.2f}"
 
 
 def _report_window(summary: dict[str, Any]) -> str:
@@ -1307,7 +1486,7 @@ def format_real_lines(summary: dict[str, Any]) -> list[str]:
     mean_d_s = _fmt_bps(summary.get("mean_drift_bps"))
     mean_s_s = _fmt_bps(summary.get("mean_slip_stop_bps"))
     p90_s_s = _fmt_bps(summary.get("p90_slip_stop_bps"), n=stop_n)
-    return [
+    lines = [
         (
             f"ไม้จริง {window}: n={n} · เฉลี่ย {planned} (planned) · {actual} (actual) · "
             f"ต้องการอย่างน้อย {target} ไม้ก่อนสรุป"
@@ -1343,6 +1522,349 @@ def format_real_lines(summary: dict[str, Any]) -> list[str]:
             f"stop ไม่มี trigger n={int(summary.get('stop_trigger_missing_n') or 0)}"
         ),
     ]
+    lines.extend(_reconcile_lines(summary, window))
+    return lines
+
+
+def _reconcile_lines(summary: dict[str, Any], window: str) -> list[str]:
+    """Income counts and the Binance-vs-trades block. Detail lines follow."""
+    rec = summary.get("reconcile")
+    if not isinstance(rec, dict):
+        rec = {}
+    totals = rec.get("totals")
+    if not isinstance(totals, dict):
+        totals = {}
+    parts: list[str] = []
+    for category in INCOME_CATEGORIES:
+        item = totals.get(category)
+        binance = None
+        attributed = None
+        if isinstance(item, dict):
+            binance = item.get("binance")
+            attributed = item.get("trades")
+        parts.append(f"{category} ไบนานซ์ {_fmt_usdt(binance)} · ในไม้ {_fmt_usdt(attributed)}")
+    income_n = int(rec.get("income_n") or 0)
+    un_n = int(rec.get("unattributed_n") or 0)
+    lines = [
+        f"รอข้อมูล income {window}: n={int(summary.get('income_pending_n') or 0)}",
+        f"income ขาด {window}: n={int(summary.get('income_missing_n') or 0)}",
+        f"กระทบยอด income {window}: n={income_n} · " + " · ".join(parts),
+        f"จับ income ไม่ได้ {window}: n={un_n}",
+    ]
+    shown = list(rec.get("unattributed") or [])[:10]
+    for item in shown:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            "· "
+            f"{item.get('symbol')} {format_bkk_stamp(int(item.get('time_ms') or 0))} "
+            f"{item.get('category')} {_fmt_usdt(item.get('amount'))}"
+        )
+    rest = un_n - len(shown)
+    if rest > 0:
+        lines.append(f"และอีก {rest} รายการ")
+    missing = rec.get("missing")
+    if isinstance(missing, list):
+        for item in missing:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"· {item.get('symbol')} {format_bkk_stamp(int(item.get('time_ms') or 0))} income ขาด"
+            )
+    return lines
+
+
+def _exit_meta(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        data = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _id_list(raw: Any) -> list[int]:
+    if not isinstance(raw, list):
+        return []
+    out: list[int] = []
+    for item in raw:
+        try:
+            tid = int(item)
+        except (TypeError, ValueError):
+            continue
+        if tid > 0:
+            out.append(tid)
+    return out
+
+
+def _income_row_key(row: dict[str, Any]) -> tuple[str, str, int, str, str, str]:
+    return (
+        str(row.get("symbol") or "").upper(),
+        str(row.get("incomeType") or ""),
+        int(row.get("time") or 0),
+        str(row.get("tradeId") or ""),
+        str(row.get("income") or ""),
+        str(row.get("tranId") or ""),
+    )
+
+
+def build_income_reconcile(
+    client: BinanceFuturesClient,
+    rows: list[dict[str, Any]],
+    *,
+    since_ms: int,
+    until_ms: int,
+) -> dict[str, Any]:
+    """Binance income for ASSIST_SYMBOLS versus the sums stored on trades.
+
+    Read-only. Does not place, cancel, or edit an order.
+    """
+    symbols = tuple(ASSIST_SYMBOLS)
+    symbol_set = {str(sym).upper() for sym in symbols}
+    fetched: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int, str, str, str]] = set()
+    start = int(since_ms)
+    end = int(until_ms)
+    for symbol in symbols:
+        for category in INCOME_CATEGORIES:
+            page = fetch_income_range(
+                client,
+                symbol=symbol,
+                start_ms=start,
+                end_ms=end + 1,
+                income_type=category,
+            )
+            for row in page:
+                sym = str(row.get("symbol") or "").upper()
+                if sym not in symbol_set:
+                    continue
+                if str(row.get("incomeType") or "") != category:
+                    continue
+                tms = int(row.get("time") or 0)
+                if tms < start or tms > end:
+                    continue
+                key = _income_row_key(row)
+                if key in seen:
+                    continue
+                seen.add(key)
+                fetched.append(row)
+
+    realized_ids: set[tuple[str, int]] = set()
+    commission_ids: set[tuple[str, int]] = set()
+    funding_spans: list[tuple[str, int, int]] = []
+    for row in rows:
+        status = str(row.get("status") or "")
+        side = str(row.get("side") or "")
+        if status not in {"closed", "open"} or side not in {"long", "short"}:
+            continue
+        sym = str(row.get("symbol") or "").upper()
+        if sym not in symbol_set:
+            continue
+        meta = _exit_meta(row.get("exit_order_ids"))
+        for tid in _id_list(meta.get("trade_ids")):
+            realized_ids.add((sym, tid))
+            commission_ids.add((sym, tid))
+        for tid in _id_list(meta.get("entry_trade_ids")):
+            commission_ids.add((sym, tid))
+        entry_ms = row.get("entry_time_ms")
+        if entry_ms is None:
+            continue
+        exit_ms = row.get("exit_time_ms")
+        span_end = int(exit_ms) if exit_ms is not None else end
+        funding_spans.append((sym, int(entry_ms), span_end))
+
+    totals = {category: {"binance": 0.0, "trades": 0.0} for category in INCOME_CATEGORIES}
+    unattributed: list[dict[str, Any]] = []
+    for row in fetched:
+        category = str(row.get("incomeType") or "")
+        if category not in totals:
+            continue
+        try:
+            amount = float(row.get("income") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        totals[category]["binance"] += amount
+        sym = str(row.get("symbol") or "").upper()
+        tms = int(row.get("time") or 0)
+        attributed = False
+        if category == "FUNDING_FEE":
+            attributed = any(
+                span_sym == sym and opened < tms <= closed_ms for span_sym, opened, closed_ms in funding_spans
+            )
+        else:
+            try:
+                tid = int(row.get("tradeId") or 0)
+            except (TypeError, ValueError):
+                tid = 0
+            pool = realized_ids if category == "REALIZED_PNL" else commission_ids
+            attributed = tid > 0 and (sym, tid) in pool
+        if not attributed:
+            unattributed.append(
+                {
+                    "symbol": sym,
+                    "time_ms": tms,
+                    "category": category,
+                    "amount": amount,
+                }
+            )
+    unattributed.sort(key=lambda item: (int(item["time_ms"]), str(item["symbol"]), str(item["category"])))
+
+    for row in rows:
+        if str(row.get("status") or "") != "closed":
+            continue
+        if str(row.get("side") or "") not in {"long", "short"}:
+            continue
+        if str(row.get("symbol") or "").upper() not in symbol_set:
+            continue
+        if not _exit_in_report_window(row, since_ms=start, until_ms=end):
+            continue
+        if row.get("realized_pnl_usdt") is not None:
+            totals["REALIZED_PNL"]["trades"] += float(row["realized_pnl_usdt"])
+        if row.get("commission_usdt") is not None:
+            totals["COMMISSION"]["trades"] += float(row["commission_usdt"])
+        if row.get("funding_usdt") is not None:
+            totals["FUNDING_FEE"]["trades"] += float(row["funding_usdt"])
+
+    missing: list[dict[str, Any]] = []
+    for row in rows:
+        if str(row.get("status") or "") != "closed":
+            continue
+        if str(row.get("income_status") or "") != "missing":
+            continue
+        if str(row.get("side") or "") not in {"long", "short"}:
+            continue
+        if not _exit_in_report_window(row, since_ms=start, until_ms=end):
+            continue
+        missing.append(
+            {
+                "symbol": str(row.get("symbol") or "").upper(),
+                "time_ms": int(row.get("exit_time_ms") or 0),
+                "entry_order_id": str(row.get("entry_order_id") or ""),
+            }
+        )
+    missing.sort(key=lambda item: (int(item["time_ms"]), str(item["symbol"]), str(item["entry_order_id"])))
+    return {
+        "totals": totals,
+        "income_n": len(fetched),
+        "unattributed": unattributed,
+        "unattributed_n": len(unattributed),
+        "missing": missing,
+    }
+
+
+def _income_refresh_due(conn: Any, now_ms: int) -> bool:
+    row = conn.execute(
+        """
+        SELECT last_attempt_ms FROM assist_journal_sync
+        WHERE symbol=? AND position_side=? AND closed_at_ms=?
+        """,
+        (_INCOME_REFRESH_SYMBOL, _INCOME_REFRESH_SIDE, _INCOME_REFRESH_CLOSED_AT),
+    ).fetchone()
+    if row is None:
+        return True
+    last = row["last_attempt_ms"] if hasattr(row, "keys") else row[0]
+    if last is None:
+        return True
+    return int(now_ms) - int(last) >= INCOME_REFRESH_GAP_MS
+
+
+def _mark_income_refresh(conn: Any, now_ms: int) -> None:
+    conn.execute(
+        """
+        INSERT INTO assist_journal_sync (
+            symbol, position_side, closed_at_ms, attempts, last_attempt_ms, gave_up_logged
+        ) VALUES (?, ?, ?, 1, ?, 0)
+        ON CONFLICT(symbol, position_side, closed_at_ms) DO UPDATE SET
+            attempts = attempts + 1,
+            last_attempt_ms = excluded.last_attempt_ms
+        """,
+        (_INCOME_REFRESH_SYMBOL, _INCOME_REFRESH_SIDE, _INCOME_REFRESH_CLOSED_AT, int(now_ms)),
+    )
+    conn.commit()
+
+
+def _due_income_rows(conn: Any, now_ms: int) -> list[dict[str, Any]]:
+    """NULL, pending, or missing closes whose exit is still inside 7 days."""
+    cutoff = int(now_ms) - INCOME_REFRESH_LOOKBACK_MS
+    cur = conn.execute(
+        """
+        SELECT entry_order_id, entry_time_ms, exit_time_ms
+        FROM assist_real_trade
+        WHERE status='closed'
+          AND exit_time_ms IS NOT NULL
+          AND exit_time_ms >= ?
+          AND (income_status IS NULL OR income_status IN ('pending', 'missing'))
+        """,
+        (cutoff,),
+    )
+    out: list[dict[str, Any]] = []
+    for row in cur.fetchall():
+        if hasattr(row, "keys"):
+            out.append(dict(row))
+        else:
+            out.append(
+                {
+                    "entry_order_id": row[0],
+                    "entry_time_ms": row[1],
+                    "exit_time_ms": row[2],
+                }
+            )
+    return out
+
+
+def _upsert_real_row(conn: Any, row: dict[str, Any]) -> None:
+    placeholders = ",".join("?" for _ in _INSERT_COLS)
+    col_sql = ",".join(_INSERT_COLS)
+    updates = ", ".join(f"{col}=excluded.{col}" for col in _INSERT_COLS if col != "entry_order_id")
+    conn.execute(
+        f"INSERT INTO assist_real_trade ({col_sql}) VALUES ({placeholders}) "
+        f"ON CONFLICT(entry_order_id) DO UPDATE SET {updates}",
+        [row.get(col) for col in _INSERT_COLS],
+    )
+
+
+def refresh_incomplete_income(
+    conn: Any,
+    client: BinanceFuturesClient,
+    *,
+    now_ms: int,
+) -> dict[str, Any]:
+    """Re-read incomplete closes from the last 7 days, at most once per 30 minutes.
+
+    A failure returns without writing. Callers must not let it stop watch.
+    Missing rows older than 7 days are left as they are.
+    """
+    if not _income_refresh_due(conn, now_ms):
+        return {"ok": True, "refreshed": False, "reason": "throttled"}
+    due = _due_income_rows(conn, now_ms)
+    _mark_income_refresh(conn, now_ms)
+    if not due:
+        return {"ok": True, "refreshed": False, "reason": "none", "n": 0}
+    starts = [
+        int(item["entry_time_ms"]) if item.get("entry_time_ms") is not None else int(item["exit_time_ms"])
+        for item in due
+    ]
+    since = min(starts) - 60_000
+    due_ids = {str(item["entry_order_id"]) for item in due}
+    try:
+        built = build_real_rows(conn, client, since_ms=since, until_ms=int(now_ms))
+    except Exception as exc:  # noqa: BLE001 — watch, journal, and pauses must continue
+        logger.exception("assist income refresh failed")
+        return {"ok": False, "refreshed": False, "error": type(exc).__name__}
+    updated: list[str] = []
+    with transaction(conn):
+        for row in built:
+            oid = str(row.get("entry_order_id") or "")
+            if oid not in due_ids or str(row.get("status") or "") != "closed":
+                continue
+            _upsert_real_row(conn, row)
+            updated.append(oid)
+    return {"ok": True, "refreshed": True, "n": len(updated), "ids": updated}
 
 
 def run_real_report(
@@ -1354,9 +1876,12 @@ def run_real_report(
     sync: bool = True,
 ) -> dict[str, Any]:
     """Sync (optional) and summarize. ``sync=False`` builds in memory and never writes."""
+    end = int(until_ms if until_ms is not None else now_ms())
     if sync:
-        sync_result = sync_real_trades(conn, client, since_ms=since_ms, until_ms=until_ms)
-        summary = summarize_real_vs_virtual(conn, since_ms=since_ms, until_ms=until_ms)
+        sync_result = sync_real_trades(conn, client, since_ms=since_ms, until_ms=end)
+        summary = summarize_real_vs_virtual(conn, since_ms=since_ms, until_ms=end)
+        stored = _load_real_rows(conn)
+        summary["reconcile"] = build_income_reconcile(client, stored, since_ms=since_ms, until_ms=end)
         lines = format_real_lines(summary)
         return {
             "ok": True,
@@ -1365,8 +1890,9 @@ def run_real_report(
             "lines": lines,
             "text": "\n".join(lines),
         }
-    rows = build_real_rows(conn, client, since_ms=since_ms, until_ms=until_ms)
-    summary = summarize_real_vs_virtual(conn, since_ms=since_ms, until_ms=until_ms, rows=rows)
+    rows = build_real_rows(conn, client, since_ms=since_ms, until_ms=end)
+    summary = summarize_real_vs_virtual(conn, since_ms=since_ms, until_ms=end, rows=rows)
+    summary["reconcile"] = build_income_reconcile(client, rows, since_ms=since_ms, until_ms=end)
     lines = format_real_lines(summary)
     return {
         "ok": True,
