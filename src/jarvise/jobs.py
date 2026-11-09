@@ -20,6 +20,11 @@ from urllib.parse import parse_qs
 from jarvise.charts import export_candle_graphs
 from jarvise.disk import disk_edge_alerted, disk_free
 from jarvise.rag import doctrine_snippets, publish_redis_status
+from jarvise_assist.execute import (
+    assist_execute_mode,
+    build_trade_client,
+    run_exec_recovery,
+)
 from jarvise_assist.explore import execute_explore
 from jarvise_assist.listen import start_listener_thread
 from jarvise_assist.signals import run_assist_morning, run_assist_signals
@@ -44,6 +49,7 @@ from jarvise_notify import (
     notify_pending_digest,
     notify_risk_halt,
 )
+from jarvise_notify.telegram import send_message
 from jarvise_notify.weekly import WEEKLY_BUILD_FAILURE, build_weekly_report, notify_weekly_build_failure
 from jarvise_obs.metrics import observe_job, render_prometheus, set_gauge
 from jarvise_paper.auto_decide import run_auto_decide
@@ -522,31 +528,25 @@ def run_assist_watch_job() -> tuple[int, dict[str, Any]]:
         conn = open_db(path)
         try:
             payload = run_assist_watch(conn, now_ms_value=now)
-            try:
-                from jarvise_assist.execute import (
-                    assist_execute_mode,
-                    build_trade_client,
-                    run_exec_recovery,
-                )
-                from jarvise_notify.telegram import send_message
-
-                if assist_execute_mode() in {"testnet", "live"}:
-                    trade, _reason = build_trade_client()
-                    if trade is not None:
-                        recovery = run_exec_recovery(conn, trade, now, send=send_message)
-                        payload["exec_recovery"] = recovery
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("assist exec recovery failed")
-                payload["exec_recovery"] = {
-                    "ok": False,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
         except Exception as exc:  # noqa: BLE001
             payload = {
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
                 "paper_only": True,
                 "at_ms": now,
+            }
+        try:
+            now_recovery = int(time.time() * 1000)
+            if assist_execute_mode() in {"testnet", "live"}:
+                trade, _reason = build_trade_client()
+                if trade is not None:
+                    recovery = run_exec_recovery(conn, trade, now_recovery, send=send_message)
+                    payload["exec_recovery"] = recovery
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("assist exec recovery failed")
+            payload["exec_recovery"] = {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
             }
         finally:
             conn.close()

@@ -39,6 +39,7 @@ from jarvise_assist.execute import (
     RECOVER_MAX_AGE_MS,
     BinanceTradeClient,
     TradeClientError,
+    _recovery_notify,
     assist_execute_mode,
     build_trade_client,
     cancel_jv_orders_for_symbol,
@@ -4688,11 +4689,15 @@ def test_recovery_claim_one_of_two_wins(tmp_path: Path) -> None:
     intent_id = _entry_intent(conn)
     finish_exec_intent(conn, intent_id, status="unknown", result_text="x")
     ts = now_ms()
-    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts) is True
+    token = claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts)
+    assert isinstance(token, int)
     # recovering is leased: second claim inside the lease fails.
-    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + 1) is False
+    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + 1) is None
     # After the lease expires, recovering is claimable again.
-    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + RECOVER_LEASE_MS) is True
+    assert isinstance(
+        claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + RECOVER_LEASE_MS),
+        int,
+    )
     # Fresh confirmed with recent log is blocked.
     finish_exec_intent(conn, intent_id, status="confirmed", result_text="")
     conn.execute(
@@ -4700,7 +4705,7 @@ def test_recovery_claim_one_of_two_wins(tmp_path: Path) -> None:
         (intent_id, "worker_claim", "local", ts + RECOVER_LEASE_MS + 1),
     )
     conn.commit()
-    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + RECOVER_LEASE_MS + 2) is False
+    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + RECOVER_LEASE_MS + 2) is None
     conn.close()
 
 
@@ -5799,6 +5804,156 @@ def test_recovery_exit_not_found_x3_over_15min_failed(
     )
     row = get_exec_intent(conn, intent_id)
     assert row is not None and row["status"] == "failed"
-    assert any("ปิดไม้ไม่สำเร็จ" in t for t in sent)
+    assert any("position และ stop ยังเปิดอยู่" in t for t in sent)
     assert not any(c[0] == "DELETE" for c in transport.calls)
+    conn.close()
+
+
+def test_exit_unknown_not_found_open_stays_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ex-unknown.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    claim_exec_intent(conn, intent_id)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("POST", "/fapi/v1/order"): httpx.TimeoutException("exit send"),
+        ("GET", "/fapi/v1/order"): (400, {"code": -2013, "msg": "Order does not exist."}),
+    }
+    transport = RecordingTransport(handlers)
+    result = run_exit_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert getattr(result, "status", None) == "unknown"
+    assert result == MSG_OUTCOME_UNKNOWN
+    assert "ปิดไม้ไม่สำเร็จ" not in result
+    conn.close()
+
+
+def test_exit_cancel_failure_warns_then_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ex-cancel.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 120_000,
+    )
+    claim_exec_intent(conn, intent_id)
+    stop_id = "jv-old-sl0"
+    deletes = {"n": 0}
+
+    def delete(clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        deletes["n"] += 1
+        if deletes["n"] == 1:
+            return (500, {"code": -1001, "msg": "internal"})
+        return (200, {"algoId": 1, "code": "200", "msg": "success"})
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v3/positionRisk"): _open_then_flat([_open_pos()]),
+        ("POST", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/userTrades"): (200, [{"realizedPnl": "1.2"}]),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (
+            200,
+            [
+                {
+                    "algoId": 5,
+                    "clientAlgoId": stop_id,
+                    "symbol": "DOGEUSDT",
+                    "type": "STOP_MARKET",
+                    "side": "BUY",
+                    "positionSide": "BOTH",
+                    "reduceOnly": True,
+                    "stopPrice": "0.083",
+                }
+            ],
+        ),
+        ("DELETE", "/fapi/v1/algoOrder"): delete,
+    }
+    transport = RecordingTransport(handlers)
+    result = run_exit_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
+    assert str(result).startswith("✅ ปิด")
+    assert "ยกเลิก stop/TP เดิมไม่สำเร็จ" in result
+    assert stop_id in result
+    assert getattr(result, "status", None) == "unknown"
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=str(result), expect_status="confirmed")
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        ts,
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] == "done"
+    assert deletes["n"] >= 2
+    conn.close()
+
+
+def test_lost_lease_sends_no_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr("jarvise_assist.execute.renew_exec_recovery_lease", lambda *a, **k: False)
+    conn = open_db(tmp_path / "lost-lease.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("POST", "/fapi/v1/algoOrder"): (200, {"algoId": 1}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    assert sent == []
+    assert not any(c[0] == "POST" for c in transport.calls)
+    assert not any(c[0] == "GET" for c in transport.calls)
+    conn.close()
+
+
+def test_lost_conditional_write_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "lost-write.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text="ก่อนหน้า")
+    monkeypatch.setattr("jarvise_assist.execute.finish_exec_intent", lambda *a, **k: False)
+    sent: list[str] = []
+    _recovery_notify(
+        lambda t, **_k: sent.append(t) or True,
+        conn,
+        intent_id,
+        status="done",
+        text="ไม่ควรส่ง",
+        expect_status="recovering",
+    )
+    assert sent == []
     conn.close()

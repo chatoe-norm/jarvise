@@ -1255,11 +1255,12 @@ def claim_exec_intent_for_recovery(
     now_ms_value: int,
     stale_after_ms: int = 10 * 60_000,
     lease_ms: int = 4 * 60_000,
-) -> bool:
+) -> int | None:
     """Claim unknown, leased recovering, or confirmed with no log row in 10 minutes.
 
     recovering is claimable only when there is no recover_claim log in the last lease_ms.
     The recover_claim INSERT runs in the same transaction as the UPDATE.
+    Returns the recover_claim log row id, or None when this caller lost the claim.
     """
     confirmed_cutoff = int(now_ms_value) - int(stale_after_ms)
     lease_cutoff = int(now_ms_value) - int(lease_ms)
@@ -1288,8 +1289,9 @@ def claim_exec_intent_for_recovery(
         """,
         (intent_id, lease_cutoff, confirmed_cutoff),
     )
+    token: int | None = None
     if cur.rowcount == 1:
-        conn.execute(
+        inserted = conn.execute(
             """
             INSERT INTO assist_exec_log (
                 intent_id, step, endpoint, client_order_id, http_status,
@@ -1298,6 +1300,30 @@ def claim_exec_intent_for_recovery(
             """,
             (intent_id, int(now_ms_value)),
         )
+        token = int(inserted.lastrowid)
+    conn.commit()
+    return token
+
+
+def renew_exec_recovery_lease(
+    conn: Any,
+    intent_id: str,
+    token: int,
+    *,
+    now_ms_value: int,
+) -> bool:
+    """Extend this pass's lease only while its claim row is still the latest one."""
+    cur = conn.execute(
+        """
+        UPDATE assist_exec_log SET created_at_ms=?
+        WHERE id=? AND step='recover_claim'
+          AND id=(
+            SELECT MAX(id) FROM assist_exec_log
+            WHERE intent_id=? AND step='recover_claim'
+          )
+        """,
+        (int(now_ms_value), int(token), intent_id),
+    )
     conn.commit()
     return cur.rowcount == 1
 
