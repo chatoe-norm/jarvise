@@ -24,6 +24,7 @@ from jarvise_assist.real_trades import (
     format_bkk_window,
     format_real_lines,
     linked_signal_id,
+    slip_entry_r,
     summarize_real_vs_virtual,
     sync_real_trades,
 )
@@ -303,7 +304,10 @@ def test_actual_r_uses_fill_versus_planned_stop(tmp_path: Path) -> None:
     assert row["net_r_real"] == pytest.approx(net / 10)
     assert row["net_r_actual"] == pytest.approx(net / 12)
     summary = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS, until_ms=until)
-    assert summary["mean_slip_r"] == pytest.approx(net / 12 - net / 10)
+    assert "mean_slip_r" not in summary
+    # Long fill 102 vs plan 100, stop 90: (102-100)/10 = +0.2R (worse).
+    assert summary["slip_entry_r_n"] == 1
+    assert summary["mean_slip_entry_r"] == pytest.approx(0.2)
     conn.close()
 
 
@@ -413,13 +417,80 @@ def test_missing_stop_or_zero_risk_leaves_actual_r_none(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_slip_entry_r_sign_for_worse_and_better_fills() -> None:
+    # Distance is 10 in every case. A worse fill is positive for both sides.
+    assert slip_entry_r(side="long", entry_fill_avg=102, plan_entry=100, planned_stop=90) == pytest.approx(
+        0.2
+    )
+    assert slip_entry_r(side="short", entry_fill_avg=98, plan_entry=100, planned_stop=110) == pytest.approx(
+        0.2
+    )
+    assert slip_entry_r(side="long", entry_fill_avg=98, plan_entry=100, planned_stop=90) == pytest.approx(
+        -0.2
+    )
+    assert slip_entry_r(side="short", entry_fill_avg=102, plan_entry=100, planned_stop=110) == pytest.approx(
+        -0.2
+    )
+    assert slip_entry_r(side="long", entry_fill_avg=100, plan_entry=100, planned_stop=100) is None
+    assert slip_entry_r(side="short", entry_fill_avg=100, plan_entry=100, planned_stop=100) is None
+    assert slip_entry_r(side="long", entry_fill_avg=None, plan_entry=100, planned_stop=90) is None
+    assert slip_entry_r(side="long", entry_fill_avg=102, plan_entry=None, planned_stop=90) is None
+    assert slip_entry_r(side="long", entry_fill_avg=102, plan_entry=100, planned_stop=None) is None
+
+
+def test_closed_real_without_virtual_counts_as_unpaired(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "unpaired.db")
+    ts = SPEC_START_MS + 1_000
+    conn.execute(
+        """
+        INSERT INTO assist_signal (
+            id, symbol, side, entry, stop, target, qty, notional, leverage, loss_at_stop,
+            created_at_ms, expires_at_ms, status, sent_at_ms
+        ) VALUES ('as_pair', 'BTCUSDT', 'long', 100, 90, 120, 1, 100, 2, 10, ?, ?, 'taken', ?)
+        """,
+        (ts, ts + 1, ts),
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_track (
+            signal_id, symbol, side, entry, stop, target, qty, sent_at_ms,
+            exit_at_ms, exit_px, exit_reason, gross_r, net_r, cohort, kind
+        ) VALUES ('as_pair', 'BTCUSDT', 'long', 100, 90, 120, 1, ?, ?, 110, 'flat', 0.5, 0.4, ?, 'sent')
+        """,
+        (ts, ts + 2_000, TRACK_COHORT),
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_real_trade (
+            symbol, side, entry_order_id, entry_client_id, status, updated_at_ms,
+            entry_time_ms, signal_id, net_r_real, net_r_virtual
+        ) VALUES ('BTCUSDT', 'long', 'paired', 'jv-pair-mkt', 'closed', ?, ?, 'as_pair', 0.5, 0.4)
+        """,
+        (ts, ts),
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_real_trade (
+            symbol, side, entry_order_id, entry_client_id, status, updated_at_ms,
+            entry_time_ms, signal_id, net_r_real, net_r_virtual
+        ) VALUES ('ETHUSDT', 'long', 'solo', 'jv-solo-mkt', 'closed', ?, ?, NULL, -0.3, NULL)
+        """,
+        (ts + 1, ts + 1),
+    )
+    conn.commit()
+    summary = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS, until_ms=ts + 10_000)
+    assert summary["n_pairs"] == 1
+    assert summary["n_real_without_pair"] == 1
+    conn.close()
+
+
 def test_labels_state_unit_bangkok_window_and_n() -> None:
     summary = {
         "closed_n": 5,
         "mean_net_r": 0.21,
         "mean_net_r_actual": 0.18,
-        "mean_slip_r": -0.03,
-        "slip_r_n": 5,
+        "mean_slip_entry_r": 0.03,
+        "slip_entry_r_n": 5,
         "mean_diff_r": 0.05,
         "n_pairs": 3,
         "n_real_without_pair": 1,
@@ -449,13 +520,19 @@ def test_labels_state_unit_bangkok_window_and_n() -> None:
         "target_n": 20,
     }
     lines = format_real_lines(summary)
+    text_block = "\n".join(lines)
     assert lines[0] == (
-        "ไม้จริง 01–07 พ.ย. (เวลาไทย): n=5 · เฉลี่ย +0.21R (planned) · +0.18R (actual) · ต้องการ 20"
+        "ไม้จริง 01–07 พ.ย. (เวลาไทย): n=5 · เฉลี่ย +0.21R (planned) · "
+        "+0.18R (actual) · ต้องการอย่างน้อย 20 ไม้ก่อนสรุป"
     )
+    assert "slip เข้าเป็น R 01–07 พ.ย. (เวลาไทย): n=5 · เฉลี่ย +0.03R (บวก = เข้าแย่กว่าแผน)" in lines
+    assert "คู่จริง-จำลอง 01–07 พ.ย. (เวลาไทย): n=3 · ต่างเฉลี่ย (จริง − จำลอง) +0.05R" in lines
+    assert "slippage ใน R" not in text_block
+    assert "actual − planned" not in text_block
+    assert "mean_slip_r" not in summary
     for line in lines:
         assert WINDOW in line
         assert "n=" in line
-    assert "slippage ใน R 01–07 พ.ย. (เวลาไทย): n=5 · เฉลี่ย -0.03R" in lines
     assert any("bps" in line for line in lines)
     text = format_weekly_summary(
         counts={"sent": 0, "skipped": 0, "taken": 0},

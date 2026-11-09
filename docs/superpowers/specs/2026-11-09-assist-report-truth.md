@@ -43,7 +43,18 @@ existing rows. Values appear only when the normal sync rebuilds a row.
 stores. If `planned_stop`, `entry_fill_avg`, or `entry_qty` is missing, or
 `risk_actual_usdt <= 0`, `net_r_actual` is NULL. That is not an error.
 
-Slippage in R is `net_r_actual - net_r_real` where both exist.
+`net_r_actual - net_r_real` is not a slippage measure: both use the same net
+USDT and differ only in the denominator, so the sign follows win or loss
+rather than fill quality.
+
+Entry slip in R is computed in the report and is not stored:
+
+`slip_entry_r = sgn * (entry_fill_avg - plan_entry) / |plan_entry - planned_stop|`
+
+`sgn` is +1 for a long and -1 for a short. `plan_entry` is the preview entry
+(`signal_entry`). Positive means the fill was worse than the plan. The value
+is None when any input is missing or the plan distance is <= 0. The report
+shows the mean and n.
 
 ## Pairs and virtual rows
 
@@ -67,9 +78,13 @@ summary's `since`/`until`.
 The weekly job still syncs from the PR #280 gate (`SPEC_START_MS`) and labels
 that sample through the report clock. Example:
 
-`ไม้จริง 01–07 พ.ย. (เวลาไทย): n=5 · เฉลี่ย +0.21R (planned) · +0.18R (actual) · ต้องการ 20`
+`ไม้จริง 01–07 พ.ย. (เวลาไทย): n=5 · เฉลี่ย +0.21R (planned) · +0.18R (actual) · ต้องการอย่างน้อย 20 ไม้ก่อนสรุป`
 
-`ต้องการ 20` remains the closed-sample target on that line.
+`slip เข้าเป็น R 01–07 พ.ย. (เวลาไทย): n=5 · เฉลี่ย +0.03R (บวก = เข้าแย่กว่าแผน)`
+
+`คู่จริง-จำลอง 01–07 พ.ย. (เวลาไทย): n=3 · ต่างเฉลี่ย (จริง − จำลอง) +0.05R`
+
+`ต้องการอย่างน้อย 20 ไม้ก่อนสรุป` is the closed-sample target on the first line.
 
 ## Journal
 

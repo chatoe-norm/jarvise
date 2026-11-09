@@ -315,6 +315,33 @@ def linked_signal_id(preview: dict[str, Any]) -> str | None:
     return None
 
 
+def slip_entry_r(
+    *,
+    side: str,
+    entry_fill_avg: float | None,
+    plan_entry: float | None,
+    planned_stop: float | None,
+) -> float | None:
+    """Entry slip in R. Positive means the fill was worse than the plan.
+
+    ``plan_entry`` is the preview entry. None when an input is missing or the
+    plan distance is <= 0. Not stored.
+    """
+    if entry_fill_avg is None or plan_entry is None or planned_stop is None:
+        return None
+    side_l = str(side).lower()
+    if side_l == "long":
+        sgn = 1.0
+    elif side_l == "short":
+        sgn = -1.0
+    else:
+        return None
+    distance = abs(float(plan_entry) - float(planned_stop))
+    if distance <= 0:
+        return None
+    return sgn * (float(entry_fill_avg) - float(plan_entry)) / distance
+
+
 def _risk_actual(
     *,
     closed: bool,
@@ -1148,7 +1175,6 @@ def summarize_real_vs_virtual(
 
     nets: list[float] = []
     actuals: list[float] = []
-    slip_rs: list[float] = []
     diffs: list[float] = []
     entry_slips: list[float] = []
     drifts: list[float] = []
@@ -1166,7 +1192,6 @@ def summarize_real_vs_virtual(
             actual = r.get("net_r_actual")
             if actual is not None:
                 actuals.append(float(actual))
-                slip_rs.append(float(actual) - float(net_r))
             if virt is not None and not r.get("re_entry"):
                 diffs.append(float(net_r) - float(virt))
         slip_e = r.get("slip_entry_bps")
@@ -1204,13 +1229,25 @@ def summarize_real_vs_virtual(
         if str(r.get("status") or "") == "closed" and str(r.get("side") or "") in {"long", "short"}
     )
     n_re_entry = sum(1 for r in rows if r.get("re_entry"))
+    entry_slip_rs: list[float] = []
+    for r in rows:
+        if str(r.get("status") or "") != "closed":
+            continue
+        value = slip_entry_r(
+            side=str(r.get("side") or ""),
+            entry_fill_avg=r.get("entry_fill_avg"),
+            plan_entry=r.get("signal_entry"),
+            planned_stop=r.get("planned_stop"),
+        )
+        if value is not None:
+            entry_slip_rs.append(value)
     window_end = int(until_ms) if until_ms is not None else now_ms()
     return {
         "closed_n": len(closed_cohort),
         "mean_net_r": statistics.mean(nets) if nets else None,
         "mean_net_r_actual": statistics.mean(actuals) if actuals else None,
-        "mean_slip_r": statistics.mean(slip_rs) if slip_rs else None,
-        "slip_r_n": len(slip_rs),
+        "mean_slip_entry_r": statistics.mean(entry_slip_rs) if entry_slip_rs else None,
+        "slip_entry_r_n": len(entry_slip_rs),
         "mean_diff_r": statistics.mean(diffs) if diffs else None,
         "n_pairs": len(pair_rows),
         "n_real_without_pair": closed_real_n - len(pair_rows),
@@ -1264,18 +1301,24 @@ def format_real_lines(summary: dict[str, Any]) -> list[str]:
     actual = _r_text(summary.get("mean_net_r_actual"))
     entry_n = int(summary.get("entry_slip_n") or 0)
     stop_n = int(summary.get("stop_n") or 0)
-    slip_n = int(summary.get("slip_r_n") or 0)
+    slip_r_n = int(summary.get("slip_entry_r_n") or 0)
     mean_e_s = _fmt_bps(summary.get("mean_slip_entry_bps"))
     p90_e_s = _fmt_bps(summary.get("p90_slip_entry_bps"), n=entry_n)
     mean_d_s = _fmt_bps(summary.get("mean_drift_bps"))
     mean_s_s = _fmt_bps(summary.get("mean_slip_stop_bps"))
     p90_s_s = _fmt_bps(summary.get("p90_slip_stop_bps"), n=stop_n)
     return [
-        (f"ไม้จริง {window}: n={n} · เฉลี่ย {planned} (planned) · {actual} (actual) · ต้องการ {target}"),
-        f"slippage ใน R {window}: n={slip_n} · เฉลี่ย {_r_text(summary.get('mean_slip_r'))}",
+        (
+            f"ไม้จริง {window}: n={n} · เฉลี่ย {planned} (planned) · {actual} (actual) · "
+            f"ต้องการอย่างน้อย {target} ไม้ก่อนสรุป"
+        ),
+        (
+            f"slip เข้าเป็น R {window}: n={slip_r_n} · "
+            f"เฉลี่ย {_r_text(summary.get('mean_slip_entry_r'))} (บวก = เข้าแย่กว่าแผน)"
+        ),
         (
             f"คู่จริง-จำลอง {window}: n={int(summary.get('n_pairs') or 0)} · "
-            f"ต่างเฉลี่ย {_r_text(summary.get('mean_diff_r'))}"
+            f"ต่างเฉลี่ย (จริง − จำลอง) {_r_text(summary.get('mean_diff_r'))}"
         ),
         f"ไม้จริงที่ไม่มีคู่ {window}: n={int(summary.get('n_real_without_pair') or 0)}",
         f"ไม้จำลองที่ไม่มีไม้จริง {window}: n={int(summary.get('n_virtual_without_real') or 0)}",
