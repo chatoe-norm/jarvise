@@ -32,8 +32,12 @@ from jarvise_assist.execute import (
     MSG_ONE_WAY,
     MSG_ORDER_NOT_FOUND,
     MSG_OUTCOME_UNKNOWN,
+    MSG_RECOVER_SIDE_MISMATCH,
+    MSG_RECOVER_STALE,
     MSG_STOP_CLOSED,
     MSG_STOP_UNVERIFIABLE,
+    RECOVER_LEASE_MS,
+    RECOVER_MAX_AGE_MS,
     BinanceTradeClient,
     TradeClientError,
     assist_execute_mode,
@@ -61,6 +65,7 @@ from jarvise_assist.store import (
     insert_signal,
     insert_watch_advice,
     now_ms,
+    symbol_has_in_flight_exec,
     upsert_watch_position,
 )
 from jarvise_assist.watch import flush_held_watch_advice, run_assist_watch
@@ -4227,16 +4232,18 @@ def test_recovery_claim_one_of_two_wins(tmp_path: Path) -> None:
     finish_exec_intent(conn, intent_id, status="unknown", result_text="x")
     ts = now_ms()
     assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts) is True
-    # Second claim while recovering still wins (status recovering is claimable).
-    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + 1) is True
+    # recovering is leased: second claim inside the lease fails.
+    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + 1) is False
+    # After the lease expires, recovering is claimable again.
+    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + RECOVER_LEASE_MS) is True
     # Fresh confirmed with recent log is blocked.
     finish_exec_intent(conn, intent_id, status="confirmed", result_text="")
     conn.execute(
         "INSERT INTO assist_exec_log (intent_id, step, endpoint, created_at_ms) VALUES (?,?,?,?)",
-        (intent_id, "worker_claim", "local", ts + 2),
+        (intent_id, "worker_claim", "local", ts + RECOVER_LEASE_MS + 1),
     )
     conn.commit()
-    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + 3) is False
+    assert claim_exec_intent_for_recovery(conn, intent_id, now_ms_value=ts + RECOVER_LEASE_MS + 2) is False
     conn.close()
 
 
@@ -4302,6 +4309,7 @@ def test_account_modes_unreadable_and_one_way_on_ms(tmp_path: Path, monkeypatch:
 
 
 def test_stale_card_stop_change_expired_same_stop_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Testnet compares side only; a stop mismatch must not expire. Side change still expires."""
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     reset_trade_key_cache()
     conn = open_db(tmp_path / "stale.db")
@@ -4324,7 +4332,8 @@ def test_stale_card_stop_change_expired_same_stop_ok(tmp_path: Path, monkeypatch
     preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
     assert preview["ok"] is True
     intent_id = str(preview["intent_id"])
-    # Change invalidation so rounded stop differs from the preview.
+    _attach_verified_sl0(handlers, intent_id)
+    # Change invalidation so rounded stop differs — testnet must not expire.
     conn.execute(
         "UPDATE analysis_output SET invalidation_price=? WHERE symbol=?",
         (0.09, "DOGEUSDT"),
@@ -4340,9 +4349,41 @@ def test_stale_card_stop_change_expired_same_stop_ok(tmp_path: Path, monkeypatch
         trade=trade,
         now_ms_value=now,
     )
-    assert any(MSG_EXPIRED in t for t in sent)
-    assert get_exec_intent(conn, intent_id)["status"] == "expired"
-    assert not any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in transport.calls)
+    assert not any(MSG_EXPIRED in t for t in sent)
+    assert get_exec_intent(conn, intent_id)["status"] != "expired"
+
+    # Side change still expires on ey: confirm.
+    intent2 = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "qty": "100",
+            "stop": "0.083",
+            "target": "0.07",
+            "leverage": 5,
+            "entry": "0.08",
+            "loss_at_stop": "0.3",
+            "r_distance": "0.003",
+        },
+        created_at_ms=now + 1,
+        expires_at_ms=now + 120_000,
+    )
+    conn.execute("UPDATE analysis_output SET action=? WHERE symbol=?", ("long", "DOGEUSDT"))
+    conn.commit()
+    sent2: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"ey:{intent2}",
+        send=lambda t, **_: sent2.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now + 1,
+    )
+    assert any(MSG_EXPIRED in t for t in sent2)
+    assert get_exec_intent(conn, intent2)["status"] == "expired"
     conn.close()
 
 
@@ -4379,5 +4420,570 @@ def test_exit_partial_leaves_stop_no_cancel(tmp_path: Path, monkeypatch: pytest.
     transport = RecordingTransport(handlers)
     result = run_exit_sequence(conn, intent_id, trade=_client(transport), sleep=_noop_sleep)
     assert "ปิดบางส่วน" in result
+    assert "เช็ก stop ของส่วนที่เหลือ" in result
+    assert not any(c[0] == "DELETE" for c in transport.calls)
+    conn.close()
+
+
+def test_recovery_lease_blocks_second_slr_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """First pass places -slr then stays recovering (verify UNVERIFIABLE); second pass posts none."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "lease-slr.db")
+    t0 = 1_700_000_000_000
+    intent_id = _entry_intent(conn, ts=t0)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    slr = client_order_id(intent_id, "slr")
+    placed = {"ok": False}
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        return (200, [])
+
+    def place_slr(clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        placed["ok"] = True
+        return (200, {"algoId": 99, "clientAlgoId": clean.get("clientAlgoId")})
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
+        ("GET", "/fapi/v1/algoOrder"): (500, {"code": -1001, "msg": "timeout"}),
+        ("POST", "/fapi/v1/algoOrder"): place_slr,
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    run_exec_recovery(conn, trade, t0 + 1_000, send=lambda *_a, **_k: True, sleep=_noop_sleep)
+    assert placed["ok"] is True
+    assert get_exec_intent(conn, intent_id)["status"] == "recovering"
+    posts_after_first = sum(
+        1
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("clientAlgoId") == slr
+    )
+    assert posts_after_first == 1
+    # Second pass inside the lease must not claim or post another -slr.
+    run_exec_recovery(conn, trade, t0 + 2_000, send=lambda *_a, **_k: True, sleep=_noop_sleep)
+    posts_total = sum(
+        1
+        for c in transport.calls
+        if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("clientAlgoId") == slr
+    )
+    assert posts_total == 1
+    conn.close()
+
+
+def test_recovery_filled_flat_done_no_orders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "filled-flat.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "done"
+    assert MSG_ALREADY_CLOSED in sent
+    assert not any(c[0] == "POST" for c in transport.calls)
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is False
+    conn.close()
+
+
+def test_recovery_not_filled_with_position_fails_no_slr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "nf-pos.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "0", "avgPrice": "0", "status": "CANCELED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "failed"
+    assert any("เข้าไม้ไม่สำเร็จ" in t for t in sent)
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_recovery_opposite_side_mismatch_no_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "side-mis.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    # Intent is short; position is long.
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos(amt="100")]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "failed"
+    assert any(MSG_RECOVER_SIDE_MISMATCH.format(symbol="DOGEUSDT") in t for t in sent)
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_recovery_older_than_2h_stale_no_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "stale-2h.db")
+    created = 1_700_000_000_000
+    intent_id = _entry_intent(conn, ts=created)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (200, {"orderId": 1, "status": "FILLED", "executedQty": "100"}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    now = created + RECOVER_MAX_AGE_MS + 1
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now,
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "stale"
+    assert len(sent) == 1
+    assert MSG_RECOVER_STALE.format(symbol="DOGEUSDT") in sent[0]
+    assert transport.calls == []
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is False
+    conn.close()
+
+
+def test_recovery_slr_timeout_then_verifies_no_cls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "slr-to.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    slr = client_order_id(intent_id, "slr")
+    oa_n = {"n": 0}
+
+    def place_timeout(_clean: dict[str, Any]) -> BaseException:
+        return httpx.ConnectTimeout("slr timeout")
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        oa_n["n"] += 1
+        # First read (pre-place verify) empty; post-timeout verify finds -slr.
+        if oa_n["n"] >= 2:
+            return (200, [_verified_stop(client_id=slr)])
+        return (200, [])
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("POST", "/fapi/v1/algoOrder"): place_timeout,
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "done"
+    assert not any(
+        c[0] == "POST"
+        and c[1] == "/fapi/v1/order"
+        and c[2].get("origClientOrderId", "").endswith("-cls")
+        or (
+            c[0] == "POST"
+            and c[1] == "/fapi/v1/order"
+            and str(c[2].get("newClientOrderId", "")).endswith("-cls")
+        )
+        for c in transport.calls
+    )
+    cls_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST"
+        and c[1] == "/fapi/v1/order"
+        and str(c[2].get("newClientOrderId") or "").endswith("-cls")
+    ]
+    assert cls_posts == []
+    conn.close()
+
+
+def test_recovery_slr_4116_already_verifies_no_cls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "slr-4116.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    slr = client_order_id(intent_id, "slr")
+    oa_n = {"n": 0}
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        oa_n["n"] += 1
+        if oa_n["n"] >= 2:
+            return (200, [_verified_stop(client_id=slr)])
+        return (200, [])
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("POST", "/fapi/v1/algoOrder"): (400, {"code": -4116, "msg": "ClientAlgoId already exists"}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] == "done"
+    assert not any(
+        c[0] == "POST"
+        and c[1] == "/fapi/v1/order"
+        and str(c[2].get("newClientOrderId") or "").endswith("-cls")
+        for c in transport.calls
+    )
+    conn.close()
+
+
+def test_recovery_stop_in_open_list_no_placement_log_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "open-list.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    sl0 = client_order_id(intent_id, "sl0")
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, [_verified_stop(client_id=sl0)]),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] == "done"
+    assert not any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in transport.calls)
+    conn.close()
+
+
+def test_recovery_open_algo_raise_unverifiable_no_orders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "oa-raise.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+
+    def raise_oa(_clean: dict[str, Any]) -> BaseException:
+        return httpx.ConnectError("openAlgo down")
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): raise_oa,
+        ("POST", "/fapi/v1/algoOrder"): (200, {"algoId": 1}),
+        ("POST", "/fapi/v1/order"): (200, {"orderId": 9, "executedQty": "100", "status": "FILLED"}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] == "recovering"
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_recovery_open_algo_dict_unverifiable_no_orders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "oa-dict.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, {"code": 0, "msg": "ok"}),
+        ("POST", "/fapi/v1/algoOrder"): (200, {"algoId": 1}),
+        ("POST", "/fapi/v1/order"): (200, {"orderId": 9, "executedQty": "100", "status": "FILLED"}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] == "recovering"
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_recovery_verified_from_open_list_no_algo_get(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "no-algo-get.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    sl0 = client_order_id(intent_id, "sl0")
+    # Placement log exists — still must not GET algoOrder when present in open list.
+    conn.execute(
+        """
+        INSERT INTO assist_exec_log (intent_id, step, endpoint, client_order_id, created_at_ms)
+        VALUES (?, 'stop', '/fapi/v1/algoOrder', ?, ?)
+        """,
+        (intent_id, sl0, now_ms()),
+    )
+    conn.commit()
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, [_verified_stop(client_id=sl0)]),
+        ("GET", "/fapi/v1/algoOrder"): (500, {"code": -1001, "msg": "should not call"}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    assert get_exec_intent(conn, intent_id)["status"] == "done"
+    assert not any(c[0] == "GET" and c[1] == "/fapi/v1/algoOrder" for c in transport.calls)
+    conn.close()
+
+
+def test_recovery_empty_open_list_no_log_no_algo_get_places_slr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "empty-place.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    slr = client_order_id(intent_id, "slr")
+    placed = {"ok": False}
+
+    def place_slr(clean: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        placed["ok"] = True
+        return (200, {"algoId": 99, "clientAlgoId": clean.get("clientAlgoId")})
+
+    def open_algo(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        if placed["ok"]:
+            return (200, [_verified_stop(client_id=slr)])
+        return (200, [])
+
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): open_algo,
+        ("GET", "/fapi/v1/algoOrder"): (500, {"code": -1001, "msg": "should not call"}),
+        ("POST", "/fapi/v1/algoOrder"): place_slr,
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    assert placed["ok"] is True
+    assert get_exec_intent(conn, intent_id)["status"] == "done"
+    assert not any(c[0] == "GET" and c[1] == "/fapi/v1/algoOrder" for c in transport.calls)
+    conn.close()
+
+
+def test_emergency_partial_cls_no_orphan_shows_remain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "partial-cls.db")
+    intent_id = _entry_intent(conn)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.083"}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos(amt="-60")]),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "executedQty": "100", "avgPrice": "0.08", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/algoOrder"): _algo_not_found(),
+        ("POST", "/fapi/v1/algoOrder"): (400, {"code": -2021, "msg": "Order would immediately trigger."}),
+        ("POST", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.08", "executedQty": "40", "status": "FILLED"},
+        ),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
+        ("DELETE", "/fapi/v1/allOpenOrders"): (200, {}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms(),
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    cls_posts = [
+        c
+        for c in transport.calls
+        if c[0] == "POST"
+        and c[1] == "/fapi/v1/order"
+        and str(c[2].get("newClientOrderId") or "").endswith("-cls")
+    ]
+    assert len(cls_posts) == 1
+    assert not any(c[0] == "DELETE" for c in transport.calls)
+    assert any("🚨" in t and "60" in t for t in sent)
+    conn.close()
+
+
+def test_recovery_exit_not_found_x3_over_15min_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "ex-nf.db")
+    t0 = 1_700_000_000_000
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08"},
+        created_at_ms=t0,
+        expires_at_ms=t0 + 120_000,
+    )
+    claim_exec_intent(conn, intent_id)
+    finish_exec_intent(conn, intent_id, status="unknown", result_text=MSG_OUTCOME_UNKNOWN)
+    for offset in (0, 5 * 60_000):
+        conn.execute(
+            """
+            INSERT INTO assist_exec_log (intent_id, step, endpoint, binance_code, created_at_ms)
+            VALUES (?, 'recover_not_found', '/fapi/v1/order', -2013, ?)
+            """,
+            (intent_id, t0 + offset),
+        )
+    conn.commit()
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos()]),
+        ("GET", "/fapi/v1/order"): (400, {"code": -2013, "msg": "Order does not exist."}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"algoId": 0}),
+        ("DELETE", "/fapi/v1/allOpenOrders"): (200, {}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        t0 + 15 * 60_000,
+        send=lambda t, **_: sent.append(t) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "failed"
+    assert any("ปิดไม้ไม่สำเร็จ" in t for t in sent)
     assert not any(c[0] == "DELETE" for c in transport.calls)
     conn.close()

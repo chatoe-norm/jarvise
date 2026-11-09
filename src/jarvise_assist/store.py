@@ -1254,14 +1254,29 @@ def claim_exec_intent_for_recovery(
     *,
     now_ms_value: int,
     stale_after_ms: int = 10 * 60_000,
+    lease_ms: int = 4 * 60_000,
 ) -> bool:
-    """Claim unknown/recovering, or confirmed with no log row in the last 10 minutes."""
-    cutoff = int(now_ms_value) - int(stale_after_ms)
+    """Claim unknown, leased recovering, or confirmed with no log row in 10 minutes.
+
+    recovering is claimable only when there is no recover_claim log in the last lease_ms.
+    The recover_claim INSERT runs in the same transaction as the UPDATE.
+    """
+    confirmed_cutoff = int(now_ms_value) - int(stale_after_ms)
+    lease_cutoff = int(now_ms_value) - int(lease_ms)
     cur = conn.execute(
         """
         UPDATE assist_exec_intent SET status='recovering'
         WHERE id=? AND (
-            status IN ('unknown', 'recovering')
+            status='unknown'
+            OR (
+                status='recovering'
+                AND NOT EXISTS (
+                    SELECT 1 FROM assist_exec_log
+                    WHERE intent_id=assist_exec_intent.id
+                      AND step='recover_claim'
+                      AND created_at_ms>?
+                )
+            )
             OR (
                 status='confirmed'
                 AND NOT EXISTS (
@@ -1271,7 +1286,7 @@ def claim_exec_intent_for_recovery(
             )
         )
         """,
-        (intent_id, cutoff),
+        (intent_id, lease_cutoff, confirmed_cutoff),
     )
     if cur.rowcount == 1:
         conn.execute(

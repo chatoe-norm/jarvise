@@ -243,22 +243,29 @@ def verify_our_stop(
     planned_stop: Decimal,
     position_qty: Decimal,
     position_flat: bool,
+    open_list: list[dict[str, Any]] | None = None,
+    query_if_missing: bool = True,
 ) -> StopVerifyResult:
     """Prove our own stop by client id. A failed GET is UNVERIFIABLE, never missing."""
-    open_list: list[dict[str, Any]] | None
-    try:
-        open_list = trade.open_algo_orders(symbol=symbol)
-    except Exception:  # noqa: BLE001
-        return StopVerifyResult.UNVERIFIABLE
+    rows: list[dict[str, Any]]
+    if open_list is None:
+        try:
+            rows = trade.open_algo_orders(symbol=symbol)
+        except Exception:  # noqa: BLE001
+            return StopVerifyResult.UNVERIFIABLE
+    else:
+        rows = open_list
 
     found: dict[str, Any] | None = None
-    for order in open_list:
+    for order in rows:
         cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
         if cid == client_id:
             found = order
             break
 
     if found is None:
+        if not query_if_missing:
+            return StopVerifyResult.NOT_PROTECTED
         try:
             found = trade.query_algo_by_client_id(symbol=symbol, client_id=client_id)
         except Exception as exc:  # noqa: BLE001
