@@ -1,6 +1,6 @@
 # Does any entry signal have an edge? Pre-registered backtest, arms A (4h, control) and B (daily trend)
 
-Date: 2026-11-10. Status: **run complete; arms A and B fail in-sample; no OOS run.** Research only. This note changes no production code, no VPS setting and no ledger. Verdict prose is for Claude.
+Date: 2026-11-10. Status: **run complete; arms A and B fail in-sample; no OOS run.** Research only. This note changes no production code, no VPS setting and no ledger. Verdict in §8: closed, no edge found.
 
 ## 1. Why
 
@@ -233,3 +233,14 @@ Sensitivity Sharpe (corrected): B1 6 bps 1.030 / 15 bps 1.000; B2 6 bps 1.057 / 
 - T2 used the four §1.1 fixtures with their ledger entry/exit timestamps on a schema-v13 ledger copy (no `assist_real_trade`).
 - T5 one-bar gaps listed above; series otherwise continuous after each coin’s start.
 - Corrected arm B OOS gated off after the look-ahead/funding fix; the 2022-11-01 to 2026-10-24 window was already seen under the buggy code.
+
+## 8. Verdict (Claude Code, 2026-11-10)
+
+Everything fails. Per §4, the 4h signal and both daily rules are closed. The owner chose to stop the search here.
+
+- **Arm A:** A1 and A2 lose in-sample: −0.067R and −0.061R per trade on about 2,600 to 2,700 trades. They lose in every year and on both sides, and the price-only result sits below the random-entry null. The 4h assist signal has no edge as traded. The earlier positive record (§1.1: 9 real trades, 15 virtual) is small enough to be noise around this result.
+- **Arm B:** after both tool fixes, B1 and B2 reach Sharpe 1.02 and 1.04. Buy-and-hold reaches 1.05. Their Deflated Sharpe is 0.935 and 0.942, below the 0.95 bar, so both fail. Their one clear property is a smaller drawdown: −15% and −11%, against −83% for holding. The long-only cells were sensitivity cells and are not promoted.
+- **Live trading:** no result in this note supports trading the assist signals with real money.
+- **Money:** §4 applies. No edge was found, so there is nothing to scale.
+- **Data now seen:** 2022-11-01 to 2026-10-24 has been evaluated for both 4h signals and daily trend on the seven assist coins. A new idea on these coins can only be judged on data after 2026-11-10, under its own pre-registration.
+- **Tool lesson:** the first arm B run passed in-sample and out-of-sample only because of a one-day look-ahead. A check of fill dates did not catch it. The truncation test (T4a) and the attribution test (T4b) did. Future replay and backtest notes should require both before any outcome is read.
