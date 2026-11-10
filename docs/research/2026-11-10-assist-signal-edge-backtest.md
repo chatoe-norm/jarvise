@@ -1,6 +1,6 @@
 # Does any entry signal have an edge? Pre-registered backtest, arms A (4h, control) and B (daily trend)
 
-Date: 2026-11-10. Status: **run complete (§7.2).** Research only. This note changes no production code, no VPS setting and no ledger. Verdict prose is for Claude.
+Date: 2026-11-10. Status: **run complete; arms A and B fail in-sample; no OOS run.** Research only. This note changes no production code, no VPS setting and no ledger. Verdict prose is for Claude.
 
 ## 1. Why
 
@@ -171,7 +171,7 @@ Two known divergences remain and are not modelled:
 
 ### 7.2 Runs
 
-Run 2026-11-10 by Cursor in `D:\Projects\jarvise-research\2026-11-10\` (scripts and data outside the repo). Wall time: fetch ≈ 3.6 min; arm A IS ≈ 11.2 min; arm B IS/OOS ≈ 2.4 min. No cell, threshold, window, symbol or cost was changed after results were seen.
+Run 2026-11-10 by Cursor in `D:\Projects\jarvise-research\2026-11-10\` (scripts and data outside the repo). Arm A IS unchanged from the first pass. Arm B IS was re-run after the look-ahead and funding fixes below; OOS was not run. No cell, threshold, window, symbol or cost was changed after results were seen.
 
 #### Tool checks (before outcomes)
 
@@ -179,8 +179,18 @@ Run 2026-11-10 by Cursor in `D:\Projects\jarvise-research\2026-11-10\` (scripts 
 | --- | --- |
 | T2 (zero tap, 10 bps, four moved-stop trades) | Pass. Sim R: +0.040 / +0.078 / +0.049 / +0.054 vs targets +0.03 / +0.10 / +0.04 / +0.03 (all within 0.03R). |
 | T3b (no 15m bar before entry) | Pass. |
-| T4 (arm B spike → fill next day) | Pass. |
+| T4 (arm B date arithmetic) | Pass on the first pass. It only checked that a spike-day signal fills the next day; it did not catch the MTM look-ahead. |
+| T4a (truncation, five D, seed `20261110`) | Pass after the fix. Weights, vol-target values, and Donchian sub-positions at each D+1 00:15 fill match the full-data run. |
+| T4b (+50% close on day D) | Old order fails (returns ending at D+1 00:15 change); fixed order passes (those returns unchanged). |
+| T6 (funding interval) | Pass. Synthetic rows at 08:00:00.020 and at a 4h offset are each charged once on pre-rebalance notional; long pays a positive rate. |
 | T5 (gaps) | Listed: one missing 15m mark bar at 2023-11-10 03:30–04:00 UTC on all seven coins; one missing spot 00:15 day on BTC/ETH/BNB at 2018-02-08→10. No other post-start gaps. |
+
+#### Tool failures found in review
+
+1. **Look-ahead in arm B MTM.** `run_portfolio_clean` rebalanced at 00:15 and then marked the interval that just ended with the new units, so new units earned day D’s return. Fixed by snapshotting `units_prev` before rebalance; price PnL and funding use `units_prev`; rebalance cost stays on the fill day’s equity change.
+2. **Exact 8h funding match.** Funding charged only when `fundingTime` equalled the 00/08/16 grid. About 43% of BTC funding times are a few milliseconds late; SOL off-grid settlements were skipped. Fixed by charging every funding row with `prev_0015 < fundingTime <= this_0015` on pre-rebalance notional (assumed +0.01% per 8h before the coin’s first funding row).
+
+The first arm B numbers on PR #321 (B1 Sharpe ~~1.381~~ / OOS ~~1.039~~; B2 Sharpe ~~2.374~~ / OOS ~~2.177~~) used the buggy code and are struck. The OOS window 2022-11-01 to 2026-10-24 was evaluated once under that buggy arm B code and cannot be unseen data for a later arm B variant. Arm A is unchanged (A1 −0.0665R, A2 −0.0611R); `sim_a._funding_r` already used the interval rule.
 
 #### Arm A (4h signal) — IS 2022-11-01 to 2025-10-24; 20 bps + funding
 
@@ -197,18 +207,20 @@ Sensitivity (mean net R): A1 at 12 bps −0.0345, at 30 bps −0.1065. A2 at 12 
 
 Diagnostics (A1): MFE before MAE−1R rates +0.5R 57.8%, +1R 28.8%, +2R 9.3%. Sign-flipped gross mean −0.0169R. Exits: stop 1831, flat/opposite 653, TP 255, end 1.
 
-#### Arm B (daily portfolio) — IS 2018-01-01 to 2022-10-31; 10 bps/side + funding
+#### Arm B (daily portfolio) — corrected IS 2018-01-01 to 2022-10-31; 10 bps/side + funding
 
-| Series | Days | Sharpe | Boot 95% lo | DSR (N=6) | Years >0 | Without best month | Max DD | vs B&H Sharpe | Pass IS | OOS Sharpe | OOS pass |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| B1 | 1764 | 1.381 | 0.495 | 0.959 | 5/5 | +1.092 (cum) | −0.132 | B&H 1.054 | **Pass** | 1.039 | **Pass** |
-| B2 | 1764 | 2.374 | 1.712 | 1.000 | 5/5 | +2.411 (cum) | −0.065 | B&H 1.054 | **Pass** | 2.177 | **Pass** |
-| B1 long-only | 1764 | 1.561 | 0.622 | 0.984 | 3/5 | +0.863 | −0.081 | — | Pass (sens.) | — | — |
-| B2 long-only | 1764 | 1.458 | 0.609 | 0.968 | 4/5 | +0.629 | −0.071 | — | Pass (sens.) | — | — |
+| Series | Days | Sharpe | Boot 95% lo | DSR (N=6) | Years >0 | Without best month | Max DD | vs B&H Sharpe | Pass IS | OOS |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| B1 | 1764 | 1.016 | 0.068 | 0.935 | 3/5 | +0.628 (cum) | −0.153 | B&H 1.054 | **Fail** | not run |
+| B2 | 1764 | 1.042 | 0.091 | 0.942 | 5/5 | +0.587 (cum) | −0.113 | B&H 1.054 | **Fail** | not run |
+| B1 long-only | 1764 | 1.550 | 0.568 | 0.997 | 3/5 | +0.842 | −0.102 | — | Pass (sens.; not promoted) | not run |
+| B2 long-only | 1764 | 1.343 | 0.278 | 0.988 | 3/5 | +0.611 | −0.115 | — | Pass (sens.; not promoted) | not run |
 
-Equal-weight buy-and-hold (IS): Sharpe 1.054, CAGR 0.729, max DD −0.827. B1 and B2 beat buy-and-hold on Sharpe; buy-and-hold has the higher CAGR and a much deeper drawdown.
+B1 and B2 fail criterion 2 (DSR ≥ 0.95). Criteria 1, 3, and 4 pass for both. Long-only variants are sensitivity only; they are not promoted and OOS is not run.
 
-Sensitivity Sharpe: B1 6 bps 1.394 / 15 bps 1.364; B2 6 bps 2.388 / 15 bps 2.357. Max \|drifted − target\|: B1 0.080, B2 0.003. Cost share of gross: B1 2.3%, B2 1.4%. Funding share of gross: B1 −9.1%, B2 −6.3% (funding received on net short exposure).
+Equal-weight buy-and-hold (IS): Sharpe 1.054, CAGR 0.729, max DD −0.827.
+
+Sensitivity Sharpe (corrected): B1 6 bps 1.030 / 15 bps 1.000; B2 6 bps 1.057 / 15 bps 1.024. Max \|drifted − target\|: B1 0.080, B2 0.003. Cost share of gross: B1 3.0%, B2 3.0%. Funding share of gross: B1 −11.9%, B2 −12.1%.
 
 #### Deviations (disclosed)
 
@@ -218,5 +230,6 @@ Sensitivity Sharpe: B1 6 bps 1.394 / 15 bps 1.364; B2 6 bps 2.388 / 15 bps 2.357
 - Long-only via `max(signal, 0)` with the same active-coin divisor.
 - B1 fill at Monday 00:15 from the Monday 00:00 close.
 - Deflated-Sharpe variance uses the four arm-B daily Sharpes; N = 6 counts A1/A2 as well.
-- Scratchpad `ledger-copy.db` is schema v13 (no `assist_real_trade`); T2 used the four §1.1 fixtures with their ledger entry/exit timestamps.
+- T2 used the four §1.1 fixtures with their ledger entry/exit timestamps on a schema-v13 ledger copy (no `assist_real_trade`).
 - T5 one-bar gaps listed above; series otherwise continuous after each coin’s start.
+- Corrected arm B OOS gated off after the look-ahead/funding fix; the 2022-11-01 to 2026-10-24 window was already seen under the buggy code.
