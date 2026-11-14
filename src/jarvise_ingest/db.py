@@ -771,6 +771,14 @@ def _migrate_assist_week_risk(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_edge", "week_risk_pct", "REAL DEFAULT NULL")
 
 
+def _migrate_assist_pause_reason(conn: sqlite3.Connection) -> None:
+    """Why the active pause was set (streak / week_loss / day_loss / day_loss_deeper).
+
+    Nullable. Existing rows are not rewritten, so a pause set before migration 29 keeps NULL.
+    """
+    _add_column_if_missing(conn, "assist_settings", "pause_reason", "TEXT DEFAULT NULL")
+
+
 def _migrate_assist_journal(conn: sqlite3.Connection) -> None:
     """Owner grade card per closed assist trade. Never copies fills or places orders."""
     conn.execute(
@@ -1170,6 +1178,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (26, "assist_card_sizing", _migrate_assist_card_sizing, True),
     (27, "assist_quick", _migrate_assist_quick, True),
     (28, "assist_week_risk", _migrate_assist_week_risk, True),
+    (29, "assist_pause_reason", _migrate_assist_pause_reason, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

@@ -11,6 +11,7 @@ from jarvise_assist.sizing import SAME_IDEA_MS, SizedSignal
 
 _UNSET: object = object()
 
+PAUSE_REASONS = frozenset({"streak", "week_loss", "day_loss", "day_loss_deeper"})
 
 RISK_MAX_PCT = 3.0
 
@@ -45,7 +46,7 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
     row = conn.execute(
         """
         SELECT risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct,
-               awaiting_explore
+               awaiting_explore, pause_reason
         FROM assist_settings WHERE id=1
         """
     ).fetchone()
@@ -59,12 +60,14 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
             "awaiting_risk": None,
             "pending_risk_pct": None,
             "awaiting_explore": False,
+            "pause_reason": None,
         }
     # Older DBs before migration 16 may lack the trailing columns.
     paused = row[2] if len(row) > 2 else None
     awaiting = row[3] if len(row) > 3 else None
     pending = row[4] if len(row) > 4 else None
     exploring = row[5] if len(row) > 5 else 0
+    reason = row[6] if len(row) > 6 else None
     return {
         "risk_pct": float(row[0]),
         "enabled": bool(int(row[1])),
@@ -72,6 +75,7 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
         "awaiting_risk": str(awaiting) if awaiting else None,
         "pending_risk_pct": float(pending) if pending is not None else None,
         "awaiting_explore": bool(int(exploring or 0)),
+        "pause_reason": str(reason) if reason else None,
     }
 
 
@@ -84,7 +88,14 @@ def write_settings(
     awaiting_risk: Any = _UNSET,
     pending_risk_pct: Any = _UNSET,
     awaiting_explore: Any = _UNSET,
+    pause_reason: Any = _UNSET,
 ) -> None:
+    if pause_reason is not _UNSET and paused_until_ms is _UNSET:
+        raise ValueError("pause_reason requires paused_until_ms")
+    if paused_until_ms is None and pause_reason not in (_UNSET, None):
+        raise ValueError("paused_until_ms=None clears pause_reason")
+    if pause_reason not in (_UNSET, None) and pause_reason not in PAUSE_REASONS:
+        raise ValueError(f"invalid pause_reason: {pause_reason!r}")
     cur = ensure_settings(conn)
     rp = float(cur["risk_pct"] if risk_pct is None else risk_pct)
     en = int(cur["enabled"] if enabled is None else enabled)
@@ -92,21 +103,28 @@ def write_settings(
     awaiting = cur["awaiting_risk"] if awaiting_risk is _UNSET else awaiting_risk
     pending = cur["pending_risk_pct"] if pending_risk_pct is _UNSET else pending_risk_pct
     exploring = cur["awaiting_explore"] if awaiting_explore is _UNSET else bool(awaiting_explore)
+    if paused_until_ms is not _UNSET and pause_reason is _UNSET:
+        reason: Any = None
+    elif paused_until_ms is _UNSET and pause_reason is _UNSET:
+        reason = cur["pause_reason"]
+    else:
+        reason = pause_reason
     conn.execute(
         """
         INSERT INTO assist_settings (
             id, risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct,
-            awaiting_explore
-        ) VALUES (1, ?, ?, ?, ?, ?, ?)
+            awaiting_explore, pause_reason
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             risk_pct=excluded.risk_pct,
             enabled=excluded.enabled,
             paused_until_ms=excluded.paused_until_ms,
             awaiting_risk=excluded.awaiting_risk,
             pending_risk_pct=excluded.pending_risk_pct,
-            awaiting_explore=excluded.awaiting_explore
+            awaiting_explore=excluded.awaiting_explore,
+            pause_reason=excluded.pause_reason
         """,
-        (rp, en, paused, awaiting, pending, int(bool(exploring))),
+        (rp, en, paused, awaiting, pending, int(bool(exploring)), reason),
     )
     conn.commit()
 
