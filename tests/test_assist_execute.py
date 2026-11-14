@@ -1183,9 +1183,154 @@ def test_move_stop_expired_and_mn_cancel(tmp_path: Path, monkeypatch: pytest.Mon
         now_ms_value=ts,
         message={"message_id": 4},
     )
-    assert get_exec_intent(conn, intent2)["status"] == "cancelled"
-    assert edits == ["advice2"]
+    assert get_exec_intent(conn, intent2)["status"] == "declined"
+    assert edits == ["advice2\n(ไม่เลื่อน)"]
     assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def _forbid_trade_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "jarvise_assist.execute.build_trade_client",
+        lambda: (_ for _ in ()).throw(AssertionError("binance")),
+    )
+
+
+def _seed_mn_intent(
+    conn: Any,
+    *,
+    status: str,
+    result_text: str | None = None,
+    advice: str | None = "advice body",
+) -> str:
+    preview: dict[str, Any] = {"stop": "0.079", "qty": "100"}
+    if advice is not None:
+        preview["advice_text"] = advice
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview=preview,
+        created_at_ms=1,
+        expires_at_ms=9_000_000_000_000,
+    )
+    finish_exec_intent(conn, intent_id, status=status, result_text=result_text or "")
+    if result_text is None:
+        conn.execute("UPDATE assist_exec_intent SET result_text=NULL WHERE id=?", (intent_id,))
+        conn.commit()
+    return intent_id
+
+
+def _mn_callback(
+    conn: Any,
+    data: str,
+    *,
+    message: dict[str, Any],
+) -> tuple[dict[str, Any], list[Any], list[str], list[tuple[Any, ...]]]:
+    answers: list[Any] = []
+    sent: list[str] = []
+    edits: list[tuple[Any, ...]] = []
+
+    def answer(*args: Any, **_kwargs: Any) -> None:
+        answers.append(args[0] if args else None)
+
+    out = handle_exec_callback(
+        conn,
+        data,
+        send=lambda text, **_: sent.append(text) or True,
+        answer=answer,
+        edit=lambda mid, text, **kwargs: edits.append((mid, text, kwargs.get("reply_markup"))),
+        message=message,
+    )
+    return out, answers, sent, edits
+
+
+@pytest.mark.parametrize("status", ["confirmed", "recovering"])
+def test_mn_in_flight_does_not_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mn-inflight.db")
+    intent_id = _seed_mn_intent(conn, status=status, result_text="already moving")
+    out, answers, sent, edits = _mn_callback(
+        conn,
+        f"mn:{intent_id}",
+        message={"message_id": 8, "text": "card"},
+    )
+    assert edits == []
+    assert answers == [None]
+    assert sent == ["กำลังทำอยู่"]
+    assert out == {"ok": False, "reason": status}
+    assert get_exec_intent(conn, intent_id)["status"] == status
+    conn.close()
+
+
+@pytest.mark.parametrize("status", ["done", "failed", "unknown", "not_found", "stale"])
+@pytest.mark.parametrize("stored", ["เลื่อนแล้ว", None])
+def test_mn_finished_replays_without_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    stored: str | None,
+) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mn-done.db")
+    intent_id = _seed_mn_intent(conn, status=status, result_text=stored)
+    out, answers, sent, edits = _mn_callback(
+        conn,
+        f"mn:{intent_id}",
+        message={"message_id": 8, "text": "card"},
+    )
+    expected = stored if stored else "ทำไปแล้ว"
+    assert edits == []
+    assert answers == [None]
+    assert sent == [expected]
+    assert out == {"ok": True, "replay": True, "text": expected}
+    assert get_exec_intent(conn, intent_id)["status"] == status
+    conn.close()
+
+
+@pytest.mark.parametrize("status", ["expired", "cancelled", "declined"])
+def test_mn_closed_decline_still_edits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mn-closed.db")
+    intent_id = _seed_mn_intent(conn, status=status, advice="advice body")
+    out, answers, sent, edits = _mn_callback(
+        conn,
+        f"mn:{intent_id}",
+        message={"message_id": 8, "text": "card"},
+    )
+    body = "advice body\n(ไม่เลื่อน)"
+    assert edits == [(8, body, {"inline_keyboard": []})]
+    assert body.count("(ไม่เลื่อน)") == 1
+    assert answers == ["ไม่เลื่อน"]
+    assert sent == []
+    assert out == {"ok": True, "declined": intent_id}
+    assert get_exec_intent(conn, intent_id)["status"] == status
+    conn.close()
+
+
+def test_mn_unknown_intent_keeps_message_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mn-missing.db")
+    out, answers, sent, edits = _mn_callback(
+        conn,
+        "mn:missing",
+        message={"message_id": 9, "text": "card body"},
+    )
+    assert edits == [(9, "card body\n(ไม่เลื่อน)", {"inline_keyboard": []})]
+    assert answers == ["ไม่เลื่อน"]
+    assert sent == []
+    assert out == {"ok": True, "declined": "missing"}
+    assert get_exec_intent(conn, "missing") is None
+
+    out_blank, _answers, sent_blank, edits_blank = _mn_callback(
+        conn,
+        "mn:also-missing",
+        message={"message_id": 10},
+    )
+    assert edits_blank == [(10, "(ไม่เลื่อน)", {"inline_keyboard": []})]
+    assert sent_blank == []
+    assert out_blank == {"ok": True, "declined": "also-missing"}
     conn.close()
 
 
@@ -6435,4 +6580,118 @@ def test_lost_conditional_write_sends_nothing(tmp_path: Path, monkeypatch: pytes
         expect_status="recovering",
     )
     assert sent == []
+    conn.close()
+
+
+def test_move_stop_tick_price_on_button_confirm_and_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "tick-px.db")
+    ts = now_ms()
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(
+        conn,
+        entry_ts=entry_ts,
+        entry="0.1673",
+        initial_stop="0.1748",
+        best_low=0.16355,
+    )
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.1673"),
+        mark_price=Decimal("0.164"),
+        update_time_ms=entry_ts,
+    )
+    sent_watch: list[dict[str, Any]] = []
+
+    def _watch_send(text: str, reply_markup: dict[str, Any] | None = None) -> bool:
+        sent_watch.append({"text": text, "reply_markup": reply_markup})
+        return True
+
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(
+            positions=[pos],
+            orders=[
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "BUY",
+                    "type": "STOP_MARKET",
+                    "reduceOnly": True,
+                    "stopPrice": "0.1748",
+                    "origQty": "100",
+                    "clientAlgoId": "owner-stop",
+                }
+            ],
+            ticks={"DOGEUSDT": Decimal("0.0001")},
+            steps={"DOGEUSDT": Decimal("1")},
+            marks={"DOGEUSDT": Decimal("0.164")},
+        ),
+        now_ms_value=ts,
+        send=_watch_send,
+    )
+    buttons = [
+        button
+        for row in sent_watch
+        if row["reply_markup"]
+        for line in row["reply_markup"]["inline_keyboard"]
+        for button in line
+    ]
+    labels = [button["text"] for button in buttons]
+    assert "✅ เลื่อน → 0.1670" in labels
+    assert "❌ ไม่เลื่อน" in labels
+    stored = conn.execute("SELECT preview_json FROM assist_exec_intent").fetchone()
+    assert stored is not None
+    assert json.loads(stored[0]).get("tick") == "0.0001"
+
+    def _run(preview: dict[str, Any]) -> str:
+        intent_id = insert_exec_intent(
+            conn,
+            kind="move_stop",
+            symbol="DOGEUSDT",
+            side="short",
+            preview=preview,
+            created_at_ms=ts,
+            expires_at_ms=ts + MOVE_STOP_TTL_MS,
+        )
+        claim_exec_intent(conn, intent_id)
+        old = {
+            "symbol": "DOGEUSDT",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "positionSide": "BOTH",
+            "reduceOnly": True,
+            "triggerPrice": "0.1676",
+            "quantity": "100",
+            "algoId": 99,
+            "clientAlgoId": "owner-stop",
+            "algoStatus": "NEW",
+            "workingType": "MARK_PRICE",
+        }
+        handlers = _move_stop_handlers(
+            mark="0.164",
+            entry="0.1673",
+            old=old,
+            ms_client_id=client_order_id(intent_id, "ms"),
+            new_stop="0.1670",
+        )
+        info = _exchange_info()
+        info["symbols"][0]["filters"][2]["tickSize"] = "0.0001"
+        handlers[("GET", "/fapi/v1/exchangeInfo")] = (200, info)
+        return run_move_stop_sequence(
+            conn,
+            intent_id,
+            trade=_client(RecordingTransport(handlers)),
+            now_ms_value=ts,
+        )
+
+    with_tick = _run({"stop": "0.1670", "qty": "100", "advice_text": "advice", "tick": "0.0001"})
+    assert "→ 0.1670 ·" in with_tick
+    assert "ยกเลิก 0.1676" in with_tick
+    without_tick = _run({"stop": "0.1670", "qty": "100", "advice_text": "advice"})
+    assert "→ 0.167 ·" in without_tick
+    assert "→ 0.1670 ·" not in without_tick
     conn.close()

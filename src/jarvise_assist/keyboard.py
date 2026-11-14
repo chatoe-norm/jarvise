@@ -81,7 +81,7 @@ def move_stop_keyboard(intent_id: str, *, new_stop: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": f"✅ เลื่อน stop → {new_stop}", "callback_data": f"ms:{intent_id}"},
+                {"text": f"✅ เลื่อน → {new_stop}", "callback_data": f"ms:{intent_id}"},
                 {"text": "❌ ไม่เลื่อน", "callback_data": f"mn:{intent_id}"},
             ]
         ]

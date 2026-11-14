@@ -11,6 +11,7 @@ import pytest
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist import listen as listen_mod
+from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.keyboard import BTN_ANYTHING, BTN_POSITIONS, BTN_TOGGLE, risk_button_label
 from jarvise_assist.listen import poll_once, process_update, start_listener_thread
 from jarvise_assist.menu import (
@@ -35,9 +36,13 @@ from jarvise_assist.sizing import size_signal
 from jarvise_assist.store import (
     ensure_settings,
     get_edge,
+    get_exec_intent,
     get_signal,
     get_telegram_state,
+    insert_exec_intent,
     insert_signal,
+    list_recoverable_exec_intents,
+    upsert_watch_position,
     write_edge,
     write_settings,
     write_telegram_state,
@@ -1316,4 +1321,358 @@ def test_midweek_transfer_does_not_change_loss_pct(tmp_path: Path) -> None:
     )
     assert r_b["paused"] is True and r_b["reason"] == "week_loss"
     assert abs(float(r_b["loss_pct"]) - pct_a) < 1e-9
+    conn.close()
+
+
+_EXEC_PREFIXES = ("ms:", "mn:", "en:", "ec:", "ey:", "xx:")
+
+
+class _NoBinance:
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(name)
+
+
+def _callback(data: str, *, chat: int = 42, mid: int = 7) -> dict[str, Any]:
+    return {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cq1",
+            "data": data,
+            "message": {"message_id": mid, "chat": {"id": chat}, "text": "advice body"},
+        },
+    }
+
+
+@pytest.mark.parametrize("prefix", _EXEC_PREFIXES)
+def test_exec_callback_prefixes_reach_handler(tmp_path: Path, monkeypatch: Any, prefix: str) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "route.db")
+    seen: list[str] = []
+    answers: list[Any] = []
+
+    def fake(_conn: Any, data: str, **kw: Any) -> dict[str, Any]:
+        seen.append(data)
+        kw["answer"]("routed")
+        return {"ok": True}
+
+    monkeypatch.setattr("jarvise_assist.listen.handle_exec_callback", fake)
+
+    def answer(cq_id: str, text: str | None = None) -> bool:
+        answers.append((cq_id, text))
+        return True
+
+    out = process_update(
+        conn,
+        _callback(f"{prefix}aei_test"),
+        send=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("send")),
+        answer=answer,
+        edit=lambda *_a, **_k: True,
+        futures=_NoBinance(),
+    )
+    assert "unhandled_callback" not in out
+    assert seen == [f"{prefix}aei_test"]
+    assert answers == [("cq1", "routed")]
+    conn.close()
+
+
+def test_exec_callback_foreign_chat_is_silent(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "foreign-exec.db")
+    seen: list[str] = []
+    answers: list[Any] = []
+    sent: list[str] = []
+
+    def fake(*_a: Any, **_k: Any) -> dict[str, Any]:
+        seen.append("called")
+        return {"ok": True}
+
+    monkeypatch.setattr("jarvise_assist.listen.handle_exec_callback", fake)
+    out = process_update(
+        conn,
+        _callback("mn:aei_test", chat=999),
+        send=lambda text, **_k: sent.append(text),
+        answer=lambda *_a, **_k: answers.append("answered"),
+        edit=lambda *_a, **_k: True,
+        futures=_NoBinance(),
+    )
+    assert out.get("ignored") == "foreign_chat"
+    assert seen == []
+    assert answers == []
+    assert sent == []
+    conn.close()
+
+
+def _move_preview_intent(conn: Any, *, advice: str = "DOGE advice") -> str:
+    return insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"stop": "0.1670", "qty": "100", "advice_text": advice, "tick": "0.0001"},
+        created_at_ms=1,
+        expires_at_ms=9_000_000_000_000,
+    )
+
+
+def test_mn_decline_edits_once_and_skips_binance(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.build_trade_client",
+        lambda: (_ for _ in ()).throw(AssertionError("binance")),
+    )
+    conn = open_db(tmp_path / "mn.db")
+    intent_id = _move_preview_intent(conn)
+    answers: list[Any] = []
+    edits: list[tuple[Any, ...]] = []
+    sent: list[str] = []
+
+    def answer(cq_id: str, text: str | None = None) -> bool:
+        answers.append(text)
+        return True
+
+    def edit(mid: int, text: str, *, reply_markup: Any = None) -> bool:
+        edits.append((mid, text, reply_markup))
+        return True
+
+    def once() -> dict[str, Any]:
+        return process_update(
+            conn,
+            _callback(f"mn:{intent_id}"),
+            send=lambda text, **_k: sent.append(text),
+            answer=answer,
+            edit=edit,
+            futures=_NoBinance(),
+        )
+
+    first = once()
+    second = once()
+    body = "DOGE advice\n(ไม่เลื่อน)"
+    assert "unhandled_callback" not in first
+    assert "unhandled_callback" not in second
+    assert answers == ["ไม่เลื่อน", "ไม่เลื่อน"]
+    assert edits == [(7, body, {"inline_keyboard": []}), (7, body, {"inline_keyboard": []})]
+    assert body.count("(ไม่เลื่อน)") == 1
+    assert get_exec_intent(conn, intent_id)["status"] == "declined"
+    assert list_recoverable_exec_intents(conn) == []
+    assert sent == []
+    conn.close()
+
+
+def test_mn_decline_when_assistant_disabled(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.build_trade_client",
+        lambda: (_ for _ in ()).throw(AssertionError("binance")),
+    )
+    conn = open_db(tmp_path / "mn-off.db")
+    write_settings(conn, enabled=False)
+    intent_id = _move_preview_intent(conn, advice="still open")
+    answers: list[Any] = []
+    sent: list[str] = []
+    edits: list[str] = []
+    out = process_update(
+        conn,
+        _callback(f"mn:{intent_id}"),
+        send=lambda text, **_k: sent.append(text),
+        answer=lambda _cq, text=None: answers.append(text),
+        edit=lambda _m, text, **_k: edits.append(text),
+        futures=_NoBinance(),
+    )
+    assert "unhandled_callback" not in out
+    assert answers == ["ไม่เลื่อน"]
+    assert "ปิดอยู่" not in answers
+    assert sent == []
+    assert edits == ["still open\n(ไม่เลื่อน)"]
+    assert get_exec_intent(conn, intent_id)["status"] == "declined"
+    conn.close()
+
+
+def test_en_cancel_leaves_advice_text(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "off")
+    conn = open_db(tmp_path / "en.db")
+    intent_id = _move_preview_intent(conn, advice="entry card")
+    edits: list[str] = []
+    out = process_update(
+        conn,
+        _callback(f"en:{intent_id}"),
+        send=lambda text, **_k: None,
+        answer=lambda *_a, **_k: None,
+        edit=lambda _m, text, **_k: edits.append(text),
+        futures=_NoBinance(),
+    )
+    assert "unhandled_callback" not in out
+    assert get_exec_intent(conn, intent_id)["status"] == "cancelled"
+    assert edits == ["entry card"]
+    conn.close()
+
+
+def _move_stop_messages(sent: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in sent if "ปุ่มหมดอายุ" in row["text"]]
+
+
+def test_declined_level_is_not_resent_tighter_and_new_trade_are(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "dedupe.db")
+    day = _ms_bangkok(2026, 11, 14, 14, 0)
+    entry_time = day - 2 * 3_600_000
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "DOGEUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.1673,
+            "qty": 100.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.1748,
+            "initial_stop_source": "signal",
+            "entry_time_ms": entry_time,
+            "no_stop_latched": 0,
+            "last_seen_ms": entry_time,
+            "closed_at_ms": None,
+        },
+    )
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "DOGEUSDT",
+                "timestamp": entry_time,
+                "timeframe": "1h",
+                "open": 0.1673,
+                "high": 0.1680,
+                "low": 0.16355,
+                "close": 0.1640,
+                "volume": 1.0,
+            }
+        ],
+    )
+    order = {
+        "symbol": "DOGEUSDT",
+        "side": "BUY",
+        "type": "STOP_MARKET",
+        "reduceOnly": True,
+        "stopPrice": "0.1748",
+        "origQty": "100",
+        "clientAlgoId": "owner-stop",
+    }
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.1673"),
+        mark_price=Decimal("0.164"),
+        update_time_ms=entry_time,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[order],
+        ticks={"DOGEUSDT": Decimal("0.0001")},
+        steps={"DOGEUSDT": Decimal("1")},
+        marks={"DOGEUSDT": Decimal("0.164")},
+    )
+    sent, send = _send_capture()
+    run_assist_watch(conn, futures=fake, now_ms_value=day, send=send)
+    moves = _move_stop_messages(sent)
+    assert len(moves) == 1
+    markup = moves[0]["reply_markup"]
+    assert markup is not None
+    mn_data = next(
+        button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+        if str(button["callback_data"]).startswith("mn:")
+    )
+    intent_id = mn_data[3:]
+    out = process_update(
+        conn,
+        _callback(mn_data, mid=int(moves[0]["message_id"])),
+        send=send,
+        answer=lambda *_a, **_k: True,
+        edit=lambda *_a, **_k: True,
+        futures=fake,
+        now_ms_value=day,
+    )
+    assert "unhandled_callback" not in out
+    assert get_exec_intent(conn, intent_id)["status"] == "declined"
+    advice = conn.execute(
+        "SELECT status FROM assist_watch_advice WHERE kind='move_stop' ORDER BY created_at_ms"
+    ).fetchall()
+    assert [row["status"] for row in advice] == ["sent"]
+
+    run_assist_watch(conn, futures=fake, now_ms_value=day + 30_000, send=send)
+    assert len(_move_stop_messages(sent)) == 1
+    assert conn.execute("SELECT COUNT(*) FROM assist_watch_advice WHERE kind='move_stop'").fetchone()[0] == 1
+
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "DOGEUSDT",
+                "timestamp": entry_time,
+                "timeframe": "1h",
+                "open": 0.1673,
+                "high": 0.1680,
+                "low": 0.1590,
+                "close": 0.1600,
+                "volume": 1.0,
+            }
+        ],
+    )
+    run_assist_watch(conn, futures=fake, now_ms_value=day + 60_000, send=send)
+    moves = _move_stop_messages(sent)
+    assert len(moves) == 2
+    assert "0.1665" in moves[1]["text"]
+
+    new_entry = day + 2 * 3_600_000
+    sized = size_signal(
+        symbol="DOGEUSDT",
+        side="short",
+        entry=Decimal("0.1500"),
+        stop=Decimal("0.1575"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("1"),
+    )
+    assert sized is not None
+    insert_signal(
+        conn,
+        sized,
+        status="sent",
+        created_at_ms=new_entry,
+        expires_at_ms=new_entry + 86_400_000,
+        sent_at_ms=new_entry,
+    )
+    fake.positions = [
+        FuturesPosition(
+            symbol="DOGEUSDT",
+            position_side="BOTH",
+            position_amt=Decimal("-100"),
+            entry_price=Decimal("0.1500"),
+            mark_price=Decimal("0.145"),
+            update_time_ms=new_entry,
+        )
+    ]
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "DOGEUSDT",
+                "timestamp": new_entry,
+                "timeframe": "1h",
+                "open": 0.1500,
+                "high": 0.1510,
+                "low": 0.14625,
+                "close": 0.1470,
+                "volume": 1.0,
+            }
+        ],
+    )
+    run_assist_watch(conn, futures=fake, now_ms_value=new_entry + 3_600_000 + 1000, send=send)
+    assert len(_move_stop_messages(sent)) == 3
     conn.close()

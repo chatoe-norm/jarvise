@@ -1519,6 +1519,19 @@ def cancel_exec_intent(conn: Any, intent_id: str) -> bool:
     return cur.rowcount == 1
 
 
+def decline_exec_intent(conn: Any, intent_id: str) -> bool:
+    """Mark a preview declined. Advice rows stay 'sent' so the same level is not re-sent."""
+    cur = conn.execute(
+        """
+        UPDATE assist_exec_intent SET status='declined'
+        WHERE id=? AND status='preview'
+        """,
+        (intent_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
 def insert_exec_log(
     conn: Any,
     *,
