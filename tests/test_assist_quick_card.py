@@ -1314,8 +1314,8 @@ def test_week_loss_does_not_block_other_pauses(tmp_path: Path, monkeypatch: pyte
     conn.close()
 
 
-def test_week_loss_known_limit_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail-closed: 4R fired at TUE; streak-style pause at WED_10 still blocks."""
+def test_week_loss_null_reason_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """NULL pause_reason (pause set before migration 29) still fail-closed via week_pause_id."""
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "kl.db")
     _eval(conn, risk=1.0, net=-50, now_ms=TUE)

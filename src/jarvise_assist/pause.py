@@ -155,7 +155,7 @@ def clear_pause_manual(conn: Any, *, now_ms_value: int | None = None) -> str | N
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     until = ensure_settings(conn).get("paused_until_ms")
     was_paused = until is not None and int(until) > ts
-    write_settings(conn, paused_until_ms=None)
+    write_settings(conn, paused_until_ms=None, pause_reason=None)
     write_edge(conn, resume_alerted=True)
     edge = get_edge(conn)
     day_id = bangkok_day_id(ts)
@@ -187,7 +187,7 @@ def maybe_auto_resume(conn: Any, *, now_ms: int, send: SendFn) -> bool:
     if int(until) > int(now_ms):
         return False
     edge = get_edge(conn)
-    write_settings(conn, paused_until_ms=None)
+    write_settings(conn, paused_until_ms=None, pause_reason=None)
     day_id = bangkok_day_id(now_ms)
     note: str | None = None
     if edge.get("day_pause_id") == day_id:
@@ -313,15 +313,14 @@ def _engage_day_pause(
     deeper: bool,
 ) -> dict[str, Any]:
     until = next_0820_bangkok_ms(now_ms)
-    write_settings(conn, paused_until_ms=until)
+    reason = "day_loss_deeper" if deeper else "day_loss"
+    write_settings(conn, paused_until_ms=until, pause_reason=reason)
     if deeper:
         write_edge(conn, day_deeper_pause_id=day_id, resume_alerted=False)
         send(day_loss_deeper_pause_text(net, until_ms=until))
-        reason = "day_loss_deeper"
     else:
         write_edge(conn, day_pause_id=day_id, resume_alerted=False)
         send(day_loss_pause_text(net, until_ms=until))
-        reason = "day_loss"
     return {
         "paused": True,
         "reason": reason,
@@ -419,7 +418,7 @@ def evaluate_pause(
             anchor = int(last3[-1]["time"] or now_ms)
             if edge["streak_anchor_ms"] != anchor:
                 until = next_0820_bangkok_ms(now_ms)
-                write_settings(conn, paused_until_ms=until)
+                write_settings(conn, paused_until_ms=until, pause_reason="streak")
                 write_edge(conn, streak_anchor_ms=anchor, resume_alerted=False)
                 send(STREAK_PAUSE_TEXT)
                 return {
@@ -441,7 +440,7 @@ def evaluate_pause(
         loss_pct = (-trading_net / week_start_bal) * Decimal("100")
         if loss_pct > threshold_pct and edge["week_pause_id"] != week_id:
             until = next_0820_bangkok_ms(now_ms)
-            write_settings(conn, paused_until_ms=until)
+            write_settings(conn, paused_until_ms=until, pause_reason="week_loss")
             write_edge(conn, week_pause_id=week_id, resume_alerted=False)
             send(week_loss_pause_text(loss_pct))
             return {
