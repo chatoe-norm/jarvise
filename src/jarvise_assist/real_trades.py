@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import statistics
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import FAPI_HISTORY_WINDOW_MS, BinanceFuturesClient
+from jarvise_assist.quick_tags import quick_income_predicate
 from jarvise_assist.sizing import round_level_to_tick
 from jarvise_assist.store import now_ms
 from jarvise_assist.track import TRACK_COHORT, virtual_risk_unusable
@@ -1551,6 +1553,9 @@ def _reconcile_lines(summary: dict[str, Any], window: str) -> list[str]:
         f"กระทบยอด income {window}: n={income_n} · " + " · ".join(parts),
         f"จับ income ไม่ได้ {window}: n={un_n}",
     ]
+    quick_n = int(rec.get("quick_n") or 0)
+    if quick_n > 0:
+        lines.append(f"income ของไม้ quick (แยก) {window}: n={quick_n}")
     shown = list(rec.get("unattributed") or [])[:10]
     for item in shown:
         if not isinstance(item, dict):
@@ -1619,6 +1624,7 @@ def build_income_reconcile(
     *,
     since_ms: int,
     until_ms: int,
+    is_quick: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     """Binance income for ASSIST_SYMBOLS versus the sums stored on trades.
 
@@ -1630,6 +1636,7 @@ def build_income_reconcile(
     seen: set[tuple[str, str, int, str, str, str]] = set()
     start = int(since_ms)
     end = int(until_ms)
+    quick_n = 0
     for symbol in symbols:
         for category in INCOME_CATEGORIES:
             page = fetch_income_range(
@@ -1652,6 +1659,9 @@ def build_income_reconcile(
                 if key in seen:
                     continue
                 seen.add(key)
+                if is_quick is not None and is_quick(row):
+                    quick_n += 1
+                    continue
                 fetched.append(row)
 
     realized_ids: set[tuple[str, int]] = set()
@@ -1748,13 +1758,16 @@ def build_income_reconcile(
             }
         )
     missing.sort(key=lambda item: (int(item["time_ms"]), str(item["symbol"]), str(item["entry_order_id"])))
-    return {
+    out: dict[str, Any] = {
         "totals": totals,
         "income_n": len(fetched),
         "unattributed": unattributed,
         "unattributed_n": len(unattributed),
         "missing": missing,
     }
+    if quick_n > 0:
+        out["quick_n"] = quick_n
+    return out
 
 
 def _income_refresh_due(conn: Any, now_ms: int) -> bool:
@@ -1877,11 +1890,14 @@ def run_real_report(
 ) -> dict[str, Any]:
     """Sync (optional) and summarize. ``sync=False`` builds in memory and never writes."""
     end = int(until_ms if until_ms is not None else now_ms())
+    is_quick = quick_income_predicate(conn, now_ms=end)
     if sync:
         sync_result = sync_real_trades(conn, client, since_ms=since_ms, until_ms=end)
         summary = summarize_real_vs_virtual(conn, since_ms=since_ms, until_ms=end)
         stored = _load_real_rows(conn)
-        summary["reconcile"] = build_income_reconcile(client, stored, since_ms=since_ms, until_ms=end)
+        summary["reconcile"] = build_income_reconcile(
+            client, stored, since_ms=since_ms, until_ms=end, is_quick=is_quick
+        )
         lines = format_real_lines(summary)
         return {
             "ok": True,
@@ -1892,7 +1908,9 @@ def run_real_report(
         }
     rows = build_real_rows(conn, client, since_ms=since_ms, until_ms=end)
     summary = summarize_real_vs_virtual(conn, since_ms=since_ms, until_ms=end, rows=rows)
-    summary["reconcile"] = build_income_reconcile(client, rows, since_ms=since_ms, until_ms=end)
+    summary["reconcile"] = build_income_reconcile(
+        client, rows, since_ms=since_ms, until_ms=end, is_quick=is_quick
+    )
     lines = format_real_lines(summary)
     return {
         "ok": True,

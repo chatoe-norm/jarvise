@@ -11,6 +11,7 @@ BTN_WEEKLY = "📊 ผลสัปดาห์นี้"
 BTN_RISK_PREFIX = "⚙️ ตั้งความเสี่ยงต่อไม้"
 BTN_TOGGLE = "⏸ หยุด / ▶️ เปิด ผู้ช่วย"
 BTN_EXPLORE = "🧪 เหรียญทดลอง"
+BTN_QUICK = "⚡ Quick"
 EXPLORE_RM_PREFIX = "explore:rm:"
 
 RISK_CHOICE_PCTS: tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
@@ -27,7 +28,7 @@ def reply_keyboard(risk_pct: float = 1.0) -> dict[str, Any]:
             [{"text": BTN_POSITIONS}, {"text": BTN_ANYTHING}],
             [{"text": BTN_WEEKLY}, {"text": risk_button_label(risk_pct)}],
             [{"text": BTN_TOGGLE}],
-            [{"text": BTN_EXPLORE}],
+            [{"text": BTN_EXPLORE}, {"text": BTN_QUICK}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,

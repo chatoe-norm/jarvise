@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 26).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 27).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -531,3 +531,59 @@ CREATE TABLE IF NOT EXISTS assist_real_trade (
 );
 CREATE INDEX IF NOT EXISTS idx_assist_real_trade_status
     ON assist_real_trade (status, entry_time_ms);
+
+-- Quick scalping assist (migration 27). Bookkeeping only; no orders.
+CREATE TABLE IF NOT EXISTS assist_quick_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    risk_pct REAL NOT NULL DEFAULT 0.5,
+    day_max_loss_r REAL NOT NULL DEFAULT 2,
+    streak_lock_n INTEGER NOT NULL DEFAULT 3,
+    cap_pct REAL NOT NULL DEFAULT 1.0,
+    locked_until_ms INTEGER,
+    lock_reason TEXT,
+    lock_day_id TEXT,
+    updated_at_ms INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS assist_quick_registration (
+    id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('long', 'short')),
+    planned_entry REAL NOT NULL,
+    planned_stop REAL NOT NULL,
+    qty REAL NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open', 'tagged', 'expired')),
+    trade_id TEXT,
+    updated_at_ms INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS assist_quick_trade (
+    id TEXT PRIMARY KEY,
+    registration_id TEXT NOT NULL UNIQUE,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    planned_stop REAL,
+    entry_time_ms INTEGER,
+    entry_qty REAL,
+    entry_avg REAL,
+    closed_at_ms INTEGER,
+    exit_avg REAL,
+    entry_trade_ids TEXT,
+    exit_trade_ids TEXT,
+    realized_pnl_usdt REAL,
+    commission_usdt REAL,
+    commission_other_asset TEXT,
+    funding_usdt REAL,
+    net_usdt REAL,
+    risk_usdt REAL,
+    net_r REAL,
+    fee_r REAL,
+    status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+    updated_at_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_assist_quick_trade_status_symbol
+    ON assist_quick_trade (status, symbol);
+CREATE INDEX IF NOT EXISTS idx_assist_quick_trade_closed
+    ON assist_quick_trade (closed_at_ms);

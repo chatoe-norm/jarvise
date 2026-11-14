@@ -337,8 +337,8 @@ def test_migration_26_is_additive(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert SCHEMA_VERSION == 26
-    assert schema_version(conn) == 26
+    assert SCHEMA_VERSION == 27
+    assert schema_version(conn) == 27
     row = conn.execute(
         """
         SELECT qty, loss_at_stop, balance_usdt, risk_pct, budget_usdt,

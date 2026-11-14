@@ -10,6 +10,8 @@ from typing import Any
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import BinanceFuturesClient, build_futures_client
 from jarvise_assist.journal import format_journal_lines, summarize_journal
+from jarvise_assist.quick import summarize_quick
+from jarvise_assist.quick_tags import quick_income_predicate
 from jarvise_assist.real_trades import (
     SPEC_START_MS,
     format_bkk_window,
@@ -49,6 +51,7 @@ def format_weekly_summary(
     journal: dict[str, Any] | None = None,
     window_start_ms: int | None = None,
     window_end_ms: int | None = None,
+    quick: dict[str, Any] | None = None,
 ) -> str:
     window = None
     if window_start_ms is not None and window_end_ms is not None:
@@ -128,6 +131,16 @@ def format_weekly_summary(
     lines.append(f"funding {_signed(funding)} USDT")
     lines.append(f"ค่าธรรมเนียม (COMMISSION) {_signed(commission)} USDT")
     lines.append(f"สุทธิ {_signed(net)} USDT")
+    quick_n = int((quick or {}).get("n") or 0) if quick else 0
+    quick_usdt = real.get("quick_usdt")
+    if quick is not None and (quick_n > 0 or quick_usdt is not None):
+        sum_r = float(quick.get("sum_r") or 0.0)
+        # Prefer income actually removed from main lines; fall back to summarize_quick usdt.
+        if quick_usdt is not None:
+            usdt = float(quick_usdt)
+        else:
+            usdt = float(quick.get("usdt") or 0.0)
+        lines.append(f"Quick (แยกจาก assist) 7 วัน: n={quick_n} · รวม {sum_r:+.2f}R · {usdt:+.2f} USDT")
     other = float(real.get("other_usdt") or 0.0)
     if other != 0.0:
         lines.append(f"เหรียญนอกรายการ {_signed(other)} USDT")
@@ -259,12 +272,17 @@ def summarize_virtual(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def summarize_income(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_income(
+    rows: list[dict[str, Any]],
+    is_quick: Callable[[dict[str, Any]], bool] | None = None,
+) -> dict[str, Any]:
     realized = Decimal("0")
     funding = Decimal("0")
     commission = Decimal("0")
     other = Decimal("0")
     realized_n = 0
+    quick_usdt = Decimal("0")
+    quick_n = 0
     for row in rows:
         itype = str(row.get("incomeType") or "")
         if itype not in INCOME_TYPES:
@@ -272,6 +290,10 @@ def summarize_income(rows: list[dict[str, Any]]) -> dict[str, Any]:
         try:
             amount = Decimal(str(row.get("income") or "0"))
         except Exception:  # noqa: BLE001
+            continue
+        if is_quick is not None and is_quick(row):
+            quick_usdt += amount
+            quick_n += 1
             continue
         sym = str(row.get("symbol") or "").upper()
         if itype == "REALIZED_PNL" and amount != 0:
@@ -286,7 +308,7 @@ def summarize_income(rows: list[dict[str, Any]]) -> dict[str, Any]:
         elif itype == "COMMISSION":
             commission += amount
     uni = realized + funding + commission
-    return {
+    out: dict[str, Any] = {
         "realized_pnl": float(realized),
         "funding": float(funding),
         "commission": float(commission),
@@ -294,6 +316,10 @@ def summarize_income(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "other_usdt": float(other),
         "realized_n": realized_n,
     }
+    if quick_n >= 1:
+        out["quick_usdt"] = float(quick_usdt)
+        out["quick_n"] = quick_n
+    return out
 
 
 def run_assist_weekly(
@@ -333,10 +359,11 @@ def run_assist_weekly(
         "other_usdt": 0.0,
         "realized_n": 0,
     }
+    is_quick = quick_income_predicate(conn, now_ms=ts)
     if client is not None:
         try:
             income = client.income_history(start_ms=week_start, end_ms=ts, limit=1000)
-            real = summarize_income(income)
+            real = summarize_income(income, is_quick=is_quick)
         except Exception as exc:  # noqa: BLE001
             real["error"] = type(exc).__name__
 
@@ -353,6 +380,7 @@ def run_assist_weekly(
         real_vs_virtual = summarize_real_vs_virtual(conn, since_ms=SPEC_START_MS, until_ms=ts)
 
     journal = summarize_journal(conn, since_ms=week_start, until_ms=ts)
+    quick_stats = summarize_quick(conn, since_ms=week_start, until_ms=ts)
     text = format_weekly_summary(
         counts=counts,
         virtual=virtual,
@@ -365,6 +393,9 @@ def run_assist_weekly(
         journal=journal,
         window_start_ms=week_start,
         window_end_ms=ts,
+        quick=quick_stats
+        if int(quick_stats.get("n") or 0) > 0 or real.get("quick_usdt") is not None
+        else None,
     )
     sent_ok = bool(send_fn(text))
     return {

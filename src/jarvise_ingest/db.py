@@ -660,6 +660,88 @@ def _migrate_assist_card_sizing(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "assist_signal", name, typ)
 
 
+def _migrate_assist_quick(conn: sqlite3.Connection) -> None:
+    """Quick (scalping) settings, registration, and tagged trades. Bookkeeping only."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_quick_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            risk_pct REAL NOT NULL DEFAULT 0.5,
+            day_max_loss_r REAL NOT NULL DEFAULT 2,
+            streak_lock_n INTEGER NOT NULL DEFAULT 3,
+            cap_pct REAL NOT NULL DEFAULT 1.0,
+            locked_until_ms INTEGER,
+            lock_reason TEXT,
+            lock_day_id TEXT,
+            updated_at_ms INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO assist_quick_settings (id, risk_pct, day_max_loss_r, streak_lock_n, cap_pct)
+        VALUES (1, 0.5, 2, 3, 1.0)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_quick_registration (
+            id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('long', 'short')),
+            planned_entry REAL NOT NULL,
+            planned_stop REAL NOT NULL,
+            qty REAL NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('open', 'tagged', 'expired')),
+            trade_id TEXT,
+            updated_at_ms INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_quick_trade (
+            id TEXT PRIMARY KEY,
+            registration_id TEXT NOT NULL UNIQUE,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            planned_stop REAL,
+            entry_time_ms INTEGER,
+            entry_qty REAL,
+            entry_avg REAL,
+            closed_at_ms INTEGER,
+            exit_avg REAL,
+            entry_trade_ids TEXT,
+            exit_trade_ids TEXT,
+            realized_pnl_usdt REAL,
+            commission_usdt REAL,
+            commission_other_asset TEXT,
+            funding_usdt REAL,
+            net_usdt REAL,
+            risk_usdt REAL,
+            net_r REAL,
+            fee_r REAL,
+            status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+            updated_at_ms INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_quick_trade_status_symbol
+        ON assist_quick_trade (status, symbol)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_quick_trade_closed
+        ON assist_quick_trade (closed_at_ms)
+        """
+    )
+
+
 def _migrate_assist_income_status(conn: sqlite3.Connection) -> None:
     """Income completeness on closed real trades. Nullable. Does not rewrite existing rows.
 
@@ -1080,6 +1162,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (24, "assist_actual_r", _migrate_assist_actual_r, True),
     (25, "assist_income_status", _migrate_assist_income_status, True),
     (26, "assist_card_sizing", _migrate_assist_card_sizing, True),
+    (27, "assist_quick", _migrate_assist_quick, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
