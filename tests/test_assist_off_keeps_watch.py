@@ -333,18 +333,19 @@ def test_off_protective_taps_work_entry_taps_refuse(tmp_path: Path, monkeypatch:
         conn,
         f"ms:{ms_id}",
         send=lambda t, **_k: sent.append(t) or True,
-        answer=lambda *_a, **_k: answers.append(None),
+        answer=lambda *a, **_k: answers.append(a[0] if a else None),
         edit=lambda *_a, **_k: True,
         trade=trade,
         now_ms_value=ts,
         message={"message_id": 1},
     )
-    assert out_ms.get("ok") is True or any("เลื่อน" in t or "stop" in t.lower() for t in sent)
+    assert out_ms["ok"] is True
     assert MSG_OFF not in sent
     assert "ปิดอยู่" not in answers
     row = get_exec_intent(conn, ms_id)
     assert row is not None
-    assert row["status"] != "preview"
+    assert row["status"] == "done"
+    assert any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in transport.calls)
 
     xx_id = insert_exec_intent(
         conn,
@@ -482,11 +483,15 @@ def test_execute_mode_off_still_refuses_protective_taps(
 ) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "off")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.build_trade_client",
+        lambda: (_ for _ in ()).throw(AssertionError("binance")),
+    )
     conn = open_db(tmp_path / "mode-off.db")
     write_settings(conn, enabled=True)
     assert protective_buttons_enabled(conn) is False
     ts = _ms_bangkok(2026, 11, 14, 12, 0)
-    for kind, prefix in (("move_stop", "ms"), ("exit", "xx"), ("move_stop", "mn")):
+    for kind, prefix in (("move_stop", "ms"), ("exit", "xx")):
         intent_id = insert_exec_intent(
             conn,
             kind=kind,
@@ -520,6 +525,52 @@ def test_execute_mode_off_still_refuses_protective_taps(
             now_ms_value=ts,
         )
         assert "ปิดอยู่" in answers or MSG_OFF in sent
+
+    # en:/mn: stay ungated (local cancel/decline only; never place orders).
+    cancel_answers: list[str | None] = []
+    for kind, prefix, expected_status in (
+        ("move_stop", "mn", "declined"),
+        ("move_stop", "en", "cancelled"),
+    ):
+        intent_id = insert_exec_intent(
+            conn,
+            kind=kind,
+            symbol="DOGEUSDT",
+            side="short",
+            preview={"stop": "0.079", "qty": "100", "advice_text": "x"},
+            created_at_ms=ts,
+            expires_at_ms=ts + 120_000,
+        )
+        answers: list[str | None] = []
+        sent: list[str] = []
+
+        def _send_ok(t: str, *, _s: list[str] = sent, **_k: Any) -> bool:
+            _s.append(t)
+            return True
+
+        def _answer_ok(
+            _cq: str, text: str | None = None, *, _a: list[str | None] = answers, **_k: Any
+        ) -> None:
+            _a.append(text)
+
+        process_update(
+            conn,
+            {
+                "callback_query": {
+                    "id": f"cq-{prefix}-ok",
+                    "data": f"{prefix}:{intent_id}",
+                    "message": {"chat": {"id": 111}, "message_id": 1, "text": "x"},
+                }
+            },
+            send=_send_ok,
+            answer=_answer_ok,
+            now_ms_value=ts,
+        )
+        row = get_exec_intent(conn, intent_id)
+        assert row is not None
+        assert row["status"] == expected_status
+        cancel_answers.extend(answers)
+    assert "ปิดอยู่" not in cancel_answers
     conn.close()
 
 

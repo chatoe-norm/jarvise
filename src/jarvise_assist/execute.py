@@ -228,7 +228,7 @@ def execution_buttons_enabled(conn: Any) -> bool:
 
 
 def protective_buttons_enabled(_conn: Any) -> bool:
-    """Move-stop / exit / cancel taps: execute mode only (assistant may be off)."""
+    """Move-stop / exit taps: execute mode only (assistant may be off)."""
     return assist_execute_mode() != "off"
 
 
@@ -3022,7 +3022,7 @@ def handle_exec_callback(
             answer("ปิดอยู่")
             send(MSG_OFF)
             return {"ok": False, "reason": "off"}
-    elif data.startswith(("ms:", "mn:", "xx:", "en:")):
+    elif data.startswith(("ms:", "xx:")):
         if not protective_buttons_enabled(conn):
             answer("ปิดอยู่")
             send(MSG_OFF)
