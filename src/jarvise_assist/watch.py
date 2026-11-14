@@ -87,7 +87,7 @@ def _default_send(text: str, *, reply_markup: dict[str, Any] | None = None) -> b
 
 
 def _log_decision(**fields: Any) -> None:
-    """One JSON observability line per universe position (or assist_disabled)."""
+    """One JSON observability line per universe position (or watch_only when off)."""
     logger.info("assist_watch_decision %s", json.dumps(fields, sort_keys=True, default=str))
 
 
@@ -878,15 +878,24 @@ def run_assist_watch(
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     send_fn = send or _default_send
     settings = ensure_settings(conn)
-    if not settings["enabled"]:
-        _log_decision(decision="assist_disabled", reason="assist_disabled")
-        return _strip_secrets({"ok": True, "skipped": "assist_disabled", "paper_only": True, "at_ms": ts})
-
-    maybe_auto_resume(conn, now_ms=ts, send=send_fn)
+    assist_enabled = bool(settings["enabled"])
+    # Off = no new signals / no pause auto-resume; protective watch still runs.
+    if assist_enabled:
+        maybe_auto_resume(conn, now_ms=ts, send=send_fn)
+    else:
+        _log_decision(decision="watch_only", reason="assist_disabled")
 
     client = futures if futures is not None else build_futures_client()
     if client is None:
-        return _strip_secrets({"ok": False, "error": "no_binance_auth", "paper_only": True, "at_ms": ts})
+        return _strip_secrets(
+            {
+                "ok": False,
+                "error": "no_binance_auth",
+                "paper_only": True,
+                "at_ms": ts,
+                "assist_enabled": assist_enabled,
+            }
+        )
 
     try:
         client.assert_key_safe()
@@ -907,7 +916,10 @@ def run_assist_watch(
         return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
 
     # Pause may engage here; watch still emits advice for open positions.
-    pause_info = evaluate_pause(conn, futures=client, now_ms=ts, send=send_fn)
+    # While the assistant is off, skip pause evaluators (owner chose off to stop new signals).
+    pause_info: dict[str, Any] = {}
+    if assist_enabled:
+        pause_info = evaluate_pause(conn, futures=client, now_ms=ts, send=send_fn)
 
     night = is_night_hold(now_ms=ts)
     actions: list[dict[str, Any]] = []
@@ -950,9 +962,10 @@ def run_assist_watch(
     except Exception:  # noqa: BLE001 — income refresh must not stop advice, journal, or pauses
         logger.exception("assist income refresh failed")
     # Same poll as the close: local rows only, no extra Binance read.
-    day_pause = evaluate_day_loss_pause(conn, now_ms=ts, send=send_fn)
-    if day_pause.get("reason") in {"day_loss", "day_loss_deeper"}:
-        pause_info = day_pause
+    if assist_enabled:
+        day_pause = evaluate_day_loss_pause(conn, now_ms=ts, send=send_fn)
+        if day_pause.get("reason") in {"day_loss", "day_loss_deeper"}:
+            pause_info = day_pause
     return _strip_secrets(
         {
             "ok": True,
@@ -964,5 +977,6 @@ def run_assist_watch(
             "orphan_cancelled": orphan_cancelled,
             "futures_recovered": recovered,
             "pause": pause_info,
+            "assist_enabled": assist_enabled,
         }
     )

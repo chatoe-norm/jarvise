@@ -422,31 +422,17 @@ def test_progress_exit_tap_reuses_run_exit_sequence(tmp_path: Path, monkeypatch:
     assert posts[0][2]["side"] == "BUY"
     assert Decimal(posts[0][2]["quantity"]) == Decimal("100")
 
+    # Assistant off: progress xx: still works (protective gate; execute mode stays testnet).
     write_settings(conn, enabled=False)
-    intent_id = insert_exec_intent(
-        conn,
-        kind="exit",
-        symbol="ADAUSDT",
-        side="short",
-        preview={"qty": "100", "entry": "0.1673", "source": "progress", "level": "0.5"},
-        created_at_ms=ts,
-        expires_at_ms=ts + 120_000,
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    off_sent, _off_answers, off_transport = _tap(
+        {"qty": "100", "entry": "0.1673", "source": "progress", "level": "0.5"},
+        _open_then_flat([live]),
     )
-    answers: list[str | None] = []
-    process_update(
-        conn,
-        {
-            "callback_query": {
-                "id": "cq-off",
-                "data": f"xx:{intent_id}",
-                "message": {"chat": {"id": 111}, "message_id": 5, "text": "progress"},
-            }
-        },
-        send=lambda *_a, **_k: True,
-        answer=lambda _cq, text=None, **_k: answers.append(text),
-        now_ms_value=ts,
-    )
-    assert answers == ["ปิดอยู่"]
+    assert any(text.startswith("✅ ปิด ADAUSDT") for text in off_sent)
+    assert not any(text == "ปิดอยู่" for text in off_sent)
+    off_posts = [call for call in off_transport.calls if call[0] == "POST" and call[1] == "/fapi/v1/order"]
+    assert len(off_posts) == 1
     conn.close()
 
 

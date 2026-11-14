@@ -1491,7 +1491,8 @@ def test_mn_decline_when_assistant_disabled(tmp_path: Path, monkeypatch: Any) ->
 
 def test_en_cancel_leaves_advice_text(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "off")
+    # en: uses the protective gate (execute mode on); local cancel, no Binance.
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
     conn = open_db(tmp_path / "en.db")
     intent_id = _move_preview_intent(conn, advice="entry card")
     edits: list[str] = []

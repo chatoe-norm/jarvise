@@ -148,7 +148,7 @@ def toggle_enabled(conn: Any, *, now_ms_value: int | None = None) -> str:
     settings = ensure_settings(conn)
     if settings["enabled"]:
         write_settings(conn, enabled=False)
-        return "⏸ ผู้ช่วยปิดแล้ว — จะไม่ส่ง signal ใหม่"
+        return "⏸ ผู้ช่วยปิดแล้ว — หยุดส่ง signal ใหม่ · ยังเฝ้าไม้ที่เปิดอยู่ (เตือน stop / เลื่อน stop / ปิดไม้)"
     write_settings(conn, enabled=True)
     note = clear_pause_manual(conn, now_ms_value=now_ms_value)
     if note:
@@ -493,7 +493,7 @@ def render_anything_now(
 ) -> tuple[str, dict[str, Any] | None]:
     settings = ensure_settings(conn)
     if not settings["enabled"]:
-        return "ผู้ช่วยปิดอยู่", None
+        return "ผู้ช่วยปิดอยู่ · ยังเฝ้าไม้ที่เปิดอยู่", None
     if is_paused(settings, now_ms=now_ms):
         return format_paused_until(int(settings["paused_until_ms"])), None
     client = futures if futures is not None else build_futures_client()

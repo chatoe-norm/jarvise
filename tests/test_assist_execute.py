@@ -1190,6 +1190,8 @@ def test_move_stop_expired_and_mn_cancel(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def _forbid_trade_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    # mn:/en: need protective_buttons_enabled (mode != off) but must not hit Binance.
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     monkeypatch.setattr(
         "jarvise_assist.execute.build_trade_client",
         lambda: (_ for _ in ()).throw(AssertionError("binance")),
