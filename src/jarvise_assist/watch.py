@@ -34,6 +34,7 @@ from jarvise_assist.messages import (
     format_move_stop_advice,
     format_no_stop_warning,
     format_partial_stop_warning,
+    format_progress_alert,
 )
 from jarvise_assist.pause import evaluate_day_loss_pause, evaluate_pause, maybe_auto_resume
 from jarvise_assist.real_trades import refresh_incomplete_income
@@ -75,6 +76,7 @@ from jarvise_notify.telegram import send_message
 logger = logging.getLogger(__name__)
 
 FOUR_H_MS = 4 * 3_600_000
+PROGRESS_R_LEVELS = (Decimal("0.5"), Decimal("1"), Decimal("1.5"))
 SendFn = Callable[..., Any]
 
 
@@ -436,6 +438,91 @@ def _process_universe_position(
         tick = client.symbol_filters(pos.symbol).tick_size
     except Exception:  # noqa: BLE001
         tick = Decimal("0.01")
+    if not night and since is not None:
+        r_now = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
+        pending = [
+            level
+            for level in PROGRESS_R_LEVELS
+            if r_now >= level
+            and not advice_already_sent(
+                conn,
+                symbol=pos.symbol,
+                position_side=pos.position_side,
+                kind="progress",
+                reason=f"r{level}",
+                level=float(level),
+                since_ms=since,
+            )
+        ]
+        if pending:
+            top_level = pending[-1]
+            stop_r = approx_r_multiple(
+                side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=compare_stop
+            )
+            reply_markup = None
+            if assist_execute_mode() == "live":
+                intent_id = insert_exec_intent(
+                    conn,
+                    kind="exit",
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    preview={
+                        "qty": str(pos.qty),
+                        "entry": str(pos.entry_price),
+                        "source": "progress",
+                        "level": str(top_level),
+                    },
+                    created_at_ms=now_ms,
+                    expires_at_ms=now_ms + PREVIEW_TTL_MS,
+                )
+                reply_markup = exit_confirm_keyboard(intent_id)
+            text = format_progress_alert(
+                symbol=pos.symbol,
+                side=pos.side,
+                level=top_level,
+                r_now=r_now,
+                mark=mark,
+                entry=pos.entry_price,
+                stop=compare_stop,
+                stop_r=stop_r,
+                tick=tick,
+                with_button=reply_markup is not None,
+            )
+            status = _emit_advice(
+                conn,
+                symbol=pos.symbol,
+                position_side=pos.position_side,
+                kind="progress",
+                reason=f"r{top_level}",
+                level=float(top_level),
+                approx_r=float(r_now),
+                text=text,
+                night=False,
+                now_ms=now_ms,
+                send=send,
+                hold_ok=False,
+                since_ms=since,
+                reply_markup=reply_markup,
+            )
+            if status == "sent":
+                for level in pending:
+                    if level == top_level:
+                        continue
+                    insert_watch_advice(
+                        conn,
+                        symbol=pos.symbol,
+                        position_side=pos.position_side,
+                        kind="progress",
+                        reason=f"r{level}",
+                        level=float(level),
+                        approx_r=float(r_now),
+                        status="sent",
+                        created_at_ms=now_ms,
+                        sent_at_ms=now_ms,
+                    )
+            actions.append(
+                {"symbol": pos.symbol, "action": "progress", "level": float(top_level), "status": status}
+            )
     trail = current_trail_advice(
         side=pos.side,
         entry=pos.entry_price,

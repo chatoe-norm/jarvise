@@ -1307,10 +1307,12 @@ def test_move_stop_once_per_level(tmp_path: Path) -> None:
     )
     sent: list[str] = []
     run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
-    assert len(sent) == 1
-    assert "stop " in sent[0] and "→" in sent[0]
+    # Mark is +0.5R, so the progress alert goes out first. The move-stop is unchanged.
+    assert len(sent) == 2
+    assert "ถึง +0.5R" in sent[0]
+    assert "stop " in sent[1] and "→" in sent[1]
     run_assist_watch(conn, futures=fake, now_ms_value=day + 60_000, send=lambda t: sent.append(t) or True)
-    assert len(sent) == 1
+    assert len(sent) == 2
     conn.close()
 
 
@@ -1431,8 +1433,10 @@ def test_1h_candle_after_entry_moves_stop(tmp_path: Path) -> None:
     )
     sent: list[str] = []
     run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t: sent.append(t) or True)
-    assert len(sent) == 1
-    assert "stop " in sent[0] and "→" in sent[0]
+    # Mark is +1R, so one progress alert (the +1R level) precedes the move-stop.
+    assert len(sent) == 2
+    assert "ถึง +1R" in sent[0]
+    assert "stop " in sent[1] and "→" in sent[1]
     conn.close()
 
 

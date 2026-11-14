@@ -820,6 +820,7 @@ def _last_advice(conn: Any, trade: dict[str, Any]) -> dict[str, Any] | None:
         SELECT kind, reason FROM assist_watch_advice
         WHERE symbol=? AND created_at_ms >= ? AND created_at_ms <= ?
           AND status IN ('sent', 'held')
+          AND kind != 'progress'
         ORDER BY created_at_ms DESC
         LIMIT 1
         """,
