@@ -3084,16 +3084,31 @@ def handle_exec_callback(
         return {"ok": True, "cancelled": intent_id}
 
     if data.startswith("mn:"):
-        answer("ไม่เลื่อน")
         intent_id = data[3:]
         intent = get_exec_intent(conn, intent_id)
-        decline_exec_intent(conn, intent_id)
+        declined = decline_exec_intent(conn, intent_id)
+        if not declined:
+            # Re-read: a claim can land between the first read and this update.
+            intent = get_exec_intent(conn, intent_id)
+            status = str(intent["status"]) if intent is not None else ""
+            if intent is not None and status not in {"expired", "cancelled", "declined"}:
+                answer()
+                if status in {"confirmed", "recovering"}:
+                    send("กำลังทำอยู่")
+                    return {"ok": False, "reason": status}
+                text = str(intent.get("result_text") or "ทำไปแล้ว")
+                send(text)
+                return {"ok": True, "replay": True, "text": text}
+        answer("ไม่เลื่อน")
         advice_body = None
         if intent is not None:
             preview = intent.get("preview") or {}
             if isinstance(preview, dict):
                 advice_body = preview.get("advice_text")
-        base = str(advice_body) if advice_body else ""
+        if advice_body:
+            base = str(advice_body)
+        else:
+            base = str(msg.get("text") or "")
         if "(ไม่เลื่อน)" in base:
             edit_body = base
         elif base:

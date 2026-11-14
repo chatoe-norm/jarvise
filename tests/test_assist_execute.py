@@ -1189,6 +1189,151 @@ def test_move_stop_expired_and_mn_cancel(tmp_path: Path, monkeypatch: pytest.Mon
     conn.close()
 
 
+def _forbid_trade_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "jarvise_assist.execute.build_trade_client",
+        lambda: (_ for _ in ()).throw(AssertionError("binance")),
+    )
+
+
+def _seed_mn_intent(
+    conn: Any,
+    *,
+    status: str,
+    result_text: str | None = None,
+    advice: str | None = "advice body",
+) -> str:
+    preview: dict[str, Any] = {"stop": "0.079", "qty": "100"}
+    if advice is not None:
+        preview["advice_text"] = advice
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="DOGEUSDT",
+        side="short",
+        preview=preview,
+        created_at_ms=1,
+        expires_at_ms=9_000_000_000_000,
+    )
+    finish_exec_intent(conn, intent_id, status=status, result_text=result_text or "")
+    if result_text is None:
+        conn.execute("UPDATE assist_exec_intent SET result_text=NULL WHERE id=?", (intent_id,))
+        conn.commit()
+    return intent_id
+
+
+def _mn_callback(
+    conn: Any,
+    data: str,
+    *,
+    message: dict[str, Any],
+) -> tuple[dict[str, Any], list[Any], list[str], list[tuple[Any, ...]]]:
+    answers: list[Any] = []
+    sent: list[str] = []
+    edits: list[tuple[Any, ...]] = []
+
+    def answer(*args: Any, **_kwargs: Any) -> None:
+        answers.append(args[0] if args else None)
+
+    out = handle_exec_callback(
+        conn,
+        data,
+        send=lambda text, **_: sent.append(text) or True,
+        answer=answer,
+        edit=lambda mid, text, **kwargs: edits.append((mid, text, kwargs.get("reply_markup"))),
+        message=message,
+    )
+    return out, answers, sent, edits
+
+
+@pytest.mark.parametrize("status", ["confirmed", "recovering"])
+def test_mn_in_flight_does_not_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mn-inflight.db")
+    intent_id = _seed_mn_intent(conn, status=status, result_text="already moving")
+    out, answers, sent, edits = _mn_callback(
+        conn,
+        f"mn:{intent_id}",
+        message={"message_id": 8, "text": "card"},
+    )
+    assert edits == []
+    assert answers == [None]
+    assert sent == ["กำลังทำอยู่"]
+    assert out == {"ok": False, "reason": status}
+    assert get_exec_intent(conn, intent_id)["status"] == status
+    conn.close()
+
+
+@pytest.mark.parametrize("status", ["done", "failed", "unknown", "not_found", "stale"])
+@pytest.mark.parametrize("stored", ["เลื่อนแล้ว", None])
+def test_mn_finished_replays_without_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    stored: str | None,
+) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mn-done.db")
+    intent_id = _seed_mn_intent(conn, status=status, result_text=stored)
+    out, answers, sent, edits = _mn_callback(
+        conn,
+        f"mn:{intent_id}",
+        message={"message_id": 8, "text": "card"},
+    )
+    expected = stored if stored else "ทำไปแล้ว"
+    assert edits == []
+    assert answers == [None]
+    assert sent == [expected]
+    assert out == {"ok": True, "replay": True, "text": expected}
+    assert get_exec_intent(conn, intent_id)["status"] == status
+    conn.close()
+
+
+@pytest.mark.parametrize("status", ["expired", "cancelled", "declined"])
+def test_mn_closed_decline_still_edits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mn-closed.db")
+    intent_id = _seed_mn_intent(conn, status=status, advice="advice body")
+    out, answers, sent, edits = _mn_callback(
+        conn,
+        f"mn:{intent_id}",
+        message={"message_id": 8, "text": "card"},
+    )
+    body = "advice body\n(ไม่เลื่อน)"
+    assert edits == [(8, body, {"inline_keyboard": []})]
+    assert body.count("(ไม่เลื่อน)") == 1
+    assert answers == ["ไม่เลื่อน"]
+    assert sent == []
+    assert out == {"ok": True, "declined": intent_id}
+    assert get_exec_intent(conn, intent_id)["status"] == status
+    conn.close()
+
+
+def test_mn_unknown_intent_keeps_message_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mn-missing.db")
+    out, answers, sent, edits = _mn_callback(
+        conn,
+        "mn:missing",
+        message={"message_id": 9, "text": "card body"},
+    )
+    assert edits == [(9, "card body\n(ไม่เลื่อน)", {"inline_keyboard": []})]
+    assert answers == ["ไม่เลื่อน"]
+    assert sent == []
+    assert out == {"ok": True, "declined": "missing"}
+    assert get_exec_intent(conn, "missing") is None
+
+    out_blank, _answers, sent_blank, edits_blank = _mn_callback(
+        conn,
+        "mn:also-missing",
+        message={"message_id": 10},
+    )
+    assert edits_blank == [(10, "(ไม่เลื่อน)", {"inline_keyboard": []})]
+    assert sent_blank == []
+    assert out_blank == {"ok": True, "declined": "also-missing"}
+    conn.close()
+
+
 def test_move_stop_already_closed_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "ms-closed.db")
