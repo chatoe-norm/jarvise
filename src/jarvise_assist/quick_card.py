@@ -225,6 +225,8 @@ def parse_quick_command(text: str) -> dict[str, Any] | None:
         return {"error": "usage"}
     if price <= 0:
         return {"error": "usage"}
+    if price >= Decimal("1e9"):
+        return {"error": "usage"}
     return {"symbol": symbol, "side": side, "stop": price}
 
 
@@ -246,7 +248,7 @@ def _fmt_r_signed(value: Decimal) -> str:
         return f"+{q:.2f}R"
     if q < 0:
         return f"−{(-q):.2f}R"
-    return f"{q:.2f}R"
+    return f"{abs(q):.2f}R"
 
 
 def fee_breakdown(entry: Decimal, stop: Decimal) -> dict[str, Any]:
@@ -380,6 +382,8 @@ def build_quick_card(
         return _fail("stop_wrong_side")
 
     stop_level = round_level_to_tick(raw_stop, tick, side=side_l, kind="stop")
+    if stop_level <= 0:
+        return _fail("stop_wrong_side")
     if side_l == "long" and stop_level >= mark:
         return _fail("stop_wrong_side")
     if side_l == "short" and stop_level <= mark:
@@ -616,7 +620,7 @@ def handle_quick_register_callback(
     except Exception:  # noqa: BLE001
         send(REFUSAL["bad_data"])
         return {"ok": False, "reason": "bad_data"}
-    if not stop_level.is_finite() or stop_level <= 0:
+    if not stop_level.is_finite() or stop_level <= 0 or stop_level >= Decimal("1e9"):
         send(REFUSAL["bad_data"])
         return {"ok": False, "reason": "bad_data"}
 

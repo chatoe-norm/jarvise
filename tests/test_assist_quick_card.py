@@ -905,6 +905,86 @@ def test_qr_bad_stop_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     conn.close()
 
 
+def test_parse_rejects_huge_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leftover A: 1e999999 → usage / bad_data; no Overflow; one send each."""
+    for text in ("q btc long 1e999999", "q btc short 1e999999"):
+        assert parse_quick_command(text) == {"error": "usage"}
+
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "huge.db")
+    _seed_settings(conn)
+    for text in ("q btc long 1e999999", "q btc short 1e999999"):
+        sent, send = _send_capture()
+        out = process_update(
+            conn,
+            _msg(text),
+            send=send,
+            futures=_happy_fake(),
+            now_ms_value=NOW,
+        )
+        assert out["handled"] is True
+        assert len(sent) == 1
+        assert sent[0]["text"] == QUICK_USAGE
+
+    sent_qr, send_qr = _send_capture()
+    answers, answer = _answers()
+    cb = f"qr:SUIUSDT:l:1e999999:{NOW // 1000}"
+    out_qr = process_update(
+        conn,
+        _cq(cb),
+        send=send_qr,
+        answer=answer,
+        futures=_happy_fake(),
+        now_ms_value=NOW,
+    )
+    assert len(answers) == 1
+    assert len(sent_qr) == 1
+    assert sent_qr[0]["text"] == REFUSAL["bad_data"]
+    assert out_qr.get("reason") == "bad_data"
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
+    conn.close()
+
+
+def test_fmt_r_signed_no_ascii_neg_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leftover B: tiny negative net R displays 0.00R, not ASCII -0.00."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "negzero.db")
+    _seed_settings(conn)
+    card = build_quick_card(
+        conn,
+        _happy_fake(marks={"SUIUSDT": Decimal("2.0003")}),
+        symbol="SUIUSDT",
+        side="long",
+        stop=Decimal("1.9979"),
+        now_ms=NOW,
+    )
+    assert card["ok"] is True
+    text = card["text"]
+    assert "เป้า 1R: 2.0027 → สุทธิ 0.00R · ชนะทุกไม้ก็ไม่มีกำไร" in text
+    assert "-0.00" not in text
+    conn.close()
+
+
+def test_stop_floors_to_zero_wrong_side(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leftover C: long stop that rounds to 0 at tick → stop_wrong_side, no callback."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "zerostop.db")
+    _seed_settings(conn)
+    card = build_quick_card(
+        conn,
+        _happy_fake(),
+        symbol="SUIUSDT",
+        side="long",
+        stop=Decimal("0.00001"),
+        now_ms=NOW,
+    )
+    assert card["ok"] is False
+    assert card["reason"] == "stop_wrong_side"
+    assert card.get("callback_data") is None
+    conn.close()
+
+
 # --- qr: register -----------------------------------------------------------
 
 
