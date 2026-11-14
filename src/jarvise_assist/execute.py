@@ -41,7 +41,13 @@ from jarvise_assist.futures import (
     protective_stop_coverage,
 )
 from jarvise_assist.keyboard import entry_confirm_keyboard, move_stop_keyboard
-from jarvise_assist.messages import fmt_price, fmt_qty, format_move_stop_advice, format_signal_message
+from jarvise_assist.messages import (
+    _fmt_price_tick,
+    fmt_price,
+    fmt_qty,
+    format_move_stop_advice,
+    format_signal_message,
+)
 from jarvise_assist.pause import is_paused
 from jarvise_assist.sizing import (
     ExistingIdea,
@@ -61,6 +67,7 @@ from jarvise_assist.store import (
     cancel_exec_intent,
     claim_exec_intent,
     claim_exec_intent_for_recovery,
+    decline_exec_intent,
     ensure_settings,
     finish_exec_intent,
     get_exec_intent,
@@ -2389,9 +2396,29 @@ def _stop_owner_label(order: dict[str, Any]) -> str:
     return "jv-" if cid.startswith("jv-") else "owner"
 
 
-def _cancel_old_stop_label(order: dict[str, Any]) -> str:
+def _tick_from_preview(preview: Any) -> Decimal | None:
+    """Tick stored on the intent. None for rows written before tick was saved."""
+    if not isinstance(preview, dict):
+        return None
+    raw = preview.get("tick")
+    if raw in (None, ""):
+        return None
+    try:
+        tick = Decimal(str(raw))
+    except Exception:  # noqa: BLE001 — a bad stored tick falls back to fmt_price
+        return None
+    return tick if tick > 0 else None
+
+
+def _fmt_move_stop_price(value: Decimal, tick: Decimal | None) -> str:
+    if tick is not None and tick > 0:
+        return _fmt_price_tick(value, tick)
+    return fmt_price(value)
+
+
+def _cancel_old_stop_label(order: dict[str, Any], *, tick: Decimal | None = None) -> str:
     px = order_stop_price(order)
-    px_s = fmt_price(px) if px is not None else "?"
+    px_s = _fmt_move_stop_price(px, tick) if px is not None else "?"
     return f"{px_s} ({_stop_owner_label(order)})"
 
 
@@ -2434,12 +2461,16 @@ def _send_fresh_move_stop_advice(
             "qty": str(pos.qty),
             "advice_text": text,
             "source": source,
+            "tick": str(tick),
         },
         created_at_ms=int(now_ms_value),
         expires_at_ms=expires_at,
     )
     if send is not None:
-        mid = send(text, reply_markup=move_stop_keyboard(new_id, new_stop=fmt_price(new_stop)))
+        mid = send(
+            text,
+            reply_markup=move_stop_keyboard(new_id, new_stop=_fmt_price_tick(new_stop, tick)),
+        )
         if mid is not None:
             set_exec_intent_message_id(conn, new_id, int(mid))
     return new_id
@@ -2510,7 +2541,7 @@ def run_move_stop_sequence(
             now_ms_value=ts,
             send=send,
         )
-        return f"stop แนะนำเปลี่ยนเป็น {fmt_price(fresh_stop)}"
+        return f"stop แนะนำเปลี่ยนเป็น {_fmt_price_tick(fresh_stop, tick)}"
 
     new_stop = button_stop
     mark = trade.mark_price(symbol)
@@ -2640,7 +2671,7 @@ def run_move_stop_sequence(
         algo_id = old.get("algoId") or old.get("orderId")
         if algo_id is None:
             continue
-        label = _cancel_old_stop_label(old)
+        label = _cancel_old_stop_label(old, tick=_tick_from_preview(preview))
         try:
             trade.cancel_algo(symbol=symbol, algo_id=algo_id)
             _log_write(
@@ -2667,7 +2698,8 @@ def run_move_stop_sequence(
                 cancelled.append(label)
             else:
                 cancel_failed = True
-    head = f"✅ เลื่อน stop {symbol} → {fmt_price(new_stop)} · qty ทั้งไม้ {fmt_qty(pos.qty)}"
+    shown = _fmt_move_stop_price(new_stop, _tick_from_preview(preview))
+    head = f"✅ เลื่อน stop {symbol} → {shown} · qty ทั้งไม้ {fmt_qty(pos.qty)}"
     if cancel_failed:
         return _exec_result(f"{head} · {MSG_MOVE_STOP_TWO}", status="done")
     if cancelled:
@@ -2975,12 +3007,12 @@ def handle_exec_callback(
     now_ms_value: int | None = None,
     message: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Route ec:/ey:/en:/ms:/xx: callbacks. Caller already enforced owner chat."""
+    """Route ec:/ey:/en:/mn:/ms:/xx: callbacks. Caller already enforced owner chat."""
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     msg = message or {}
     mid = msg.get("message_id")
 
-    if not execution_buttons_enabled(conn) and not data.startswith("en:"):
+    if not execution_buttons_enabled(conn) and not data.startswith(("en:", "mn:")):
         answer("ปิดอยู่")
         send(MSG_OFF)
         return {"ok": False, "reason": "off"}
@@ -3034,7 +3066,7 @@ def handle_exec_callback(
             set_exec_intent_message_id(conn, intent_id, int(new_mid))
         return {"ok": True, "preview": intent_id}
 
-    if data.startswith("en:") or data.startswith("mn:"):
+    if data.startswith("en:"):
         answer()
         intent_id = data[3:]
         intent = get_exec_intent(conn, intent_id)
@@ -3050,6 +3082,29 @@ def handle_exec_callback(
         else:
             send(MSG_CANCELLED)
         return {"ok": True, "cancelled": intent_id}
+
+    if data.startswith("mn:"):
+        answer("ไม่เลื่อน")
+        intent_id = data[3:]
+        intent = get_exec_intent(conn, intent_id)
+        decline_exec_intent(conn, intent_id)
+        advice_body = None
+        if intent is not None:
+            preview = intent.get("preview") or {}
+            if isinstance(preview, dict):
+                advice_body = preview.get("advice_text")
+        base = str(advice_body) if advice_body else ""
+        if "(ไม่เลื่อน)" in base:
+            edit_body = base
+        elif base:
+            edit_body = f"{base}\n(ไม่เลื่อน)"
+        else:
+            edit_body = "(ไม่เลื่อน)"
+        if mid is not None:
+            edit(int(mid), edit_body, reply_markup={"inline_keyboard": []})
+        else:
+            send(edit_body)
+        return {"ok": True, "declined": intent_id}
 
     if data.startswith("ey:") or data.startswith("ms:") or data.startswith("xx:"):
         prefix = data[:3]
@@ -3072,10 +3127,10 @@ def handle_exec_callback(
             text = str(intent.get("result_text") or "ทำไปแล้ว")
             send(text)
             return {"ok": True, "replay": True, "text": text}
-        if intent["status"] == "cancelled":
+        if intent["status"] in {"cancelled", "declined"}:
             answer()
             send(MSG_CANCELLED)
-            return {"ok": False, "reason": "cancelled"}
+            return {"ok": False, "reason": intent["status"]}
         if intent["status"] == "confirmed":
             answer()
             send("กำลังทำอยู่")
@@ -3827,7 +3882,11 @@ def _recover_move_stop_intent(
             conn,
             intent_id,
             status="done",
-            text=f"✅ เลื่อน stop {symbol} → {fmt_price(new_stop)} · qty ทั้งไม้ {fmt_qty(pos.qty)}",
+            text=(
+                f"✅ เลื่อน stop {symbol} → "
+                f"{_fmt_move_stop_price(new_stop, _tick_from_preview(preview))}"
+                f" · qty ทั้งไม้ {fmt_qty(pos.qty)}"
+            ),
             expect_status="recovering",
         )
         return

@@ -109,7 +109,7 @@ def process_update(
             )
             answer_fn(cq_id, text=result.get("toast"))
             return result
-        if data.startswith(("ec:", "ey:", "en:", "ms:", "xx:")):
+        if data.startswith(("ec:", "ey:", "en:", "ms:", "mn:", "xx:")):
 
             def _answer(text: str | None = None) -> None:
                 answer_fn(cq_id, text=text)

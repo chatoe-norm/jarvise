@@ -54,7 +54,9 @@ from jarvise_assist.store import (
     insert_signal,
     list_held_signals,
     list_held_watch_advice,
+    upsert_watch_position,
 )
+from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_assist.watch import run_assist_watch
 from jarvise_ingest.db import open_db, upsert_analysis_output, upsert_market_technicals
 
@@ -3146,3 +3148,110 @@ def test_on_demand_requote_no_baseline_reason_line(tmp_path: Path, monkeypatch: 
     assert "ขนาด:" not in text
     assert markup is None or "ec:DOGEUSDT" not in json.dumps(markup)
     conn.close()
+
+
+def test_short_breakeven_exact_half_r_tick() -> None:
+    entry = Decimal("0.1673")
+    initial = Decimal("0.1748")
+    tick = Decimal("0.0001")
+    entry_ms = 1_700_000_000_000
+    now = entry_ms + 3_600_000
+
+    def advice(low: str) -> tuple[Decimal, str] | None:
+        return current_trail_advice(
+            side="short",
+            entry=entry,
+            initial_stop=initial,
+            candles_1h=[
+                {
+                    "timestamp": entry_ms,
+                    "open": "0.1673",
+                    "high": "0.1680",
+                    "low": low,
+                    "close": low,
+                }
+            ],
+            entry_time_ms=entry_ms,
+            now_ms=now,
+            tick=tick,
+        )
+
+    hit = advice("0.16355")
+    assert hit == (Decimal("0.1670"), "breakeven")
+    assert advice("0.16356") is None
+
+
+def _exchange_stop_case(tmp_path: Path, *, stop_px: str, name: str) -> list[str]:
+    conn = open_db(tmp_path / f"{name}.db")
+    day = _ms_bangkok(2026, 11, 14, 14, 0)
+    entry_time = day - 2 * 3_600_000
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "DOGEUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.1673,
+            "qty": 100.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.1748,
+            "initial_stop_source": "signal",
+            "entry_time_ms": entry_time,
+            "no_stop_latched": 0,
+            "last_seen_ms": entry_time,
+            "closed_at_ms": None,
+        },
+    )
+    upsert_market_technicals(
+        conn,
+        [
+            {
+                "symbol": "DOGEUSDT",
+                "timestamp": entry_time,
+                "timeframe": "1h",
+                "open": 0.1673,
+                "high": 0.1680,
+                "low": 0.16355,
+                "close": 0.1640,
+                "volume": 1.0,
+            }
+        ],
+    )
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.1673"),
+        mark_price=Decimal("0.164"),
+        update_time_ms=entry_time,
+    )
+    fake = FakeFutures(
+        positions=[pos],
+        orders=[
+            {
+                "symbol": "DOGEUSDT",
+                "side": "BUY",
+                "type": "STOP_MARKET",
+                "reduceOnly": True,
+                "stopPrice": stop_px,
+                "origQty": "100",
+                "clientAlgoId": "owner-stop",
+            }
+        ],
+        ticks={"DOGEUSDT": Decimal("0.0001")},
+        steps={"DOGEUSDT": Decimal("1")},
+        marks={"DOGEUSDT": Decimal("0.164")},
+    )
+    sent: list[str] = []
+    run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda text, **_k: sent.append(text) or True)
+    conn.close()
+    return [text for text in sent if "ปุ่มหมดอายุ" in text]
+
+
+def test_move_stop_respects_tighter_exchange_stop(tmp_path: Path) -> None:
+    wider = _exchange_stop_case(tmp_path, stop_px="0.1676", name="wider")
+    assert len(wider) == 1
+    assert "stop 0.1676 → 0.1670" in wider[0]
+    tighter = _exchange_stop_case(tmp_path, stop_px="0.1668", name="tighter")
+    assert tighter == []

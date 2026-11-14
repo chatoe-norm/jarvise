@@ -29,7 +29,7 @@ from jarvise_assist.futures import (
 from jarvise_assist.journal import journal_on_close
 from jarvise_assist.keyboard import exit_confirm_keyboard, move_stop_keyboard
 from jarvise_assist.messages import (
-    fmt_price,
+    _fmt_price_tick,
     format_exit_advice,
     format_move_stop_advice,
     format_no_stop_warning,
@@ -487,11 +487,12 @@ def _process_universe_position(
                         "qty": str(pos.qty),
                         "advice_text": text,
                         "source": _source,
+                        "tick": str(tick),
                     },
                     created_at_ms=now_ms,
                     expires_at_ms=expires_at,
                 )
-                move_markup = move_stop_keyboard(intent_id, new_stop=fmt_price(suggested_d))
+                move_markup = move_stop_keyboard(intent_id, new_stop=_fmt_price_tick(suggested_d, tick))
             status = _emit_advice(
                 conn,
                 symbol=pos.symbol,
