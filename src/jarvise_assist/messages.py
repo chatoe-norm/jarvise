@@ -338,6 +338,42 @@ def format_exit_advice(
     return f"✅ {symbol.upper()} {side_label} · ออกตอนนี้\n{detail} · ประมาณ {r_s}R"
 
 
+def _fmt_r_level(level: Decimal) -> str:
+    """+0.5R / +1R / +1.5R — no trailing zeros."""
+    text = format(level.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def format_progress_alert(
+    *,
+    symbol: str,
+    side: str,
+    level: Decimal,
+    r_now: Decimal,
+    mark: Decimal,
+    entry: Decimal,
+    stop: Decimal,
+    stop_r: Decimal,
+    tick: Decimal,
+    with_button: bool,
+) -> str:
+    """Owner alert that the live mark crossed a progress level. No new order rule."""
+    side_label = "LONG" if side.lower() == "long" else "SHORT"
+    lines = [
+        (f"📈 {symbol.upper()} {side_label} ถึง +{_fmt_r_level(level)}R แล้ว (ตอนนี้ {r_now:+.2f}R)"),
+        (
+            f"mark {_fmt_price_tick(mark, tick)} · entry {_fmt_price_tick(entry, tick)} · "
+            f"stop ปัจจุบัน {_fmt_price_tick(stop, tick)} ({stop_r:+.2f}R)"
+        ),
+        "แจ้งเพื่อทราบ · กติกาเดิม: เลื่อน BE เมื่อแท่ง 1h ปิดเกิน +0.5R · trail เมื่อเกิน +1R",
+    ]
+    if with_button:
+        lines.append("กด ✅ ปิดไม้ = ปิดทั้งไม้ที่ราคาตลาดตอนกด")
+    return "\n".join(lines)
+
+
 def safe_symbol_configs(client: Any) -> dict[str, SymbolAccountConfig]:
     """Read symbolConfig; empty dict on any failure (never raises)."""
     try:

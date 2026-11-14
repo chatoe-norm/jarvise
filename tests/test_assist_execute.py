@@ -2103,8 +2103,12 @@ def test_deduped_watch_poll_inserts_no_intent(tmp_path: Path, monkeypatch: pytes
     fake = FakeFutures(positions=[pos], orders=[], algo_orders=[stop_order])
     monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
     run_assist_watch(conn, futures=fake, now_ms_value=day, send=lambda t, **_: True)
-    n = conn.execute("SELECT COUNT(*) FROM assist_exec_intent").fetchone()[0]
-    assert n == 0
+    # The already-sent exit stays silent. The mark is past +1.5R, so the new
+    # progress alert is the only intent on this poll.
+    rows = conn.execute("SELECT kind, preview_json FROM assist_exec_intent").fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "exit"
+    assert json.loads(rows[0][1])["source"] == "progress"
     conn.close()
 
 
