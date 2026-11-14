@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from decimal import Decimal
@@ -83,6 +84,37 @@ SendFn = Callable[..., Any]
 def _default_send(text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
     """Telegram send that keeps inline buttons (exit / move-stop)."""
     return send_message(text, reply_markup=reply_markup) is not None
+
+
+def _log_decision(**fields: Any) -> None:
+    """One JSON observability line per universe position (or assist_disabled)."""
+    logger.info("assist_watch_decision %s", json.dumps(fields, sort_keys=True, default=str))
+
+
+def _emit_status_to_decision(status: str) -> str:
+    if status == "skipped":
+        return "skipped_dedupe"
+    if status == "failed":
+        return "send_failed"
+    return status
+
+
+def _threshold_price(*, side: str, entry: Decimal, risk: Decimal, milestone: str) -> float | None:
+    if risk <= 0:
+        return None
+    r_mult = Decimal("1") if milestone == "trail" else Decimal("0.5")
+    if side == "long":
+        return float(entry + r_mult * risk)
+    return float(entry - r_mult * risk)
+
+
+def _last_closed_bar_ts(candles: list[dict[str, Any]], *, now_ms: int) -> int | None:
+    last: int | None = None
+    for row in candles:
+        ts = int(row["timestamp"])
+        if ts + ONE_H_MS <= int(now_ms):
+            last = ts if last is None else max(last, ts)
+    return last
 
 
 # Re-export for callers/tests that imported from watch.
@@ -352,6 +384,23 @@ def _process_universe_position(
     initial_stop = stored.get("initial_stop")
     if initial_stop is None:
         actions.append({"symbol": pos.symbol, "action": "no_initial_stop"})
+        _log_decision(
+            symbol=pos.symbol,
+            side=pos.side,
+            entry_time_ms=stored.get("entry_time_ms"),
+            milestone="none",
+            best_extreme=None,
+            last_closed_bar_ts=None,
+            threshold_price=None,
+            suggested=None,
+            compare_stop=None,
+            compare_source=None,
+            mark=None,
+            r_now=None,
+            progress_sent=[],
+            decision="no_initial_stop",
+            reason="no_initial_stop",
+        )
         return
     stop_dec = Decimal(str(initial_stop))
     since = int(stored["entry_time_ms"]) if stored.get("entry_time_ms") else None
@@ -430,6 +479,7 @@ def _process_universe_position(
 
     # Compare trail advice to the resting stop order, else the frozen initial stop.
     compare_stop = protective if protective is not None else stop_dec
+    compare_source = "exchange" if protective is not None else "initial"
 
     mark = pos.mark_price if pos.mark_price > 0 else client.mark_price(pos.symbol)
     entry_time = int(stored.get("entry_time_ms") or now_ms)
@@ -438,6 +488,7 @@ def _process_universe_position(
         tick = client.symbol_filters(pos.symbol).tick_size
     except Exception:  # noqa: BLE001
         tick = Decimal("0.01")
+    progress_sent: list[float] = []
     if not night and since is not None:
         r_now = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
         pending = [
@@ -505,6 +556,7 @@ def _process_universe_position(
                 reply_markup=reply_markup,
             )
             if status == "sent":
+                progress_sent = [float(level) for level in pending]
                 for level in pending:
                     if level == top_level:
                         continue
@@ -532,8 +584,13 @@ def _process_universe_position(
         now_ms=now_ms,
         tick=tick,
     )
+    move_decision: str | None = None
+    move_reason: str | None = None
+    suggested_d: Decimal | None = None
+    milestone = "none"
     if trail is not None:
         suggested_d, _source = trail
+        milestone = str(_source)
         tighter = suggested_d > compare_stop if pos.side == "long" else suggested_d < compare_stop
         if tighter:
             expires_at = now_ms + MOVE_STOP_TTL_MS
@@ -604,6 +661,14 @@ def _process_universe_position(
                     "status": status,
                 }
             )
+            move_decision = _emit_status_to_decision(status)
+            move_reason = str(_source)
+        else:
+            move_decision = "not_tighter"
+            move_reason = "not_tighter"
+    else:
+        move_decision = "not_reached"
+        move_reason = "not_reached"
 
     reason = _exit_reason(
         conn,
@@ -658,6 +723,35 @@ def _process_universe_position(
             reply_markup=exit_markup,
         )
         actions.append({"symbol": pos.symbol, "action": "exit", "reason": reason, "status": status})
+
+    best_low, best_high = candle_extremes_after_entry(
+        candles_1h,
+        entry_time_ms=entry_time,
+        now_ms=now_ms,
+        bar_ms=ONE_H_MS,
+    )
+    best_extreme = best_high if pos.side == "long" else best_low
+    risk = abs(pos.entry_price - stop_dec)
+    r_now_val = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
+    _log_decision(
+        symbol=pos.symbol,
+        side=pos.side,
+        entry_time_ms=entry_time,
+        milestone=milestone,
+        best_extreme=best_extreme,
+        last_closed_bar_ts=_last_closed_bar_ts(candles_1h, now_ms=now_ms),
+        threshold_price=_threshold_price(
+            side=pos.side, entry=pos.entry_price, risk=risk, milestone=milestone
+        ),
+        suggested=float(suggested_d) if suggested_d is not None else None,
+        compare_stop=float(compare_stop),
+        compare_source=compare_source,
+        mark=float(mark),
+        r_now=float(r_now_val),
+        progress_sent=progress_sent,
+        decision=move_decision,
+        reason=move_reason,
+    )
 
 
 def flush_held_watch_advice(
@@ -785,6 +879,7 @@ def run_assist_watch(
     send_fn = send or _default_send
     settings = ensure_settings(conn)
     if not settings["enabled"]:
+        _log_decision(decision="assist_disabled", reason="assist_disabled")
         return _strip_secrets({"ok": True, "skipped": "assist_disabled", "paper_only": True, "at_ms": ts})
 
     maybe_auto_resume(conn, now_ms=ts, send=send_fn)
