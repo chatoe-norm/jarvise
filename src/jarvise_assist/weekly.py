@@ -135,10 +135,11 @@ def format_weekly_summary(
     quick_usdt = real.get("quick_usdt")
     if quick is not None and (quick_n > 0 or quick_usdt is not None):
         sum_r = float(quick.get("sum_r") or 0.0)
-        raw_usdt = quick.get("usdt")
-        if raw_usdt is None:
-            raw_usdt = 0.0 if quick_usdt is None else quick_usdt
-        usdt = float(raw_usdt)
+        # Prefer income actually removed from main lines; fall back to summarize_quick usdt.
+        if quick_usdt is not None:
+            usdt = float(quick_usdt)
+        else:
+            usdt = float(quick.get("usdt") or 0.0)
         lines.append(f"Quick (แยกจาก assist) 7 วัน: n={quick_n} · รวม {sum_r:+.2f}R · {usdt:+.2f} USDT")
     other = float(real.get("other_usdt") or 0.0)
     if other != 0.0:

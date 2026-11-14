@@ -453,6 +453,115 @@ def test_fill_expired_and_wrong_side(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_first_fill_wrong_side_before_opening_expires(tmp_path: Path) -> None:
+    """Earlier wrong-side fill expires the registration; later opening fill must not tag."""
+    conn = open_db(tmp_path / "wrongfirst.db")
+    t0 = _ms_bangkok(2026, 11, 10, 11, 0)
+    rid, _ = create_quick_registration(
+        conn,
+        symbol="ETHUSDT",
+        side="long",
+        planned_entry=100.0,
+        planned_stop=90.0,
+        qty=1.0,
+        now_ms=t0,
+    )
+    fake = HistoryFakeFutures(
+        trades=[
+            _fill(
+                tid=9,
+                symbol="ETHUSDT",
+                side="SELL",
+                price=100.0,
+                qty=1.0,
+                time_ms=t0 + 60_000,
+            ),
+            _fill(
+                tid=10,
+                symbol="ETHUSDT",
+                side="BUY",
+                price=100.0,
+                qty=1.0,
+                time_ms=t0 + 3 * 60_000,
+                realized=-1.0,
+            ),
+        ]
+    )
+    sync_quick_trades(conn, fake, now_ms=t0 + 3 * 60_000, send=lambda *_a, **_k: True)
+    reg = conn.execute("SELECT status FROM assist_quick_registration WHERE id=?", (rid,)).fetchone()
+    assert reg["status"] == "expired"
+    assert conn.execute("SELECT COUNT(*) AS n FROM assist_quick_trade").fetchone()["n"] == 0
+    pred = quick_income_predicate(conn, now_ms=t0 + 3 * 60_000)
+    assert (
+        pred(
+            _income(
+                symbol="ETHUSDT",
+                itype="REALIZED_PNL",
+                income="-1",
+                time_ms=t0 + 3 * 60_000,
+                trade_id=10,
+            )
+        )
+        is False
+    )
+
+    # short mirror: BUY first, then SELL
+    rid2, _ = create_quick_registration(
+        conn,
+        symbol="BTCUSDT",
+        side="short",
+        planned_entry=100.0,
+        planned_stop=110.0,
+        qty=1.0,
+        now_ms=t0,
+    )
+    fake2 = HistoryFakeFutures(
+        trades=[
+            _fill(
+                tid=19,
+                symbol="BTCUSDT",
+                side="BUY",
+                price=100.0,
+                qty=1.0,
+                time_ms=t0 + 60_000,
+            ),
+            _fill(
+                tid=20,
+                symbol="BTCUSDT",
+                side="SELL",
+                price=100.0,
+                qty=1.0,
+                time_ms=t0 + 3 * 60_000,
+                realized=-1.0,
+            ),
+        ]
+    )
+    sync_quick_trades(conn, fake2, now_ms=t0 + 3 * 60_000, send=lambda *_a, **_k: True)
+    reg2 = conn.execute("SELECT status FROM assist_quick_registration WHERE id=?", (rid2,)).fetchone()
+    assert reg2["status"] == "expired"
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM assist_quick_trade WHERE registration_id=?",
+            (rid2,),
+        ).fetchone()["n"]
+        == 0
+    )
+    pred2 = quick_income_predicate(conn, now_ms=t0 + 3 * 60_000)
+    assert (
+        pred2(
+            _income(
+                symbol="BTCUSDT",
+                itype="REALIZED_PNL",
+                income="-1",
+                time_ms=t0 + 3 * 60_000,
+                trade_id=20,
+            )
+        )
+        is False
+    )
+    conn.close()
+
+
 def test_fill_partials_and_cross_zero(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "part.db")
     t0 = _ms_bangkok(2026, 11, 10, 12, 0)
@@ -1264,6 +1373,76 @@ def test_weekly_and_reconcile_skip_quick(tmp_path: Path) -> None:
     assert not any(u.get("symbol") == "BTCUSDT" and u.get("amount") == -5.0 for u in rec["unattributed"])
     conn.close()
     empty.close()
+
+
+def test_weekly_quick_line_uses_quick_usdt_for_no_r(tmp_path: Path) -> None:
+    """No-R quick trade: Quick line USDT comes from real quick_usdt, not summarize_quick usdt=0."""
+    conn = open_db(tmp_path / "norweek.db")
+    now = _ms_bangkok(2026, 11, 10, 8, 30)
+    closed = now - 1000
+    entry_ms = now - 10_000
+    exit_tid = 77
+    entry_tid = 76
+    conn.execute(
+        """
+        INSERT INTO assist_quick_registration (
+            id, symbol, side, planned_entry, planned_stop, qty,
+            created_at_ms, expires_at_ms, status, trade_id, updated_at_ms
+        ) VALUES ('rn', 'ETHUSDT', 'long', 100, 90, 1, ?, ?, 'tagged', 'qn', ?)
+        """,
+        (entry_ms, closed, closed),
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_quick_trade (
+            id, registration_id, symbol, side, planned_stop, entry_time_ms,
+            entry_qty, entry_avg, closed_at_ms, exit_avg,
+            entry_trade_ids, exit_trade_ids, realized_pnl_usdt, commission_usdt,
+            commission_other_asset, funding_usdt, net_usdt, risk_usdt, net_r, fee_r,
+            status, updated_at_ms
+        ) VALUES (
+            'qn', 'rn', 'ETHUSDT', 'long', 90, ?, 1, 100, ?, 97,
+            ?, ?, -3.0, -0.2, 'BNB:0.01', 0, -3.2, 10, NULL, NULL, 'closed', ?
+        )
+        """,
+        (entry_ms, closed, json.dumps([entry_tid]), json.dumps([exit_tid]), closed),
+    )
+    conn.commit()
+    income = [
+        _income(
+            symbol="ETHUSDT",
+            itype="REALIZED_PNL",
+            income="-3.0",
+            time_ms=closed,
+            trade_id=exit_tid,
+        ),
+        _income(
+            symbol="ETHUSDT",
+            itype="COMMISSION",
+            income="-0.2",
+            time_ms=closed,
+            trade_id=exit_tid,
+        ),
+    ]
+    pred = quick_income_predicate(conn, now_ms=now)
+    real = summarize_income(income, is_quick=pred)
+    assert real.get("quick_usdt") == pytest.approx(-3.2)
+    quick = summarize_quick(conn, until_ms=now)
+    assert quick["n"] == 0
+    assert quick["usdt"] == pytest.approx(0.0)
+    text = format_weekly_summary(
+        counts={"sent": 0, "skipped": 0, "taken": 0},
+        virtual={"n": 0},
+        real=real,
+        closed_all=0,
+        quick=quick,
+    )
+    assert "Quick (แยกจาก assist) 7 วัน: n=0 · รวม +0.00R · -3.20 USDT" in text
+    # สุทธิ + quick USDT equals the total of the income rows
+    net_line = next(ln for ln in text.splitlines() if ln.startswith("สุทธิ "))
+    net_usdt = float(net_line.split()[1])
+    assert net_usdt + float(real["quick_usdt"]) == pytest.approx(-3.2)
+    conn.close()
 
 
 def test_watch_no_quick_and_sync_failure(tmp_path: Path, caplog: Any) -> None:

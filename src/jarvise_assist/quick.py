@@ -319,7 +319,7 @@ def _rebuild_open_trade(
         "entry_trade_ids": json.dumps(entry_ids),
         "exit_trade_ids": json.dumps(exit_ids),
         "realized_pnl_usdt": realized if status == "closed" else None,
-        "commission_usdt": commission if status == "closed" else commission,
+        "commission_usdt": commission,
         "commission_other_asset": other_asset,
         "funding_usdt": funding if status == "closed" else None,
         "net_usdt": net_usdt if status == "closed" else None,
@@ -432,6 +432,7 @@ def sync_quick_trades(
 
     info: dict[str, Any] = {"tagged": 0, "expired": 0, "updated": 0}
 
+    tagged_trade_ids: set[str] = set()
     for reg in open_regs:
         rid = str(reg["id"])
         sym = str(reg["symbol"]).upper()
@@ -439,51 +440,28 @@ def sync_quick_trades(
         created = int(reg["created_at_ms"])
         expires = int(reg["expires_at_ms"])
         fills = fetch_all_user_trades(client, sym, start_ms=created, end_ms=int(now_ms) + 1)
-        opens = [
-            f
-            for f in fills
-            if str(f.get("side") or "").upper() == _opening_side(side)
-            and created <= int(f.get("time") or 0) <= expires
-        ]
-        opens.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
-
-        if opens:
-            first = opens[0]
-            trade_id = f"aqt_{uuid.uuid4().hex[:16]}"
-            # Reuse existing trade id if somehow present
-            existing = conn.execute(
-                "SELECT id FROM assist_quick_trade WHERE registration_id=?", (rid,)
-            ).fetchone()
-            if existing is not None:
-                trade_id = str(existing["id"])
-            _rebuild_open_trade(
-                conn,
-                trade_id=trade_id,
-                registration_id=rid,
-                symbol=sym,
-                side=side,
-                planned_stop=float(reg["planned_stop"]),
-                fills=fills,
-                first_fill=first,
-                now_ms=now_ms,
-                client=client,
-            )
-            conn.execute(
-                """
-                UPDATE assist_quick_registration
-                SET status='tagged', trade_id=?, updated_at_ms=?
-                WHERE id=?
-                """,
-                (trade_id, int(now_ms), rid),
-            )
-            conn.commit()
-            info["tagged"] += 1
-            continue
-
-        # Wrong-side first fill after created → expire immediately.
+        # First fill after created decides: wrong side → expire; opening → tag or grace.
         after = [f for f in fills if int(f.get("time") or 0) >= created]
         after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
-        if after and str(after[0].get("side") or "").upper() != _opening_side(side):
+
+        if not after:
+            if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
+                conn.execute(
+                    """
+                    UPDATE assist_quick_registration
+                    SET status='expired', updated_at_ms=?
+                    WHERE id=?
+                    """,
+                    (int(now_ms), rid),
+                )
+                conn.commit()
+                info["expired"] += 1
+            continue
+
+        first = after[0]
+        first_side = str(first.get("side") or "").upper()
+        first_time = int(first.get("time") or 0)
+        if first_side != _opening_side(side):
             conn.execute(
                 """
                 UPDATE assist_quick_registration
@@ -496,21 +474,57 @@ def sync_quick_trades(
             info["expired"] += 1
             continue
 
-        if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
-            conn.execute(
-                """
-                UPDATE assist_quick_registration
-                SET status='expired', updated_at_ms=?
-                WHERE id=?
-                """,
-                (int(now_ms), rid),
-            )
-            conn.commit()
-            info["expired"] += 1
+        if first_time > expires:
+            if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
+                conn.execute(
+                    """
+                    UPDATE assist_quick_registration
+                    SET status='expired', updated_at_ms=?
+                    WHERE id=?
+                    """,
+                    (int(now_ms), rid),
+                )
+                conn.commit()
+                info["expired"] += 1
+            continue
 
-    # Rebuild already-open trades
+        trade_id = f"aqt_{uuid.uuid4().hex[:16]}"
+        # Reuse existing trade id if somehow present
+        existing = conn.execute(
+            "SELECT id FROM assist_quick_trade WHERE registration_id=?", (rid,)
+        ).fetchone()
+        if existing is not None:
+            trade_id = str(existing["id"])
+        _rebuild_open_trade(
+            conn,
+            trade_id=trade_id,
+            registration_id=rid,
+            symbol=sym,
+            side=side,
+            planned_stop=float(reg["planned_stop"]),
+            fills=fills,
+            first_fill=first,
+            now_ms=now_ms,
+            client=client,
+        )
+        conn.execute(
+            """
+            UPDATE assist_quick_registration
+            SET status='tagged', trade_id=?, updated_at_ms=?
+            WHERE id=?
+            """,
+            (trade_id, int(now_ms), rid),
+        )
+        conn.commit()
+        tagged_trade_ids.add(trade_id)
+        info["tagged"] += 1
+
+    # Rebuild already-open trades (skip ones tagged earlier in this run)
     open_trades = conn.execute("SELECT * FROM assist_quick_trade WHERE status='open'").fetchall()
     for trade in open_trades:
+        trade_id = str(trade["id"])
+        if trade_id in tagged_trade_ids:
+            continue
         sym = str(trade["symbol"]).upper()
         side = str(trade["side"])
         entry_ms = int(trade["entry_time_ms"] or 0)
@@ -531,7 +545,7 @@ def sync_quick_trades(
             first_fill = cand[0]
         _rebuild_open_trade(
             conn,
-            trade_id=str(trade["id"]),
+            trade_id=trade_id,
             registration_id=str(trade["registration_id"]),
             symbol=sym,
             side=side,
@@ -699,12 +713,8 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
     def _mark(cur: float, options: tuple[float, ...], prefix: str) -> list[dict[str, str]]:
         row: list[dict[str, str]] = []
         for v in options:
-            label = f"✓ {_fmt_pct(v)}" if abs(cur - v) < 1e-9 else _fmt_pct(v)
-            if prefix in {"dl"}:
-                label = f"{label}R" if "✓" in label or True else label
-                # Always show R unit for day loss
-                bare = _fmt_pct(v)
-                label = f"✓ {bare}R" if abs(cur - v) < 1e-9 else f"{bare}R"
+            bare = _fmt_pct(v)
+            label = f"✓ {bare}R" if abs(cur - v) < 1e-9 else f"{bare}R"
             row.append({"text": label, "callback_data": f"qs:{prefix}:{_fmt_pct(v)}"})
         return row
 
@@ -780,7 +790,6 @@ def _apply_quick_setting(
             send("รับได้แค่ 0.25 / 0.5 / 0.75 / 1")
             return {"ok": False, "rejected": True}
         if val >= RISK_CONFIRM_AT and not confirmed:
-            total_hint = ""
             send(
                 f"ยืนยันความเสี่ยงต่อไม้ {_fmt_pct(val)}%?",
                 reply_markup={
@@ -792,7 +801,6 @@ def _apply_quick_setting(
                     ]
                 },
             )
-            del total_hint
             return {"ok": True, "confirm": True}
         write_quick_settings(conn, risk_pct=val, updated_at_ms=now_ms)
         text, kb = render_quick_menu(conn, now_ms=now_ms)
