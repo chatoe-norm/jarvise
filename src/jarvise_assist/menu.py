@@ -41,6 +41,7 @@ from jarvise_assist.messages import (
 )
 from jarvise_assist.pause import clear_pause_manual, format_paused_until, is_paused
 from jarvise_assist.quick import render_quick_menu
+from jarvise_assist.quick_tags import MSG_QUICK_OPEN
 from jarvise_assist.signals import scan_signal_candidates
 from jarvise_assist.sizing import below_min_notional, cap_requote_qty, chase_exceeded, next_assist_run_ms
 from jarvise_assist.store import (
@@ -75,6 +76,7 @@ ON_DEMAND_REASON_TH: dict[str, str] = {
     "same_idea": "ส่งไปแล้วใน 24 ชม.",
     "requote_cap_zero": "จำกัดตามไอเดียแรกแล้วขนาดเหลือ 0 — ไม่ส่ง",
     "requote_no_baseline": "ไม่มีขนาดอ้างอิงจากไอเดียแรก",
+    "quick_open": MSG_QUICK_OPEN,
 }
 
 

@@ -9,6 +9,23 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+MSG_QUICK_OPEN = "มีไม้ quick อยู่ — ปิดก่อนถึงเข้าได้"
+
+
+def quick_symbols(conn: Any) -> frozenset[str]:
+    """Upper-cased symbols with an open quick trade or open registration.
+
+    Status only (not expires_at_ms). Read-only; no Binance; no cross-call cache.
+    """
+    rows = conn.execute(
+        """
+        SELECT UPPER(symbol) AS symbol FROM assist_quick_trade WHERE status='open'
+        UNION
+        SELECT UPPER(symbol) AS symbol FROM assist_quick_registration WHERE status='open'
+        """
+    ).fetchall()
+    return frozenset(str(r[0]) for r in rows)
+
 
 def _id_set(raw: Any) -> set[int]:
     if not raw:
