@@ -28,6 +28,7 @@ from jarvise_assist.menu import (
     handle_risk_number,
     match_menu_label,
 )
+from jarvise_assist.quick import handle_quick_callback
 from jarvise_assist.store import (
     ensure_settings,
     get_edge,
@@ -94,6 +95,9 @@ def process_update(
         if data.startswith("risk:") or data.startswith("risk_yes:") or data == "risk_no":
             answer_fn(cq_id)
             return handle_risk_callback(conn, data, send=send_fn)
+        if data.startswith("qs:"):
+            answer_fn(cq_id)
+            return handle_quick_callback(conn, data, send=send_fn, now_ms=ts)
         if data.startswith(EXPLORE_RM_PREFIX):
             answer_fn(cq_id)
             result = remove_explore_symbol(conn, data.removeprefix(EXPLORE_RM_PREFIX))

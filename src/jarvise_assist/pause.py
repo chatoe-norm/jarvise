@@ -9,6 +9,7 @@ from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import BinanceFuturesClient
+from jarvise_assist.quick_tags import quick_income_predicate
 from jarvise_assist.store import ensure_settings, get_edge, now_ms, write_edge, write_settings
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -380,10 +381,11 @@ def evaluate_pause(
         return {"paused": False, "error": type(exc).__name__}
 
     edge = get_edge(conn)
+    is_quick = quick_income_predicate(conn, now_ms=now_ms)
     realized = [
         r
         for r in _universe_income(income, income_type="REALIZED_PNL")
-        if Decimal(str(r.get("income") or "0")) != 0
+        if Decimal(str(r.get("income") or "0")) != 0 and not is_quick(r)
     ]
     events = _close_events(realized)
 

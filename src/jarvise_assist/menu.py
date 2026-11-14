@@ -22,6 +22,7 @@ from jarvise_assist.keyboard import (
     BTN_ANYTHING,
     BTN_EXPLORE,
     BTN_POSITIONS,
+    BTN_QUICK,
     BTN_RISK_PREFIX,
     BTN_TOGGLE,
     BTN_WEEKLY,
@@ -39,6 +40,7 @@ from jarvise_assist.messages import (
     safe_symbol_configs,
 )
 from jarvise_assist.pause import clear_pause_manual, format_paused_until, is_paused
+from jarvise_assist.quick import render_quick_menu
 from jarvise_assist.signals import scan_signal_candidates
 from jarvise_assist.sizing import below_min_notional, cap_requote_qty, chase_exceeded, next_assist_run_ms
 from jarvise_assist.store import (
@@ -90,6 +92,8 @@ def match_menu_label(text: str) -> str | None:
         return "toggle"
     if raw == BTN_EXPLORE:
         return "explore"
+    if raw == BTN_QUICK:
+        return "quick"
     return None
 
 
@@ -141,6 +145,10 @@ def handle_menu_text(
         explore_body, explore_markup = render_explore_message(conn)
         send_fn(explore_body, reply_markup=explore_markup)
         return {"handled": True, "kind": kind, "text": explore_body}
+    if kind == "quick":
+        body, markup = render_quick_menu(conn, now_ms=now_ms)
+        send_fn(body, reply_markup=markup)
+        return {"handled": True, "kind": kind, "text": body}
     return {"handled": False}
 
 

@@ -38,6 +38,7 @@ from jarvise_assist.messages import (
     format_progress_alert,
 )
 from jarvise_assist.pause import evaluate_day_loss_pause, evaluate_pause, maybe_auto_resume
+from jarvise_assist.quick import sync_quick_trades
 from jarvise_assist.real_trades import refresh_incomplete_income
 from jarvise_assist.signals import (
     _alert_key_unsafe,
@@ -915,6 +916,12 @@ def run_assist_watch(
     except Exception as exc:  # noqa: BLE001
         return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
 
+    quick_info: dict[str, Any] = {}
+    try:
+        quick_info = sync_quick_trades(conn, client, now_ms=ts, send=send_fn) or {}
+    except Exception:  # noqa: BLE001 — quick sync must not stop advice, journal, or pauses
+        logger.exception("assist quick sync failed")
+
     # Pause may engage here; watch still emits advice for open positions.
     # While the assistant is off, skip pause evaluators (owner chose off to stop new signals).
     pause_info: dict[str, Any] = {}
@@ -966,17 +973,18 @@ def run_assist_watch(
         day_pause = evaluate_day_loss_pause(conn, now_ms=ts, send=send_fn)
         if day_pause.get("reason") in {"day_loss", "day_loss_deeper"}:
             pause_info = day_pause
-    return _strip_secrets(
-        {
-            "ok": True,
-            "paper_only": True,
-            "at_ms": ts,
-            "night_hold": night,
-            "actions": actions,
-            "closed": [{"symbol": s, "position_side": p} for s, p in closed],
-            "orphan_cancelled": orphan_cancelled,
-            "futures_recovered": recovered,
-            "pause": pause_info,
-            "assist_enabled": assist_enabled,
-        }
-    )
+    result: dict[str, Any] = {
+        "ok": True,
+        "paper_only": True,
+        "at_ms": ts,
+        "night_hold": night,
+        "actions": actions,
+        "closed": [{"symbol": s, "position_side": p} for s, p in closed],
+        "orphan_cancelled": orphan_cancelled,
+        "futures_recovered": recovered,
+        "pause": pause_info,
+        "assist_enabled": assist_enabled,
+    }
+    if quick_info:
+        result["quick"] = quick_info
+    return _strip_secrets(result)
