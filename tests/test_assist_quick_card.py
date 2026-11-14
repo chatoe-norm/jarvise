@@ -699,6 +699,212 @@ def test_refusal_margin_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     conn.close()
 
 
+def test_refusal_margin_cap_available_300(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1a: available 300 + stop 1.994 must refuse shrink (not emit a card)."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "mc300.db")
+    _seed_settings(conn)
+    fake = _happy_fake(available=Decimal("300"))
+    _assert_refusal(
+        conn,
+        fake,
+        reason="margin_cap",
+        monkeypatch=monkeypatch,
+        text_has=REFUSAL["margin_cap"],
+    )
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
+    conn.close()
+
+
+def test_refusal_leverage_cap_stop_19984(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1b: stop 1.9984 needs >5x on risk size — refuse, do not shrink qty."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "lc.db")
+    _seed_settings(conn)
+    fake = _happy_fake()
+    card = build_quick_card(
+        conn,
+        fake,
+        symbol="SUIUSDT",
+        side="long",
+        stop=Decimal("1.9984"),
+        now_ms=NOW,
+    )
+    assert card["ok"] is False
+    assert card["reason"] == "leverage_cap"
+    assert card["text"] == REFUSAL["leverage_cap"]
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
+    conn.close()
+
+
+def test_card_ok_available_340_lone_survivor_5x(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1c: available 340 fits 5x with no qty cut — card OK."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "ok340.db")
+    _seed_settings(conn)
+    card = build_quick_card(
+        conn,
+        _happy_fake(available=Decimal("340")),
+        symbol="SUIUSDT",
+        side="long",
+        stop=Decimal("1.994"),
+        now_ms=NOW,
+    )
+    assert card["ok"] is True
+    assert card["qty"] == Decimal("833.3")
+    assert int(card["leverage"]) == 5
+    conn.close()
+
+
+def test_qr_tap_refuses_when_available_drops_to_300(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1d: card at full available; tap after available=300 → margin_cap, no row."""
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "tap_mc.db")
+    _seed_settings(conn)
+    card = build_quick_card(
+        conn, _happy_fake(), symbol="SUIUSDT", side="long", stop=Decimal("1.994"), now_ms=NOW
+    )
+    assert card["ok"] is True
+    cb = card["callback_data"]
+    sent, send = _send_capture()
+    answers, answer = _answers()
+    process_update(
+        conn,
+        _cq(cb),
+        send=send,
+        answer=answer,
+        futures=_happy_fake(available=Decimal("300")),
+        now_ms_value=NOW + 30_000,
+    )
+    assert len(answers) == 1
+    assert len(sent) == 1
+    assert sent[0]["text"] == REFUSAL["margin_cap"]
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
+    conn.close()
+
+
+def test_happy_sui_fee_and_target_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1e: exact fee / target lines on happy SUI stop 1.994."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "lines_e.db")
+    _seed_settings(conn)
+    card = build_quick_card(
+        conn, _happy_fake(), symbol="SUIUSDT", side="long", stop=Decimal("1.994"), now_ms=NOW
+    )
+    assert card["ok"] is True
+    text = card["text"]
+    assert "ถ้าชน stop: −7 USDT ≈ −1.40R รวมค่าธรรมเนียม (ราคา −5 USDT = 1R · ค่าธรรมเนียม ≈ 2 USDT)" in text
+    assert "ค่าธรรมเนียมไป-กลับ ≈ 0.40R ≈ 2 USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)" in text
+    assert "เป้า 1R: 2.0060 → สุทธิ +0.60R · ต้องชนะ ≥ 70% ถึงคุ้มทุน" in text
+    assert "เป้า 1.5R: 2.0090 → สุทธิ +1.10R · ต้องชนะ ≥ 56% ถึงคุ้มทุน" in text
+    conn.close()
+
+
+def test_sui_stop_1993_fee_and_target_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1f: stop 1.993 — rounded R / USDT lines, no long Decimal tails."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "lines_f.db")
+    _seed_settings(conn)
+    card = build_quick_card(
+        conn, _happy_fake(), symbol="SUIUSDT", side="long", stop=Decimal("1.993"), now_ms=NOW
+    )
+    assert card["ok"] is True
+    text = card["text"]
+    assert "ถ้าชน stop: −6.71 USDT ≈ −1.34R รวมค่าธรรมเนียม (ราคา −5 USDT = 1R · ค่าธรรมเนียม ≈ 1.71 USDT)" in text
+    assert "ค่าธรรมเนียมไป-กลับ ≈ 0.34R ≈ 1.71 USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)" in text
+    assert "เป้า 1R: 2.0070 → สุทธิ +0.66R · ต้องชนะ ≥ 68% ถึงคุ้มทุน" in text
+    assert "เป้า 1.5R: 2.0105 → สุทธิ +1.16R · ต้องชนะ ≥ 54% ถึงคุ้มทุน" in text
+    assert "0.3428571428571428571428571429R" not in text
+    conn.close()
+
+
+def test_fee_ge_k_no_profit_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1g: risk 0.25% + stop 1.9984 → f≥k tails say no profit even if every win."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "lines_g.db")
+    _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=0.25)
+    card = build_quick_card(
+        conn, _happy_fake(), symbol="SUIUSDT", side="long", stop=Decimal("1.9984"), now_ms=NOW
+    )
+    assert card["ok"] is True
+    text = card["text"]
+    assert "⚠ ค่าธรรมเนียมสูงเทียบระยะ stop — reward < 3× ค่าไป-กลับ" in text
+    assert (
+        "ถ้าชน stop: −6.25 USDT ≈ −2.50R รวมค่าธรรมเนียม (ราคา −2.5 USDT = 1R · ค่าธรรมเนียม ≈ 3.75 USDT)" in text
+    )
+    assert "เป้า 1R: 2.0016 → สุทธิ −0.50R · ชนะทุกไม้ก็ไม่มีกำไร" in text
+    assert "เป้า 1.5R: 2.0024 → สุทธิ 0.00R · ชนะทุกไม้ก็ไม่มีกำไร" in text
+    assert "+-0.5" not in text
+    conn.close()
+
+
+def test_parse_rejects_nan_inf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1h: nan/inf stop tokens → usage; process_update sends QUICK_USAGE once."""
+    for bad in (
+        "q btc long nan",
+        "q btc long snan",
+        "q btc long inf",
+        "q btc long -inf",
+        "q btc short nan%",
+        "q btc short inf%",
+    ):
+        assert parse_quick_command(bad) == {"error": "usage"}
+
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "nan.db")
+    _seed_settings(conn)
+    for bad in (
+        "q btc long nan",
+        "q btc long snan",
+        "q btc long inf",
+        "q btc long -inf",
+        "q btc short nan%",
+        "q btc short inf%",
+    ):
+        sent, send = _send_capture()
+        out = process_update(
+            conn,
+            _msg(bad),
+            send=send,
+            futures=_happy_fake(),
+            now_ms_value=NOW,
+        )
+        assert out["handled"] is True
+        assert len(sent) == 1
+        assert sent[0]["text"] == QUICK_USAGE
+    conn.close()
+
+
+def test_qr_bad_stop_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1i: forged qr stop NaN/Infinity/0/-1 → bad_data; one answer+send; no rows."""
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "badstop.db")
+    _seed_settings(conn)
+    created = NOW // 1000
+    for stop_field in ("NaN", "Infinity", "0", "-1"):
+        sent, send = _send_capture()
+        answers, answer = _answers()
+        cb = f"qr:SUIUSDT:l:{stop_field}:{created}"
+        out = process_update(
+            conn,
+            _cq(cb),
+            send=send,
+            answer=answer,
+            futures=_happy_fake(),
+            now_ms_value=NOW,
+        )
+        assert len(answers) == 1
+        assert len(sent) == 1
+        assert sent[0]["text"] == REFUSAL["bad_data"]
+        assert out.get("reason") == "bad_data"
+        assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
+    conn.close()
+
+
 # --- qr: register -----------------------------------------------------------
 
 
@@ -1161,11 +1367,14 @@ def test_refusal_texts_cover_reasons() -> None:
         "quick_cap",
         "portfolio_cap",
         "margin_cap",
+        "leverage_cap",
         "card_expired",
         "bad_data",
     ):
         assert key in REFUSAL
         assert REFUSAL[key]
+    assert "ไม่ย่อขนาด" in REFUSAL["margin_cap"]
+    assert "เกิน 5x" in REFUSAL["leverage_cap"]
 
 
 def test_card_json_markup_serializable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -12,7 +12,7 @@ import math
 import re
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jarvise_assist.explore import contract_rejection, normalize_explore_symbol
@@ -28,6 +28,7 @@ from jarvise_assist.messages import (
 from jarvise_assist.pause import bangkok_week_id, format_paused_until
 from jarvise_assist.quick import (
     QUICK_USAGE,
+    REG_TTL_MS,
     create_quick_registration,
     get_quick_settings,
     is_quick_locked,
@@ -109,7 +110,11 @@ def _refusal_portfolio_cap() -> str:
 
 
 def _refusal_margin_cap() -> str:
-    return "margin ไม่พอ (available balance)"
+    return "margin ไม่พอ (available balance) — บอทไม่ย่อขนาดให้"
+
+
+def _refusal_leverage_cap() -> str:
+    return "stop แคบเกินไป — ขนาดตาม risk ต้องใช้ leverage เกิน 5x (บอทไม่ย่อขนาดให้)"
 
 
 def _refusal_card_expired() -> str:
@@ -134,6 +139,7 @@ REFUSAL: dict[str, str] = {
     "quick_cap": _refusal_quick_cap(),
     "portfolio_cap": _refusal_portfolio_cap(),
     "margin_cap": _refusal_margin_cap(),
+    "leverage_cap": _refusal_leverage_cap(),
     "card_expired": _refusal_card_expired(),
     "bad_data": _refusal_bad_data(),
 }
@@ -206,6 +212,8 @@ def parse_quick_command(text: str) -> dict[str, Any] | None:
             pct = Decimal(stop_raw[:-1])
         except Exception:  # noqa: BLE001
             return {"error": "usage"}
+        if not pct.is_finite():
+            return {"error": "usage"}
         if pct <= 0 or pct >= 20:
             return {"error": "usage"}
         return {"symbol": symbol, "side": side, "stop_pct": pct}
@@ -213,9 +221,32 @@ def parse_quick_command(text: str) -> dict[str, Any] | None:
         price = Decimal(stop_raw)
     except Exception:  # noqa: BLE001
         return {"error": "usage"}
+    if not price.is_finite():
+        return {"error": "usage"}
     if price <= 0:
         return {"error": "usage"}
     return {"symbol": symbol, "side": side, "stop": price}
+
+
+def _fmt_usdt(value: Decimal) -> str:
+    """USDT display: half-up to 0.01, then fmt_price (strip trailing zeros)."""
+    return fmt_price(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _fmt_r_abs(value: Decimal) -> str:
+    """Absolute R to 2 decimals (no sign)."""
+    q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{q:.2f}"
+
+
+def _fmt_r_signed(value: Decimal) -> str:
+    """Signed R: + when >0, − (U+2212) when <0, bare 0.00R when 0."""
+    q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if q > 0:
+        return f"+{q:.2f}R"
+    if q < 0:
+        return f"−{(-q):.2f}R"
+    return f"{q:.2f}R"
 
 
 def fee_breakdown(entry: Decimal, stop: Decimal) -> dict[str, Any]:
@@ -369,6 +400,8 @@ def build_quick_card(
     )
     if sized is None:
         return _fail("size_failed")
+    if "leverage_cap" in sized.reduce_reasons:
+        return _fail("leverage_cap")
     if below_min_notional(
         qty=sized.qty,
         notional=sized.notional,
@@ -381,7 +414,7 @@ def build_quick_card(
         [SignalCandidate(sized=sized, confidence=0.0, symbol_rank=0)],
         available_balance=available,
     )
-    if not survivors:
+    if not survivors or "margin_cap" in survivors[0].sized.reduce_reasons:
         return _fail("margin_cap")
     sized = survivors[0].sized
     if below_min_notional(
@@ -439,7 +472,13 @@ def build_quick_card(
     margin = (sized.notional / Decimal(lev)).quantize(Decimal("0.01"))
     base = sym[:-4] if sym.endswith("USDT") else sym
     notional_s = fmt_price(sized.notional.quantize(Decimal("0.01")))
-    loss_s = fmt_price(sized.loss_at_stop.quantize(Decimal("0.01")))
+    fee_usdt = (Decimal("2") * QUICK_FEE_BPS_PER_SIDE / Decimal("10000")) * sized.notional
+    loss_total = sized.loss_at_stop + fee_usdt
+    loss_total_s = _fmt_usdt(loss_total)
+    loss_price_s = _fmt_usdt(sized.loss_at_stop)
+    fee_usdt_s = _fmt_usdt(fee_usdt)
+    f_r_s = _fmt_r_abs(f)
+    loss_r_s = _fmt_r_abs(Decimal("1") + f)
     entry_s = _fmt_price_tick(mark, tick)
     stop_s = _fmt_price_tick(stop_level, tick)
     t1_s = _fmt_price_tick(t1, tick)
@@ -454,6 +493,13 @@ def build_quick_card(
             return "0"
         return fmt_price((usdt / balance * Decimal("100")).quantize(Decimal("0.01")))
 
+    def _target_line(label: str, target_s: str, net: Decimal, be_pct: int) -> str:
+        if net <= 0:
+            tail = "ชนะทุกไม้ก็ไม่มีกำไร"
+        else:
+            tail = f"ต้องชนะ ≥ {be_pct}% ถึงคุ้มทุน"
+        return f"เป้า {label}: {target_s} → สุทธิ {_fmt_r_signed(net)} · {tail}"
+
     card_until = int(now_ms) + QUICK_CARD_TTL_MS
     side_label = "LONG" if side_l == "long" else "SHORT"
     lines = [
@@ -463,10 +509,13 @@ def build_quick_card(
         f"ขนาด: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT",
         f"ฐาน: Futures {bal_s} USDT × {fmt_price(risk_pct)}% = งบ {budget_s} USDT",
         f"Leverage ที่ต้องใช้: {lev}x · margin ≈ {fmt_price(margin)} USDT",
-        f"ถ้าชน stop: −{loss_s} USDT ≈ −(1+{fmt_price(f)})R รวมค่าธรรมเนียม",
-        (f"ค่าธรรมเนียมไป-กลับ ≈ {fmt_price(f)}R (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)"),
-        (f"เป้า 1R: {t1_s} → สุทธิ +{fmt_price(fees['net_1r'])}R · ต้องชนะ ≥ {fees['be_1r_pct']}%"),
-        (f"เป้า 1.5R: {t15_s} → สุทธิ +{fmt_price(fees['net_1_5r'])}R · ต้องชนะ ≥ {fees['be_1_5r_pct']}%"),
+        (
+            f"ถ้าชน stop: −{loss_total_s} USDT ≈ −{loss_r_s}R รวมค่าธรรมเนียม "
+            f"(ราคา −{loss_price_s} USDT = 1R · ค่าธรรมเนียม ≈ {fee_usdt_s} USDT)"
+        ),
+        (f"ค่าธรรมเนียมไป-กลับ ≈ {f_r_s}R ≈ {fee_usdt_s} USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)"),
+        _target_line("1R", t1_s, fees["net_1r"], int(fees["be_1r_pct"])),
+        _target_line("1.5R", t15_s, fees["net_1_5r"], int(fees["be_1_5r_pct"])),
     ]
     if fees["warn"]:
         lines.append("⚠ ค่าธรรมเนียมสูงเทียบระยะ stop — reward < 3× ค่าไป-กลับ")
@@ -502,6 +551,7 @@ def build_quick_card(
         "stop": stop_level,
         "qty": sized.qty,
         "leverage": lev,
+        "tick": tick,
         "symbol": sym,
         "side": side_l,
         "positions": positions,
@@ -566,6 +616,9 @@ def handle_quick_register_callback(
     except Exception:  # noqa: BLE001
         send(REFUSAL["bad_data"])
         return {"ok": False, "reason": "bad_data"}
+    if not stop_level.is_finite() or stop_level <= 0:
+        send(REFUSAL["bad_data"])
+        return {"ok": False, "reason": "bad_data"}
 
     created_ms = created_sec * 1000
     age = int(now_ms) - created_ms
@@ -610,24 +663,15 @@ def handle_quick_register_callback(
             "live_position": "main_position",
             "locked": "locked",
         }.get(str(reason), str(reason))
-        if mapped == "week_loss_pause":
-            text = _refusal_week_loss(week_until or now_ms)
-        else:
-            text = REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
+        text = REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
         send(text)
         return {"ok": False, "reason": mapped}
 
-    from jarvise_assist.quick import REG_TTL_MS
-
     expires = int(now_ms) + REG_TTL_MS
     side_label = "LONG" if side == "long" else "SHORT"
-    tick_guess = Decimal("0.0001")
-    try:
-        tick_guess = Decimal(str(futures.symbol_filters(sym).tick_size))
-    except Exception:  # noqa: BLE001
-        pass
-    entry_s = _fmt_price_tick(Decimal(str(card["entry"])), tick_guess)
-    stop_fmt = _fmt_price_tick(Decimal(str(card["stop"])), tick_guess)
+    tick = Decimal(str(card.get("tick") or "0.0001"))
+    entry_s = _fmt_price_tick(Decimal(str(card["entry"])), tick)
+    stop_fmt = _fmt_price_tick(Decimal(str(card["stop"])), tick)
     qty_s = fmt_qty(Decimal(str(card["qty"])))
     body = "\n".join(
         [
