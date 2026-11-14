@@ -36,7 +36,7 @@ The reason is speed. Proving an autonomous edge takes months: the shadow-veto wi
    - **The owner's real trades,** from realized PnL on closed positions.
 
    Report the counts of signals sent, skipped, and taken. The owner chose to see no statistics on each signal, so the weekly summary is where the honest track record lives.
-8. **Losing-streak pause.** At the start of watch, signal, and morning jobs: if the three latest non-zero `REALIZED_PNL` rows on the seven symbols are all negative, or week-to-date real net loss (realized + commission + funding) exceeds 6% of the reconstructed week-start USDT balance, pause new signals until the next 08:20 Asia/Bangkok and send one Telegram line. Watch still emits advice while paused. Signal and morning insert nothing and return `skipped: "streak_pause"`. Auto-resume sends one line when the pause expires; the menu toggle "open" clears the pause immediately without that line.
+8. **Losing-streak pause.** At the start of watch, signal, and morning jobs: if the three latest non-zero `REALIZED_PNL` rows on the seven symbols are all negative, or week-to-date real net loss (realized + commission + funding) exceeds 4R of the reconstructed week-start USDT balance, where R is the assist risk_pct in effect at the start of the Bangkok week, frozen for the week (4 × risk_pct %, 12% at 3%; 6% before 2026-11-14), pause new signals until the next 08:20 Asia/Bangkok and send one Telegram line. Watch still emits advice while paused. Signal and morning insert nothing and return `skipped: "streak_pause"`. Auto-resume sends one line when the pause expires; the menu toggle "open" clears the pause immediately without that line.
 
 ## Non-goals
 

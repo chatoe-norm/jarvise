@@ -108,7 +108,7 @@ off. No new env var. No writes to paper, live, approval, or shadow tables.
 ## Daily 3R loss pause
 
 This sits beside the streak pause (3 consecutive losses until 08:20) and the
-week-loss pause (trading net worse than 6% until 08:20). Those two rules are
+week-loss pause (trading net worse than 4R × week-start risk, 12% at 3% risk, until 08:20; 6% before 2026-11-14). Those two rules are
 unchanged. The day rule does not replace them. If streak or week-loss engages
 on the same call, that pause wins and the day rule waits until the assistant
 is not paused.
