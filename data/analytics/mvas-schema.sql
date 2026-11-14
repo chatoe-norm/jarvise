@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 29).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 30).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -590,3 +590,80 @@ CREATE INDEX IF NOT EXISTS idx_assist_quick_trade_status_symbol
     ON assist_quick_trade (status, symbol);
 CREATE INDEX IF NOT EXISTS idx_assist_quick_trade_closed
     ON assist_quick_trade (closed_at_ms);
+
+-- Partner unit/NAV ledger (migration 30). Inert storage; no Telegram/Binance wiring.
+CREATE TABLE IF NOT EXISTS partner (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
+    fee_rate_bps INTEGER NOT NULL DEFAULT 5000
+        CHECK (fee_rate_bps BETWEEN 0 AND 10000),
+    units_e8 INTEGER NOT NULL DEFAULT 0 CHECK (units_e8 >= 0),
+    cost_micro INTEGER NOT NULL DEFAULT 0 CHECK (cost_micro >= 0),
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'closed')),
+    telegram_user_id TEXT UNIQUE,
+    invite_hash TEXT,
+    invite_expires_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_partner_single_admin
+    ON partner (is_admin) WHERE is_admin = 1;
+
+CREATE TABLE IF NOT EXISTS partner_event (
+    id TEXT PRIMARY KEY,
+    partner_id TEXT NOT NULL REFERENCES partner (id),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'deposit', 'convert', 'withdraw_profit', 'close',
+            'fee_credit', 'adjust_cost'
+        )
+    ),
+    request_id TEXT,
+    related_event_id TEXT,
+    account_value_micro INTEGER NOT NULL,
+    total_units_before_e8 INTEGER NOT NULL,
+    nav TEXT NOT NULL,
+    units_delta_e8 INTEGER NOT NULL,
+    cost_delta_micro INTEGER NOT NULL,
+    cash_micro INTEGER NOT NULL DEFAULT 0,
+    fee_micro INTEGER NOT NULL DEFAULT 0,
+    units_after_e8 INTEGER NOT NULL,
+    cost_after_micro INTEGER NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'admin',
+    note TEXT,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_partner_event_partner
+    ON partner_event (partner_id, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS partner_request (
+    id TEXT PRIMARY KEY,
+    partner_id TEXT NOT NULL REFERENCES partner (id),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('convert', 'withdraw_profit', 'close')
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'pending', 'confirmed', 'rejected', 'expired', 'cancelled'
+        )
+    ),
+    quote_account_value_micro INTEGER,
+    quote_nav TEXT,
+    quote_gross_micro INTEGER,
+    quote_cost_micro INTEGER,
+    quote_fee_micro INTEGER,
+    quote_cash_micro INTEGER,
+    payout_state TEXT NOT NULL DEFAULT 'none'
+        CHECK (payout_state IN ('none', 'due', 'paid')),
+    payout_micro INTEGER,
+    admin_message_id INTEGER,
+    partner_message_id INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    decided_at_ms INTEGER,
+    paid_at_ms INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_partner_request_one_pending
+    ON partner_request (partner_id) WHERE status = 'pending';
