@@ -5,6 +5,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+from jarvise_assist.quick_tags import MSG_QUICK_OPEN
+
 BTN_POSITIONS = "📋 ไม้ที่ถืออยู่"
 BTN_ANYTHING = "🔎 ตอนนี้มีเหรียญไหนน่าเข้า"
 BTN_WEEKLY = "📊 ผลสัปดาห์นี้"
@@ -43,11 +45,12 @@ def explore_remove_keyboard(symbols: list[str]) -> dict[str, Any]:
     }
 
 
-def skip_inline_keyboard(signal_id: str, *, entry: bool = False) -> dict[str, Any]:
+def skip_inline_keyboard(signal_id: str, *, entry: bool = False, quick_block: bool = False) -> dict[str, Any]:
     # callback_data is the assist_signal.id (Telegram limit 64 bytes; our ids fit).
     row: list[dict[str, str]] = [{"text": "⏭ ข้าม", "callback_data": signal_id}]
     if entry:
-        row.insert(0, {"text": "เข้าไม้", "callback_data": f"ec:{signal_id}"})
+        label = MSG_QUICK_OPEN if quick_block else "เข้าไม้"
+        row.insert(0, {"text": label, "callback_data": f"ec:{signal_id}"})
     return {"inline_keyboard": [row]}
 
 

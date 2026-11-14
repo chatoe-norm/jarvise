@@ -39,6 +39,7 @@ from jarvise_assist.messages import (
 )
 from jarvise_assist.pause import evaluate_day_loss_pause, evaluate_pause, maybe_auto_resume
 from jarvise_assist.quick import sync_quick_trades
+from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.real_trades import refresh_incomplete_income
 from jarvise_assist.signals import (
     _alert_key_unsafe,
@@ -766,6 +767,7 @@ def flush_held_watch_advice(
     held = list_held_watch_advice(conn)
     if not held:
         return {"sent": [], "dropped": []}
+    quick = quick_symbols(conn)
     positions = {(p.symbol, p.position_side): p for p in futures.position_risk()}
     try:
         orders = futures.all_open_orders()
@@ -774,6 +776,10 @@ def flush_held_watch_advice(
     sent: list[str] = []
     dropped: list[str] = []
     for row in held:
+        if str(row["symbol"]).upper() in quick:
+            mark_watch_advice_dropped(conn, str(row["id"]))
+            dropped.append(str(row["id"]))
+            continue
         key = (str(row["symbol"]).upper(), str(row["position_side"]).upper())
         pos = positions.get(key)
         kind = str(row["kind"])
@@ -921,6 +927,7 @@ def run_assist_watch(
         quick_info = sync_quick_trades(conn, client, now_ms=ts, send=send_fn) or {}
     except Exception:  # noqa: BLE001 — quick sync must not stop advice, journal, or pauses
         logger.exception("assist quick sync failed")
+    quick = quick_symbols(conn)
 
     # Pause may engage here; watch still emits advice for open positions.
     # While the assistant is off, skip pause evaluators (owner chose off to stop new signals).
@@ -933,6 +940,9 @@ def run_assist_watch(
     open_keys: set[tuple[str, str]] = set()
     for pos in positions:
         open_keys.add((pos.symbol, pos.position_side))
+        if pos.symbol in quick:
+            actions.append({"symbol": pos.symbol, "action": "quick_skip"})
+            continue
         if pos.symbol not in ASSIST_SYMBOLS:
             _ensure_watch_row(conn, pos, now_ms=ts, in_universe=False)
             actions.append({"symbol": pos.symbol, "action": "outside_universe"})

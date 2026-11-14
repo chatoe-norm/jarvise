@@ -49,6 +49,7 @@ from jarvise_assist.messages import (
     format_signal_message,
 )
 from jarvise_assist.pause import is_paused
+from jarvise_assist.quick_tags import MSG_QUICK_OPEN, quick_symbols
 from jarvise_assist.sizing import (
     ExistingIdea,
     SignalCandidate,
@@ -3049,6 +3050,9 @@ def handle_exec_callback(
         if symbol.upper() not in ASSIST_SYMBOLS:
             send("ไม่อยู่ในจักรวาล")
             return {"ok": False, "reason": "universe"}
+        if symbol.upper() in quick_symbols(conn):
+            send(MSG_QUICK_OPEN)
+            return {"ok": False, "reason": "quick_open"}
         preview = create_entry_preview(
             conn,
             symbol=symbol,
@@ -3187,6 +3191,10 @@ def handle_exec_callback(
             text = _msg_symbol_in_flight(str(intent["symbol"]))
             send(text)
             return {"ok": False, "reason": "in_flight"}
+        if prefix == "ey:" and str(intent["symbol"]).upper() in quick_symbols(conn):
+            answer()
+            send(MSG_QUICK_OPEN)
+            return {"ok": False, "reason": "quick_open"}
         if not claim_exec_intent(conn, intent_id):
             # Lost race — replay stored or in-flight
             again = get_exec_intent(conn, intent_id)

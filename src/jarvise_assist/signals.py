@@ -31,6 +31,7 @@ from jarvise_assist.messages import (
     safe_symbol_configs,
 )
 from jarvise_assist.pause import evaluate_pause, is_paused, maybe_auto_resume
+from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.sizing import (
     IDEA_LOOKBACK_MS,
     ExistingIdea,
@@ -287,8 +288,11 @@ def build_existing_ideas(
     """
     ideas: list[ExistingIdea] = []
     open_keys: set[tuple[str, str]] = set()
+    quick = quick_symbols(conn)
     for pos in positions:
         if pos.symbol not in ASSIST_SYMBOLS:
+            continue
+        if pos.symbol in quick:
             continue
         trade_side = pos.side
         open_keys.add((pos.symbol, trade_side))
@@ -333,7 +337,8 @@ def scan_signal_candidates(
     settings = ensure_settings(conn)
     balance, available = futures.usdt_wallet_and_available()
     positions = futures.position_risk()
-    open_syms = {p.symbol for p in positions}
+    quick = quick_symbols(conn)
+    open_syms = {p.symbol for p in positions if p.symbol not in quick}
     try:
         orders = futures.all_open_orders()
     except AttributeError:
@@ -346,6 +351,9 @@ def scan_signal_candidates(
     filters_by_symbol: dict[str, SymbolFilters] = {}
 
     for symbol in ASSIST_SYMBOLS:
+        if on_demand and symbol in quick:
+            skipped.append({"symbol": symbol, "reason": "quick_open"})
+            continue
         if symbol in open_syms:
             skipped.append({"symbol": symbol, "reason": "open_position"})
             continue
@@ -560,6 +568,7 @@ def run_assist_signals(
     admitted: list[SignalCandidate] = list(scanned["admitted"])
     expires = next_assist_run_ms(ts)
     configs = safe_symbol_configs(client)
+    quick = quick_symbols(conn)
     for cand in admitted:
         sized = cand.sized
         symbol = sized.symbol
@@ -592,7 +601,11 @@ def run_assist_signals(
             created_at_ms=ts,
             expires_at_ms=expires,
         )
-        markup = skip_inline_keyboard(sid, entry=execution_buttons_enabled(conn))
+        markup = skip_inline_keyboard(
+            sid,
+            entry=execution_buttons_enabled(conn),
+            quick_block=sized.symbol in quick,
+        )
         sent_ok, mid = _invoke_send(send_fn, text, reply_markup=markup)
         if sent_ok:
             mark_signal_sent(conn, sid, sized, sent_at_ms=ts, expires_at_ms=expires)
@@ -691,7 +704,8 @@ def run_assist_morning(
     morning_candidates: list[tuple[str, SignalCandidate]] = []
     filters_by_symbol: dict[str, SymbolFilters] = {}
     first_send_by_symbol: dict[str, dict[str, Any]] = {}
-    open_syms = {p.symbol.upper() for p in open_positions}
+    quick = quick_symbols(conn)
+    open_syms = {p.symbol.upper() for p in open_positions if p.symbol.upper() not in quick}
 
     for row in list_held_signals(conn):
         symbol = str(row["symbol"]).upper()
@@ -862,7 +876,11 @@ def run_assist_morning(
                 qty=Decimal(str(first["qty"])),
                 tick_size=tick,
             )
-        markup = skip_inline_keyboard(sid, entry=execution_buttons_enabled(conn))
+        markup = skip_inline_keyboard(
+            sid,
+            entry=execution_buttons_enabled(conn),
+            quick_block=sized.symbol in quick,
+        )
         sent_ok, mid = _invoke_send(send_fn, text, reply_markup=markup)
         if sent_ok:
             mark_signal_sent(conn, sid, sized, sent_at_ms=ts, expires_at_ms=expires)
