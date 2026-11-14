@@ -779,6 +779,107 @@ def _migrate_assist_pause_reason(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_settings", "pause_reason", "TEXT DEFAULT NULL")
 
 
+def _migrate_partner_ledger(conn: sqlite3.Connection) -> None:
+    """Partner unit/NAV fund tables. Additive only; no Telegram/Binance wiring."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS partner (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
+            fee_rate_bps INTEGER NOT NULL DEFAULT 5000
+                CHECK (fee_rate_bps BETWEEN 0 AND 10000),
+            units_e8 INTEGER NOT NULL DEFAULT 0 CHECK (units_e8 >= 0),
+            cost_micro INTEGER NOT NULL DEFAULT 0 CHECK (cost_micro >= 0),
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active', 'closed')),
+            telegram_user_id TEXT UNIQUE,
+            invite_hash TEXT,
+            invite_expires_at_ms INTEGER,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_partner_single_admin
+        ON partner (is_admin) WHERE is_admin = 1
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS partner_event (
+            id TEXT PRIMARY KEY,
+            partner_id TEXT NOT NULL REFERENCES partner (id),
+            kind TEXT NOT NULL CHECK (
+                kind IN (
+                    'deposit', 'convert', 'withdraw_profit', 'close',
+                    'fee_credit', 'adjust_cost'
+                )
+            ),
+            request_id TEXT,
+            related_event_id TEXT,
+            account_value_micro INTEGER NOT NULL,
+            total_units_before_e8 INTEGER NOT NULL,
+            nav TEXT NOT NULL,
+            units_delta_e8 INTEGER NOT NULL,
+            cost_delta_micro INTEGER NOT NULL,
+            cash_micro INTEGER NOT NULL DEFAULT 0,
+            fee_micro INTEGER NOT NULL DEFAULT 0,
+            units_after_e8 INTEGER NOT NULL,
+            cost_after_micro INTEGER NOT NULL,
+            actor TEXT NOT NULL DEFAULT 'admin',
+            note TEXT,
+            created_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_partner_event_partner
+        ON partner_event (partner_id, created_at_ms)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS partner_request (
+            id TEXT PRIMARY KEY,
+            partner_id TEXT NOT NULL REFERENCES partner (id),
+            kind TEXT NOT NULL CHECK (
+                kind IN ('convert', 'withdraw_profit', 'close')
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'pending', 'confirmed', 'rejected', 'expired', 'cancelled'
+                )
+            ),
+            quote_account_value_micro INTEGER,
+            quote_nav TEXT,
+            quote_gross_micro INTEGER,
+            quote_cost_micro INTEGER,
+            quote_fee_micro INTEGER,
+            quote_cash_micro INTEGER,
+            payout_state TEXT NOT NULL DEFAULT 'none'
+                CHECK (payout_state IN ('none', 'due', 'paid')),
+            payout_micro INTEGER,
+            admin_message_id INTEGER,
+            partner_message_id INTEGER,
+            created_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            decided_at_ms INTEGER,
+            paid_at_ms INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_partner_request_one_pending
+        ON partner_request (partner_id) WHERE status = 'pending'
+        """
+    )
+
+
 def _migrate_assist_journal(conn: sqlite3.Connection) -> None:
     """Owner grade card per closed assist trade. Never copies fills or places orders."""
     conn.execute(
@@ -1179,6 +1280,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (27, "assist_quick", _migrate_assist_quick, True),
     (28, "assist_week_risk", _migrate_assist_week_risk, True),
     (29, "assist_pause_reason", _migrate_assist_pause_reason, True),
+    (30, "partner_ledger", _migrate_partner_ledger, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
