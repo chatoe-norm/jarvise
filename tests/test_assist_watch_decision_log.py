@@ -300,10 +300,13 @@ def test_decision_assist_disabled_one_line_no_symbol(
             now_ms_value=day,
             send=lambda *_a, **_k: True,
         )
-    assert out.get("skipped") == "assist_disabled"
+    assert out.get("assist_enabled") is False
+    assert out.get("ok") is True
+    assert out.get("skipped") is None
     rows = _decision_lines(caplog)
     assert len(rows) == 1
-    assert rows[0]["decision"] == "assist_disabled"
+    assert rows[0]["decision"] == "watch_only"
+    assert rows[0]["reason"] == "assist_disabled"
     assert "symbol" not in rows[0] or rows[0].get("symbol") is None
     _assert_safe_fields(rows[0])
     conn.close()

@@ -227,6 +227,11 @@ def execution_buttons_enabled(conn: Any) -> bool:
     return bool(ensure_settings(conn).get("enabled"))
 
 
+def protective_buttons_enabled(_conn: Any) -> bool:
+    """Move-stop / exit taps: execute mode only (assistant may be off)."""
+    return assist_execute_mode() != "off"
+
+
 def trade_auth_reason_th(reason: str | None) -> str:
     """Map typed resolve_trade_auth failure reasons to Thai owner copy."""
     if reason is None:
@@ -3012,10 +3017,16 @@ def handle_exec_callback(
     msg = message or {}
     mid = msg.get("message_id")
 
-    if not execution_buttons_enabled(conn) and not data.startswith(("en:", "mn:")):
-        answer("ปิดอยู่")
-        send(MSG_OFF)
-        return {"ok": False, "reason": "off"}
+    if data.startswith(("ec:", "ey:")):
+        if not execution_buttons_enabled(conn):
+            answer("ปิดอยู่")
+            send(MSG_OFF)
+            return {"ok": False, "reason": "off"}
+    elif data.startswith(("ms:", "xx:")):
+        if not protective_buttons_enabled(conn):
+            answer("ปิดอยู่")
+            send(MSG_OFF)
+            return {"ok": False, "reason": "off"}
 
     if data.startswith("ec:"):
         answer()
