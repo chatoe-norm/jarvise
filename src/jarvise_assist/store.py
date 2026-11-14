@@ -118,7 +118,8 @@ def get_edge(conn: Any) -> dict[str, Any]:
                permission_error_reported, key_unsafe_reported,
                streak_anchor_ms, week_pause_id,
                listener_down_since_ms, listener_down_alerted, resume_alerted,
-               day_pause_id, day_resume_net_r, day_resume_id, day_deeper_pause_id
+               day_pause_id, day_resume_net_r, day_resume_id, day_deeper_pause_id,
+               week_risk_id, week_risk_pct
         FROM assist_edge WHERE id=1
         """
     ).fetchone()
@@ -146,6 +147,8 @@ def get_edge(conn: Any) -> dict[str, Any]:
             "day_resume_net_r": None,
             "day_resume_id": None,
             "day_deeper_pause_id": None,
+            "week_risk_id": None,
+            "week_risk_pct": None,
         }
 
     def _i(idx: int) -> Any:
@@ -169,6 +172,8 @@ def get_edge(conn: Any) -> dict[str, Any]:
         "day_resume_net_r": float(_i(10)) if _i(10) is not None else None,
         "day_resume_id": str(_i(11)) if _i(11) else None,
         "day_deeper_pause_id": str(_i(12)) if _i(12) else None,
+        "week_risk_id": str(_i(13)) if _i(13) else None,
+        "week_risk_pct": float(_i(14)) if _i(14) is not None else None,
     }
 
 
@@ -188,6 +193,8 @@ def write_edge(
     day_resume_net_r: Any = _UNSET,
     day_resume_id: Any = _UNSET,
     day_deeper_pause_id: Any = _UNSET,
+    week_risk_id: Any = _UNSET,
+    week_risk_pct: Any = _UNSET,
 ) -> None:
     cur = get_edge(conn)
     since = cur["futures_down_since_ms"] if futures_down_since_ms is _UNSET else futures_down_since_ms
@@ -213,6 +220,8 @@ def write_edge(
     day_resume_r = cur["day_resume_net_r"] if day_resume_net_r is _UNSET else day_resume_net_r
     day_resume = cur["day_resume_id"] if day_resume_id is _UNSET else day_resume_id
     day_deeper = cur["day_deeper_pause_id"] if day_deeper_pause_id is _UNSET else day_deeper_pause_id
+    week_risk = cur["week_risk_id"] if week_risk_id is _UNSET else week_risk_id
+    week_risk_p = cur["week_risk_pct"] if week_risk_pct is _UNSET else week_risk_pct
     conn.execute(
         """
         INSERT INTO assist_edge (
@@ -220,8 +229,9 @@ def write_edge(
             permission_error_reported, key_unsafe_reported,
             streak_anchor_ms, week_pause_id,
             listener_down_since_ms, listener_down_alerted, resume_alerted,
-            day_pause_id, day_resume_net_r, day_resume_id, day_deeper_pause_id
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            day_pause_id, day_resume_net_r, day_resume_id, day_deeper_pause_id,
+            week_risk_id, week_risk_pct
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             futures_down_since_ms=excluded.futures_down_since_ms,
             futures_down_alerted=excluded.futures_down_alerted,
@@ -235,7 +245,9 @@ def write_edge(
             day_pause_id=excluded.day_pause_id,
             day_resume_net_r=excluded.day_resume_net_r,
             day_resume_id=excluded.day_resume_id,
-            day_deeper_pause_id=excluded.day_deeper_pause_id
+            day_deeper_pause_id=excluded.day_deeper_pause_id,
+            week_risk_id=excluded.week_risk_id,
+            week_risk_pct=excluded.week_risk_pct
         """,
         (
             since,
@@ -251,6 +263,8 @@ def write_edge(
             day_resume_r,
             day_resume,
             day_deeper,
+            week_risk,
+            week_risk_p,
         ),
     )
     conn.commit()

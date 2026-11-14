@@ -10,10 +10,17 @@ from typing import Any
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import BinanceFuturesClient
 from jarvise_assist.quick_tags import quick_income_predicate
-from jarvise_assist.store import ensure_settings, get_edge, now_ms, write_edge, write_settings
+from jarvise_assist.store import (
+    RISK_MAX_PCT,
+    ensure_settings,
+    get_edge,
+    now_ms,
+    write_edge,
+    write_settings,
+)
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
-WEEK_LOSS_PCT = Decimal("6")
+WEEK_LOSS_R = Decimal("4")
 DAY_LOSS_CAP_R = Decimal("3")
 DAY_LOSS_DEEPER_R = Decimal("1")
 _R_STORE = Decimal("0.0001")
@@ -33,6 +40,21 @@ SendFn = Callable[..., Any]
 
 RESUME_TEXT = "▶️ กลับมาส่ง signal แล้ว"
 STREAK_PAUSE_TEXT = "⏸ หยุดส่ง signal ถึงพรุ่งนี้ 08:20 — แพ้ติดกัน 3 ไม้"
+
+
+def week_start_risk_pct(conn: Any, *, now_ms_value: int | None = None) -> Decimal:
+    """Frozen assist risk_pct for the Bangkok week (week-loss threshold = 4R).
+
+    Snapshots on first call of the week. Local SQLite only; never writes assist_settings.
+    """
+    ts = int(now_ms_value if now_ms_value is not None else now_ms())
+    week_id = bangkok_week_id(ts)
+    edge = get_edge(conn)
+    if edge["week_risk_id"] == week_id and edge["week_risk_pct"] is not None:
+        return Decimal(str(edge["week_risk_pct"]))
+    pct = min(float(ensure_settings(conn)["risk_pct"]), RISK_MAX_PCT)
+    write_edge(conn, week_risk_id=week_id, week_risk_pct=pct)
+    return Decimal(str(pct))
 
 
 def next_0820_bangkok_ms(now_ms: int) -> int:
@@ -369,6 +391,7 @@ def evaluate_pause(
     send: SendFn,
 ) -> dict[str, Any]:
     """Engage streak, weekly-loss, then day-loss pause. Call after maybe_auto_resume."""
+    week_risk = week_start_risk_pct(conn, now_ms_value=now_ms)
     settings = ensure_settings(conn)
     if is_paused(settings, now_ms=now_ms):
         return {"paused": True, "reason": "already", "until_ms": settings["paused_until_ms"]}
@@ -406,16 +429,17 @@ def evaluate_pause(
                     "anchor_ms": anchor,
                 }
 
-    # Week trading net loss > 6% of reconstructed week-start balance.
+    # Week trading net loss > 4R × week-start risk of reconstructed week-start balance.
     trading = [r for r in income if str(r.get("incomeType") or "") in TRADING_INCOME_TYPES]
     transfers = [r for r in income if str(r.get("incomeType") or "") in TRANSFER_INCOME_TYPES]
     trading_net = _net_income_usdt(trading)
     transfer_net = _net_income_usdt(transfers)
     week_start_bal = balance - trading_net - transfer_net
     week_id = bangkok_week_id(now_ms)
+    threshold_pct = WEEK_LOSS_R * week_risk
     if week_start_bal > 0 and trading_net < 0:
         loss_pct = (-trading_net / week_start_bal) * Decimal("100")
-        if loss_pct > WEEK_LOSS_PCT and edge["week_pause_id"] != week_id:
+        if loss_pct > threshold_pct and edge["week_pause_id"] != week_id:
             until = next_0820_bangkok_ms(now_ms)
             write_settings(conn, paused_until_ms=until)
             write_edge(conn, week_pause_id=week_id, resume_alerted=False)
@@ -426,6 +450,8 @@ def evaluate_pause(
                 "until_ms": until,
                 "loss_pct": float(loss_pct),
                 "week_id": week_id,
+                "threshold_pct": float(threshold_pct),
+                "week_risk_pct": float(week_risk),
             }
 
     return evaluate_day_loss_pause(conn, now_ms=now_ms, send=send)

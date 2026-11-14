@@ -39,7 +39,7 @@ from jarvise_assist.messages import (
     format_signal_message,
     safe_symbol_configs,
 )
-from jarvise_assist.pause import clear_pause_manual, format_paused_until, is_paused
+from jarvise_assist.pause import clear_pause_manual, format_paused_until, is_paused, week_start_risk_pct
 from jarvise_assist.quick import render_quick_menu
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN
 from jarvise_assist.signals import scan_signal_candidates
@@ -586,6 +586,7 @@ def handle_risk_callback(
             send("รับได้แค่ 0.5–3 — ลองใหม่หรือยกเลิกด้วยเมนู")
             write_settings(conn, awaiting_risk=None, pending_risk_pct=None)
             return {"ok": False, "rejected": True}
+        week_start_risk_pct(conn)
         write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
         send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard(pct))
         return {"ok": True, "risk_pct": pct}
@@ -624,6 +625,7 @@ def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn) -> dict[str, 
         write_settings(conn, awaiting_risk="confirm", pending_risk_pct=pct)
         send(f"ยืนยัน {pct:g}%?", reply_markup=risk_confirm_keyboard(pct))
         return {"ok": True, "confirm": True, "pending": pct}
+    week_start_risk_pct(conn)
     write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
     send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard(pct))
     return {"ok": True, "risk_pct": pct}

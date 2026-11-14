@@ -99,8 +99,8 @@ def _income(
 
 def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     fresh = open_db(tmp_path / "fresh.db")
-    assert SCHEMA_VERSION == 27
-    assert schema_version(fresh) == 27
+    assert SCHEMA_VERSION == 28
+    assert schema_version(fresh) == 28
     for table in (
         "assist_quick_settings",
         "assist_quick_registration",
@@ -144,7 +144,7 @@ def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path26)
-    assert schema_version(conn) == 27
+    assert schema_version(conn) == 28
     row = conn.execute("SELECT qty FROM assist_signal WHERE id='old'").fetchone()
     assert row["qty"] == 2
     qs = get_quick_settings(conn)
@@ -1234,7 +1234,7 @@ def test_streak_skips_quick_week_loss_keeps_quick(tmp_path: Path) -> None:
 
     # week loss still counts quick
     conn5 = open_db(tmp_path / "week.db")
-    # large trading loss > 6%
+    # large trading loss > 4R × week-start risk (4% at the default 1%)
     week_income = [
         {
             "symbol": "BTCUSDT",

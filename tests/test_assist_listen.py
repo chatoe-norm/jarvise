@@ -593,7 +593,7 @@ def test_manual_resume_clears_pause(tmp_path: Path) -> None:
 def test_weekly_loss_pauses_once_per_week(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "wloss.db")
     now = _ms_bangkok(2026, 10, 27, 18, 0)
-    # Balance 1000, week net -70 → week start 1070, loss ~6.54% > 6%.
+    # Balance 1000, week net -70 → week start 1070, loss ~6.54% > 4R × week-start risk (4% at the default 1%).
     income = [
         {
             "symbol": "BTCUSDT",

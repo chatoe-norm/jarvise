@@ -765,6 +765,12 @@ def _migrate_assist_day_loss(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "assist_edge", name, typ)
 
 
+def _migrate_assist_week_risk(conn: sqlite3.Connection) -> None:
+    """Frozen week risk for the week-loss pause; nullable defaults only; existing edge values are not rewritten."""
+    _add_column_if_missing(conn, "assist_edge", "week_risk_id", "TEXT DEFAULT NULL")
+    _add_column_if_missing(conn, "assist_edge", "week_risk_pct", "REAL DEFAULT NULL")
+
+
 def _migrate_assist_journal(conn: sqlite3.Connection) -> None:
     """Owner grade card per closed assist trade. Never copies fills or places orders."""
     conn.execute(
@@ -1163,6 +1169,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (25, "assist_income_status", _migrate_assist_income_status, True),
     (26, "assist_card_sizing", _migrate_assist_card_sizing, True),
     (27, "assist_quick", _migrate_assist_quick, True),
+    (28, "assist_week_risk", _migrate_assist_week_risk, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 27).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 28).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -350,7 +350,9 @@ CREATE TABLE IF NOT EXISTS assist_edge (
     day_pause_id TEXT DEFAULT NULL,
     day_resume_net_r REAL DEFAULT NULL,
     day_resume_id TEXT DEFAULT NULL,
-    day_deeper_pause_id TEXT DEFAULT NULL
+    day_deeper_pause_id TEXT DEFAULT NULL,
+    week_risk_id TEXT DEFAULT NULL,
+    week_risk_pct REAL DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS assist_signal (
