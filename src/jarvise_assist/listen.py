@@ -29,6 +29,12 @@ from jarvise_assist.menu import (
     match_menu_label,
 )
 from jarvise_assist.quick import handle_quick_callback
+from jarvise_assist.quick_card import (
+    QUICK_REGISTER_PREFIX,
+    handle_quick_register_callback,
+    handle_quick_text,
+    parse_quick_command,
+)
 from jarvise_assist.store import (
     ensure_settings,
     get_edge,
@@ -98,6 +104,15 @@ def process_update(
         if data.startswith("qs:"):
             answer_fn(cq_id)
             return handle_quick_callback(conn, data, send=send_fn, now_ms=ts)
+        if data.startswith(QUICK_REGISTER_PREFIX):
+            answer_fn(cq_id)
+            return handle_quick_register_callback(
+                conn,
+                data,
+                send=send_fn,
+                futures=futures if futures is not None else build_futures_client(),
+                now_ms=ts,
+            )
         if data.startswith(EXPLORE_RM_PREFIX):
             answer_fn(cq_id)
             result = remove_explore_symbol(conn, data.removeprefix(EXPLORE_RM_PREFIX))
@@ -165,6 +180,11 @@ def process_update(
     risk_num = handle_risk_number(conn, text, send=send_fn)
     if risk_num.get("handled"):
         return risk_num
+    if parse_quick_command(text) is not None:
+        client = futures if futures is not None else build_futures_client()
+        quick_out = handle_quick_text(conn, text, futures=client, send=send_fn, now_ms=ts)
+        if quick_out is not None:
+            return quick_out
     if ensure_settings(conn).get("awaiting_explore") and match_menu_label(text) is None:
         lookup = explore_lookup or _explore_lookup(futures)
         fetch = explore_fetch or fetch_klines

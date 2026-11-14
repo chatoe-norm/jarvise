@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
+from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.pause import bangkok_day_id, bangkok_day_start_ms
 from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
 from jarvise_assist.sizing import MAX_PORTFOLIO_RISK_PCT
@@ -19,6 +20,8 @@ SendFn = Callable[..., Any]
 
 REG_TTL_MS = 10 * 60_000
 REG_EXPIRE_GRACE_MS = 2 * 60_000
+
+QUICK_USAGE = "พิมพ์: q BTC long 67000 (stop เป็นราคา) หรือ q BTC short 0.4% (stop ห่างจากราคา %)"
 
 RISK_ALLOWED = (0.25, 0.5, 0.75, 1.0)
 CAP_ALLOWED = (0.5, 1.0, 1.5, 2.0)
@@ -91,6 +94,10 @@ def _clear_lock_if_expired(conn: Any, *, now_ms: int) -> dict[str, Any]:
     return settings
 
 
+def is_quick_locked(conn: Any, *, now_ms: int) -> bool:
+    return _is_locked(_clear_lock_if_expired(conn, now_ms=now_ms), now_ms=now_ms)
+
+
 def create_quick_registration(
     conn: Any,
     *,
@@ -100,6 +107,7 @@ def create_quick_registration(
     planned_stop: float,
     qty: float,
     now_ms: int,
+    live_positions: Sequence[FuturesPosition] | None = None,
 ) -> tuple[str | None, str | None]:
     """Create an open registration. Returns (id, None) or (None, reason_code)."""
     settings = _clear_lock_if_expired(conn, now_ms=now_ms)
@@ -148,6 +156,11 @@ def create_quick_registration(
     ).fetchone()
     if watch is not None:
         return None, "open_assist_watch"
+
+    if live_positions is not None:
+        for pos in live_positions:
+            if str(pos.symbol).upper() == sym:
+                return None, "live_position"
 
     rid = f"aqr_{uuid.uuid4().hex[:16]}"
     expires = int(now_ms) + REG_TTL_MS
@@ -709,6 +722,7 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
         )
     if n < 20:
         lines.append(f"ยังไม่พิสูจน์ edge — ตัวอย่าง {n}/20 ไม้")
+    lines.append(QUICK_USAGE)
 
     def _mark(cur: float, options: tuple[float, ...], prefix: str) -> list[dict[str, str]]:
         row: list[dict[str, str]] = []
