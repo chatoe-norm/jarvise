@@ -28,6 +28,11 @@ from jarvise_assist.menu import (
     handle_risk_number,
     match_menu_label,
 )
+from jarvise_assist.partner_admin import (
+    handle_partner_callback,
+    handle_partner_text,
+    parse_partner_command,
+)
 from jarvise_assist.quick import handle_quick_callback
 from jarvise_assist.quick_card import (
     QUICK_REGISTER_PREFIX,
@@ -98,6 +103,17 @@ def process_update(
             return {"ignored": "foreign_chat"}
         data = str(callback.get("data") or "")
         cq_id = str(callback.get("id") or "")
+        if data.startswith("pa:"):
+            return handle_partner_callback(
+                conn,
+                data,
+                callback=callback,
+                send=send_fn,
+                answer=answer_fn,
+                edit=edit_fn,
+                futures=futures,
+                now_ms=ts,
+            )
         if data.startswith("risk:") or data.startswith("risk_yes:") or data == "risk_no":
             answer_fn(cq_id)
             return handle_risk_callback(conn, data, send=send_fn)
@@ -177,6 +193,15 @@ def process_update(
         if noted:
             send_fn("บันทึกโน้ตแล้ว")
             return {"ok": True, "journal_note": True}
+    if parse_partner_command(text) is not None:
+        return handle_partner_text(
+            conn,
+            text,
+            message=message,
+            send=send_fn,
+            futures=futures,
+            now_ms=ts,
+        )
     risk_num = handle_risk_number(conn, text, send=send_fn)
     if risk_num.get("handled"):
         return risk_num
