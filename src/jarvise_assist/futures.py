@@ -486,11 +486,23 @@ class BinanceFuturesClient:
             raise FuturesKeyUnsafeError("; ".join(audit["block_reasons"]) or "key unsafe")
         return audit
 
-    def usdt_wallet_and_available(self) -> tuple[Decimal, Decimal]:
-        """USDT wallet ``balance`` and ``availableBalance`` from one GET."""
+    def balance_rows(self) -> list[dict[str, Any]]:
+        """Signed GET balance rows. Raises when the payload is not a list."""
         payload = self._signed_get(BALANCE_PATH, provider="binance_fapi_balance")
         if not isinstance(payload, list):
             raise ValueError("unexpected balance response type")
+        return list(payload)
+
+    def position_rows(self) -> list[dict[str, Any]]:
+        """Signed GET positionRisk rows. Raises when the payload is not a list."""
+        payload = self._signed_get(POSITION_RISK_PATH, provider="binance_fapi_position")
+        if not isinstance(payload, list):
+            raise ValueError("unexpected positionRisk response type")
+        return list(payload)
+
+    def usdt_wallet_and_available(self) -> tuple[Decimal, Decimal]:
+        """USDT wallet ``balance`` and ``availableBalance`` from one GET."""
+        payload = self.balance_rows()
         for row in payload:
             if str(row.get("asset") or "") == "USDT":
                 balance = Decimal(str(row.get("balance") or "0"))
