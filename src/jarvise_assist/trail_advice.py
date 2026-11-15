@@ -7,18 +7,23 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, Literal
 
+import httpx
+
 from jarvise_assist.sizing import round_level_to_tick
 from jarvise_paper.profit_lock import trail_stop_with_source
 
 ONE_H_MS = 3_600_000
 FIFTEEN_M_MS = 900_000
 _ENTRY_BAR_CACHE_MAX = 256
+_ENTRY_BAR_FAIL_COOLDOWN_MS = 120_000
+_ENTRY_BAR_FETCH_TIMEOUT_S = 5.0
 TrailSource = Literal["breakeven", "trail"]
 EntryBarTag = Literal["aligned", "open", "used", "empty"]
 
 logger = logging.getLogger(__name__)
 
 _ENTRY_BAR_CACHE: dict[tuple[str, int], tuple[float | None, float | None]] = {}
+_ENTRY_BAR_FAIL_MEMO: dict[tuple[str, int], int] = {}
 
 
 def fetch_entry_bar_15m(symbol: str, start_ms: int, until_ms: int) -> list[dict]:
@@ -26,20 +31,28 @@ def fetch_entry_bar_15m(symbol: str, start_ms: int, until_ms: int) -> list[dict]
     try:
         from jarvise_ingest.providers.binance_klines import fetch_klines_range
 
-        return fetch_klines_range(
-            symbol,
-            "15m",
-            start_ms,
-            until_ms=until_ms,
-            page_limit=4,
-            max_pages=1,
-        )
+        with httpx.Client(timeout=_ENTRY_BAR_FETCH_TIMEOUT_S) as client:
+            return fetch_klines_range(
+                symbol,
+                "15m",
+                start_ms,
+                until_ms=until_ms,
+                page_limit=4,
+                max_pages=1,
+                client=client,
+            )
     except Exception:
         logger.warning("assist trail_advice: entry-bar 15m fetch failed")
         return []
 
 
 _ENTRY_BAR_FETCH: Callable[[str, int, int], list[dict]] = fetch_entry_bar_15m
+
+
+def _remember_entry_bar_failure(cache_key: tuple[str, int], now_ms: int) -> None:
+    if len(_ENTRY_BAR_FAIL_MEMO) >= _ENTRY_BAR_CACHE_MAX:
+        _ENTRY_BAR_FAIL_MEMO.clear()
+    _ENTRY_BAR_FAIL_MEMO[cache_key] = int(now_ms) + _ENTRY_BAR_FAIL_COOLDOWN_MS
 
 
 def candle_extremes_after_entry(
@@ -101,12 +114,16 @@ def entry_bar_extremes(
     cached = _ENTRY_BAR_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    retry_after = _ENTRY_BAR_FAIL_MEMO.get(cache_key)
+    if retry_after is not None and int(now_ms) < retry_after:
+        return None, None
 
     fetcher = fetch if fetch is not None else _ENTRY_BAR_FETCH
     try:
         rows = fetcher(symbol, start, bar_close)
     except Exception:
         logger.warning("assist trail_advice: entry-bar 15m fetch failed")
+        _remember_entry_bar_failure(cache_key, now_ms)
         return None, None
     best_low: float | None = None
     best_high: float | None = None
@@ -123,7 +140,9 @@ def entry_bar_extremes(
             lo = float(low)
             best_low = lo if best_low is None else min(best_low, lo)
     if best_low is None and best_high is None:
+        _remember_entry_bar_failure(cache_key, now_ms)
         return None, None
+    _ENTRY_BAR_FAIL_MEMO.pop(cache_key, None)
     if len(_ENTRY_BAR_CACHE) >= _ENTRY_BAR_CACHE_MAX:
         _ENTRY_BAR_CACHE.clear()
     _ENTRY_BAR_CACHE[cache_key] = (best_low, best_high)
