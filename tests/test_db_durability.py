@@ -34,11 +34,114 @@ def test_connect_pragmas(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "p.db")
     pragmas = db_pragmas(conn)
     assert pragmas["journal_mode"].lower() == "wal"
-    assert pragmas["busy_timeout_ms"] == 5000
+    assert pragmas["busy_timeout_ms"] == 15000
     assert pragmas["foreign_keys"] is True
     assert pragmas["synchronous"] == 1  # NORMAL
     assert pragmas["user_version"] == SCHEMA_VERSION
     conn.close()
+
+
+def test_open_db_current_schema_takes_no_write_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """open_db on an up-to-date DB must not take the WAL write lock (repair DML gated)."""
+    import jarvise_ingest.db as db_mod
+
+    path = tmp_path / "lock.db"
+    open_db(path).close()
+
+    holder = sqlite3.connect(str(path), isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(db_mod, "BUSY_TIMEOUT_MS", 50)
+    try:
+        conn = open_db(path)
+        try:
+            assert schema_version(conn) == SCHEMA_VERSION
+        finally:
+            conn.close()
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+
+def test_repair_backfills_still_apply(tmp_path: Path) -> None:
+    """Repair steps still backfill when probes find work (self-heal unchanged)."""
+    path = tmp_path / "repair.db"
+    conn = open_db(path)
+    conn.execute(
+        """
+        INSERT INTO paper_positions (
+            symbol, side, qty, entry_price, entry_ts, stop_price, initial_stop_price
+        ) VALUES ('BTCUSDT', 'long', 1.0, 100.0, 1, 90.0, NULL)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_signal (
+            id, symbol, side, entry, stop, target, qty, notional, leverage,
+            loss_at_stop, created_at_ms, expires_at_ms, status
+        ) VALUES (
+            'sig-repair-1', 'BTCUSDT', 'long', 100.0, 90.0, 120.0, 1.0, 100.0, 1,
+            10.0, 1, 2, 'sent'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_track (
+            signal_id, symbol, side, entry, stop, target, qty, sent_at_ms, cohort
+        ) VALUES (
+            'sig-repair-1', 'BTCUSDT', 'long', 100.0, 90.0, 120.0, 1.0, 1, NULL
+        )
+        """
+    )
+    for table in (
+        "assist_settings",
+        "assist_edge",
+        "assist_telegram",
+        "assist_quick_settings",
+    ):
+        conn.execute(f"DELETE FROM {table} WHERE id = 1")
+    conn.commit()
+    conn.close()
+
+    conn = open_db(path)
+    try:
+        row = conn.execute(
+            "SELECT stop_price, initial_stop_price FROM paper_positions WHERE symbol = 'BTCUSDT'"
+        ).fetchone()
+        assert row is not None
+        assert row["initial_stop_price"] == row["stop_price"] == 90.0
+        cohort = conn.execute("SELECT cohort FROM assist_track WHERE signal_id = 'sig-repair-1'").fetchone()
+        assert cohort is not None and cohort["cohort"] == "core7_4h_v1"
+        settings = conn.execute("SELECT risk_pct, enabled FROM assist_settings WHERE id = 1").fetchone()
+        assert settings is not None and settings["risk_pct"] == 1.0 and settings["enabled"] == 1
+        edge = conn.execute(
+            """
+            SELECT futures_down_alerted, permission_error_reported, key_unsafe_reported
+            FROM assist_edge WHERE id = 1
+            """
+        ).fetchone()
+        assert edge is not None
+        assert edge["futures_down_alerted"] == 0
+        assert edge["permission_error_reported"] == 0
+        assert edge["key_unsafe_reported"] == 0
+        telegram = conn.execute(
+            "SELECT last_update_id, keyboard_sent FROM assist_telegram WHERE id = 1"
+        ).fetchone()
+        assert telegram is not None
+        assert telegram["last_update_id"] is None and telegram["keyboard_sent"] == 0
+        quick = conn.execute(
+            """
+            SELECT risk_pct, day_max_loss_r, streak_lock_n, cap_pct
+            FROM assist_quick_settings WHERE id = 1
+            """
+        ).fetchone()
+        assert quick is not None
+        assert quick["risk_pct"] == 0.5
+        assert quick["day_max_loss_r"] == 2
+        assert quick["streak_lock_n"] == 3
+        assert quick["cap_pct"] == 1.0
+    finally:
+        conn.close()
 
 
 def test_migrations_are_numbered_and_idempotent(tmp_path: Path) -> None:
