@@ -792,7 +792,6 @@ def apply_deposit(
     account_value_incl_deposit: Decimal,
     now_ms: int,
     note: str | None = None,
-    request_id: str | None = None,
 ) -> dict[str, Any]:
     with transaction(conn):
         return _apply_deposit_tx(
@@ -802,7 +801,6 @@ def apply_deposit(
             account_value_incl_deposit,
             now_ms,
             note=note,
-            request_id=request_id,
         )
 
 
@@ -811,10 +809,9 @@ def apply_convert(
     partner_id: str,
     account_value: Decimal,
     now_ms: int,
-    request_id: str | None = None,
 ) -> dict[str, Any]:
     with transaction(conn):
-        return _apply_convert_tx(conn, partner_id, account_value, now_ms, request_id=request_id)
+        return _apply_convert_tx(conn, partner_id, account_value, now_ms)
 
 
 def apply_withdraw_profit(
@@ -822,11 +819,10 @@ def apply_withdraw_profit(
     partner_id: str,
     account_value: Decimal,
     now_ms: int,
-    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Withdraw profit share. ``account_value`` is the raw wallet value."""
     with transaction(conn):
-        return _apply_withdraw_profit_tx(conn, partner_id, account_value, now_ms, request_id=request_id)
+        return _apply_withdraw_profit_tx(conn, partner_id, account_value, now_ms)
 
 
 def apply_close(
@@ -834,11 +830,10 @@ def apply_close(
     partner_id: str,
     account_value: Decimal,
     now_ms: int,
-    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Close partner. ``account_value`` is the raw wallet value."""
     with transaction(conn):
-        return _apply_close_tx(conn, partner_id, account_value, now_ms, request_id=request_id)
+        return _apply_close_tx(conn, partner_id, account_value, now_ms)
 
 
 def apply_adjust_cost(
@@ -1224,5 +1219,44 @@ def verify_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
                         "payout_state": str(req["payout_state"]),
                     }
                 )
+
+    events_all = conn.execute(
+        """
+        SELECT id, partner_id, kind, request_id
+        FROM partner_event
+        ORDER BY rowid
+        """
+    ).fetchall()
+    for ev in events_all:
+        eid = str(ev["id"])
+        kind = str(ev["kind"])
+        rid = ev["request_id"]
+        if kind in ("withdraw_profit", "close") and rid is None:
+            mismatches.append({"event_id": eid, "kind": kind, "request_id": None})
+            continue
+        if rid is None:
+            continue
+        rid_s = str(rid)
+        linked = conn.execute(
+            """
+            SELECT partner_id, kind, status FROM partner_request
+            WHERE id = ?
+            """,
+            (rid_s,),
+        ).fetchone()
+        if (
+            linked is None
+            or str(linked["partner_id"]) != str(ev["partner_id"])
+            or str(linked["kind"]) != kind
+            or str(linked["status"]) != "confirmed"
+        ):
+            mismatches.append(
+                {
+                    "event_id": eid,
+                    "request_id": rid_s,
+                    "partner_id": str(ev["partner_id"]),
+                    "kind": kind,
+                }
+            )
 
     return {"ok": len(mismatches) == 0, "mismatches": mismatches}

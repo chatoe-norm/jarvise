@@ -820,3 +820,73 @@ def test_verify_ledger_mixed_request_flow(tmp_path: Path) -> None:
     assert n_exp >= 1
     assert ps.verify_ledger(conn)["ok"] is True
     conn.close()
+
+
+def test_public_apply_rejects_request_id_kwarg(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "no_rid_kw.db")
+    now = 1_700_000_000_000
+    a = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)
+    b = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=now + 1)
+    a_id, b_id = a["partner_id"], b["partner_id"]
+    ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
+    ps.apply_deposit(conn, b_id, D("100"), D("1100"), now + 20)
+
+    with pytest.raises(TypeError):
+        ps.apply_close(conn, b_id, D("1100"), now + 30, request_id="x")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        ps.apply_withdraw_profit(conn, b_id, D("1100"), now + 40, request_id="x")  # type: ignore[call-arg]
+    conn.close()
+
+
+def test_verify_ledger_event_request_links(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "ev_req.db")
+    now = 1_700_000_000_000
+    a = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)
+    b = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=now + 1)
+    c = ps.create_partner(conn, name="Carol", is_admin=False, now_ms=now + 2)
+    a_id, b_id, c_id = a["partner_id"], b["partner_id"], c["partner_id"]
+    ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
+    ps.apply_deposit(conn, b_id, D("100"), D("1100"), now + 20)
+    ps.apply_deposit(conn, c_id, D("100"), D("1200"), now + 30)
+
+    cl = ps.apply_close(conn, c_id, D("1200"), now + 40)
+    assert cl["ok"]
+    close_eid = cl["event_ids"][0]
+    assert ps.verify_ledger(conn)["ok"] is True
+
+    conn.execute("UPDATE partner_event SET request_id = NULL WHERE id = ?", (close_eid,))
+    conn.commit()
+    null_close = ps.verify_ledger(conn)
+    assert null_close["ok"] is False
+    assert any(m.get("event_id") == close_eid for m in null_close["mismatches"])
+
+    conn.execute(
+        "UPDATE partner_event SET request_id = ? WHERE id = ?",
+        ("pr_made_up", close_eid),
+    )
+    conn.commit()
+    fake_close = ps.verify_ledger(conn)
+    assert fake_close["ok"] is False
+    assert any(m.get("event_id") == close_eid for m in fake_close["mismatches"])
+
+    # Restore close event link so withdraw check is isolated
+    conn.execute(
+        "UPDATE partner_event SET request_id = ? WHERE id = ?",
+        (cl["request_id"], close_eid),
+    )
+    conn.commit()
+    assert ps.mark_paid(conn, cl["request_id"], now + 45)["ok"]
+    assert ps.verify_ledger(conn)["ok"] is True
+
+    # A+B = 1100 units; raw V=1320 → NAV 1.2 so B has profit to withdraw
+    wd = ps.apply_withdraw_profit(conn, b_id, D("1320"), now + 50)
+    assert wd["ok"]
+    wd_eid = wd["event_ids"][0]
+    assert ps.verify_ledger(conn)["ok"] is True
+
+    conn.execute("UPDATE partner_event SET request_id = NULL WHERE id = ?", (wd_eid,))
+    conn.commit()
+    null_wd = ps.verify_ledger(conn)
+    assert null_wd["ok"] is False
+    assert any(m.get("event_id") == wd_eid for m in null_wd["mismatches"])
+    conn.close()
