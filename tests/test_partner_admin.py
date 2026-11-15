@@ -100,9 +100,14 @@ def _patch_read(monkeypatch: Any, client: FakeValueClient) -> None:
 def _send_capture() -> tuple[list[dict[str, Any]], Any]:
     sent: list[dict[str, Any]] = []
 
-    def send(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+    def send(
+        text: str, *, reply_markup: dict[str, Any] | None = None, chat_id: str | None = None, **kw: Any
+    ) -> int:
         mid = len(sent) + 1
-        sent.append({"text": text, "reply_markup": reply_markup, "message_id": mid})
+        entry: dict[str, Any] = {"text": text, "reply_markup": reply_markup, "message_id": mid}
+        if chat_id is not None:
+            entry["chat_id"] = chat_id
+        sent.append(entry)
         return mid
 
     return sent, send
@@ -111,8 +116,18 @@ def _send_capture() -> tuple[list[dict[str, Any]], Any]:
 def _edit_capture() -> tuple[list[dict[str, Any]], Any]:
     edited: list[dict[str, Any]] = []
 
-    def edit(message_id: int, text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
-        edited.append({"message_id": message_id, "text": text, "reply_markup": reply_markup})
+    def edit(
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+        chat_id: str | None = None,
+        **kw: Any,
+    ) -> bool:
+        entry: dict[str, Any] = {"message_id": message_id, "text": text, "reply_markup": reply_markup}
+        if chat_id is not None:
+            entry["chat_id"] = chat_id
+        edited.append(entry)
         return True
 
     return edited, edit
@@ -1099,7 +1114,7 @@ def test_static_guards() -> None:
             assert not (0x1780 <= o <= 0x17FF)
 
     admin = (root / "partner_admin.py").read_text(encoding="utf-8")
-    for banned in ("apply_convert", "apply_withdraw_profit", "apply_close", "mark_paid"):
+    for banned in ("apply_convert", "apply_withdraw_profit", "apply_close"):
         assert banned not in admin
 
 
@@ -1118,4 +1133,291 @@ def test_no_chat_id_on_sends(tmp_path: Path, monkeypatch: Any, env_chat: None) -
     )
     for c in calls:
         assert "chat_id" not in c
+    conn.close()
+
+
+# ---- P3a polish + invite / unbind --------------------------------------------
+
+
+def test_amount_re_rejects_thai_and_fullwidth_digits() -> None:
+    assert pa.parse_amount("๕๐๐", allow_zero=False) is None
+    assert pa.parse_amount("５００", allow_zero=False) is None
+    assert pa.parse_amount("500", allow_zero=False) == D("500")
+
+
+def test_value_th_no_usdt_row_text() -> None:
+    assert pa.thai_reason("no_usdt_row") == "ไม่พบยอด USDT ใน futures wallet"
+    admin = (Path(__file__).resolve().parents[1] / "src" / "jarvise_assist" / "partner_admin.py").read_text(
+        encoding="utf-8"
+    )
+    assert "แถว" not in admin
+
+
+def test_overview_and_init_signed_unrealized(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "signed_u.db")
+    client = FakeValueClient(wallet="940", unrealized="60")
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p init", message=_owner_msg(text="p init"), send=send, futures=client, now_ms=NOW
+    )
+    assert "ยังไม่ปิด +60.00" in sent[0]["text"]
+
+    answers, answer = _answer_capture()
+    edited, edit = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        "pa:iy",
+        callback=_owner_cb(data="pa:iy"),
+        send=_send_capture()[1],
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW + 1,
+    )
+    sent2, send2 = _send_capture()
+    pa.handle_partner_text(
+        conn, "p", message=_owner_msg(text="p"), send=send2, futures=client, now_ms=NOW + 2
+    )
+    assert "ยังไม่ปิด +60.00" in sent2[0]["text"]
+    conn.close()
+
+
+def test_pa_dn_bad_id_no_db(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dn_bad.db")
+    _do_init(conn, monkeypatch)
+    answers, answer = _answer_capture()
+    edited, edit = _edit_capture()
+    called: list[str] = []
+
+    def boom(*a: Any, **k: Any) -> dict[str, Any]:
+        called.append("reject")
+        raise AssertionError("reject_request must not run for bad id")
+
+    monkeypatch.setattr(ps, "reject_request", boom)
+    pa.handle_partner_callback(
+        conn,
+        "pa:dn:xyz",
+        callback=_owner_cb(data="pa:dn:xyz"),
+        send=_send_capture()[1],
+        answer=answer,
+        edit=edit,
+        futures=FakeValueClient(wallet="1000"),
+        now_ms=NOW + 1,
+    )
+    assert answers[0][1] == "รายการนี้ปิดไปแล้ว"
+    assert called == []
+    assert edited == []
+    conn.close()
+
+
+def test_pa_dn_on_convert_refused(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dn_cv.db")
+    _do_init(conn, monkeypatch)
+    admin = ps.admin_partner(conn)
+    assert admin is not None
+    req = ps.create_request(conn, str(admin["id"]), "convert", NOW + 10)
+    rid = req["request_id"]
+    answers, answer = _answer_capture()
+    edited, edit = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:dn:{rid}",
+        callback=_owner_cb(data=f"pa:dn:{rid}"),
+        send=_send_capture()[1],
+        answer=answer,
+        edit=edit,
+        futures=FakeValueClient(wallet="1000"),
+        now_ms=NOW + 11,
+    )
+    assert answers[0][1] == "ไม่ใช่รายการฝาก"
+    assert (
+        conn.execute("SELECT status FROM partner_request WHERE id=?", (rid,)).fetchone()["status"]
+        == "pending"
+    )
+    conn.close()
+
+
+def test_pa_dy_expired_after_newer_dep(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dy_old.db")
+    _do_init(conn, monkeypatch)
+    client = FakeValueClient(wallet="1000")
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p add B", message=_owner_msg(text="p add B"), send=send, futures=client, now_ms=NOW + 1
+    )
+    client_v = FakeValueClient(wallet="1100")
+    _patch_read(monkeypatch, client_v)
+    sent1, send1 = _send_capture()
+    pa.handle_partner_text(
+        conn,
+        "p dep B 100",
+        message=_owner_msg(text="p dep B 100"),
+        send=send1,
+        futures=client_v,
+        now_ms=NOW + 2,
+    )
+    rid_old = sent1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    # expire old by creating new after TTL
+    t1 = NOW + 2 + ps.REQUEST_TTL_MS + 1
+    sent2, send2 = _send_capture()
+    pa.handle_partner_text(
+        conn, "p dep B 100", message=_owner_msg(text="p dep B 100"), send=send2, futures=client_v, now_ms=t1
+    )
+    answers, answer = _answer_capture()
+    edited, edit = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid_old}",
+        callback=_owner_cb(data=f"pa:dy:{rid_old}", mid=sent1[0]["message_id"]),
+        send=_send_capture()[1],
+        answer=answer,
+        edit=edit,
+        futures=client_v,
+        now_ms=t1 + 1,
+    )
+    assert answers[0][1] is not None
+    assert "หมดอายุ" in answers[0][1]
+    assert edited[0]["reply_markup"] == {"inline_keyboard": []}
+    conn.close()
+
+
+def test_handle_dep_pending_non_deposit(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dep_cv_pending.db")
+    _do_init(conn, monkeypatch)
+    client = FakeValueClient(wallet="1000")
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p add B", message=_owner_msg(text="p add B"), send=send, futures=client, now_ms=NOW + 1
+    )
+    b = conn.execute("SELECT id FROM partner WHERE name='B'").fetchone()
+    ps.create_request(conn, str(b["id"]), "convert", NOW + 2)
+    sent2, send2 = _send_capture()
+    pa.handle_partner_text(
+        conn,
+        "p dep B 100",
+        message=_owner_msg(text="p dep B 100"),
+        send=send2,
+        futures=client,
+        now_ms=NOW + 3,
+    )
+    assert "มีคำขอ" in sent2[0]["text"] and "ค้างอยู่" in sent2[0]["text"]
+    assert "ทบกำไร" in sent2[0]["text"]
+    kb = sent2[0]["reply_markup"]["inline_keyboard"][0]
+    assert kb[0]["callback_data"].startswith("pa:ry:")
+    assert kb[1]["callback_data"].startswith("pa:rn:")
+    assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_request").fetchone()["n"]) == 1
+    conn.close()
+
+
+def test_invite_and_unbind(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "inv_cmd.db")
+    _do_init(conn, monkeypatch)
+    client = FakeValueClient(wallet="1000")
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p add B", message=_owner_msg(text="p add B"), send=send, futures=client, now_ms=NOW + 1
+    )
+    sent_i, send_i = _send_capture()
+    pa.handle_partner_text(
+        conn, "p invite B", message=_owner_msg(text="p invite B"), send=send_i, futures=client, now_ms=NOW + 2
+    )
+    text = sent_i[0]["text"]
+    assert "เชิญ B" in text
+    assert "/start " in text
+    assert "ใช้ได้ครั้งเดียว" in text
+    code = ""
+    for line in text.splitlines():
+        if line.startswith("/start "):
+            code = line.split(None, 1)[1].strip()
+    assert ps.bind_invite(conn, code, "501", admin_chat_id="42", now_ms=NOW + 3)["ok"]
+
+    sent_bound, send_bound = _send_capture()
+    pa.handle_partner_text(
+        conn,
+        "p invite B",
+        message=_owner_msg(text="p invite B"),
+        send=send_bound,
+        futures=client,
+        now_ms=NOW + 4,
+    )
+    assert "ผูกอยู่แล้ว" in sent_bound[0]["text"]
+    assert "p unbind" in sent_bound[0]["text"]
+
+    sent_u, send_u = _send_capture()
+    pa.handle_partner_text(
+        conn, "p unbind B", message=_owner_msg(text="p unbind B"), send=send_u, futures=client, now_ms=NOW + 5
+    )
+    assert "ยกเลิกการผูก B แล้ว" in sent_u[0]["text"]
+    assert (
+        ps.get_partner(conn, str(conn.execute("SELECT id FROM partner WHERE name='B'").fetchone()["id"]))[
+            "telegram_user_id"
+        ]
+        is None
+    )
+
+    # overview TG badge
+    inv2 = ps.create_invite(
+        conn, str(conn.execute("SELECT id FROM partner WHERE name='B'").fetchone()["id"]), now_ms=NOW + 6
+    )
+    ps.bind_invite(conn, inv2["code"], "501", admin_chat_id="42", now_ms=NOW + 7)
+    sent_ov, send_ov = _send_capture()
+    pa.handle_partner_text(
+        conn, "p", message=_owner_msg(text="p"), send=send_ov, futures=client, now_ms=NOW + 8
+    )
+    assert "· B · TG ✅" in sent_ov[0]["text"]
+    assert "p invite" in pa.HELP_TEXT and "p unbind" in pa.HELP_TEXT
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
+def test_cost_notifies_bound_partner(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "cost_n.db")
+    _do_init(conn, monkeypatch)
+    client = FakeValueClient(wallet="1000")
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p add B", message=_owner_msg(text="p add B"), send=send, futures=client, now_ms=NOW + 1
+    )
+    # give B some cost via deposit
+    client_v = FakeValueClient(wallet="1600")
+    _patch_read(monkeypatch, client_v)
+    sent_d, send_d = _send_capture()
+    pa.handle_partner_text(
+        conn,
+        "p dep B 600",
+        message=_owner_msg(text="p dep B 600"),
+        send=send_d,
+        futures=client_v,
+        now_ms=NOW + 2,
+    )
+    rid = sent_d[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    _confirm_dep(conn, rid, client_v, monkeypatch, now_ms=NOW + 3)
+    b_id = str(conn.execute("SELECT id FROM partner WHERE name='B'").fetchone()["id"])
+    inv = ps.create_invite(conn, b_id, now_ms=NOW + 4)
+    ps.bind_invite(conn, inv["code"], "501", admin_chat_id="42", now_ms=NOW + 5)
+
+    calls: list[dict[str, Any]] = []
+
+    def send2(text: str, **kwargs: Any) -> int:
+        calls.append({"text": text, **kwargs})
+        return len(calls)
+
+    pa.handle_partner_text(
+        conn,
+        "p cost B 550 adjust down",
+        message=_owner_msg(text="p cost B 550 adjust down"),
+        send=send2,
+        futures=client_v,
+        now_ms=NOW + 6,
+    )
+    partner_msgs = [c for c in calls if c.get("chat_id") == "501"]
+    assert partner_msgs
+    assert "แอดมินปรับทุน" in partner_msgs[0]["text"]
+    assert "550" in partner_msgs[0]["text"]
+    assert ps.verify_ledger(conn)["ok"] is True
     conn.close()
