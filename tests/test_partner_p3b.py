@@ -884,3 +884,334 @@ def test_static_guards_allow_mark_paid() -> None:
         assert banned not in admin
     # mark_paid is allowed in P3b
     assert "mark_paid" in admin
+
+
+def _owner_cb_stale(data: str, text: str, *, mid: int = 7) -> dict[str, Any]:
+    """Callback with a frozen message.text (Telegram snapshot at first tap)."""
+    cb = _owner_cb(data, mid=mid)
+    cb["message"] = dict(cb["message"])
+    cb["message"]["text"] = text
+    return cb
+
+
+def _pd_callback(markup: dict[str, Any] | None) -> str | None:
+    if not markup:
+        return None
+    for row in markup.get("inline_keyboard") or []:
+        for btn in row:
+            data = str(btn.get("callback_data") or "")
+            if data.startswith("pa:pd:"):
+                return data
+    return None
+
+
+def _net_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("ยอดสุทธิ "):
+            return line
+    raise AssertionError(f"no net line in {text!r}")
+
+
+def test_double_tap_pa_ry_keeps_due_button(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dt_ry.db")
+    _init_and_add(conn, monkeypatch)
+    _bind(conn, "C", "502", now_ms=NOW + 5)
+    c_id = str(conn.execute("SELECT id FROM partner WHERE name='C'").fetchone()["id"])
+    ps.apply_deposit(conn, c_id, D("330"), D("1330"), NOW + 6)
+    cli = FakeValueClient(wallet="1500")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    portal.handle_portal_callback(
+        conn,
+        "pp:go:wd",
+        callback=_pcb("pp:go:wd", chat=502),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=cli,
+        now_ms=NOW + 10,
+    )
+    rid = conn.execute("SELECT id FROM partner_request WHERE status='pending'").fetchone()["id"]
+    stale = "📥 คำขอจาก C: ถอนกำไร\nประมาณการตอนนี้: เงินออก 0.00 · ค่าธรรมเนียม 0.00"
+    cb = _owner_cb_stale(f"pa:ry:{rid}", stale)
+    edited, edit = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:ry:{rid}",
+        callback=cb,
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=edit,
+        futures=cli,
+        now_ms=NOW + 11,
+    )
+    assert "ค้างจ่าย" in edited[0]["text"]
+    assert _pd_callback(edited[0]["reply_markup"]) == f"pa:pd:{rid}"
+    due_after = ps.payouts_due_total(conn)
+    n_wd = int(
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind='withdraw_profit'").fetchone()["n"]
+    )
+    assert n_wd == 1
+
+    edited2, edit2 = _edit_capture()
+    answers2, answer2 = _answer_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:ry:{rid}",
+        callback=cb,
+        send=_send_capture()[1],
+        answer=answer2,
+        edit=edit2,
+        futures=cli,
+        now_ms=NOW + 12,
+    )
+    assert "ปิดไปแล้ว" in (answers2[0][1] or "")
+    assert "ค้างจ่าย" in edited2[0]["text"]
+    assert "📥" not in edited2[0]["text"]
+    assert _pd_callback(edited2[0]["reply_markup"]) == f"pa:pd:{rid}"
+    assert ps.payouts_due_total(conn) == due_after
+    assert (
+        int(
+            conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind='withdraw_profit'").fetchone()[
+                "n"
+            ]
+        )
+        == 1
+    )
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
+def test_double_tap_pa_pd_keeps_paid_text(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dt_pd.db")
+    _init_and_add(conn, monkeypatch)
+    _bind(conn, "C", "502", now_ms=NOW + 5)
+    c_id = str(conn.execute("SELECT id FROM partner WHERE name='C'").fetchone()["id"])
+    ps.apply_deposit(conn, c_id, D("330"), D("1330"), NOW + 6)
+    cli = FakeValueClient(wallet="1500")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    portal.handle_portal_callback(
+        conn,
+        "pp:go:wd",
+        callback=_pcb("pp:go:wd", chat=502),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=cli,
+        now_ms=NOW + 10,
+    )
+    rid = conn.execute("SELECT id FROM partner_request WHERE status='pending'").fetchone()["id"]
+    edited, edit = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:ry:{rid}",
+        callback=_owner_cb(data=f"pa:ry:{rid}"),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=edit,
+        futures=cli,
+        now_ms=NOW + 11,
+    )
+    due_text = edited[0]["text"]
+    assert "ค้างจ่าย" in due_text
+    cb = _owner_cb_stale(f"pa:pd:{rid}", due_text)
+    edited1, edit1 = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:pd:{rid}",
+        callback=cb,
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=edit1,
+        futures=cli,
+        now_ms=NOW + 12,
+    )
+    assert "โอนแล้ว" in edited1[0]["text"]
+    assert (edited1[0]["reply_markup"] or {}).get("inline_keyboard") == []
+
+    edited2, edit2 = _edit_capture()
+    answers2, answer2 = _answer_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:pd:{rid}",
+        callback=cb,
+        send=_send_capture()[1],
+        answer=answer2,
+        edit=edit2,
+        futures=cli,
+        now_ms=NOW + 13,
+    )
+    assert "ปิดไปแล้ว" in (answers2[0][1] or "")
+    assert "โอนแล้ว" in edited2[0]["text"]
+    assert "ค้างจ่าย" not in edited2[0]["text"]
+    assert (edited2[0]["reply_markup"] or {}).get("inline_keyboard") == []
+    assert (
+        conn.execute("SELECT payout_state FROM partner_request WHERE id=?", (rid,)).fetchone()["payout_state"]
+        == "paid"
+    )
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
+def test_double_tap_pa_dy_keeps_deposit_text(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dt_dy.db")
+    _init_and_add(conn, monkeypatch)
+    _bind(conn, "B", "501", now_ms=NOW + 5)
+    cli = FakeValueClient(wallet="1600")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    sent, send = _send_capture()
+    portal.handle_portal_text(conn, _pmsg("ฝาก 600", chat=501), send=send, futures=cli, now_ms=NOW + 10)
+    admin_dep = [s for s in sent if "chat_id" not in s and "แจ้งฝาก" in s["text"]][0]
+    rid = admin_dep["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    cb = _owner_cb_stale(f"pa:dy:{rid}", admin_dep["text"])
+    edited, edit = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid}",
+        callback=cb,
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=edit,
+        futures=cli,
+        now_ms=NOW + 11,
+    )
+    assert "บันทึกฝากแล้ว" in edited[0]["text"]
+    n_dep = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind='deposit'").fetchone()["n"])
+    # admin init deposit + B deposit
+    assert n_dep == 2
+
+    edited2, edit2 = _edit_capture()
+    answers2, answer2 = _answer_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid}",
+        callback=cb,
+        send=_send_capture()[1],
+        answer=answer2,
+        edit=edit2,
+        futures=cli,
+        now_ms=NOW + 12,
+    )
+    assert "ปิดไปแล้ว" in (answers2[0][1] or "")
+    assert "บันทึกฝากแล้ว" in edited2[0]["text"]
+    assert (
+        int(conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind='deposit'").fetchone()["n"]) == 2
+    )
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
+def test_pa_rn_after_pa_ry_keeps_pd_button(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "rn_after_ry.db")
+    _init_and_add(conn, monkeypatch)
+    _bind(conn, "C", "502", now_ms=NOW + 5)
+    c_id = str(conn.execute("SELECT id FROM partner WHERE name='C'").fetchone()["id"])
+    ps.apply_deposit(conn, c_id, D("330"), D("1330"), NOW + 6)
+    cli = FakeValueClient(wallet="1500")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    portal.handle_portal_callback(
+        conn,
+        "pp:go:wd",
+        callback=_pcb("pp:go:wd", chat=502),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=cli,
+        now_ms=NOW + 10,
+    )
+    rid = conn.execute("SELECT id FROM partner_request WHERE status='pending'").fetchone()["id"]
+    edited, edit = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:ry:{rid}",
+        callback=_owner_cb(data=f"pa:ry:{rid}"),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=edit,
+        futures=cli,
+        now_ms=NOW + 11,
+    )
+    assert _pd_callback(edited[0]["reply_markup"]) == f"pa:pd:{rid}"
+    stale = "📥 คำขอจาก C: ถอนกำไร"
+    answers, answer = _answer_capture()
+    edited2, edit2 = _edit_capture()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:rn:{rid}",
+        callback=_owner_cb_stale(f"pa:rn:{rid}", stale),
+        send=_send_capture()[1],
+        answer=answer,
+        edit=edit2,
+        futures=cli,
+        now_ms=NOW + 12,
+    )
+    assert "ปิดไปแล้ว" in (answers[0][1] or "")
+    assert "ค้างจ่าย" in edited2[0]["text"]
+    assert _pd_callback(edited2[0]["reply_markup"]) == f"pa:pd:{rid}"
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
+def test_portal_v_cache_invalidates_when_due_clears(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "cache_due.db")
+    _init_and_add(conn, monkeypatch)
+    _bind(conn, "B", "501", now_ms=NOW + 5)
+    _bind(conn, "C", "502", now_ms=NOW + 6)
+    b_id = str(conn.execute("SELECT id FROM partner WHERE name='B'").fetchone()["id"])
+    c_id = str(conn.execute("SELECT id FROM partner WHERE name='C'").fetchone()["id"])
+    ps.apply_deposit(conn, b_id, D("600"), D("1600"), NOW + 7)
+    ps.apply_deposit(conn, c_id, D("330"), D("1930"), NOW + 8)
+    cli = FakeValueClient(wallet="2400")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    portal.handle_portal_callback(
+        conn,
+        "pp:go:wd",
+        callback=_pcb("pp:go:wd", chat=502),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=cli,
+        now_ms=NOW + 20,
+    )
+    rid = conn.execute("SELECT id FROM partner_request WHERE status='pending'").fetchone()["id"]
+    pa.handle_partner_callback(
+        conn,
+        f"pa:ry:{rid}",
+        callback=_owner_cb(data=f"pa:ry:{rid}"),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=cli,
+        now_ms=NOW + 21,
+    )
+    x = ps.payouts_due_total(conn)
+    assert x > 0
+    portal.reset_value_cache()
+    cli.calls = 0
+    sent, send = _send_capture()
+    portal.handle_portal_text(conn, _pmsg("hi", chat=501), send=send, futures=cli, now_ms=NOW + 30)
+    assert cli.calls == 1
+    net_before = _net_line(sent[0]["text"])
+
+    cli.wallet = str(D("2400") - x)
+    pa.handle_partner_callback(
+        conn,
+        f"pa:pd:{rid}",
+        callback=_owner_cb(data=f"pa:pd:{rid}"),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=cli,
+        now_ms=NOW + 31,
+    )
+    assert ps.payouts_due_total(conn) == 0
+    sent2, send2 = _send_capture()
+    portal.handle_portal_text(conn, _pmsg("hi", chat=501), send=send2, futures=cli, now_ms=NOW + 30 + 4000)
+    assert cli.calls == 2
+    assert _net_line(sent2[0]["text"]) == net_before
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()

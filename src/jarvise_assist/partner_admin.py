@@ -331,6 +331,43 @@ def _paid_button(request_id: str) -> dict[str, Any]:
     return {"inline_keyboard": [[{"text": "💸 โอนแล้ว", "callback_data": f"pa:pd:{request_id}"}]]}
 
 
+def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, Any]]:
+    """Render admin message text from the DB row (never from callback message.text)."""
+    empty: dict[str, Any] = {"inline_keyboard": []}
+    req = ps.get_request(conn, rid)
+    if req is None:
+        return "รายการนี้ปิดไปแล้ว", empty
+    partner = ps.get_partner(conn, str(req["partner_id"]))
+    pname = str(partner["name"]) if partner is not None else "?"
+    status = str(req["status"])
+    kind = str(req["kind"])
+    payout_state = str(req["payout_state"] or "none")
+
+    if status == "rejected":
+        if kind == "deposit":
+            return "ยกเลิกแล้ว", empty
+        return "ปฏิเสธแล้ว", empty
+    if status == "cancelled":
+        return "ยกเลิกอัตโนมัติ — ไม่มีกำไรแล้ว ณ ตอนยืนยัน", empty
+    if status == "confirmed":
+        if payout_state == "due":
+            x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
+            body = (
+                f"✅ ยืนยันแล้ว · ค้างจ่าย {fmt_usdt(x)} USDT ให้ {pname}\nโอนออกจาก futures wallet แล้วค่อยกด โอนแล้ว"
+            )
+            return body, _paid_button(rid)
+        if payout_state == "paid":
+            x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
+            return f"💸 โอนแล้ว {fmt_usdt(x)} USDT ให้ {pname}", empty
+        if kind == "deposit":
+            x = ps.usdt_from_micro(int(req["quote_gross_micro"] or 0))
+            return f"✅ บันทึกฝากแล้ว · {pname} {fmt_usdt(x)} USDT", empty
+        if kind == "convert":
+            return f"✅ ทบกำไร {pname} แล้ว", empty
+        return f"✅ ยืนยันแล้ว · ปิด {pname} แล้ว (ไม่มีเงินออก)", empty
+    return "รายการนี้ปิดไปแล้ว", empty
+
+
 def _init_buttons() -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -996,7 +1033,8 @@ def handle_partner_callback(
             if status != "pending":
                 _answer("รายการนี้ปิดไปแล้ว")
                 if mid is not None:
-                    edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                    body, markup = _settled_view(conn, rid)
+                    edit(int(mid), body, reply_markup=markup)
                 return {"ok": False, "reason": "request_not_pending"}
             if str(req["kind"]) != "deposit":
                 _answer("ไม่ใช่รายการฝาก")
@@ -1017,7 +1055,8 @@ def handle_partner_callback(
                 return {"ok": True, "cmd": "dep_cancel"}
             _answer("รายการนี้ปิดไปแล้ว")
             if mid is not None:
-                edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                body, markup = _settled_view(conn, rid)
+                edit(int(mid), body, reply_markup=markup)
             return {"ok": False, "reason": "request_not_pending"}
 
         if data.startswith("pa:dy:"):
@@ -1039,7 +1078,8 @@ def handle_partner_callback(
             if status != "pending":
                 _answer("รายการนี้ปิดไปแล้ว")
                 if mid is not None:
-                    edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                    body, markup = _settled_view(conn, rid)
+                    edit(int(mid), body, reply_markup=markup)
                 return {"ok": False, "reason": "request_not_pending"}
             if str(req["kind"]) != "deposit":
                 _answer("ไม่ใช่รายการฝาก")
@@ -1076,6 +1116,9 @@ def handle_partner_callback(
             reason = str(result.get("reason") or "")
             if reason == "request_not_pending":
                 _answer("รายการนี้ปิดไปแล้ว")
+                if mid is not None:
+                    body, markup = _settled_view(conn, rid)
+                    edit(int(mid), body, reply_markup=markup)
                 return {"ok": False, "reason": reason}
             _answer(thai_reason(reason))
             return {"ok": False, "reason": reason}
@@ -1103,7 +1146,8 @@ def handle_partner_callback(
             if status != "pending":
                 _answer("รายการนี้ปิดไปแล้ว")
                 if mid is not None:
-                    edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                    body, markup = _settled_view(conn, rid)
+                    edit(int(mid), body, reply_markup=markup)
                 return {"ok": False, "reason": "request_not_pending"}
             due_total = ps.payouts_due_total(conn)
             if due_total > 0:
@@ -1182,6 +1226,12 @@ def handle_partner_callback(
             if reason == "deposit_pending":
                 _answer("มีรายการฝากค้างอยู่ — บันทึกหรือยกเลิกก่อน")
                 return {"ok": False, "reason": reason}
+            if reason == "request_not_pending":
+                _answer("รายการนี้ปิดไปแล้ว")
+                if mid is not None:
+                    body, markup = _settled_view(conn, rid)
+                    edit(int(mid), body, reply_markup=markup)
+                return {"ok": False, "reason": reason}
             _answer(thai_reason(reason))
             return {"ok": False, "reason": reason}
 
@@ -1209,7 +1259,8 @@ def handle_partner_callback(
                 return {"ok": True, "cmd": "reject"}
             _answer("รายการนี้ปิดไปแล้ว")
             if mid is not None:
-                edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                body, markup = _settled_view(conn, rid)
+                edit(int(mid), body, reply_markup=markup)
             return {"ok": False, "reason": "request_not_pending"}
 
         if data.startswith("pa:pd:"):
@@ -1245,7 +1296,8 @@ def handle_partner_callback(
                 return {"ok": True, "cmd": "paid"}
             _answer("รายการนี้ปิดไปแล้ว")
             if mid is not None:
-                edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                body, markup = _settled_view(conn, rid)
+                edit(int(mid), body, reply_markup=markup)
             return {"ok": False, "reason": "not_due"}
 
         _answer()

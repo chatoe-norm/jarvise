@@ -40,8 +40,8 @@ _DEP_TEXT_RE = re.compile(r"^ฝาก\s+(\S+)$")
 _KIND_CODE = {"cv": "convert", "wd": "withdraw_profit", "cl": "close"}
 _MIN_DEP = Decimal("50")
 
-# Portal-only V cache: (AccountValue, read_at_ms) or None
-_value_cache: tuple[AccountValue, int] | None = None
+# Portal-only V cache: (AccountValue, read_at_ms, due_total, total_units) or None
+_value_cache: tuple[AccountValue, int, Decimal, Decimal] | None = None
 
 
 def reset_value_cache() -> None:
@@ -77,15 +77,24 @@ def _resolve_client(futures: Any) -> Any:
     return build_futures_client()
 
 
-def _read_v_cached(futures: Any, *, now_ms: int) -> AccountValue | AccountValueError:
+def _read_v_cached(
+    conn: sqlite3.Connection, futures: Any, *, now_ms: int
+) -> AccountValue | AccountValueError:
+    """Read V with a 30 s TTL; miss when due total or unit sum drifted since cache."""
     global _value_cache
     if _value_cache is not None:
-        cached, at = _value_cache
+        cached, at, due_cached, units_cached = _value_cache
         if int(now_ms) - at < _CACHE_TTL_MS:
-            return cached
+            if ps.payouts_due_total(conn) == due_cached and ps.total_units(conn) == units_cached:
+                return cached
     av = read_account_value(_resolve_client(futures), now_ms=now_ms)
     if isinstance(av, AccountValue):
-        _value_cache = (av, int(now_ms))
+        _value_cache = (
+            av,
+            int(now_ms),
+            ps.payouts_due_total(conn),
+            ps.total_units(conn),
+        )
     return av
 
 
@@ -256,7 +265,7 @@ def _send_card(
     futures: Any,
     now_ms: int,
 ) -> dict[str, Any]:
-    av = _read_v_cached(futures, now_ms=now_ms)
+    av = _read_v_cached(conn, futures, now_ms=now_ms)
     text, markup = _build_card(conn, row, av, now_ms=now_ms)
     send_to_partner(send, row, text, reply_markup=markup)
     return {"ok": True, "cmd": "card"}
@@ -369,7 +378,7 @@ def _preview_request(
     now_ms: int,
 ) -> dict[str, Any]:
     kind = _KIND_CODE[code]
-    av = _read_v_cached(futures, now_ms=now_ms)
+    av = _read_v_cached(conn, futures, now_ms=now_ms)
     mid = msg.get("message_id")
     partner_chat = str(row["telegram_user_id"])
     if isinstance(av, AccountValueError):
@@ -437,7 +446,7 @@ def _submit_request(
         answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
         return {"ok": False, "reason": reason}
     rid = str(created["request_id"])
-    av = _read_v_cached(futures, now_ms=now_ms)
+    av = _read_v_cached(conn, futures, now_ms=now_ms)
     cash = Decimal("0")
     fee = Decimal("0")
     if isinstance(av, AccountValue):
@@ -504,7 +513,7 @@ def handle_portal_callback(
 
     if data == "pp:v":
         _answer()
-        av = _read_v_cached(futures, now_ms=now_ms)
+        av = _read_v_cached(conn, futures, now_ms=now_ms)
         text, markup = _build_card(conn, row, av, now_ms=now_ms)
         ok = False
         if mid is not None:
@@ -527,7 +536,7 @@ def handle_portal_callback(
 
     if data == "pp:x":
         _answer()
-        av = _read_v_cached(futures, now_ms=now_ms)
+        av = _read_v_cached(conn, futures, now_ms=now_ms)
         text, markup = _build_card(conn, row, av, now_ms=now_ms)
         if mid is not None:
             try:
