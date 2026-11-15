@@ -26,3 +26,12 @@ def _no_http_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("jarvise_ingest.http._sleep", lambda seconds: None)
     monkeypatch.setattr("jarvise_ingest.http._LOCAL_FAILURES", {})
     monkeypatch.setattr("jarvise_ingest.http._LOCAL_OPEN_UNTIL", {})
+
+
+@pytest.fixture(autouse=True)
+def _no_entry_bar_15m_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assist trail advice must not hit Binance 15m klines during the suite."""
+    import jarvise_assist.trail_advice as trail_advice
+
+    trail_advice._ENTRY_BAR_CACHE.clear()
+    monkeypatch.setattr(trail_advice, "_ENTRY_BAR_FETCH", lambda *_a, **_k: [])

@@ -2523,6 +2523,7 @@ def run_move_stop_sequence(
         entry_time_ms=entry_time,
         now_ms=ts,
         tick=tick,
+        symbol=symbol,
     )
     if advice is None:
         return MSG_MOVE_STOP_NO_ADVICE

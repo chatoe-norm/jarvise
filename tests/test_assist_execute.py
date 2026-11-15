@@ -557,7 +557,10 @@ def _seed_move_stop_watch(
     side: str = "short",
     symbol: str = "DOGEUSDT",
 ) -> None:
-    """Watch row + closed 1h bar so trail advice lands at best_low + 1R (short)."""
+    """Watch row + closed 1h bar so trail advice lands at best_low + 1R (short).
+
+    The bar sits at the unaligned entry_ts as a test shortcut; real 1h bars open on the hour.
+    """
     upsert_watch_position(
         conn,
         {
@@ -6592,7 +6595,7 @@ def test_move_stop_tick_price_on_button_confirm_and_cancel(
 ) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
     conn = open_db(tmp_path / "tick-px.db")
-    ts = now_ms()
+    ts = _ms_bangkok(2026, 11, 14, 12, 0)
     entry_ts = ts - 2 * 3_600_000
     _seed_move_stop_watch(
         conn,
@@ -6698,4 +6701,65 @@ def test_move_stop_tick_price_on_button_confirm_and_cancel(
     without_tick = _run({"stop": "0.1670", "qty": "100", "advice_text": "advice"})
     assert "→ 0.167 ·" in without_tick
     assert "→ 0.1670 ·" not in without_tick
+    conn.close()
+
+
+def test_move_stop_card_held_at_night_no_buttons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Night hold keeps move-stop advice; live buttons and intents stay off."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "night-hold.db")
+    ts = _ms_bangkok(2026, 11, 14, 23, 40)
+    entry_ts = ts - 2 * 3_600_000
+    _seed_move_stop_watch(
+        conn,
+        entry_ts=entry_ts,
+        entry="0.1673",
+        initial_stop="0.1748",
+        best_low=0.16355,
+    )
+    pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-100"),
+        entry_price=Decimal("0.1673"),
+        mark_price=Decimal("0.164"),
+        update_time_ms=entry_ts,
+    )
+    sent_watch: list[dict[str, Any]] = []
+
+    def _watch_send(text: str, reply_markup: dict[str, Any] | None = None) -> bool:
+        sent_watch.append({"text": text, "reply_markup": reply_markup})
+        return True
+
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(
+            positions=[pos],
+            orders=[
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "BUY",
+                    "type": "STOP_MARKET",
+                    "reduceOnly": True,
+                    "stopPrice": "0.1748",
+                    "origQty": "100",
+                    "clientAlgoId": "owner-stop",
+                }
+            ],
+            ticks={"DOGEUSDT": Decimal("0.0001")},
+            steps={"DOGEUSDT": Decimal("1")},
+            marks={"DOGEUSDT": Decimal("0.164")},
+        ),
+        now_ms_value=ts,
+        send=_watch_send,
+    )
+    assert sent_watch == []
+    advice = [
+        (str(row[0]), str(row[1]))
+        for row in conn.execute(
+            "SELECT kind, status FROM assist_watch_advice WHERE symbol='DOGEUSDT'"
+        ).fetchall()
+    ]
+    assert advice == [("move_stop", "held")]
+    assert conn.execute("SELECT COUNT(*) FROM assist_exec_intent").fetchone()[0] == 0
     conn.close()
