@@ -242,6 +242,27 @@ def test_read_failed_hides_exception_text() -> None:
     assert "evil" not in blob
 
 
+def test_read_empty_balance_no_usdt_row_three_calls() -> None:
+    client = _ScriptedClient([[], []], [])
+    out = read_account_value(client, now_ms=9, attempts=3)
+    assert isinstance(out, AccountValueError)
+    assert out.reason == "no_usdt_row"
+    assert client.balance_calls == 2
+    assert client.position_calls == 1
+    assert client.balance_calls + client.position_calls == 3
+
+
+def test_read_bad_usdt_balance_three_calls() -> None:
+    bad = [{"asset": "USDT", "balance": "abc"}]
+    client = _ScriptedClient([bad, bad], [])
+    out = read_account_value(client, now_ms=9, attempts=3)
+    assert isinstance(out, AccountValueError)
+    assert out.reason == "bad_payload"
+    assert client.balance_calls == 2
+    assert client.position_calls == 1
+    assert client.balance_calls + client.position_calls == 3
+
+
 def test_balance_and_position_rows_get_only() -> None:
     paths: list[str] = []
     methods: list[str] = []

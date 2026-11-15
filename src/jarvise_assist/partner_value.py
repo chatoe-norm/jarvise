@@ -136,7 +136,11 @@ def read_account_value(
                 return AccountValueError(reason="bad_payload")
             b1 = _usdt_balance(first)
             b2 = _usdt_balance(second)
-            if b1 is not None and b2 is not None and b1 == b2:
+            if b1 is None:
+                return parse_account_value(first, positions, read_at_ms=now_ms)
+            if b2 is None:
+                return parse_account_value(second, positions, read_at_ms=now_ms)
+            if b1 == b2:
                 return parse_account_value(second, positions, read_at_ms=now_ms)
         return AccountValueError(reason="wallet_moving")
     except Exception as exc:  # noqa: BLE001 — map to typed reason; never store str(exc)

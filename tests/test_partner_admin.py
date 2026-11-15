@@ -11,6 +11,7 @@ import pytest
 
 from jarvise_assist import partner_admin as pa
 from jarvise_assist import partner_store as ps
+from jarvise_assist import partner_value
 from jarvise_assist.partner_value import AccountValue, AccountValueError
 from jarvise_ingest.db import open_db
 
@@ -791,6 +792,134 @@ def test_dep_confirm_convert_refused(tmp_path: Path, monkeypatch: Any, env_chat:
     conn.close()
 
 
+def test_dep_expired_allows_new_request(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dep_exp_new.db")
+    _do_init(conn, monkeypatch)
+    client = FakeValueClient(wallet="1000")
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p add B", message=_owner_msg(text="p add B"), send=send, futures=client, now_ms=NOW + 1
+    )
+    client_v = FakeValueClient(wallet="1100")
+    _patch_read(monkeypatch, client_v)
+    t0 = NOW + 2
+    sent1, send1 = _send_capture()
+    pa.handle_partner_text(
+        conn,
+        "p dep B 100",
+        message=_owner_msg(text="p dep B 100"),
+        send=send1,
+        futures=client_v,
+        now_ms=t0,
+    )
+    rid1 = sent1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    t1 = t0 + ps.REQUEST_TTL_MS + 1
+    sent2, send2 = _send_capture()
+    pa.handle_partner_text(
+        conn,
+        "p dep B 100",
+        message=_owner_msg(text="p dep B 100"),
+        send=send2,
+        futures=client_v,
+        now_ms=t1,
+    )
+    rid2 = sent2[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    assert rid2 != rid1
+    row1 = conn.execute("SELECT status FROM partner_request WHERE id = ?", (rid1,)).fetchone()
+    assert row1["status"] == "expired"
+    pending_n = int(
+        conn.execute("SELECT COUNT(*) AS n FROM partner_request WHERE status = 'pending'").fetchone()["n"]
+    )
+    assert pending_n == 1
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
+def test_dep_confirm_expired_no_read_no_event(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dep_exp_dy.db")
+    _do_init(conn, monkeypatch)
+    client = FakeValueClient(wallet="1000")
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p add B", message=_owner_msg(text="p add B"), send=send, futures=client, now_ms=NOW + 1
+    )
+    client_v = FakeValueClient(wallet="1100")
+    _patch_read(monkeypatch, client_v)
+    t0 = NOW + 2
+    sent1, send1 = _send_capture()
+    pa.handle_partner_text(
+        conn,
+        "p dep B 100",
+        message=_owner_msg(text="p dep B 100"),
+        send=send1,
+        futures=client_v,
+        now_ms=t0,
+    )
+    rid = sent1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    read_calls = {"n": 0}
+    real_read = pa.read_account_value
+
+    def counting_read(*args: Any, **kwargs: Any) -> Any:
+        read_calls["n"] += 1
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(pa, "read_account_value", counting_read)
+    answers, answer = _answer_capture()
+    edited, edit = _edit_capture()
+    before_events = _n_events(conn)
+    pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid}",
+        callback=_owner_cb(data=f"pa:dy:{rid}", mid=sent1[0]["message_id"]),
+        send=_send_capture()[1],
+        answer=answer,
+        edit=edit,
+        futures=client_v,
+        now_ms=t0 + ps.REQUEST_TTL_MS + 1,
+    )
+    assert answers[0][1] is not None
+    assert "หมดอายุ" in answers[0][1]
+    assert read_calls["n"] == 0
+    assert _n_events(conn) == before_events
+    assert len(edited) == 1
+    assert edited[0]["reply_markup"] == {"inline_keyboard": []}
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
+def test_admin_source_has_no_recorded_toast() -> None:
+    text = (Path(__file__).resolve().parents[1] / "src" / "jarvise_assist" / "partner_admin.py").read_text(
+        encoding="utf-8"
+    )
+    assert "บันทึกไปแล้ว" not in text
+
+
+def test_overview_real_reader_no_usdt_row(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ov_real.db")
+    _do_init(conn, monkeypatch, wallet="1000")
+    monkeypatch.setattr(pa, "read_account_value", partner_value.read_account_value)
+
+    class NoUsdtClient:
+        def balance_rows(self) -> list[dict[str, Any]]:
+            return [{"asset": "BNB", "balance": "1"}]
+
+        def position_rows(self) -> list[dict[str, Any]]:
+            return []
+
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p", message=_owner_msg(text="p"), send=send, futures=NoUsdtClient(), now_ms=NOW + 10
+    )
+    text = sent[0]["text"]
+    assert pa.thai_reason("no_usdt_row") in text
+    assert "NAV" not in text
+    assert "ค่าธรรมเนียมถ้าปิดทั้งหมด" not in text
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
 # ---- overview ----------------------------------------------------------------
 
 
@@ -860,7 +989,8 @@ def test_overview_abc_and_v_error(tmp_path: Path, monkeypatch: Any, env_chat: No
     pa.handle_partner_text(conn, "p", message=_owner_msg(text="p"), send=send_e, futures=err, now_ms=NOW + 7)
     et = sent_e[0]["text"]
     assert "NAV" not in et
-    assert "USDT" in et or "อ่าน" in et or "แถว" in et  # Thai reason for no_usdt_row
+    assert pa.thai_reason("no_usdt_row") in et
+    assert "ค่าธรรมเนียมถ้าปิดทั้งหมด" not in et
     conn.close()
 
 

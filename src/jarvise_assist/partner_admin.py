@@ -207,14 +207,14 @@ def _find_partner_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | 
     ).fetchone()
 
 
-def _pending_request(conn: sqlite3.Connection, partner_id: str) -> sqlite3.Row | None:
+def _pending_request(conn: sqlite3.Connection, partner_id: str, *, now_ms: int) -> sqlite3.Row | None:
     return conn.execute(
         """
         SELECT * FROM partner_request
-        WHERE partner_id = ? AND status = 'pending'
+        WHERE partner_id = ? AND status = 'pending' AND expires_at_ms > ?
         ORDER BY created_at_ms DESC LIMIT 1
         """,
-        (partner_id,),
+        (partner_id, int(now_ms)),
     ).fetchone()
 
 
@@ -351,7 +351,10 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
 
     if len(partners) > _MAX_PARTNERS_SHOWN:
         lines.append(f"แสดง {_MAX_PARTNERS_SHOWN} จาก {len(partners)}")
-    lines.append(f"ปิดแล้ว {closed_n} · ค่าธรรมเนียมถ้าปิดทั้งหมด {fmt_usdt(total_fee)}")
+    if v_ok:
+        lines.append(f"ปิดแล้ว {closed_n} · ค่าธรรมเนียมถ้าปิดทั้งหมด {fmt_usdt(total_fee)}")
+    else:
+        lines.append(f"ปิดแล้ว {closed_n}")
     pending_n = int(
         conn.execute(
             """
@@ -436,7 +439,7 @@ def _handle_dep(
         send(thai_reason("closed"))
         return {"ok": False, "reason": "closed"}
     partner_id = str(row["id"])
-    pending = _pending_request(conn, partner_id)
+    pending = _pending_request(conn, partner_id, now_ms=now_ms)
     if pending is not None:
         amt = ps.usdt_from_micro(int(pending["quote_gross_micro"] or 0))
         send(
@@ -469,7 +472,7 @@ def _handle_dep(
     if not created.get("ok"):
         reason = str(created.get("reason") or "")
         if reason == "request_pending":
-            pending2 = _pending_request(conn, partner_id)
+            pending2 = _pending_request(conn, partner_id, now_ms=now_ms)
             if pending2 is not None:
                 amt = ps.usdt_from_micro(int(pending2["quote_gross_micro"] or 0))
                 send(
@@ -697,6 +700,11 @@ def handle_partner_callback(
             if str(req["kind"]) != "deposit":
                 _answer("ไม่ใช่รายการฝาก")
                 return {"ok": False, "reason": "not_deposit"}
+            if int(req["expires_at_ms"]) <= now_ms:
+                _answer("รายการหมดอายุแล้ว — ส่ง p dep ใหม่")
+                if mid is not None:
+                    edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                return {"ok": False, "reason": "expired"}
             av = _read_v(futures, now_ms=now_ms)
             if isinstance(av, AccountValueError):
                 _answer(thai_reason(av.reason, detail=av.detail))
@@ -716,7 +724,7 @@ def handle_partner_callback(
                 return {"ok": True, "cmd": "dep_confirm"}
             reason = str(result.get("reason") or "")
             if reason == "request_not_pending":
-                _answer("บันทึกไปแล้ว")
+                _answer("รายการนี้ปิดไปแล้ว")
                 return {"ok": False, "reason": reason}
             _answer(thai_reason(reason))
             return {"ok": False, "reason": reason}
