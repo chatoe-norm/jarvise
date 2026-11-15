@@ -216,3 +216,137 @@ def test_pa_callback_routed(tmp_path: Path, monkeypatch: Any) -> None:
     assert seen == ["pa:iy"]
     assert out.get("pa") == "pa:iy"
     conn.close()
+
+
+# ---- P3a routing -------------------------------------------------------------
+
+
+def test_bound_partner_p_reaches_portal(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "pp_route.db")
+    from decimal import Decimal
+
+    from jarvise_assist import partner_store as ps
+
+    a = ps.create_partner(conn, name="admin", is_admin=True, now_ms=1)
+    b = ps.create_partner(conn, name="B", is_admin=False, now_ms=2)
+    ps.apply_deposit(conn, a["partner_id"], Decimal("1000"), Decimal("1000"), 3)
+    inv = ps.create_invite(conn, b["partner_id"], now_ms=4)
+    assert ps.bind_invite(conn, inv["code"], "501", admin_chat_id="42", now_ms=5)["ok"]
+
+    portal_hits: list[str] = []
+    admin_hits: list[str] = []
+    risk_hits: list[str] = []
+    quick_hits: list[str] = []
+
+    def fake_portal(conn: Any, message: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        portal_hits.append(str(message.get("text")))
+        return {"ok": True, "portal": True}
+
+    def fake_admin(*a: Any, **k: Any) -> dict[str, Any]:
+        admin_hits.append("x")
+        return {"ok": True}
+
+    def fake_risk(*a: Any, **k: Any) -> dict[str, Any]:
+        risk_hits.append("x")
+        return {"handled": False}
+
+    def fake_quick(*a: Any, **k: Any) -> dict[str, Any]:
+        quick_hits.append("x")
+        return {"ok": True}
+
+    monkeypatch.setattr("jarvise_assist.listen.handle_portal_text", fake_portal, raising=False)
+    monkeypatch.setattr("jarvise_assist.listen.handle_partner_text", fake_admin)
+    monkeypatch.setattr("jarvise_assist.listen.handle_risk_number", fake_risk)
+    monkeypatch.setattr("jarvise_assist.listen.handle_quick_text", fake_quick)
+    out = process_update(conn, _message("p", chat=501, from_id=501), send=_send_capture()[1])
+    assert portal_hits == ["p"]
+    assert admin_hits == []
+    assert risk_hits == []
+    assert quick_hits == []
+    assert out.get("portal") is True
+    conn.close()
+
+
+def test_partner_foreign_callbacks_silent(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "pp_fcb.db")
+    called: list[str] = []
+
+    def track(name: str) -> Any:
+        def fake(*a: Any, **k: Any) -> dict[str, Any]:
+            called.append(name)
+            return {"ok": True}
+
+        return fake
+
+    monkeypatch.setattr("jarvise_assist.listen.handle_partner_callback", track("pa"))
+    monkeypatch.setattr("jarvise_assist.listen.handle_portal_callback", track("pp"), raising=False)
+    monkeypatch.setattr("jarvise_assist.listen.handle_risk_callback", track("risk"))
+    monkeypatch.setattr("jarvise_assist.listen.handle_exec_callback", track("exec"))
+    answers: list[Any] = []
+
+    def answer(cq_id: str, text: str | None = None) -> bool:
+        answers.append((cq_id, text))
+        return True
+
+    for data in (
+        "pa:dy:pr_0123456789abcdef",
+        "pa:pd:pr_0123456789abcdef",
+        "risk:1",
+        "ey:x",
+    ):
+        out = process_update(
+            conn,
+            _callback(data, chat=501, from_id=501),
+            send=_send_capture()[1],
+            answer=answer,
+        )
+        assert out == {"ignored": "foreign_chat"}
+    assert called == []
+    assert answers == []
+    conn.close()
+
+
+def test_owner_pp_answered_ignored(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "pp_own.db")
+    portal_hits: list[str] = []
+
+    def fake_portal(*a: Any, **k: Any) -> dict[str, Any]:
+        portal_hits.append("x")
+        return {"ok": True}
+
+    monkeypatch.setattr("jarvise_assist.listen.handle_portal_callback", fake_portal, raising=False)
+    answers: list[Any] = []
+
+    def answer(cq_id: str, text: str | None = None) -> bool:
+        answers.append((cq_id, text))
+        return True
+
+    out = process_update(
+        conn,
+        _callback("pp:v"),
+        send=_send_capture()[1],
+        answer=answer,
+    )
+    assert out == {"ignored": "partner_prefix"}
+    assert answers == [("cq1", None)]
+    assert portal_hits == []
+    conn.close()
+
+
+def test_no_owner_chat_bound_partner_silent(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    conn = open_db(tmp_path / "pp_no.db")
+    portal_hits: list[str] = []
+
+    def fake_portal(*a: Any, **k: Any) -> dict[str, Any]:
+        portal_hits.append("x")
+        return {"ok": True}
+
+    monkeypatch.setattr("jarvise_assist.listen.handle_portal_text", fake_portal, raising=False)
+    out = process_update(conn, _message("p", chat=501, from_id=501), send=_send_capture()[1])
+    assert out == {"ignored": "no_owner_chat"}
+    assert portal_hits == []
+    conn.close()

@@ -10,6 +10,8 @@ cash does not inflate everyone else's mark.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import sqlite3
 import uuid
 from decimal import ROUND_DOWN, Decimal
@@ -37,6 +39,7 @@ BPS = Decimal("10000")
 USDT_QUANT = Decimal("0.000001")
 
 REQUEST_TTL_MS = 86_400_000
+INVITE_TTL_MS = 86_400_000
 MIN_DEPOSIT_USDT = Decimal("50")
 _REQUEST_KINDS = frozenset({"deposit", "convert", "withdraw_profit", "close"})
 _CANCEL_ON_CONFIRM = frozenset({"no_profit", "below_min"})
@@ -133,6 +136,132 @@ def payouts_due_total(conn: sqlite3.Connection) -> Decimal:
         "SELECT COALESCE(SUM(payout_micro), 0) AS s FROM partner_request WHERE payout_state = 'due'"
     ).fetchone()
     return usdt_from_micro(int(row["s"]))
+
+
+def create_invite(conn: sqlite3.Connection, partner_id: str, *, now_ms: int) -> dict[str, Any]:
+    """Issue a one-time invite code; store only the sha256 hash."""
+    row = get_partner(conn, partner_id)
+    if row is None:
+        return {"ok": False, "reason": "not_found"}
+    if str(row["status"]) == "closed":
+        return {"ok": False, "reason": "closed"}
+    if int(row["is_admin"]) == 1:
+        return {"ok": False, "reason": "admin_no_invite"}
+    if row["telegram_user_id"] is not None:
+        return {"ok": False, "reason": "already_bound"}
+    code = secrets.token_urlsafe(24)
+    digest = hashlib.sha256(code.encode()).hexdigest()
+    expires = int(now_ms) + INVITE_TTL_MS
+    with transaction(conn):
+        conn.execute(
+            """
+            UPDATE partner
+            SET invite_hash = ?, invite_expires_at_ms = ?, updated_at_ms = ?
+            WHERE id = ?
+            """,
+            (digest, expires, int(now_ms), partner_id),
+        )
+    return {"ok": True, "code": code, "expires_at_ms": expires}
+
+
+def bind_invite(
+    conn: sqlite3.Connection,
+    code: str,
+    telegram_user_id: str,
+    *,
+    admin_chat_id: str,
+    now_ms: int,
+) -> dict[str, Any]:
+    """Bind a Telegram user to a partner via invite code. One transaction."""
+    tg = str(telegram_user_id)
+    if tg == str(admin_chat_id):
+        return {"ok": False, "reason": "admin_id"}
+    digest = hashlib.sha256(str(code).encode()).hexdigest()
+    with transaction(conn):
+        row = conn.execute(
+            "SELECT * FROM partner WHERE invite_hash = ?",
+            (digest,),
+        ).fetchone()
+        if (
+            row is None
+            or str(row["status"]) == "closed"
+            or int(row["is_admin"]) == 1
+            or row["invite_expires_at_ms"] is None
+            or int(row["invite_expires_at_ms"]) <= int(now_ms)
+        ):
+            return {"ok": False, "reason": "invite_invalid"}
+        existing = conn.execute(
+            "SELECT 1 FROM partner WHERE telegram_user_id = ? LIMIT 1",
+            (tg,),
+        ).fetchone()
+        if existing is not None:
+            return {"ok": False, "reason": "tg_in_use"}
+        try:
+            conn.execute(
+                """
+                UPDATE partner
+                SET telegram_user_id = ?, invite_hash = NULL, invite_expires_at_ms = NULL,
+                    updated_at_ms = ?
+                WHERE id = ?
+                """,
+                (tg, int(now_ms), str(row["id"])),
+            )
+        except sqlite3.IntegrityError:
+            return {"ok": False, "reason": "tg_in_use"}
+        return {"ok": True, "partner_id": str(row["id"]), "name": str(row["name"])}
+
+
+def unbind_partner(conn: sqlite3.Connection, partner_id: str, *, now_ms: int) -> dict[str, Any]:
+    with transaction(conn):
+        row = get_partner(conn, partner_id)
+        if row is None:
+            return {"ok": False, "reason": "not_found"}
+        conn.execute(
+            """
+            UPDATE partner
+            SET telegram_user_id = NULL, invite_hash = NULL, invite_expires_at_ms = NULL,
+                updated_at_ms = ?
+            WHERE id = ?
+            """,
+            (int(now_ms), partner_id),
+        )
+    return {"ok": True}
+
+
+def partner_by_telegram_id(conn: sqlite3.Connection, telegram_user_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM partner WHERE telegram_user_id = ?",
+        (str(telegram_user_id),),
+    ).fetchone()
+
+
+def get_request(conn: sqlite3.Connection, request_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM partner_request WHERE id = ?", (request_id,)).fetchone()
+
+
+def list_due_payouts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT * FROM partner_request
+            WHERE payout_state = 'due'
+            ORDER BY decided_at_ms, id
+            """
+        )
+    )
+
+
+def list_pending_requests(conn: sqlite3.Connection, *, now_ms: int) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT * FROM partner_request
+            WHERE status = 'pending' AND expires_at_ms > ?
+            ORDER BY created_at_ms, id
+            """,
+            (int(now_ms),),
+        )
+    )
 
 
 def _pool_value(conn: sqlite3.Connection, account_value: Decimal) -> Decimal:

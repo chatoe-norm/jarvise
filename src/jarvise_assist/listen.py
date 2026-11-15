@@ -33,6 +33,7 @@ from jarvise_assist.partner_admin import (
     handle_partner_text,
     parse_partner_command,
 )
+from jarvise_assist.partner_portal import handle_portal_callback, handle_portal_text
 from jarvise_assist.quick import handle_quick_callback
 from jarvise_assist.quick_card import (
     QUICK_REGISTER_PREFIX,
@@ -99,10 +100,21 @@ def process_update(
     if isinstance(callback, dict):
         msg = callback.get("message") or {}
         chat = (msg.get("chat") or {}).get("id")
-        if str(chat) != expected:
-            return {"ignored": "foreign_chat"}
         data = str(callback.get("data") or "")
         cq_id = str(callback.get("id") or "")
+        if str(chat) != expected:
+            if data.startswith("pp:"):
+                return handle_portal_callback(
+                    conn,
+                    data,
+                    callback=callback,
+                    send=send_fn,
+                    answer=answer_fn,
+                    edit=edit_fn,
+                    futures=futures,
+                    now_ms=ts,
+                )
+            return {"ignored": "foreign_chat"}
         if data.startswith("pa:"):
             return handle_partner_callback(
                 conn,
@@ -114,6 +126,9 @@ def process_update(
                 futures=futures,
                 now_ms=ts,
             )
+        if data.startswith("pp:"):
+            answer_fn(cq_id)
+            return {"ignored": "partner_prefix"}
         if data.startswith("risk:") or data.startswith("risk_yes:") or data == "risk_no":
             answer_fn(cq_id)
             return handle_risk_callback(conn, data, send=send_fn)
@@ -180,7 +195,13 @@ def process_update(
         return {"ignored": "no_message"}
     chat = (message.get("chat") or {}).get("id")
     if str(chat) != expected:
-        return {"ignored": "foreign_chat"}
+        return handle_portal_text(
+            conn,
+            message,
+            send=send_fn,
+            futures=futures,
+            now_ms=ts,
+        )
     text = str(message.get("text") or "")
     reply = message.get("reply_to_message")
     if isinstance(reply, dict) and reply.get("message_id") is not None:
