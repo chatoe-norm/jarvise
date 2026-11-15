@@ -847,7 +847,7 @@ def _migrate_partner_ledger(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             partner_id TEXT NOT NULL REFERENCES partner (id),
             kind TEXT NOT NULL CHECK (
-                kind IN ('convert', 'withdraw_profit', 'close')
+                kind IN ('deposit', 'convert', 'withdraw_profit', 'close')
             ),
             status TEXT NOT NULL CHECK (
                 status IN (

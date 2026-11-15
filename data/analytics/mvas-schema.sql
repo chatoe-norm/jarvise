@@ -642,7 +642,7 @@ CREATE TABLE IF NOT EXISTS partner_request (
     id TEXT PRIMARY KEY,
     partner_id TEXT NOT NULL REFERENCES partner (id),
     kind TEXT NOT NULL CHECK (
-        kind IN ('convert', 'withdraw_profit', 'close')
+        kind IN ('deposit', 'convert', 'withdraw_profit', 'close')
     ),
     status TEXT NOT NULL CHECK (
         status IN (

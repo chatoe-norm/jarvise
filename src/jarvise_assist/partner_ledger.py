@@ -1,8 +1,8 @@
 """Pure unit/NAV partner-ledger math. Decimal only; no I/O.
 
-Account value ``V`` (USDT) is a function argument. Callers that withdraw or
-close pass ``V`` *before* this event's cash leaves the wallet (admin confirms,
-then transfers).
+Account value ``V`` (USDT) is a function argument. Store callers pass the raw
+wallet value; the store subtracts payouts still due to get the pool value used
+for NAV. Plan helpers take the pool (or pre-cash) value directly.
 """
 
 from __future__ import annotations
@@ -168,11 +168,13 @@ def plan_deposit(
     """Deposit ``amount`` already in the wallet; ``account_value_incl`` includes it."""
     d = Decimal(amount)
     if d <= ZERO:
-        return Refusal("nav_not_positive")
+        return Refusal("amount_not_positive")
     v = Decimal(account_value_incl)
     u_total = Decimal(total_units)
     c = Decimal(cost)
     u_partner = Decimal(units)
+    if u_total == ZERO and d != v:
+        return Refusal("first_deposit_must_equal_value")
     nav_pre = nav(v - d, u_total)
     if isinstance(nav_pre, Refusal):
         return nav_pre
@@ -220,7 +222,7 @@ def plan_withdraw_profit(
     fee_rate: Decimal,
     nav: Decimal,
 ) -> WithdrawPlan | Refusal:
-    """Cash out partner share of profit. Pass V before cash leaves the wallet."""
+    """Cash out partner share of profit. ``nav`` is from the pool value."""
     n = Decimal(nav)
     if n <= ZERO:
         return Refusal("nav_not_positive")
@@ -253,7 +255,7 @@ def plan_close(
     fee_rate: Decimal,
     nav: Decimal,
 ) -> ClosePlan | Refusal:
-    """Redeem all units. Pass V before cash leaves the wallet."""
+    """Redeem all units. ``nav`` is from the pool value."""
     n = Decimal(nav)
     if n <= ZERO:
         return Refusal("nav_not_positive")
@@ -289,11 +291,11 @@ def plan_adjust_cost(
     reason: str,
 ) -> AdjustPlan | Refusal:
     """Admin sets cost basis; units unchanged. Reason must be at least 10 characters."""
-    if len(reason) < 10:
+    if len(reason.strip()) < 10:
         return Refusal("reason_short")
     nc = Decimal(new_cost)
     if nc < ZERO:
-        return Refusal("nav_not_positive")
+        return Refusal("cost_negative")
     u = Decimal(units)
     c = Decimal(cost)
     return AdjustPlan(units_after=u, cost_after=nc, cost_delta=nc - c)

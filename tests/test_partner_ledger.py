@@ -113,11 +113,22 @@ def test_plan_deposit_issues_units_down_to_e8() -> None:
     assert p4.units_issued == (D("1") / p4.nav_pre).quantize(UNIT, rounding=ROUND_DOWN)
 
 
-def test_plan_deposit_refuses_bad_nav() -> None:
+def test_plan_deposit_refusal_codes() -> None:
     r = plan_deposit(amount=D("10"), account_value_incl=D("5"), total_units=D("100"), cost=D("0"))
-    # V_pre = -5 with U>0
     assert isinstance(r, Refusal)
     assert r.reason == "nav_not_positive"
+
+    r0 = plan_deposit(amount=D("0"), account_value_incl=D("0"), total_units=D("0"), cost=D("0"))
+    assert isinstance(r0, Refusal) and r0.reason == "amount_not_positive"
+
+    r_neg = plan_deposit(amount=D("-1"), account_value_incl=D("100"), total_units=D("0"), cost=D("0"))
+    assert isinstance(r_neg, Refusal) and r_neg.reason == "amount_not_positive"
+
+    r_first = plan_deposit(amount=D("100"), account_value_incl=D("1000"), total_units=D("0"), cost=D("0"))
+    assert isinstance(r_first, Refusal) and r_first.reason == "first_deposit_must_equal_value"
+
+    ok_first = plan_deposit(amount=D("1000"), account_value_incl=D("1000"), total_units=D("0"), cost=D("0"))
+    assert isinstance(ok_first, DepositPlan)
 
 
 def test_owner_example_convert() -> None:
@@ -201,8 +212,11 @@ def test_plan_adjust_cost() -> None:
     r = plan_adjust_cost(units=D("10"), cost=D("50"), new_cost=D("40"), reason="short")
     assert isinstance(r, Refusal) and r.reason == "reason_short"
 
+    r_pad = plan_adjust_cost(units=D("10"), cost=D("50"), new_cost=D("40"), reason="   short   ")
+    assert isinstance(r_pad, Refusal) and r_pad.reason == "reason_short"
+
     r2 = plan_adjust_cost(units=D("10"), cost=D("50"), new_cost=D("-1"), reason="admin correction ok")
-    assert isinstance(r2, Refusal)
+    assert isinstance(r2, Refusal) and r2.reason == "cost_negative"
 
 
 def test_nav_unchanged_for_others_after_deposit() -> None:
