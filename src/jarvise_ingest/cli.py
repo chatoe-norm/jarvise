@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
+from typing import TypeVar
 
 from jarvise_ingest.db import (
     append_derivatives,
@@ -41,6 +46,48 @@ EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 1h --skip-derivatives --j
 BACKFILL_EXAMPLE = "jarvise ingest --symbol BTCUSDT --timeframe 4h --since 2021-01-01 --skip-derivatives"
 UNIVERSE_EXAMPLE = "jarvise ingest --universe paper_core --timeframe 4h --skip-derivatives --json"
 EQUITY_EXAMPLE = "jarvise ingest --universe paper_equity --timeframe 1d --skip-book --skip-derivatives --json"
+
+_LOG = logging.getLogger(__name__)
+_sleep = time.sleep
+_T = TypeVar("_T")
+
+
+def _store_with_lock_retry(
+    stream: str, symbol: str, conn: sqlite3.Connection, store_fn: Callable[[], _T]
+) -> _T:
+    """Run a SQLite store once; on locked/busy roll back, wait 1s, retry once."""
+    started = time.perf_counter()
+    try:
+        return store_fn()
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if "locked" not in msg and "busy" not in msg:
+            raise
+        # Failed DML leaves an implicit BEGIN; clear it so the busy handler can run
+        # on retry and so a later symbol is not pinned to a dead snapshot.
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        _LOG.warning(
+            "ingest store locked stream=%s symbol=%s elapsed_ms=%s; retrying once",
+            stream,
+            symbol,
+            elapsed_ms,
+        )
+        _sleep(1.0)
+        try:
+            return store_fn()
+        except sqlite3.OperationalError as retry_exc:
+            retry_msg = str(retry_exc).lower()
+            if "locked" not in retry_msg and "busy" not in retry_msg:
+                raise
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
 
 
 def _parse_instant(raw: str) -> datetime:
@@ -361,7 +408,7 @@ def run(argv: list[str] | None = None) -> int:
             else:
                 try:
                     book_row = fetch_order_book_snapshot(sym)
-                    n = upsert_order_book(conn, book_row)
+                    n = _store_with_lock_retry("book", sym, conn, partial(upsert_order_book, conn, book_row))
                     book_summary[sym] = {
                         "upserted": n,
                         "bid_ask_spread": book_row.get("bid_ask_spread"),
@@ -381,7 +428,9 @@ def run(argv: list[str] | None = None) -> int:
             else:
                 try:
                     rows, provider = fetch_derivatives(sym, args.timeframe, limit=min(30, limit))
-                    n = append_derivatives(conn, rows)
+                    n = _store_with_lock_retry(
+                        "derivatives", sym, conn, partial(append_derivatives, conn, rows)
+                    )
                     coin = rows[0]["symbol"] if rows else sym
                     deriv_summary[coin] = {
                         "versions_appended": n,

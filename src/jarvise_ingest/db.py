@@ -351,7 +351,7 @@ _DERIV_METRIC_KEYS = (
 )
 
 
-BUSY_TIMEOUT_MS = 5000
+BUSY_TIMEOUT_MS = 15000
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -623,15 +623,17 @@ def _migrate_assist_listen(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute(
-        "INSERT OR IGNORE INTO assist_telegram (id, last_update_id, keyboard_sent) VALUES (1, NULL, 0)"
-    )
+    if conn.execute("SELECT 1 FROM assist_telegram WHERE id = 1 LIMIT 1").fetchone() is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO assist_telegram (id, last_update_id, keyboard_sent) VALUES (1, NULL, 0)"
+        )
 
 
 def _migrate_assist_track_measure(conn: sqlite3.Connection) -> None:
     """Cohort + kind + virtual funding on assist_track. Never writes paper/live/approval."""
     _add_column_if_missing(conn, "assist_track", "cohort", "TEXT")
-    conn.execute("UPDATE assist_track SET cohort='core7_4h_v1' WHERE cohort IS NULL")
+    if conn.execute("SELECT 1 FROM assist_track WHERE cohort IS NULL LIMIT 1").fetchone() is not None:
+        conn.execute("UPDATE assist_track SET cohort='core7_4h_v1' WHERE cohort IS NULL")
     _add_column_if_missing(conn, "assist_track", "kind", "TEXT NOT NULL DEFAULT 'sent'")
     _add_column_if_missing(conn, "assist_track", "funding_usdt", "REAL")
     _add_column_if_missing(conn, "assist_track", "funding_missing", "INTEGER")
@@ -677,12 +679,13 @@ def _migrate_assist_quick(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO assist_quick_settings (id, risk_pct, day_max_loss_r, streak_lock_n, cap_pct)
-        VALUES (1, 0.5, 2, 3, 1.0)
-        """
-    )
+    if conn.execute("SELECT 1 FROM assist_quick_settings WHERE id = 1 LIMIT 1").fetchone() is None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO assist_quick_settings (id, risk_pct, day_max_loss_r, streak_lock_n, cap_pct)
+            VALUES (1, 0.5, 2, 3, 1.0)
+            """
+        )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS assist_quick_registration (
@@ -1070,7 +1073,8 @@ def _migrate_trade_assist(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute("INSERT OR IGNORE INTO assist_settings (id, risk_pct, enabled) VALUES (1, 1.0, 1)")
+    if conn.execute("SELECT 1 FROM assist_settings WHERE id = 1 LIMIT 1").fetchone() is None:
+        conn.execute("INSERT OR IGNORE INTO assist_settings (id, risk_pct, enabled) VALUES (1, 1.0, 1)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS assist_edge (
@@ -1083,14 +1087,15 @@ def _migrate_trade_assist(conn: sqlite3.Connection) -> None:
         """
     )
     _add_column_if_missing(conn, "assist_edge", "key_unsafe_reported", "INTEGER NOT NULL DEFAULT 0")
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO assist_edge (
-            id, futures_down_since_ms, futures_down_alerted,
-            permission_error_reported, key_unsafe_reported
-        ) VALUES (1, NULL, 0, 0, 0)
-        """
-    )
+    if conn.execute("SELECT 1 FROM assist_edge WHERE id = 1 LIMIT 1").fetchone() is None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO assist_edge (
+                id, futures_down_since_ms, futures_down_alerted,
+                permission_error_reported, key_unsafe_reported
+            ) VALUES (1, NULL, 0, 0, 0)
+            """
+        )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS assist_signal (
@@ -1213,13 +1218,23 @@ def _migrate_stop_and_marks(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "paper_positions", "approval_id", "TEXT")
     _add_column_if_missing(conn, "paper_positions", "initial_stop_price", "REAL")
     _add_column_if_missing(conn, "paper_positions", "stop_moved_ts", "INTEGER")
-    conn.execute(
-        """
-        UPDATE paper_positions
-        SET initial_stop_price = stop_price
-        WHERE initial_stop_price IS NULL AND stop_price IS NOT NULL
-        """
-    )
+    if (
+        conn.execute(
+            """
+            SELECT 1 FROM paper_positions
+            WHERE initial_stop_price IS NULL AND stop_price IS NOT NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        is not None
+    ):
+        conn.execute(
+            """
+            UPDATE paper_positions
+            SET initial_stop_price = stop_price
+            WHERE initial_stop_price IS NULL AND stop_price IS NOT NULL
+            """
+        )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
@@ -1250,6 +1265,7 @@ def _migrate_indicator_context(conn: sqlite3.Connection) -> None:
 # multi-step evolution runs exactly once per database. ``repair=True`` marks cheap,
 # idempotent additive steps (column sniff + ALTER ADD) that also re-run on every open so
 # schema drift self-heals; the destructive bitemporal rebuild is version-gated only.
+# Repair steps must not write when there is nothing to repair (enforced by test 1).
 MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (1, "derivatives_bitemporal", _migrate_derivatives_bitemporal, False),
     (2, "analysis_timeframe", _migrate_analysis_timeframe, True),
