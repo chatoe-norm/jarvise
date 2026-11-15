@@ -3178,6 +3178,7 @@ def test_short_breakeven_exact_half_r_tick() -> None:
             entry_time_ms=entry_ms,
             now_ms=now,
             tick=tick,
+            symbol="ADAUSDT",
         )
 
     hit = advice("0.16355")

@@ -371,6 +371,7 @@ def render_open_positions(
                 entry_time_ms=entry_time,
                 now_ms=now_ms,
                 tick=tick_d,
+                symbol=sym,
             )
             if advice is not None:
                 advice_level, advice_src = advice

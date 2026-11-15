@@ -72,6 +72,8 @@ from jarvise_assist.trail_advice import (
     ONE_H_MS,
     candle_extremes_after_entry,
     current_trail_advice,
+    entry_bar_15m_label,
+    post_entry_extremes,
 )
 from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
 from jarvise_notify.telegram import send_message
@@ -585,6 +587,7 @@ def _process_universe_position(
         entry_time_ms=entry_time,
         now_ms=now_ms,
         tick=tick,
+        symbol=pos.symbol,
     )
     move_decision: str | None = None
     move_reason: str | None = None
@@ -726,11 +729,11 @@ def _process_universe_position(
         )
         actions.append({"symbol": pos.symbol, "action": "exit", "reason": reason, "status": status})
 
-    best_low, best_high = candle_extremes_after_entry(
+    best_low, best_high = post_entry_extremes(
         candles_1h,
+        symbol=pos.symbol,
         entry_time_ms=entry_time,
         now_ms=now_ms,
-        bar_ms=ONE_H_MS,
     )
     best_extreme = best_high if pos.side == "long" else best_low
     risk = abs(pos.entry_price - stop_dec)
@@ -753,6 +756,7 @@ def _process_universe_position(
         progress_sent=progress_sent,
         decision=move_decision,
         reason=move_reason,
+        entry_bar_15m=entry_bar_15m_label(symbol=pos.symbol, entry_time_ms=entry_time, now_ms=now_ms),
     )
 
 
