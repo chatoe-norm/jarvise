@@ -790,6 +790,10 @@ def _not_in_streak_pause(conn: Any, entry_ms: int | None) -> bool:
     if entry_ms is None:
         return True
     settings = ensure_settings(conn)
+    reason = settings.get("pause_reason")
+    # Non-streak pauses (week/day loss) must not fail this check via an old streak anchor.
+    if reason is not None and reason != "streak":
+        return True
     edge = get_edge(conn)
     until = settings.get("paused_until_ms")
     anchor = edge.get("streak_anchor_ms")

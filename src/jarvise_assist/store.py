@@ -12,8 +12,24 @@ from jarvise_assist.sizing import SAME_IDEA_MS, SizedSignal
 _UNSET: object = object()
 
 PAUSE_REASONS = frozenset({"streak", "week_loss", "day_loss", "day_loss_deeper"})
+PAUSE_BLOCK_REASONS = {
+    "streak": "streak_pause",
+    "week_loss": "week_loss_pause",
+    "day_loss": "day_loss_pause",
+    "day_loss_deeper": "day_loss_deeper_pause",
+}
 
 RISK_MAX_PCT = 3.0
+
+
+def pause_block_reason(reason: str | None) -> str:
+    """Map assist_settings.pause_reason to assist_track.block_reason.
+
+    NULL or unknown keeps the pre-change fallback ``streak_pause``.
+    """
+    if reason is None:
+        return "streak_pause"
+    return PAUSE_BLOCK_REASONS.get(str(reason), "streak_pause")
 
 
 def clamp_stored_risk_pct(
@@ -438,7 +454,7 @@ def _open_track_for_symbol_side(
     return row is not None
 
 
-_BLOCKED_REASONS = frozenset({"risk_cap", "margin_cap", "streak_pause"})
+_BLOCKED_REASONS = frozenset({"risk_cap", "margin_cap", *PAUSE_BLOCK_REASONS.values()})
 
 
 def _sizing_column_values(sized: SizedSignal) -> tuple[Any, ...]:

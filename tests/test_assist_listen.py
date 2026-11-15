@@ -24,11 +24,11 @@ from jarvise_assist.menu import (
 )
 from jarvise_assist.pause import (
     RESUME_TEXT,
-    STREAK_PAUSE_TEXT,
     clear_pause_manual,
     evaluate_pause,
     maybe_auto_resume,
     next_0820_bangkok_ms,
+    streak_pause_text,
     week_loss_pause_text,
 )
 from jarvise_assist.signals import run_assist_morning, run_assist_signals
@@ -444,7 +444,7 @@ def test_three_losses_pause_until_next_0820_once(tmp_path: Path) -> None:
     r1 = evaluate_pause(conn, futures=fake, now_ms=now, send=send)
     assert r1["paused"] is True and r1["reason"] == "streak"
     assert ensure_settings(conn)["paused_until_ms"] == next_0820_bangkok_ms(now)
-    assert STREAK_PAUSE_TEXT in sent[0]["text"]
+    assert streak_pause_text(until_ms=next_0820_bangkok_ms(now), now_ms=now) in sent[0]["text"]
     n_msgs = len(sent)
     write_settings(conn, paused_until_ms=None)
     r2 = evaluate_pause(conn, futures=fake, now_ms=now + 1000, send=send)
@@ -461,6 +461,7 @@ def test_signal_and_morning_return_streak_pause(tmp_path: Path) -> None:
     _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=now - 60_000)
     p = run_assist_signals(conn, futures=fake, now_ms_value=now, send=lambda *_a, **_k: True)
     assert p["skipped"] == "streak_pause"
+    assert p.get("pause_reason") is None
     # Pause still records a blocked virtual track for the admitted candidate; sends nothing.
     blocked = conn.execute(
         "SELECT status, kind, block_reason FROM assist_signal s JOIN assist_track t ON t.signal_id = s.id"
@@ -485,6 +486,7 @@ def test_signal_and_morning_return_streak_pause(tmp_path: Path) -> None:
     insert_signal(conn, sized, status="held", created_at_ms=now, expires_at_ms=now + 10_000_000)
     m = run_assist_morning(conn, futures=fake, now_ms_value=now, send=lambda *_a, **_k: True)
     assert m["skipped"] == "streak_pause"
+    assert m.get("pause_reason") is None
     conn.close()
 
 
@@ -614,7 +616,8 @@ def test_weekly_loss_pauses_once_per_week(tmp_path: Path) -> None:
     assert r2.get("paused") is False
     assert len(sent) == n
     # Sample pause line.
-    assert "6%" in week_loss_pause_text(Decimal("6.5")) or "6.5" in week_loss_pause_text(Decimal("6.5"))
+    sample = week_loss_pause_text(Decimal("6.5"), until_ms=next_0820_bangkok_ms(now), now_ms=now)
+    assert "6%" in sample or "6.5" in sample
     conn.close()
 
 
@@ -1293,7 +1296,7 @@ def test_three_separate_losing_trades_pause(tmp_path: Path) -> None:
     sent, send = _send_capture()
     r = evaluate_pause(conn, futures=fake, now_ms=now, send=send)
     assert r["paused"] is True and r["reason"] == "streak"
-    assert STREAK_PAUSE_TEXT in sent[0]["text"]
+    assert streak_pause_text(until_ms=next_0820_bangkok_ms(now), now_ms=now) in sent[0]["text"]
     conn.close()
 
 

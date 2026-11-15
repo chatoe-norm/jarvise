@@ -18,7 +18,7 @@ from jarvise_assist.journal import summarize_journal
 from jarvise_assist.keyboard import BTN_EXPLORE, BTN_QUICK, reply_keyboard
 from jarvise_assist.listen import process_update
 from jarvise_assist.menu import match_menu_label
-from jarvise_assist.pause import STREAK_PAUSE_TEXT, bangkok_day_start_ms, day_bot_net_r, evaluate_pause
+from jarvise_assist.pause import bangkok_day_start_ms, day_bot_net_r, evaluate_pause
 from jarvise_assist.quick import (
     create_quick_registration,
     get_quick_settings,
@@ -1127,7 +1127,7 @@ def test_streak_skips_quick_week_loss_keeps_quick(tmp_path: Path) -> None:
     fake = WatchFakeFutures(balance=Decimal("1000"), income=income)
     r = evaluate_pause(conn, futures=fake, now_ms=now, send=send)
     assert r.get("reason") != "streak"
-    assert STREAK_PAUSE_TEXT not in " ".join(s["text"] for s in sent)
+    assert "แพ้ติดกัน 3 ไม้" not in " ".join(s["text"] for s in sent)
 
     # same income without quick rows → streak
     conn2 = open_db(tmp_path / "streak2.db")

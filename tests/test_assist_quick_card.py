@@ -473,7 +473,7 @@ def test_refusal_week_loss_pause(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert _table_rows(conn, "assist_settings") == before_s
     assert _table_rows(conn, "assist_edge") == before_e
     assert "4R" in card["text"]
-    assert format_paused_until(until) in card["text"]
+    assert format_paused_until(until, now_ms=NOW) in card["text"]
     conn.close()
 
 
@@ -1241,7 +1241,7 @@ def test_week_loss_blocks_card_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert len(sent) == 1
     assert "4R" in sent[0]["text"]
     until = next_0820_bangkok_ms(TUE)
-    assert format_paused_until(until) in sent[0]["text"]
+    assert format_paused_until(until, now_ms=TUE + 60_000) in sent[0]["text"]
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
     assert fake.calls == []
     conn.close()

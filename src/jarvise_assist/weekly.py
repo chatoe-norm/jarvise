@@ -35,7 +35,14 @@ WEEK_MS = 7 * 24 * 3_600_000
 ANALYSIS_EXIT_REASONS = frozenset({"flat", "opposite"})
 
 
-_BLOCKED_REASON_ORDER = ("risk_cap", "margin_cap", "streak_pause")
+_BLOCKED_REASON_ORDER = (
+    "risk_cap",
+    "margin_cap",
+    "streak_pause",
+    "week_loss_pause",
+    "day_loss_pause",
+    "day_loss_deeper_pause",
+)
 
 
 def format_weekly_summary(

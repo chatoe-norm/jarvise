@@ -110,7 +110,9 @@ def test_p_agreement_table(tmp_path: Path) -> None:
             assert result["until_ms"] == next_0820_bangkok_ms(TUE)
             loss_pct = Decimal(str(result["loss_pct"]))
             assert len(sent) == 1
-            assert sent[0]["text"] == week_loss_pause_text(loss_pct)
+            assert sent[0]["text"] == week_loss_pause_text(
+                loss_pct, until_ms=next_0820_bangkok_ms(TUE), now_ms=TUE
+            )
             trading_net = Decimal(str(net))
             expected_pct = (-trading_net / Decimal("1000")) * Decimal("100")
             assert abs(loss_pct - expected_pct) < Decimal("0.0001")

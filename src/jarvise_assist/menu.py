@@ -506,7 +506,7 @@ def render_anything_now(
     if not settings["enabled"]:
         return "ผู้ช่วยปิดอยู่ · ยังเฝ้าไม้ที่เปิดอยู่", None
     if is_paused(settings, now_ms=now_ms):
-        return format_paused_until(int(settings["paused_until_ms"])), None
+        return format_paused_until(int(settings["paused_until_ms"]), now_ms=now_ms), None
     client = futures if futures is not None else build_futures_client()
     if client is None:
         return "อ่าน futures ไม่ได้", None
