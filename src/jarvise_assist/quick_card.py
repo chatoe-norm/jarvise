@@ -61,8 +61,8 @@ def _refusal_locked() -> str:
     return "🔒 quick ล็อกอยู่ — รอถึง 00:00 หรือปลดล็อกจากเมนู Quick"
 
 
-def _refusal_week_loss(until: int) -> str:
-    return f"⏸ quick ลงทะเบียนไม่ได้ — ขาดทุนสัปดาห์นี้เกิน 4R · ระบบหลัก{format_paused_until(until)}"
+def _refusal_week_loss(until: int, *, now_ms: int) -> str:
+    return f"⏸ quick ลงทะเบียนไม่ได้ — ขาดทุนสัปดาห์นี้เกิน 4R · ระบบหลัก{format_paused_until(until, now_ms=now_ms)}"
 
 
 def _refusal_quick_open() -> str:
@@ -321,7 +321,7 @@ def build_quick_card(
 
     week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
     if week_until is not None:
-        return _fail("week_loss_pause", _refusal_week_loss(week_until))
+        return _fail("week_loss_pause", _refusal_week_loss(week_until, now_ms=now_ms))
 
     if sym in quick_symbols(conn):
         return _fail("quick_open")
@@ -648,7 +648,7 @@ def handle_quick_register_callback(
 
     week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
     if week_until is not None:
-        send(_refusal_week_loss(week_until))
+        send(_refusal_week_loss(week_until, now_ms=now_ms))
         return {"ok": False, "reason": "week_loss_pause"}
 
     positions: list[FuturesPosition] = list(card.get("positions") or [])

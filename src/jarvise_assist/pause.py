@@ -39,7 +39,6 @@ TRANSFER_INCOME_TYPES = frozenset(
 SendFn = Callable[..., Any]
 
 RESUME_TEXT = "▶️ กลับมาส่ง signal แล้ว"
-STREAK_PAUSE_TEXT = "⏸ หยุดส่ง signal ถึงพรุ่งนี้ 08:20 — แพ้ติดกัน 3 ไม้"
 
 
 def week_start_risk_pct(conn: Any, *, now_ms_value: int | None = None) -> Decimal:
@@ -64,6 +63,19 @@ def next_0820_bangkok_ms(now_ms: int) -> int:
     if local >= target:
         target = target + timedelta(days=1)
     return int(target.timestamp() * 1000)
+
+
+def bangkok_resume_label(until_ms: int, *, now_ms: int) -> str:
+    """Thai day word + HH:MM for a pause resume clock (fixed UTC+7 Bangkok)."""
+    until = datetime.fromtimestamp(until_ms / 1000.0, tz=BANGKOK)
+    now = datetime.fromtimestamp(now_ms / 1000.0, tz=BANGKOK)
+    delta_days = (until.date() - now.date()).days
+    hhmm = until.strftime("%H:%M")
+    if delta_days == 0:
+        return f"วันนี้ {hhmm}"
+    if delta_days == 1:
+        return f"พรุ่งนี้ {hhmm}"
+    return until.strftime("%d/%m %H:%M")
 
 
 def bangkok_day_id(now_ms: int) -> str:
@@ -92,8 +104,14 @@ def monday_bangkok_ms(now_ms: int) -> int:
     return int(monday.timestamp() * 1000)
 
 
-def week_loss_pause_text(pct: Decimal) -> str:
-    return f"⏸ หยุดส่ง signal ถึงพรุ่งนี้ 08:20 — ขาดทุนสัปดาห์นี้ {float(pct):.1f}%"
+def streak_pause_text(*, until_ms: int, now_ms: int) -> str:
+    label = bangkok_resume_label(until_ms, now_ms=now_ms)
+    return f"⏸ หยุดส่ง signal ถึง{label} — แพ้ติดกัน 3 ไม้"
+
+
+def week_loss_pause_text(pct: Decimal, *, until_ms: int, now_ms: int) -> str:
+    label = bangkok_resume_label(until_ms, now_ms=now_ms)
+    return f"⏸ หยุดส่ง signal ถึง{label} — ขาดทุนสัปดาห์นี้ {float(pct):.1f}%"
 
 
 def format_signed_r(net: Decimal) -> str:
@@ -104,22 +122,15 @@ def format_signed_r(net: Decimal) -> str:
     return f"{shown}R"
 
 
-def _bangkok_hhmm(ms: int) -> str:
-    local = datetime.fromtimestamp(ms / 1000.0, tz=BANGKOK)
-    return local.strftime("%H:%M")
-
-
-def day_loss_pause_text(net: Decimal, *, until_ms: int) -> str:
+def day_loss_pause_text(net: Decimal, *, until_ms: int, now_ms: int) -> str:
     """End clock comes from the real pause time, the same way format_paused_until does."""
-    clock = _bangkok_hhmm(until_ms)
-    return f"⏸ หยุดส่ง signal ถึง {clock} — วันนี้ {format_signed_r(net)} ({BOT_ENTRIES_ONLY_TH})"
+    label = bangkok_resume_label(until_ms, now_ms=now_ms)
+    return f"⏸ หยุดส่ง signal ถึง{label} — วันนี้ {format_signed_r(net)} ({BOT_ENTRIES_ONLY_TH})"
 
 
-def day_loss_deeper_pause_text(net: Decimal, *, until_ms: int) -> str:
-    clock = _bangkok_hhmm(until_ms)
-    return (
-        f"⏸ หยุดส่ง signal ถึง {clock} — วันนี้ {format_signed_r(net)} ลึกกว่าตอนเปิดต่ออีก 1R ({BOT_ENTRIES_ONLY_TH})"
-    )
+def day_loss_deeper_pause_text(net: Decimal, *, until_ms: int, now_ms: int) -> str:
+    label = bangkok_resume_label(until_ms, now_ms=now_ms)
+    return f"⏸ หยุดส่ง signal ถึง{label} — วันนี้ {format_signed_r(net)} ลึกกว่าตอนเปิดต่ออีก 1R ({BOT_ENTRIES_ONLY_TH})"
 
 
 def day_loss_resume_text(net: Decimal) -> str:
@@ -135,8 +146,9 @@ def _quantize_r(value: Any) -> Decimal:
     return Decimal(str(value)).quantize(_R_STORE, rounding=ROUND_HALF_UP)
 
 
-def format_paused_until(paused_until_ms: int) -> str:
-    return f"หยุดพักถึง {_bangkok_hhmm(paused_until_ms)}"
+def format_paused_until(paused_until_ms: int, *, now_ms: int) -> str:
+    label = bangkok_resume_label(paused_until_ms, now_ms=now_ms)
+    return f"หยุดพักถึง{label}"
 
 
 def is_paused(settings: dict[str, Any], *, now_ms: int) -> bool:
@@ -317,10 +329,10 @@ def _engage_day_pause(
     write_settings(conn, paused_until_ms=until, pause_reason=reason)
     if deeper:
         write_edge(conn, day_deeper_pause_id=day_id, resume_alerted=False)
-        send(day_loss_deeper_pause_text(net, until_ms=until))
+        send(day_loss_deeper_pause_text(net, until_ms=until, now_ms=now_ms))
     else:
         write_edge(conn, day_pause_id=day_id, resume_alerted=False)
-        send(day_loss_pause_text(net, until_ms=until))
+        send(day_loss_pause_text(net, until_ms=until, now_ms=now_ms))
     return {
         "paused": True,
         "reason": reason,
@@ -420,7 +432,7 @@ def evaluate_pause(
                 until = next_0820_bangkok_ms(now_ms)
                 write_settings(conn, paused_until_ms=until, pause_reason="streak")
                 write_edge(conn, streak_anchor_ms=anchor, resume_alerted=False)
-                send(STREAK_PAUSE_TEXT)
+                send(streak_pause_text(until_ms=until, now_ms=now_ms))
                 return {
                     "paused": True,
                     "reason": "streak",
@@ -442,7 +454,7 @@ def evaluate_pause(
             until = next_0820_bangkok_ms(now_ms)
             write_settings(conn, paused_until_ms=until, pause_reason="week_loss")
             write_edge(conn, week_pause_id=week_id, resume_alerted=False)
-            send(week_loss_pause_text(loss_pct))
+            send(week_loss_pause_text(loss_pct, until_ms=until, now_ms=now_ms))
             return {
                 "paused": True,
                 "reason": "week_loss",

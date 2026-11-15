@@ -60,6 +60,7 @@ from jarvise_assist.store import (
     mark_signal_expired,
     mark_signal_sent,
     now_ms,
+    pause_block_reason,
     previous_analysis_action,
     recent_same_idea,
     record_blocked_signal,
@@ -537,8 +538,9 @@ def run_assist_signals(
         except Exception:  # noqa: BLE001 — leave the pause payload; send nothing
             scanned = None
         if scanned is not None:
+            blocked_reason = pause_block_reason(settings.get("pause_reason"))
             for cand in scanned["admitted"]:
-                _record_blocked_safe(conn, cand.sized, reason="streak_pause", created_at_ms=ts)
+                _record_blocked_safe(conn, cand.sized, reason=blocked_reason, created_at_ms=ts)
             for cand in scanned["rejected"]:
                 _record_blocked_safe(conn, cand.sized, reason="risk_cap", created_at_ms=ts)
             for cand in scanned["margin_dropped"]:
@@ -547,6 +549,7 @@ def run_assist_signals(
             {
                 "ok": True,
                 "skipped": "streak_pause",
+                "pause_reason": settings.get("pause_reason"),
                 "paper_only": True,
                 "at_ms": ts,
                 "pause": pause_info,
@@ -691,6 +694,7 @@ def run_assist_morning(
             {
                 "ok": True,
                 "skipped": "streak_pause",
+                "pause_reason": settings.get("pause_reason"),
                 "paper_only": True,
                 "at_ms": ts,
                 "pause": pause_info,

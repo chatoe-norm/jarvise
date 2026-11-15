@@ -299,7 +299,7 @@ def test_p_quick_blocks_week_loss_reason(tmp_path: Path, monkeypatch: pytest.Mon
     )
     assert card["reason"] == "week_loss_pause"
     assert "4R" in card["text"]
-    assert format_paused_until(until) in card["text"]
+    assert format_paused_until(until, now_ms=TUE + 60_000) in card["text"]
     conn.close()
 
     conn = open_db(tmp_path / "sun.db")

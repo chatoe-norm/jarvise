@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,9 @@ from jarvise_assist.pause import (
     RESUME_TEXT,
     bangkok_day_id,
     bangkok_day_start_ms,
+    bangkok_resume_label,
     day_bot_net_r,
+    day_loss_pause_text,
     evaluate_pause,
     is_paused,
     maybe_auto_resume,
@@ -57,16 +58,10 @@ def _pause_lines(sent: list[str]) -> list[str]:
     return [text for text in sent if text.startswith("⏸") and BOT_ENTRIES_ONLY_TH in text]
 
 
-def _assert_end_clock(text: str, until_ms: int) -> None:
-    clock = f"ถึง {datetime_clock(until_ms)}"
-    assert clock in text
+def _assert_end_clock(text: str, until_ms: int, *, now_ms: int) -> None:
+    label = bangkok_resume_label(until_ms, now_ms=now_ms)
+    assert f"ถึง{label}" in text
     assert "เที่ยงคืน" not in text
-    assert "พรุ่งนี้" not in text
-
-
-def datetime_clock(ms: int) -> str:
-    local = datetime.fromtimestamp(ms / 1000.0, tz=timezone(timedelta(hours=7)))
-    return local.strftime("%H:%M")
 
 
 def _trade(
@@ -143,10 +138,8 @@ def test_day_sum_minus_3_pauses_until_next_0820_once(tmp_path: Path) -> None:
     assert first["reason"] == "day_loss"
     assert first["until_ms"] == until
     assert ensure_settings(conn)["paused_until_ms"] == until
-    assert _pause_lines(sent) == [
-        f"⏸ หยุดส่ง signal ถึง {datetime_clock(until)} — วันนี้ -3.0R ({BOT_ENTRIES_ONLY_TH})"
-    ]
-    _assert_end_clock(_pause_lines(sent)[0], until)
+    assert _pause_lines(sent) == [day_loss_pause_text(Decimal("-3.0"), until_ms=until, now_ms=NOW)]
+    _assert_end_clock(_pause_lines(sent)[0], until, now_ms=NOW)
     assert get_edge(conn)["day_pause_id"] == "2026-11-09"
 
     again = evaluate_pause(conn, futures=_futures(), now_ms=NOW + 1_000, send=send)
@@ -253,7 +246,7 @@ def test_pause_at_2358_lasts_until_next_0820_while_new_day_sum_is_zero(tmp_path:
     midnight = _ms_bangkok(2026, 11, 10, 0, 2)
     assert result["until_ms"] == morning
     assert result["until_ms"] == next_0820_bangkok_ms(at)
-    _assert_end_clock(sent[0], morning)
+    _assert_end_clock(sent[0], morning, now_ms=at)
     assert is_paused(ensure_settings(conn), now_ms=at) is True
     assert is_paused(ensure_settings(conn), now_ms=midnight) is True
     assert day_bot_net_r(conn, now_ms=midnight) == 0
@@ -277,7 +270,7 @@ def test_pause_at_0200_ends_0820_the_same_morning(tmp_path: Path) -> None:
     assert result["reason"] == "day_loss"
     assert result["until_ms"] == morning
     assert "-3.1R" in sent[0]
-    _assert_end_clock(sent[0], morning)
+    _assert_end_clock(sent[0], morning, now_ms=at)
     assert is_paused(ensure_settings(conn), now_ms=morning - 1) is True
     assert is_paused(ensure_settings(conn), now_ms=morning) is False
     conn.close()
@@ -368,7 +361,7 @@ def test_each_manual_resume_arms_another_1r(tmp_path: Path) -> None:
     _trade(conn, oid="base", exit_ms=NOW - 180_000, net=-3.0)
     first = evaluate_pause(conn, futures=_futures(), now_ms=NOW, send=send)
     assert first["reason"] == "day_loss"
-    _assert_end_clock(sent[0], first["until_ms"])
+    _assert_end_clock(sent[0], first["until_ms"], now_ms=NOW)
     opened = _resume(conn, send, NOW)
     assert "วันนี้ติดลบแล้ว -3.0R" in str(opened["text"])
     assert "จากไม้ที่ปิดแล้ว" in str(opened["text"])
@@ -396,7 +389,7 @@ def test_each_manual_resume_arms_another_1r(tmp_path: Path) -> None:
     deeper = evaluate_pause(conn, futures=_futures(), now_ms=NOW + 4_000, send=send)
     assert deeper["reason"] == "day_loss_deeper"
     assert deeper["until_ms"] == next_0820_bangkok_ms(NOW + 4_000)
-    _assert_end_clock(_pause_lines(sent)[-1], deeper["until_ms"])
+    _assert_end_clock(_pause_lines(sent)[-1], deeper["until_ms"], now_ms=NOW + 4_000)
     assert "-4.0R" in _pause_lines(sent)[-1]
     assert "ลึกกว่าตอนเปิดต่ออีก 1R" in _pause_lines(sent)[-1]
     assert get_edge(conn)["day_deeper_pause_id"] == "2026-11-09"
@@ -479,10 +472,11 @@ def test_day_loss_blocks_new_signals_not_exits(tmp_path: Path) -> None:
     payload = run_assist_signals(conn, futures=fake, now_ms_value=now, send=send)
     assert payload["skipped"] == "streak_pause"
     assert payload["pause"]["reason"] == "day_loss"
+    assert payload.get("pause_reason") == "day_loss"
     assert _pause_lines(sent) == [
-        f"⏸ หยุดส่ง signal ถึง {datetime_clock(payload['pause']['until_ms'])} — วันนี้ -3.0R ({BOT_ENTRIES_ONLY_TH})"
+        day_loss_pause_text(Decimal("-3.0"), until_ms=payload["pause"]["until_ms"], now_ms=now)
     ]
-    _assert_end_clock(_pause_lines(sent)[0], payload["pause"]["until_ms"])
+    _assert_end_clock(_pause_lines(sent)[0], payload["pause"]["until_ms"], now_ms=now)
     assert conn.execute("SELECT COUNT(*) FROM assist_signal WHERE status='sent'").fetchone()[0] == 0
     sized = size_signal(
         symbol="BTCUSDT",
@@ -598,7 +592,7 @@ def test_watch_pauses_on_day_loss_in_the_same_poll_without_binance(
     assert calls["n"] == calls["at_sync"]
     assert payload["pause"]["reason"] == "day_loss"
     assert payload["pause"]["until_ms"] == next_0820_bangkok_ms(day)
-    _assert_end_clock(_pause_lines(sent)[0], payload["pause"]["until_ms"])
+    _assert_end_clock(_pause_lines(sent)[0], payload["pause"]["until_ms"], now_ms=day)
     assert len(_pause_lines(sent)) == 1
     assert any(row["symbol"] == "BTCUSDT" for row in payload["closed"])
     conn.close()
