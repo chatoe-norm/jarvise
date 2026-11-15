@@ -100,9 +100,14 @@ def _patch_read(monkeypatch: Any, client: FakeValueClient) -> None:
 def _send_capture() -> tuple[list[dict[str, Any]], Any]:
     sent: list[dict[str, Any]] = []
 
-    def send(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+    def send(
+        text: str, *, reply_markup: dict[str, Any] | None = None, chat_id: str | None = None, **kw: Any
+    ) -> int:
         mid = len(sent) + 1
-        sent.append({"text": text, "reply_markup": reply_markup, "message_id": mid})
+        entry: dict[str, Any] = {"text": text, "reply_markup": reply_markup, "message_id": mid}
+        if chat_id is not None:
+            entry["chat_id"] = chat_id
+        sent.append(entry)
         return mid
 
     return sent, send
@@ -111,8 +116,18 @@ def _send_capture() -> tuple[list[dict[str, Any]], Any]:
 def _edit_capture() -> tuple[list[dict[str, Any]], Any]:
     edited: list[dict[str, Any]] = []
 
-    def edit(message_id: int, text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
-        edited.append({"message_id": message_id, "text": text, "reply_markup": reply_markup})
+    def edit(
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+        chat_id: str | None = None,
+        **kw: Any,
+    ) -> bool:
+        entry: dict[str, Any] = {"message_id": message_id, "text": text, "reply_markup": reply_markup}
+        if chat_id is not None:
+            entry["chat_id"] = chat_id
+        edited.append(entry)
         return True
 
     return edited, edit
@@ -1099,7 +1114,7 @@ def test_static_guards() -> None:
             assert not (0x1780 <= o <= 0x17FF)
 
     admin = (root / "partner_admin.py").read_text(encoding="utf-8")
-    for banned in ("apply_convert", "apply_withdraw_profit", "apply_close", "mark_paid"):
+    for banned in ("apply_convert", "apply_withdraw_profit", "apply_close"):
         assert banned not in admin
 
 
@@ -1290,8 +1305,9 @@ def test_handle_dep_pending_non_deposit(tmp_path: Path, monkeypatch: Any, env_ch
     )
     assert "มีคำขอ" in sent2[0]["text"] and "ค้างอยู่" in sent2[0]["text"]
     assert "ทบกำไร" in sent2[0]["text"]
-    # commit 1: no deposit buttons on this path
-    assert sent2[0].get("reply_markup") is None or sent2[0]["reply_markup"] is None
+    kb = sent2[0]["reply_markup"]["inline_keyboard"][0]
+    assert kb[0]["callback_data"].startswith("pa:ry:")
+    assert kb[1]["callback_data"].startswith("pa:rn:")
     assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_request").fetchone()["n"]) == 1
     conn.close()
 

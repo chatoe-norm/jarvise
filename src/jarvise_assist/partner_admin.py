@@ -48,7 +48,12 @@ HELP_TEXT = (
     "p dep <ชื่อ> <จำนวน> — บันทึกฝาก (ยืนยันก่อน)\n"
     "p cost <ชื่อ> <ทุนใหม่> <เหตุผล> — ปรับทุน (เหตุผลอย่างน้อย 10 ตัวอักษร)\n"
     "p invite <ชื่อ> — ออกลิงก์เชิญผูก Telegram\n"
-    "p unbind <ชื่อ> — ยกเลิกการผูก Telegram"
+    "p unbind <ชื่อ> — ยกเลิกการผูก Telegram\n"
+    "p cv <ชื่อ> — สร้างคำขอทบกำไร\n"
+    "p wd <ชื่อ> — สร้างคำขอถอนกำไร\n"
+    "p close <ชื่อ> — สร้างคำขอปิดพอร์ต\n"
+    "p due — รายการค้างจ่ายและคำขอค้าง\n"
+    "ถอนเงินต้นแอดมิน: p cost admin <ทุนใหม่> <เหตุผล> แล้ว p wd admin"
 )
 
 _GATE_MSG = "คำสั่งพอร์ตร่วมใช้ได้เฉพาะแชทส่วนตัวกับบอท"
@@ -69,6 +74,11 @@ _STORE_TH: dict[str, str] = {
     "no_admin": "ยังไม่มีแอดมิน",
     "deposit_pending": "มีรายการฝากค้างอยู่",
     "first_deposit_must_equal_value": "ฝากครั้งแรกต้องเท่ากับยอดพอร์ต",
+    "admin_has_partners": "ปิดแอดมินไม่ได้ ขณะที่ยังมีพาร์ทเนอร์ถือหน่วย",
+    "no_profit": "ยังไม่มีกำไร",
+    "below_min": "กำไรน้อยเกินไป",
+    "not_due": "รายการนี้ปิดไปแล้ว",
+    "payout_due": "มียอดค้างจ่าย — โอนแล้วกด โอนแล้ว ก่อน",
 }
 
 _VALUE_TH: dict[str, str] = {
@@ -229,6 +239,20 @@ def parse_partner_command(text: str) -> dict[str, Any] | None:
         if len(parts) != 3 or not _NAME_RE.match(parts[2]):
             return {"error": "usage"}
         return {"cmd": "unbind", "name": parts[2]}
+    if head == "cv":
+        if len(parts) != 3 or not _NAME_RE.match(parts[2]):
+            return {"error": "usage"}
+        return {"cmd": "cv", "name": parts[2]}
+    if head == "wd":
+        if len(parts) != 3 or not _NAME_RE.match(parts[2]):
+            return {"error": "usage"}
+        return {"cmd": "wd", "name": parts[2]}
+    if head == "close":
+        if len(parts) != 3 or not _NAME_RE.match(parts[2]):
+            return {"error": "usage"}
+        return {"cmd": "close", "name": parts[2]}
+    if head == "due" and len(parts) == 2:
+        return {"cmd": "due"}
     return {"error": "usage"}
 
 
@@ -290,6 +314,21 @@ def _deposit_buttons(request_id: str) -> dict[str, Any]:
             ]
         ]
     }
+
+
+def _request_buttons(request_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ ยืนยัน", "callback_data": f"pa:ry:{request_id}"},
+                {"text": "✖️ ปฏิเสธ", "callback_data": f"pa:rn:{request_id}"},
+            ]
+        ]
+    }
+
+
+def _paid_button(request_id: str) -> dict[str, Any]:
+    return {"inline_keyboard": [[{"text": "💸 โอนแล้ว", "callback_data": f"pa:pd:{request_id}"}]]}
 
 
 def _init_buttons() -> dict[str, Any]:
@@ -356,6 +395,8 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
         lines.append(f"โพซิชันเปิด {av.open_positions}")
         due = ps.payouts_due_total(conn)
         lines.append(f"ค้างจ่าย {fmt_usdt(due)}")
+        if due > 0:
+            lines.append(f"⚠️ ค้างจ่าย {fmt_usdt(due)} — ถ้าโอนแล้วให้กด โอนแล้ว (p due)")
         u_total = ps.total_units(conn)
         pool = av.value - due
         n = pl.nav(pool, u_total)
@@ -495,7 +536,10 @@ def _handle_dep(
     if pending is not None:
         pend_kind = str(pending["kind"])
         if pend_kind != "deposit":
-            send(f"{name} มีคำขอ{kind_th(pend_kind)}ค้างอยู่ — ตัดสินอันนั้นก่อน")
+            send(
+                f"{name} มีคำขอ{kind_th(pend_kind)}ค้างอยู่ — ตัดสินอันนั้นก่อน",
+                reply_markup=_request_buttons(str(pending["id"])),
+            )
             return {"ok": False, "reason": "request_pending"}
         amt = ps.usdt_from_micro(int(pending["quote_gross_micro"] or 0))
         send(
@@ -653,6 +697,135 @@ def _handle_unbind(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: in
     return {"ok": True, "cmd": "unbind"}
 
 
+def _admin_request_message(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    kind: str,
+    *,
+    send: Any,
+    futures: Any,
+    now_ms: int,
+) -> dict[str, Any]:
+    av = _read_v(futures, now_ms=now_ms)
+    if isinstance(av, AccountValueError):
+        send(thai_reason(av.reason, detail=av.detail))
+        return {"ok": False, "reason": av.reason}
+    created = ps.create_request(conn, str(row["id"]), kind, now_ms)
+    if not created.get("ok"):
+        send(thai_reason(str(created.get("reason") or "")))
+        return {"ok": False, "reason": created.get("reason")}
+    rid = str(created["request_id"])
+    due = ps.payouts_due_total(conn)
+    u_total = ps.total_units(conn)
+    n = pl.nav(av.value - due, u_total)
+    cash = _ZERO
+    fee = _ZERO
+    if not isinstance(n, pl.Refusal):
+        units = ps.units_from_e8(int(row["units_e8"]))
+        cost = ps.usdt_from_micro(int(row["cost_micro"]))
+        fee_rate = Decimal(int(row["fee_rate_bps"])) / Decimal("10000")
+        if kind == "convert":
+            cv = pl.plan_convert(units=units, cost=cost, fee_rate=fee_rate, nav=n)
+            if not isinstance(cv, pl.Refusal):
+                fee = cv.fee
+        elif kind == "withdraw_profit":
+            wd = pl.plan_withdraw_profit(units=units, cost=cost, fee_rate=fee_rate, nav=n)
+            if not isinstance(wd, pl.Refusal):
+                cash, fee = wd.cash, wd.fee
+        elif kind == "close":
+            cl = pl.plan_close(units=units, cost=cost, fee_rate=fee_rate, nav=n)
+            if not isinstance(cl, pl.Refusal):
+                cash, fee = cl.cash, cl.fee
+    send(
+        f"📥 คำขอจาก {row['name']}: {kind_th(kind)}\n"
+        f"ประมาณการตอนนี้: เงินออก {fmt_usdt(cash)} · ค่าธรรมเนียม {fmt_usdt(fee)}\n"
+        f"กดยืนยัน = ล็อกตัวเลขตามยอดพอร์ตตอนกด และตั้งเป็นยอดค้างจ่าย\n"
+        f"หมดอายุใน 24 ชม.",
+        reply_markup=_request_buttons(rid),
+    )
+    return {"ok": True, "cmd": kind, "request_id": rid}
+
+
+def _handle_cv_wd_close(
+    conn: sqlite3.Connection,
+    name: str,
+    kind: str,
+    *,
+    send: Any,
+    futures: Any,
+    now_ms: int,
+) -> dict[str, Any]:
+    if not _has_events(conn):
+        send("ยังไม่ได้ตั้งต้น\nพิมพ์ p init")
+        return {"ok": False, "reason": "not_init"}
+    row = _find_partner_by_name(conn, name)
+    if row is None:
+        send(thai_reason("not_found"))
+        return {"ok": False, "reason": "not_found"}
+    if str(row["status"]) != "active":
+        send(thai_reason("closed"))
+        return {"ok": False, "reason": "closed"}
+    if kind == "close" and int(row["is_admin"]) == 1:
+        other = conn.execute(
+            """
+            SELECT 1 FROM partner
+            WHERE id != ? AND status = 'active' AND units_e8 > 0
+            LIMIT 1
+            """,
+            (str(row["id"]),),
+        ).fetchone()
+        if other is not None:
+            send("ปิดแอดมินไม่ได้ ขณะที่ยังมีพาร์ทเนอร์ถือหน่วย")
+            return {"ok": False, "reason": "admin_has_partners"}
+    return _admin_request_message(conn, row, kind, send=send, futures=futures, now_ms=now_ms)
+
+
+def _handle_due(conn: sqlite3.Connection, *, send: Any, now_ms: int) -> dict[str, Any]:
+    msgs = 0
+    remaining = 0
+    due_rows = ps.list_due_payouts(conn)
+    pending_rows = ps.list_pending_requests(conn, now_ms=now_ms)
+    total = len(due_rows) + len(pending_rows)
+    if total == 0:
+        send("ไม่มีรายการค้าง")
+        return {"ok": True, "cmd": "due", "n": 0}
+    for req in due_rows:
+        if msgs >= 10:
+            remaining = total - msgs
+            break
+        partner = ps.get_partner(conn, str(req["partner_id"]))
+        pname = str(partner["name"]) if partner is not None else "?"
+        x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
+        decided = int(req["decided_at_ms"] or req["created_at_ms"] or now_ms)
+        send(
+            f"{pname} · {kind_th(str(req['kind']))} · {fmt_usdt(x)} USDT · ยืนยัน {_bangkok_stamp(decided)}",
+            reply_markup=_paid_button(str(req["id"])),
+        )
+        msgs += 1
+    for req in pending_rows:
+        if msgs >= 10:
+            remaining = total - msgs
+            break
+        partner = ps.get_partner(conn, str(req["partner_id"]))
+        pname = str(partner["name"]) if partner is not None else "?"
+        kind = str(req["kind"])
+        if kind == "deposit":
+            amt = ps.usdt_from_micro(int(req["quote_gross_micro"] or 0))
+            send(
+                f"{pname} · ฝาก · {fmt_usdt(amt)} USDT · ค้างยืนยัน",
+                reply_markup=_deposit_buttons(str(req["id"])),
+            )
+        else:
+            send(
+                f"{pname} · {kind_th(kind)} · ค้างยืนยัน",
+                reply_markup=_request_buttons(str(req["id"])),
+            )
+        msgs += 1
+    if remaining > 0:
+        send(f"อีก {remaining} รายการ")
+    return {"ok": True, "cmd": "due", "n": msgs}
+
+
 def handle_partner_text(
     conn: sqlite3.Connection,
     text: str,
@@ -706,6 +879,25 @@ def handle_partner_text(
             return _handle_invite(conn, str(parsed["name"]), send=send, now_ms=now_ms)
         if cmd == "unbind":
             return _handle_unbind(conn, str(parsed["name"]), send=send, now_ms=now_ms)
+        if cmd == "cv":
+            return _handle_cv_wd_close(
+                conn, str(parsed["name"]), "convert", send=send, futures=futures, now_ms=now_ms
+            )
+        if cmd == "wd":
+            return _handle_cv_wd_close(
+                conn,
+                str(parsed["name"]),
+                "withdraw_profit",
+                send=send,
+                futures=futures,
+                now_ms=now_ms,
+            )
+        if cmd == "close":
+            return _handle_cv_wd_close(
+                conn, str(parsed["name"]), "close", send=send, futures=futures, now_ms=now_ms
+            )
+        if cmd == "due":
+            return _handle_due(conn, send=send, now_ms=now_ms)
         send(HELP_TEXT)
         return {"ok": False, "reason": "usage"}
     except Exception:  # noqa: BLE001
@@ -809,11 +1001,19 @@ def handle_partner_callback(
             if str(req["kind"]) != "deposit":
                 _answer("ไม่ใช่รายการฝาก")
                 return {"ok": False, "reason": "not_deposit"}
+            amount = ps.usdt_from_micro(int(req["quote_gross_micro"] or 0))
+            partner = ps.get_partner(conn, str(req["partner_id"]))
             rejected = ps.reject_request(conn, rid, now_ms)
             if rejected.get("ok"):
                 _answer()
                 if mid is not None:
                     edit(int(mid), "ยกเลิกแล้ว", reply_markup={"inline_keyboard": []})
+                if partner is not None:
+                    send_to_partner(
+                        send,
+                        partner,
+                        f"✖️ แอดมินยกเลิกรายการฝาก {fmt_usdt(amount)} USDT",
+                    )
                 return {"ok": True, "cmd": "dep_cancel"}
             _answer("รายการนี้ปิดไปแล้ว")
             if mid is not None:
@@ -844,6 +1044,10 @@ def handle_partner_callback(
             if str(req["kind"]) != "deposit":
                 _answer("ไม่ใช่รายการฝาก")
                 return {"ok": False, "reason": "not_deposit"}
+            due_total = ps.payouts_due_total(conn)
+            if due_total > 0:
+                _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอนแล้วกด โอนแล้ว ก่อน (p due)")
+                return {"ok": False, "reason": "payout_due"}
             av = _read_v(futures, now_ms=now_ms)
             if isinstance(av, AccountValueError):
                 _answer(thai_reason(av.reason, detail=av.detail))
@@ -860,6 +1064,14 @@ def handle_partner_callback(
                 )
                 if mid is not None:
                     edit(int(mid), body, reply_markup={"inline_keyboard": []})
+                partner = ps.get_partner(conn, str(req["partner_id"]))
+                if partner is not None:
+                    send_to_partner(
+                        send,
+                        partner,
+                        f"✅ บันทึกเงินฝาก {fmt_usdt(amount)} USDT แล้ว · "
+                        f"ทุนรวม {fmt_usdt(Decimal(result.get('cost_after') or 0))} USDT",
+                    )
                 return {"ok": True, "cmd": "dep_confirm"}
             reason = str(result.get("reason") or "")
             if reason == "request_not_pending":
@@ -867,6 +1079,174 @@ def handle_partner_callback(
                 return {"ok": False, "reason": reason}
             _answer(thai_reason(reason))
             return {"ok": False, "reason": reason}
+
+        if data.startswith("pa:ry:"):
+            rid = data[len("pa:ry:") :]
+            if not _REQ_ID_RE.match(rid):
+                _answer("รายการนี้ปิดไปแล้ว")
+                return {"ok": False, "reason": "bad_id"}
+            req = conn.execute("SELECT * FROM partner_request WHERE id = ?", (rid,)).fetchone()
+            if req is None:
+                _answer("รายการนี้ปิดไปแล้ว")
+                return {"ok": False, "reason": "request_not_pending"}
+            kind = str(req["kind"])
+            if kind not in ("convert", "withdraw_profit", "close"):
+                _answer("ไม่ใช่คำขอนี้")
+                return {"ok": False, "reason": "not_this_kind"}
+            status = str(req["status"])
+            expired = status == "expired" or (status == "pending" and int(req["expires_at_ms"]) <= now_ms)
+            if expired:
+                _answer("รายการหมดอายุแล้ว")
+                if mid is not None:
+                    edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                return {"ok": False, "reason": "expired"}
+            if status != "pending":
+                _answer("รายการนี้ปิดไปแล้ว")
+                if mid is not None:
+                    edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+                return {"ok": False, "reason": "request_not_pending"}
+            due_total = ps.payouts_due_total(conn)
+            if due_total > 0:
+                _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอนแล้วกด โอนแล้ว ก่อน (p due)")
+                return {"ok": False, "reason": "payout_due"}
+            av = _read_v(futures, now_ms=now_ms)
+            if isinstance(av, AccountValueError):
+                _answer(thai_reason(av.reason, detail=av.detail))
+                return {"ok": False, "reason": av.reason}
+            result = ps.confirm_request(conn, rid, av.value, now_ms)
+            partner = ps.get_partner(conn, str(req["partner_id"]))
+            pname = str(partner["name"]) if partner is not None else "?"
+            if result.get("ok"):
+                fee = Decimal(result.get("fee") or 0)
+                cash = Decimal(result.get("cash") or 0)
+                cost_after = Decimal(result.get("cost_after") or 0)
+                _answer()
+                if kind == "convert":
+                    body = (
+                        f"✅ ทบกำไร {pname} แล้ว · ค่าธรรมเนียม {fmt_usdt(fee)} · ทุนใหม่ {fmt_usdt(cost_after)}"
+                    )
+                    if mid is not None:
+                        edit(int(mid), body, reply_markup={"inline_keyboard": []})
+                    if partner is not None:
+                        send_to_partner(
+                            send,
+                            partner,
+                            f"✅ ทบกำไรแล้ว · ค่าธรรมเนียม {fmt_usdt(fee)} · ทุนใหม่ {fmt_usdt(cost_after)} USDT",
+                        )
+                elif cash > 0:
+                    body = (
+                        f"✅ ยืนยันแล้ว · ค้างจ่าย {fmt_usdt(cash)} USDT ให้ {pname}\n"
+                        f"โอนออกจาก futures wallet แล้วค่อยกด โอนแล้ว"
+                    )
+                    if mid is not None:
+                        edit(int(mid), body, reply_markup=_paid_button(rid))
+                    if partner is not None:
+                        if kind == "withdraw_profit":
+                            send_to_partner(
+                                send,
+                                partner,
+                                f"✅ แอดมินยืนยันถอนกำไร {fmt_usdt(cash)} USDT "
+                                f"(ค่าธรรมเนียม {fmt_usdt(fee)}) · รอโอน",
+                            )
+                        else:
+                            send_to_partner(
+                                send,
+                                partner,
+                                f"✅ แอดมินยืนยันปิดพอร์ต · จะได้รับ {fmt_usdt(cash)} USDT "
+                                f"(ค่าธรรมเนียม {fmt_usdt(fee)}) · รอโอน",
+                            )
+                else:
+                    # close with cash 0
+                    body = f"✅ ยืนยันแล้ว · ปิด {pname} แล้ว (ไม่มีเงินออก)"
+                    if mid is not None:
+                        edit(int(mid), body, reply_markup={"inline_keyboard": []})
+                    if partner is not None:
+                        ps.unbind_partner(conn, str(partner["id"]), now_ms=now_ms)
+                return {"ok": True, "cmd": "confirm", "kind": kind}
+            reason = str(result.get("reason") or "")
+            if reason in ("no_profit", "below_min"):
+                _answer()
+                if mid is not None:
+                    edit(
+                        int(mid),
+                        "ยกเลิกอัตโนมัติ — ไม่มีกำไรแล้ว ณ ตอนยืนยัน",
+                        reply_markup={"inline_keyboard": []},
+                    )
+                if partner is not None:
+                    send_to_partner(
+                        send,
+                        partner,
+                        f"คำขอ{kind_th(kind)}ถูกยกเลิก — ไม่มีกำไร ณ ตอนแอดมินยืนยัน",
+                    )
+                return {"ok": False, "reason": reason}
+            if reason == "deposit_pending":
+                _answer("มีรายการฝากค้างอยู่ — บันทึกหรือยกเลิกก่อน")
+                return {"ok": False, "reason": reason}
+            _answer(thai_reason(reason))
+            return {"ok": False, "reason": reason}
+
+        if data.startswith("pa:rn:"):
+            rid = data[len("pa:rn:") :]
+            if not _REQ_ID_RE.match(rid):
+                _answer("รายการนี้ปิดไปแล้ว")
+                return {"ok": False, "reason": "bad_id"}
+            req = conn.execute("SELECT * FROM partner_request WHERE id = ?", (rid,)).fetchone()
+            if req is None:
+                _answer("รายการนี้ปิดไปแล้ว")
+                return {"ok": False, "reason": "request_not_pending"}
+            kind = str(req["kind"])
+            if kind not in ("convert", "withdraw_profit", "close"):
+                _answer("ไม่ใช่คำขอนี้")
+                return {"ok": False, "reason": "not_this_kind"}
+            partner = ps.get_partner(conn, str(req["partner_id"]))
+            rejected = ps.reject_request(conn, rid, now_ms)
+            if rejected.get("ok"):
+                _answer()
+                if mid is not None:
+                    edit(int(mid), "ปฏิเสธแล้ว", reply_markup={"inline_keyboard": []})
+                if partner is not None:
+                    send_to_partner(send, partner, f"✖️ แอดมินปฏิเสธคำขอ{kind_th(kind)}")
+                return {"ok": True, "cmd": "reject"}
+            _answer("รายการนี้ปิดไปแล้ว")
+            if mid is not None:
+                edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+            return {"ok": False, "reason": "request_not_pending"}
+
+        if data.startswith("pa:pd:"):
+            rid = data[len("pa:pd:") :]
+            if not _REQ_ID_RE.match(rid):
+                _answer("รายการนี้ปิดไปแล้ว")
+                return {"ok": False, "reason": "bad_id"}
+            req = conn.execute("SELECT * FROM partner_request WHERE id = ?", (rid,)).fetchone()
+            paid = ps.mark_paid(conn, rid, now_ms)
+            if paid.get("ok"):
+                amount = ps.usdt_from_micro(int((req["payout_micro"] if req else 0) or 0))
+                partner = ps.get_partner(conn, str(req["partner_id"])) if req is not None else None
+                pname = str(partner["name"]) if partner is not None else "?"
+                _answer()
+                if mid is not None:
+                    edit(
+                        int(mid),
+                        f"💸 โอนแล้ว {fmt_usdt(amount)} USDT ให้ {pname}",
+                        reply_markup={"inline_keyboard": []},
+                    )
+                if partner is not None:
+                    note = f"💸 แอดมินแจ้งว่าโอน {fmt_usdt(amount)} USDT ให้คุณแล้ว"
+                    closed = str(partner["status"]) == "closed"
+                    other_due = [
+                        d for d in ps.list_due_payouts(conn) if str(d["partner_id"]) == str(partner["id"])
+                    ]
+                    if closed and not other_due:
+                        note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
+                        send_to_partner(send, partner, note)
+                        ps.unbind_partner(conn, str(partner["id"]), now_ms=now_ms)
+                    else:
+                        send_to_partner(send, partner, note)
+                return {"ok": True, "cmd": "paid"}
+            _answer("รายการนี้ปิดไปแล้ว")
+            if mid is not None:
+                edit(int(mid), str(msg.get("text") or ""), reply_markup={"inline_keyboard": []})
+            return {"ok": False, "reason": "not_due"}
 
         _answer()
         return {"ok": False, "reason": "unknown"}
