@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,7 @@ from jarvise_assist.store import (
 )
 from jarvise_assist.trail_advice import (
     current_trail_advice,
+    entry_bar_extremes,
     fetch_entry_bar_15m,
 )
 from jarvise_assist.watch import run_assist_watch
@@ -41,8 +44,11 @@ from jarvise_ingest.db import open_db, upsert_market_technicals
 
 ENTRY = Decimal("0.1673")
 INITIAL = Decimal("0.1748")
+LONG_ENTRY = Decimal("0.1673")
+LONG_INITIAL = Decimal("0.1598")
 TICK = Decimal("0.0001")
 SYM = "ADAUSDT"
+DECISION_PREFIX = "assist_watch_decision "
 
 
 def _hour_bars() -> list[dict[str, Any]]:
@@ -173,6 +179,156 @@ def test_entry_bar_prefill_leak_filtered() -> None:
     assert len(calls) == 1
 
 
+def test_entry_bar_upper_bound_10m_row_filtered() -> None:
+    """10:00 15m row is past hour close; post-fill lows above 0.5R → None."""
+    entry_ms = _ms_bangkok(2026, 11, 14, 9, 5)
+    now = _ms_bangkok(2026, 11, 14, 10, 5)
+    calls, fetch = _fake_15m(
+        [
+            {
+                "timestamp": _ms_bangkok(2026, 11, 14, 9, 15),
+                "low": 0.16356,
+                "high": 0.167,
+            },
+            {
+                "timestamp": _ms_bangkok(2026, 11, 14, 9, 30),
+                "low": 0.16356,
+                "high": 0.167,
+            },
+            {
+                "timestamp": _ms_bangkok(2026, 11, 14, 9, 45),
+                "low": 0.16356,
+                "high": 0.167,
+            },
+            {
+                "timestamp": _ms_bangkok(2026, 11, 14, 10, 0),
+                "low": 0.1600,
+                "high": 0.167,
+            },
+        ]
+    )
+    out = current_trail_advice(
+        side="short",
+        entry=ENTRY,
+        initial_stop=INITIAL,
+        candles_1h=_hour_bars(),
+        entry_time_ms=entry_ms,
+        now_ms=now,
+        tick=TICK,
+        symbol=SYM,
+        entry_bar_fetch=fetch,
+    )
+    assert out is None
+    assert len(calls) == 1
+
+
+def test_entry_bar_cache_hit_and_fail_memo() -> None:
+    """Success caches; empty result cools down 120s on now_ms (not wall clock)."""
+    entry_ms = _ms_bangkok(2026, 11, 14, 9, 5)
+    now = _ms_bangkok(2026, 11, 14, 10, 5)
+    start_15 = _ms_bangkok(2026, 11, 14, 9, 15)
+    until = _ms_bangkok(2026, 11, 14, 10, 0)
+    calls, fetch = _fake_15m(
+        [
+            {
+                "timestamp": start_15,
+                "open": 0.166,
+                "high": 0.167,
+                "low": 0.1624,
+                "close": 0.164,
+            }
+        ]
+    )
+    first = entry_bar_extremes(symbol=SYM, entry_time_ms=entry_ms, now_ms=now, fetch=fetch)
+    second = entry_bar_extremes(symbol=SYM, entry_time_ms=entry_ms, now_ms=now, fetch=fetch)
+    assert first == (0.1624, 0.167)
+    assert second == first
+    assert calls == [(SYM, start_15, until)]
+
+    trail_advice._ENTRY_BAR_CACHE.clear()
+    empty_calls: list[tuple[str, int, int]] = []
+
+    def empty_fetch(symbol: str, start_ms: int, until_ms: int) -> list[dict]:
+        empty_calls.append((symbol, start_ms, until_ms))
+        return []
+
+    assert entry_bar_extremes(symbol=SYM, entry_time_ms=entry_ms, now_ms=now, fetch=empty_fetch) == (
+        None,
+        None,
+    )
+    assert len(empty_calls) == 1
+    assert entry_bar_extremes(symbol=SYM, entry_time_ms=entry_ms, now_ms=now + 60_000, fetch=empty_fetch) == (
+        None,
+        None,
+    )
+    assert len(empty_calls) == 1
+    assert entry_bar_extremes(
+        symbol=SYM, entry_time_ms=entry_ms, now_ms=now + 121_000, fetch=empty_fetch
+    ) == (None, None)
+    assert len(empty_calls) == 2
+
+
+def test_entry_bar_long_upper_bound_filtered() -> None:
+    """Long-side mirror: 10:00 high must not count; in-hour highs below 0.5R → None."""
+    entry_ms = _ms_bangkok(2026, 11, 14, 9, 5)
+    now = _ms_bangkok(2026, 11, 14, 10, 5)
+    h09 = _ms_bangkok(2026, 11, 14, 9, 0)
+    h10 = _ms_bangkok(2026, 11, 14, 10, 0)
+    candles = [
+        {
+            "timestamp": h09,
+            "open": 0.1673,
+            "high": 0.1700,
+            "low": 0.1660,
+            "close": 0.1680,
+        },
+        {
+            "timestamp": h10,
+            "open": 0.1680,
+            "high": 0.1700,
+            "low": 0.1670,
+            "close": 0.1690,
+        },
+    ]
+    calls, fetch = _fake_15m(
+        [
+            {
+                "timestamp": _ms_bangkok(2026, 11, 14, 9, 15),
+                "low": 0.167,
+                "high": 0.17104,
+            },
+            {
+                "timestamp": _ms_bangkok(2026, 11, 14, 9, 30),
+                "low": 0.167,
+                "high": 0.17104,
+            },
+            {
+                "timestamp": _ms_bangkok(2026, 11, 14, 9, 45),
+                "low": 0.167,
+                "high": 0.17104,
+            },
+            {
+                "timestamp": _ms_bangkok(2026, 11, 14, 10, 0),
+                "low": 0.167,
+                "high": 0.1800,
+            },
+        ]
+    )
+    out = current_trail_advice(
+        side="long",
+        entry=LONG_ENTRY,
+        initial_stop=LONG_INITIAL,
+        candles_1h=candles,
+        entry_time_ms=entry_ms,
+        now_ms=now,
+        tick=TICK,
+        symbol=SYM,
+        entry_bar_fetch=fetch,
+    )
+    assert out is None
+    assert len(calls) == 1
+
+
 def test_entry_bar_exact_half_r_threshold() -> None:
     """(d) Exact Decimal 0.5R on the 15m path."""
     entry_ms = _ms_bangkok(2026, 11, 14, 9, 5)
@@ -181,6 +337,7 @@ def test_entry_bar_exact_half_r_threshold() -> None:
 
     def advice(low: float) -> tuple[Decimal, str] | None:
         trail_advice._ENTRY_BAR_CACHE.clear()
+        trail_advice._ENTRY_BAR_FAIL_MEMO.clear()
         _, fetch = _fake_15m(
             [{"timestamp": start_15, "low": low, "high": 0.1676, "open": 0.166, "close": 0.164}]
         )
@@ -242,6 +399,7 @@ def test_entry_bar_fetcher_raises_or_empty() -> None:
         )
         is None
     )
+    trail_advice._ENTRY_BAR_FAIL_MEMO.clear()
     assert (
         current_trail_advice(
             side="short",
@@ -271,11 +429,9 @@ def test_entry_bar_fetcher_raises_or_empty() -> None:
         kwargs["transport"] = transport
         return real_client(*args, **kwargs)
 
-    import jarvise_ingest.providers.binance_klines as klines
-
     monkey = pytest.MonkeyPatch()
     try:
-        monkey.setattr(klines.httpx, "Client", _client_factory)
+        monkey.setattr(trail_advice.httpx, "Client", _client_factory)
         assert fetch_entry_bar_15m(SYM, entry_ms, _ms_bangkok(2026, 11, 14, 10, 0)) == []
     finally:
         monkey.undo()
@@ -284,6 +440,62 @@ def test_entry_bar_fetcher_raises_or_empty() -> None:
     assert req.url.params.get("interval") == "15m"
     assert "X-MBX-APIKEY" not in req.headers
     assert "x-mbx-apikey" not in {k.lower() for k in req.headers.keys()}
+
+
+def test_entry_bar_decision_log_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Watch decision log tags entry_bar_15m as used / aligned / open."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "off")
+    t1005 = _ms_bangkok(2026, 11, 14, 10, 5)
+    t0955 = _ms_bangkok(2026, 11, 14, 9, 55)
+    start_15 = _ms_bangkok(2026, 11, 14, 9, 15)
+    until = _ms_bangkok(2026, 11, 14, 10, 0)
+
+    def fetch(symbol: str, start_ms: int, until_ms: int) -> list[dict]:
+        assert symbol == SYM
+        assert start_ms == start_15
+        assert until_ms == until
+        return [
+            {
+                "timestamp": start_15,
+                "open": 0.166,
+                "high": 0.167,
+                "low": 0.1624,
+                "close": 0.164,
+            }
+        ]
+
+    monkeypatch.setattr(trail_advice, "_ENTRY_BAR_FETCH", fetch)
+
+    def _run(*, entry_ms: int, now_ms: int) -> dict[str, Any]:
+        trail_advice._ENTRY_BAR_CACHE.clear()
+        trail_advice._ENTRY_BAR_FAIL_MEMO.clear()
+        conn = open_db(tmp_path / f"label-{entry_ms}-{now_ms}.db")
+        _seed_ada_watch(conn, entry_ms=entry_ms)
+        with caplog.at_level(logging.INFO, logger="jarvise_assist.watch"):
+            caplog.clear()
+            run_assist_watch(
+                conn,
+                futures=_ada_futures(mark="0.1650", entry_ms=entry_ms),
+                now_ms_value=now_ms,
+                send=lambda *_a, **_k: True,
+            )
+        conn.close()
+        lines = [
+            json.loads(rec.getMessage()[len(DECISION_PREFIX) :])
+            for rec in caplog.records
+            if rec.name == "jarvise_assist.watch" and rec.getMessage().startswith(DECISION_PREFIX)
+        ]
+        assert len(lines) == 1
+        return lines[0]
+
+    used = _run(entry_ms=_ms_bangkok(2026, 11, 14, 9, 5), now_ms=t1005)
+    assert used["entry_bar_15m"] == "used"
+    aligned = _run(entry_ms=_ms_bangkok(2026, 11, 14, 9, 0), now_ms=t1005)
+    assert aligned["entry_bar_15m"] == "aligned"
+    open_tag = _run(entry_ms=_ms_bangkok(2026, 11, 14, 9, 5), now_ms=t0955)
+    assert open_tag["entry_bar_15m"] == "open"
 
 
 def _seed_ada_watch(conn: Any, *, entry_ms: int) -> None:
@@ -413,6 +625,7 @@ def test_entry_bar_e2e_watch_mn_and_recompute(tmp_path: Path, monkeypatch: pytes
         answer=lambda _cq, text=None: answers.append(text),
         edit=lambda mid, text, *, reply_markup=None: edits.append((mid, text, reply_markup)),
         futures=_ada_futures(mark="0.1650", entry_ms=entry_ms),
+        now_ms_value=t1005,
     )
     assert "unhandled_callback" not in out
     assert answers == ["ไม่เลื่อน"]

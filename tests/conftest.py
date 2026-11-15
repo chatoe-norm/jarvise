@@ -34,4 +34,5 @@ def _no_entry_bar_15m_network(monkeypatch: pytest.MonkeyPatch) -> None:
     import jarvise_assist.trail_advice as trail_advice
 
     trail_advice._ENTRY_BAR_CACHE.clear()
+    trail_advice._ENTRY_BAR_FAIL_MEMO.clear()
     monkeypatch.setattr(trail_advice, "_ENTRY_BAR_FETCH", lambda *_a, **_k: [])
