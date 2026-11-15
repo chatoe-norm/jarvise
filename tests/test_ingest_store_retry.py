@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from functools import partial
 from pathlib import Path
 
 import pytest
 
-from jarvise_ingest.db import open_db, upsert_order_book
+from jarvise_ingest.db import append_derivatives, open_db, upsert_order_book
 
 
 def _candle(symbol: str = "BTCUSDT") -> list[dict]:
@@ -121,6 +122,12 @@ def test_book_store_locked_once_retries(
     safety = out["market_safety"]["BTCUSDT"]
     assert safety["critical"] is False
     assert not any(r.startswith("provider_error:") for r in safety["reasons"])
+    with open_db(db) as check:
+        n = check.execute(
+            "SELECT COUNT(*) FROM order_book_microstructure WHERE symbol=?",
+            ("BTCUSDT",),
+        ).fetchone()[0]
+    assert n == 1
 
 
 def test_derivatives_store_locked_once_retries(
@@ -170,6 +177,12 @@ def test_derivatives_store_locked_once_retries(
     safety = out["market_safety"]["BTCUSDT"]
     assert safety["critical"] is False
     assert not any(r.startswith("provider_error:") for r in safety["reasons"])
+    with open_db(db) as check:
+        n = check.execute(
+            "SELECT COUNT(*) FROM derivatives_analytics WHERE symbol=?",
+            ("BTC",),
+        ).fetchone()[0]
+    assert n == 1
 
 
 def test_book_fetch_http_error_still_critical(
@@ -228,7 +241,10 @@ def test_book_store_locked_twice_provider_error_unchanged(
     book = _healthy_book()
     monkeypatch.setattr(ingest_cli, "fetch_order_book_snapshot", lambda *a, **k: book)
 
+    calls = {"n": 0}
+
     def always_locked(*_a: object, **_k: object) -> int:
+        calls["n"] += 1
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(ingest_cli, "upsert_order_book", always_locked)
@@ -256,9 +272,130 @@ def test_book_store_locked_twice_provider_error_unchanged(
     )
     out = json.loads(capsys.readouterr().out)
     assert code == 1
+    assert calls["n"] == 2
     assert sleeps == [1.0]
     assert "database is locked" in out["errors"]
     safety = out["market_safety"]["BTCUSDT"]
     assert safety["critical"] is True
     assert any("provider_error: book:database is locked" in r for r in safety["reasons"])
     assert kills and kills[0].startswith("market_safety:")
+
+
+def test_book_store_other_operational_error_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JARVISE_MARKET_SAFETY", "1")
+    from jarvise_ingest import cli as ingest_cli
+
+    sleeps = _stub_common(ingest_cli, monkeypatch)
+    kills = _kill_recorder(monkeypatch)
+    book = _healthy_book()
+    monkeypatch.setattr(ingest_cli, "fetch_order_book_snapshot", lambda *a, **k: book)
+
+    def disk_io(*_a: object, **_k: object) -> int:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(ingest_cli, "upsert_order_book", disk_io)
+
+    db = tmp_path / "book-io.db"
+    conn = open_db(db)
+    upsert_order_book(conn, _healthy_book())
+    conn.commit()
+    conn.close()
+
+    code = ingest_cli.run(
+        [
+            "--symbol",
+            "BTCUSDT",
+            "--timeframe",
+            "1h",
+            "--limit",
+            "5",
+            "--db",
+            str(db),
+            "--skip-macro",
+            "--skip-derivatives",
+            "--json",
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert sleeps == []
+    safety = out["market_safety"]["BTCUSDT"]
+    assert safety["critical"] is True
+    assert any("provider_error: book:disk I/O error" in r for r in safety["reasons"])
+    assert kills and kills[0].startswith("market_safety:")
+
+
+def test_store_retry_rolls_back_before_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locked DML leaves an implicit BEGIN; rollback before retry so the busy handler can run."""
+    import jarvise_ingest.db as db_mod
+    from jarvise_ingest import cli as ingest_cli
+
+    path = tmp_path / "retry-rollback.db"
+    open_db(path).close()
+    monkeypatch.setattr(db_mod, "BUSY_TIMEOUT_MS", 50)
+    conn = open_db(path)
+    holder = sqlite3.connect(str(path), isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    seen: list[bool] = []
+
+    def _release_during_sleep(_s: float) -> None:
+        seen.append(conn.in_transaction)
+        holder.execute("ROLLBACK")
+
+    monkeypatch.setattr(ingest_cli, "_sleep", _release_during_sleep)
+    try:
+        n = ingest_cli._store_with_lock_retry(
+            "derivatives",
+            "BTCUSDT",
+            conn,
+            partial(append_derivatives, conn, _deriv_rows()),
+        )
+        assert n == 1
+        assert seen == [False]
+        count = conn.execute("SELECT COUNT(*) FROM derivatives_analytics").fetchone()[0]
+        assert count == 1
+    finally:
+        holder.close()
+        conn.close()
+
+
+def test_store_failed_twice_leaves_no_open_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After two locked attempts the conn must not pin a snapshot for the next symbol."""
+    import jarvise_ingest.db as db_mod
+    from jarvise_ingest import cli as ingest_cli
+
+    path = tmp_path / "double-fail-clean.db"
+    open_db(path).close()
+    monkeypatch.setattr(db_mod, "BUSY_TIMEOUT_MS", 50)
+    conn = open_db(path)
+    holder = sqlite3.connect(str(path), isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(ingest_cli, "_sleep", lambda _s: None)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            ingest_cli._store_with_lock_retry(
+                "book",
+                "BTCUSDT",
+                conn,
+                partial(upsert_order_book, conn, _healthy_book("BTCUSDT")),
+            )
+        assert conn.in_transaction is False
+
+        holder.execute("ROLLBACK")
+        conn.execute("SELECT COUNT(*) FROM order_book_microstructure").fetchone()
+        holder.execute("UPDATE assist_settings SET risk_pct = risk_pct WHERE id = 1")
+
+        n = ingest_cli._store_with_lock_retry(
+            "book",
+            "ETHUSDT",
+            conn,
+            partial(upsert_order_book, conn, _healthy_book("ETHUSDT")),
+        )
+        assert n == 1
+    finally:
+        holder.close()
+        conn.close()
