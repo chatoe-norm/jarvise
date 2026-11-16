@@ -1063,3 +1063,173 @@ def test_progress_link_ignores_done_intent_without_exit_market_log(tmp_path: Pat
     assert checks["exit_followed_plan"] is False
     assert "exit_source" not in checks
     conn.close()
+
+
+def test_journal_on_close_tick_rounds_0_94372(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "tick-94372.db")
+    _seed_card(conn)
+    conn.execute(
+        "UPDATE assist_real_trade SET exit_fill_avg=? WHERE entry_order_id='42'",
+        (0.94372,),
+    )
+    conn.commit()
+    sent: list[str] = []
+
+    def send(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+        sent.append(text)
+        return 1
+
+    def sync(*_a: Any, **_k: Any) -> None:
+        return None
+
+    fake = FakeFutures(ticks={"ADAUSDT": Decimal("0.0001")})
+    journal_on_close(conn, [], futures=fake, now_ms_value=DAYTIME, send=send, sync_fn=sync)
+    assert "ออก 0.9437" in sent[0]
+    assert "0.94372" not in sent[0]
+    conn.close()
+
+    fallback = open_db(tmp_path / "tick-94372-fallback.db")
+    _seed_card(fallback)
+    fallback.execute(
+        "UPDATE assist_real_trade SET exit_fill_avg=? WHERE entry_order_id='42'",
+        (0.94372,),
+    )
+    fallback.commit()
+    sent2: list[str] = []
+
+    def send2(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+        sent2.append(text)
+        return 1
+
+    class BrokenFilters(FakeFutures):
+        def symbol_filters(self, symbol: str) -> Any:
+            raise RuntimeError("filters down")
+
+    journal_on_close(
+        fallback,
+        [],
+        futures=BrokenFilters(),
+        now_ms_value=DAYTIME,
+        send=send2,
+        sync_fn=sync,
+    )
+    assert "ออก 0.94372" in sent2[0]
+    fallback.close()
+
+
+def test_progress_link_prefers_exit_order_id_match(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "link-prefer.db")
+    trade = _progress_exit_setup(conn)
+    newer = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="XRPUSDT",
+        side="short",
+        preview={
+            "qty": "10",
+            "entry": "0.95",
+            "source": "progress",
+            "level": "1",
+        },
+        created_at_ms=EXIT - 200,
+        expires_at_ms=EXIT + 60_000,
+    )
+    conn.execute("UPDATE assist_exec_intent SET status='done' WHERE id=?", (newer,))
+    conn.commit()
+    insert_exec_log(
+        conn,
+        intent_id=newer,
+        step="exit_market",
+        endpoint="/fapi/v1/order",
+        order_or_algo_id="77",
+        created_at_ms=EXIT - 100,
+    )
+    checks = collect_auto_checks(conn, trade)
+    assert checks["exit_level"] == "0.5"
+
+    conn.execute(
+        "UPDATE assist_real_trade SET exit_order_ids=? WHERE entry_order_id='prog1'",
+        (json.dumps({"order_ids": [123]}),),
+    )
+    conn.commit()
+    trade2 = dict(conn.execute("SELECT * FROM assist_real_trade WHERE entry_order_id='prog1'").fetchone())
+    checks2 = collect_auto_checks(conn, trade2)
+    assert checks2["exit_level"] == "1"
+    conn.close()
+
+
+def test_progress_level_missing_or_invalid_renders_without_level(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "level-missing.db")
+    trade = _progress_exit_setup(conn)
+    row = conn.execute(
+        "SELECT id, preview_json FROM assist_exec_intent WHERE kind='exit' ORDER BY created_at_ms LIMIT 1"
+    ).fetchone()
+    preview = json.loads(str(row["preview_json"]))
+    del preview["level"]
+    conn.execute(
+        "UPDATE assist_exec_intent SET preview_json=? WHERE id=?",
+        (json.dumps(preview), row["id"]),
+    )
+    conn.commit()
+    checks = collect_auto_checks(conn, trade)
+    assert checks["exit_source"] == "progress"
+    assert "exit_level" not in checks
+    text = format_journal_card(conn, trade, checks)
+    assert "· ปิดตามแผน: ก่อนแผน (ปิดจากแจ้งเตือน)" in text
+    assert "ปิดจากแจ้งเตือน +" not in text
+
+    for bad in ("None", "abc", "NaN"):
+        card = format_journal_card(
+            conn,
+            trade,
+            {**checks, "exit_level": bad},
+        )
+        assert "· ปิดตามแผน: ก่อนแผน (ปิดจากแจ้งเตือน)" in card
+        assert "ปิดจากแจ้งเตือน +" not in card
+    conn.close()
+
+
+def test_journal_edit_card_rerenders_when_message_has_no_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    conn = open_db(tmp_path / "edit-no-text.db")
+    _trade(conn, entry_order_id="42")
+    conn.execute(
+        """
+        INSERT INTO assist_journal (
+            entry_order_id, auto_checks_json, grade, mistake_tags, note,
+            card_message_id, created_at_ms, graded_at_ms
+        ) VALUES ('42', ?, NULL, NULL, NULL, 5, ?, NULL)
+        """,
+        (json.dumps({"exit_source": "progress", "exit_level": "None"}), NOW),
+    )
+    conn.commit()
+    edits: list[dict[str, Any]] = []
+
+    def edit(mid: int, text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
+        edits.append({"mid": mid, "text": text, "reply_markup": reply_markup})
+        return True
+
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq",
+                "data": "jp:42",
+                "message": {
+                    "message_id": 5,
+                    "chat": {"id": 111},
+                },
+            }
+        },
+        send=lambda *_a, **_k: 1,
+        answer=lambda *_a, **_k: None,
+        edit=edit,
+        now_ms_value=NOW,
+    )
+    assert len(edits) == 1
+    assert edits[0]["text"].startswith("📘 บันทึกไม้")
+    assert edits[0]["text"].endswith("\nเกรด: ตามแผน")
+    assert "999999" not in edits[0]["text"]
+    conn.close()
