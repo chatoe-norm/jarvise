@@ -21,11 +21,12 @@ from jarvise_assist.execute import handle_exec_callback
 from jarvise_assist.explore import remove_explore_symbol, submit_explore_symbol
 from jarvise_assist.futures import build_futures_client, public_exchange_symbol
 from jarvise_assist.journal import handle_journal_callback, store_journal_note
-from jarvise_assist.keyboard import EXPLORE_RM_PREFIX, reply_keyboard_for
+from jarvise_assist.keyboard import ASSIST_TOGGLE_PREFIX, EXPLORE_RM_PREFIX, reply_keyboard_for
 from jarvise_assist.menu import (
     handle_menu_text,
     handle_risk_callback,
     handle_risk_number,
+    handle_toggle_confirm_callback,
     match_menu_label,
 )
 from jarvise_assist.partner_admin import (
@@ -129,6 +130,16 @@ def process_update(
         if data.startswith("pp:"):
             answer_fn(cq_id)
             return {"ignored": "partner_prefix"}
+        if data.startswith(ASSIST_TOGGLE_PREFIX):
+            return handle_toggle_confirm_callback(
+                conn,
+                data,
+                send=send_fn,
+                answer=lambda text=None: answer_fn(cq_id, text=text),
+                edit=edit_fn,
+                message=msg if isinstance(msg, dict) else {},
+                now_ms=ts,
+            )
         if data.startswith("risk:") or data.startswith("risk_yes:") or data == "risk_no":
             answer_fn(cq_id)
             return handle_risk_callback(conn, data, send=send_fn)

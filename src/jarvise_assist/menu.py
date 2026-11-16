@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
@@ -34,6 +35,7 @@ from jarvise_assist.keyboard import (
     reply_keyboard_for,
     risk_choice_keyboard,
     risk_confirm_keyboard,
+    toggle_confirm_keyboard,
 )
 from jarvise_assist.messages import (
     _fmt_price_tick,
@@ -43,7 +45,13 @@ from jarvise_assist.messages import (
     format_signal_message,
     safe_symbol_configs,
 )
-from jarvise_assist.pause import clear_pause_manual, format_paused_until, is_paused, week_start_risk_pct
+from jarvise_assist.pause import (
+    clear_pause_manual,
+    format_paused_until,
+    is_paused,
+    pause_clear_warning,
+    week_start_risk_pct,
+)
 from jarvise_assist.quick import render_quick_menu
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN
 from jarvise_assist.signals import scan_signal_candidates
@@ -67,6 +75,9 @@ _NO_STOP_LINE = "⚠️ ยังไม่มี stop — ตั้ง Stop-Mark
 RISK_MIN_PCT = 0.5
 RISK_MAX_PCT = 3.0
 RISK_CONFIRM_ABOVE = 2.0
+TOGGLE_CONFIRM_TTL_S = 60
+TOGGLE_CONFIRM_FUTURE_S = 5
+_TOGGLE_CONFIRM_RE = re.compile(r"^at:(on|onp|off|no):([0-9]{10})$")
 
 ON_DEMAND_REASON_TH: dict[str, str] = {
     "flat": "ไม่มีแนวโน้ม",
@@ -162,9 +173,9 @@ def handle_menu_text(
         send_fn(msg, reply_markup=markup)
         result = {"handled": True, "kind": kind}
     elif kind == "toggle":
-        body = toggle_enabled(conn, now_ms_value=now_ms)
-        send_fn(body, reply_markup=reply_keyboard_for(ensure_settings(conn)))
-        result = {"handled": True, "kind": kind, "text": body}
+        body, markup = render_toggle_confirm(conn, now_ms=now_ms)
+        send_fn(body, reply_markup=markup)
+        result = {"handled": True, "kind": kind, "text": body, "confirm": True}
     elif kind == "explore":
         write_settings(conn, awaiting_explore=True, awaiting_risk=None, pending_risk_pct=None)
         explore_body, explore_markup = render_explore_message(conn)
@@ -192,6 +203,91 @@ def toggle_enabled(conn: Any, *, now_ms_value: int | None = None) -> str:
     if note:
         return f"▶️ ผู้ช่วยเปิดแล้ว — {note}"
     return "▶️ ผู้ช่วยเปิดแล้ว"
+
+
+def render_toggle_confirm(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
+    """Read-only confirm prompt + inline keyboard for the ผู้ช่วย button."""
+    settings = ensure_settings(conn)
+    ts_s = int(now_ms) // 1000
+    ttl = TOGGLE_CONFIRM_TTL_S
+    if settings["enabled"]:
+        body = (
+            "ยืนยันปิดผู้ช่วย?\n"
+            "• หยุดส่ง signal ใหม่\n"
+            "• ยังเฝ้าไม้ที่เปิดอยู่ (เตือน stop / เลื่อน stop / ปิดไม้)\n"
+            f"กดยืนยันภายใน {ttl} วิ"
+        )
+        action = "off"
+    else:
+        warnings = pause_clear_warning(conn, now_ms=now_ms)
+        lines = ["ยืนยันเปิดผู้ช่วย?", "• กลับมาส่ง signal ใหม่", *warnings, f"กดยืนยันภายใน {ttl} วิ"]
+        body = "\n".join(lines)
+        action = "onp" if warnings else "on"
+    return body, toggle_confirm_keyboard(action, ts_s)
+
+
+def handle_toggle_confirm_callback(
+    conn: Any,
+    data: str,
+    *,
+    send: SendFn,
+    answer: Callable[..., Any],
+    edit: Callable[..., Any],
+    message: dict[str, Any],
+    now_ms: int,
+) -> dict[str, Any]:
+    """Apply or cancel an assist toggle confirm stamped into callback_data."""
+    matched = _TOGGLE_CONFIRM_RE.match(data or "")
+    mid = message.get("message_id") if isinstance(message, dict) else None
+
+    def _edit(text: str) -> None:
+        if mid is not None:
+            edit(int(mid), text, reply_markup={"inline_keyboard": []})
+
+    if matched is None:
+        answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
+        return {"ok": False, "reason": "bad_data"}
+
+    action = matched.group(1)
+    ts_s = int(matched.group(2))
+    now_s = int(now_ms) // 1000
+    settings = ensure_settings(conn)
+
+    if action == "no":
+        answer()
+        _edit("✖️ ยกเลิกแล้ว — ไม่ได้เปลี่ยนอะไร")
+        status = "ผู้ช่วยยังเปิดอยู่" if settings["enabled"] else "ผู้ช่วยยังปิดอยู่"
+        send(status, reply_markup=reply_keyboard_for(settings))
+        return {"ok": True, "cancelled": True}
+
+    if now_s - ts_s > TOGGLE_CONFIRM_TTL_S or ts_s > now_s + TOGGLE_CONFIRM_FUTURE_S:
+        answer("หมดเวลาแล้ว — กด ผู้ช่วย ใหม่")
+        _edit("⌛ หมดเวลา — ไม่ได้เปลี่ยนอะไร · กด ผู้ช่วย ใหม่")
+        return {"ok": False, "reason": "expired"}
+
+    if action == "off" and not settings["enabled"]:
+        msg = "ผู้ช่วยปิดอยู่แล้ว — ไม่ได้เปลี่ยนอะไร"
+        answer(msg)
+        _edit(msg)
+        return {"ok": False, "reason": "stale"}
+    if action in ("on", "onp") and settings["enabled"]:
+        msg = "ผู้ช่วยเปิดอยู่แล้ว — ไม่ได้เปลี่ยนอะไร"
+        answer(msg)
+        _edit(msg)
+        return {"ok": False, "reason": "stale"}
+
+    if action == "on" and is_paused(settings, now_ms=now_ms):
+        msg = "มีการหยุดพักที่ยังไม่ได้แจ้ง — ไม่ได้เปลี่ยนอะไร · กด ผู้ช่วย ใหม่"
+        answer(msg)
+        _edit(msg)
+        return {"ok": False, "reason": "stale_pause"}
+
+    body = toggle_enabled(conn, now_ms_value=now_ms)
+    enabled = bool(ensure_settings(conn)["enabled"])
+    answer()
+    _edit("เปิดผู้ช่วย — ✅ ยืนยันแล้ว" if enabled else "ปิดผู้ช่วย — ✅ ยืนยันแล้ว")
+    send(body, reply_markup=reply_keyboard_for(ensure_settings(conn)))
+    return {"ok": True, "applied": True, "text": body, "enabled": enabled}
 
 
 def _signed_usdt(value: float) -> str:

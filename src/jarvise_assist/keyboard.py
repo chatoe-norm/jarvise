@@ -19,8 +19,21 @@ LEGACY_BTN_RISK_PREFIX = "⚙️ ตั้งความเสี่ยงต�
 LEGACY_BTN_TOGGLE = "⏸ หยุด / ▶️ เปิด ผู้ช่วย"
 LEGACY_BTN_EXPLORE = "🧪 เหรียญทดลอง"
 EXPLORE_RM_PREFIX = "explore:rm:"
+ASSIST_TOGGLE_PREFIX = "at:"
 
 RISK_CHOICE_PCTS: tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
+
+
+def toggle_confirm_keyboard(action: str, ts_s: int) -> dict[str, Any]:
+    """Inline ✅/✖️ for assist on/off confirm. action is on|onp|off."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ ยืนยัน", "callback_data": f"at:{action}:{ts_s}"},
+                {"text": "✖️ ยกเลิก", "callback_data": f"at:no:{ts_s}"},
+            ]
+        ]
+    }
 
 
 def risk_button_label(risk_pct: float) -> str:

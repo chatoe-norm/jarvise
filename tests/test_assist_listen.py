@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.conftest import assist_toggle_confirm
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist import listen as listen_mod
@@ -226,10 +227,10 @@ def test_enable_toggle(tmp_path: Path) -> None:
     sent, send = _send_capture()
     day = _ms_bangkok(2026, 10, 27, 12, 0)
     write_settings(conn, paused_until_ms=day + 10_000_000)
-    r1 = handle_menu_text(conn, BTN_TOGGLE, now_ms=day, send=send)
+    r1 = assist_toggle_confirm(conn, now_ms=day, send=send)
     assert "ปิด" in (r1.get("text") or "")
     assert ensure_settings(conn)["enabled"] is False
-    r2 = handle_menu_text(conn, BTN_TOGGLE, now_ms=day, send=send)
+    r2 = assist_toggle_confirm(conn, now_ms=day, send=send)
     assert "เปิด" in (r2.get("text") or "")
     assert ensure_settings(conn)["enabled"] is True
     assert ensure_settings(conn)["paused_until_ms"] is None
@@ -577,9 +578,9 @@ def test_manual_resume_clears_pause(tmp_path: Path) -> None:
     now = _ms_bangkok(2026, 10, 27, 12, 0)
     write_settings(conn, paused_until_ms=now + 9_000_000, enabled=False)
     write_edge(conn, resume_alerted=False)
-    # Toggle on via menu.
+    # Toggle on via menu (confirm).
     sent, send = _send_capture()
-    handle_menu_text(conn, BTN_TOGGLE, now_ms=now, send=send)  # enable was False → opens
+    assist_toggle_confirm(conn, now_ms=now, send=send)  # enable was False → opens
     # First toggle when enabled=False opens; settings already enabled=False so toggle enables.
     assert ensure_settings(conn)["enabled"] is True
     assert ensure_settings(conn)["paused_until_ms"] is None

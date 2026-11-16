@@ -8,12 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.conftest import assist_toggle_confirm
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist import execute as execute_mod
 from jarvise_assist.futures import FuturesPosition
-from jarvise_assist.keyboard import BTN_TOGGLE
-from jarvise_assist.menu import handle_menu_text
 from jarvise_assist.pause import (
     BOT_ENTRIES_ONLY_TH,
     RESUME_TEXT,
@@ -334,8 +333,8 @@ def test_manual_resume_same_day_warns_and_does_not_repause(tmp_path: Path) -> No
     _trade(conn, oid="t", exit_ms=NOW - 60_000, net=-3.2)
     first = evaluate_pause(conn, futures=_futures(), now_ms=NOW, send=send)
     assert first["reason"] == "day_loss"
-    handle_menu_text(conn, BTN_TOGGLE, now_ms=NOW, send=send)
-    opened = handle_menu_text(conn, BTN_TOGGLE, now_ms=NOW, send=send)
+    assist_toggle_confirm(conn, now_ms=NOW, send=send)
+    opened = assist_toggle_confirm(conn, now_ms=NOW, send=send)
     assert "วันนี้ติดลบแล้ว -3.2R" in str(opened["text"])
     assert BOT_ENTRIES_ONLY_TH in str(opened["text"])
     assert ensure_settings(conn)["paused_until_ms"] is None
@@ -351,8 +350,8 @@ def test_manual_resume_same_day_warns_and_does_not_repause(tmp_path: Path) -> No
 
 
 def _resume(conn: Any, send: Any, at_ms: int) -> dict[str, Any]:
-    handle_menu_text(conn, BTN_TOGGLE, now_ms=at_ms, send=send)
-    return handle_menu_text(conn, BTN_TOGGLE, now_ms=at_ms, send=send)
+    assist_toggle_confirm(conn, now_ms=at_ms, send=send)
+    return assist_toggle_confirm(conn, now_ms=at_ms, send=send)
 
 
 def test_each_manual_resume_arms_another_1r(tmp_path: Path) -> None:
@@ -375,7 +374,7 @@ def test_each_manual_resume_arms_another_1r(tmp_path: Path) -> None:
 
     # An already-expired pause clock is not an active pause.
     write_settings(conn, enabled=False, paused_until_ms=NOW - 1)
-    expired = handle_menu_text(conn, BTN_TOGGLE, now_ms=NOW + 2_000, send=send)
+    expired = assist_toggle_confirm(conn, now_ms=NOW + 2_000, send=send)
     assert "วันนี้ติดลบแล้ว -3.0R" in str(expired["text"])
     assert get_edge(conn)["day_resume_net_r"] == pytest.approx(-3.0)
     write_settings(conn, enabled=True)

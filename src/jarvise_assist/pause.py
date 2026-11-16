@@ -156,6 +156,29 @@ def is_paused(settings: dict[str, Any], *, now_ms: int) -> bool:
     return until is not None and int(until) > int(now_ms)
 
 
+def pause_clear_warning(conn: Any, *, now_ms: int) -> list[str]:
+    """Read-only Thai warning lines shown before confirming assist ON while paused."""
+    settings = ensure_settings(conn)
+    if not is_paused(settings, now_ms=now_ms):
+        return []
+    until = int(settings["paused_until_ms"])
+    pause_reason = settings.get("pause_reason")
+    if pause_reason in ("day_loss", "day_loss_deeper"):
+        reason = " (ขาดทุนวันนี้)"
+    elif pause_reason == "streak":
+        reason = " (แพ้ติดกัน 3 ไม้)"
+    elif pause_reason == "week_loss":
+        reason = " (ขาดทุนสัปดาห์นี้)"
+    else:
+        reason = ""
+    lines = [f"⚠️ จะยกเลิกการหยุดพัก{reason} ที่ตั้งไว้ถึง{bangkok_resume_label(until, now_ms=now_ms)}"]
+    if get_edge(conn).get("day_pause_id") == bangkok_day_id(now_ms):
+        lines.append(f"⚠️ วันนี้ถ้าขาดทุนเพิ่มอีก 1R จากตอนเปิด จะหยุดพักอีกรอบ ({BOT_ENTRIES_ONLY_TH})")
+    if pause_reason == "week_loss":
+        lines.append("⚠️ สัปดาห์นี้จะไม่หยุดพักเพราะขาดทุนรายสัปดาห์อีก (เริ่มนับใหม่วันจันทร์)")
+    return lines
+
+
 def clear_pause_manual(conn: Any, *, now_ms_value: int | None = None) -> str | None:
     """Owner toggled assist on: clear pause and suppress the auto-resume line.
 
