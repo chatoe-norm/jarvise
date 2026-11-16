@@ -20,14 +20,18 @@ from jarvise_assist.futures import (
 )
 from jarvise_assist.keyboard import (
     BTN_ANYTHING,
-    BTN_EXPLORE,
     BTN_POSITIONS,
     BTN_QUICK,
     BTN_RISK_PREFIX,
     BTN_TOGGLE,
     BTN_WEEKLY,
+    LEGACY_BTN_ANYTHING,
+    LEGACY_BTN_EXPLORE,
+    LEGACY_BTN_RISK_PREFIX,
+    LEGACY_BTN_TOGGLE,
     anything_now_keyboard,
     reply_keyboard,
+    reply_keyboard_for,
     risk_choice_keyboard,
     risk_confirm_keyboard,
 )
@@ -84,19 +88,34 @@ def match_menu_label(text: str) -> str | None:
     raw = (text or "").strip()
     if raw == BTN_POSITIONS:
         return "positions"
-    if raw == BTN_ANYTHING:
+    if raw == BTN_ANYTHING or raw == LEGACY_BTN_ANYTHING:
         return "anything"
     if raw == BTN_WEEKLY:
         return "weekly"
     if raw.startswith(BTN_RISK_PREFIX):
         return "risk"
-    if raw == BTN_TOGGLE:
+    if raw.startswith(LEGACY_BTN_RISK_PREFIX):
+        return "risk"
+    if raw == BTN_TOGGLE or raw == LEGACY_BTN_TOGGLE:
         return "toggle"
-    if raw == BTN_EXPLORE:
+    if raw == LEGACY_BTN_EXPLORE:
         return "explore"
     if raw == BTN_QUICK:
         return "quick"
     return None
+
+
+def is_legacy_menu_label(text: str) -> bool:
+    raw = (text or "").strip()
+    if raw == LEGACY_BTN_ANYTHING:
+        return True
+    if raw.startswith(LEGACY_BTN_RISK_PREFIX):
+        return True
+    if raw == LEGACY_BTN_TOGGLE:
+        return True
+    if raw == LEGACY_BTN_EXPLORE:
+        return True
+    return False
 
 
 def handle_menu_text(
@@ -113,19 +132,24 @@ def handle_menu_text(
     if kind != "explore" and ensure_settings(conn).get("awaiting_explore"):
         write_settings(conn, awaiting_explore=False)
     send_fn = send or (lambda t, **kw: send_message(t, reply_markup=kw.get("reply_markup")) is not None)
-    clamp_stored_risk_pct(conn, send=send_fn, reply_keyboard_fn=reply_keyboard)
+    clamp_stored_risk_pct(
+        conn,
+        send=send_fn,
+        reply_keyboard_fn=lambda pct: reply_keyboard(pct, enabled=bool(ensure_settings(conn)["enabled"])),
+    )
+    result: dict[str, Any]
     if kind == "positions":
         body = render_open_positions(conn, futures=futures, now_ms=now_ms)
         send_fn(body)
-        return {"handled": True, "kind": kind, "text": body}
-    if kind == "anything":
+        result = {"handled": True, "kind": kind, "text": body}
+    elif kind == "anything":
         body, markup = render_anything_now(conn, futures=futures, now_ms=now_ms)
         send_fn(body, reply_markup=markup)
-        return {"handled": True, "kind": kind, "text": body}
-    if kind == "weekly":
+        result = {"handled": True, "kind": kind, "text": body}
+    elif kind == "weekly":
         payload = run_assist_weekly(conn, futures=futures, now_ms_value=now_ms, send=send_fn)
-        return {"handled": True, "kind": kind, "text": payload.get("text"), "payload": payload}
-    if kind == "risk":
+        result = {"handled": True, "kind": kind, "text": payload.get("text"), "payload": payload}
+    elif kind == "risk":
         balance: Decimal | None = None
         client = futures if futures is not None else build_futures_client()
         if client is not None:
@@ -136,22 +160,26 @@ def handle_menu_text(
         markup = risk_choice_keyboard(balance=balance)
         msg = "ตั้งความเสี่ยงต่อไม้ — เลือก หรือ กด อื่นๆ แล้วพิมพ์ตัวเลข 0.5–3"
         send_fn(msg, reply_markup=markup)
-        return {"handled": True, "kind": kind}
-    if kind == "toggle":
+        result = {"handled": True, "kind": kind}
+    elif kind == "toggle":
         body = toggle_enabled(conn, now_ms_value=now_ms)
-        settings = ensure_settings(conn)
-        send_fn(body, reply_markup=reply_keyboard(settings["risk_pct"]))
-        return {"handled": True, "kind": kind, "text": body}
-    if kind == "explore":
+        send_fn(body, reply_markup=reply_keyboard_for(ensure_settings(conn)))
+        result = {"handled": True, "kind": kind, "text": body}
+    elif kind == "explore":
         write_settings(conn, awaiting_explore=True, awaiting_risk=None, pending_risk_pct=None)
         explore_body, explore_markup = render_explore_message(conn)
         send_fn(explore_body, reply_markup=explore_markup)
-        return {"handled": True, "kind": kind, "text": explore_body}
-    if kind == "quick":
+        result = {"handled": True, "kind": kind, "text": explore_body}
+    elif kind == "quick":
         body, markup = render_quick_menu(conn, now_ms=now_ms)
         send_fn(body, reply_markup=markup)
-        return {"handled": True, "kind": kind, "text": body}
-    return {"handled": False}
+        result = {"handled": True, "kind": kind, "text": body}
+    else:
+        return {"handled": False}
+    if is_legacy_menu_label(text) and kind != "toggle":
+        send_fn("เมนูอัปเดตแล้ว", reply_markup=reply_keyboard_for(ensure_settings(conn)))
+        result = {**result, "menu_refreshed": True}
+    return result
 
 
 def toggle_enabled(conn: Any, *, now_ms_value: int | None = None) -> str:
@@ -589,7 +617,7 @@ def handle_risk_callback(
             return {"ok": False, "rejected": True}
         week_start_risk_pct(conn)
         write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
-        send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard(pct))
+        send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard_for(ensure_settings(conn)))
         return {"ok": True, "risk_pct": pct}
     if data == "risk_no":
         write_settings(conn, awaiting_risk=None, pending_risk_pct=None)
@@ -628,5 +656,5 @@ def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn) -> dict[str, 
         return {"ok": True, "confirm": True, "pending": pct}
     week_start_risk_pct(conn)
     write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
-    send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard(pct))
+    send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard_for(ensure_settings(conn)))
     return {"ok": True, "risk_pct": pct}

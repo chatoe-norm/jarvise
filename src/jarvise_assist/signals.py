@@ -506,7 +506,11 @@ def run_assist_signals(
 
     maybe_auto_resume(conn, now_ms=ts, send=send_fn)
     settings = ensure_settings(conn)
-    clamp_stored_risk_pct(conn, send=send_fn, reply_keyboard_fn=reply_keyboard)
+    clamp_stored_risk_pct(
+        conn,
+        send=send_fn,
+        reply_keyboard_fn=lambda pct: reply_keyboard(pct, enabled=bool(ensure_settings(conn)["enabled"])),
+    )
 
     client = futures if futures is not None else build_futures_client()
     if client is None:
@@ -656,7 +660,11 @@ def run_assist_morning(
 
     maybe_auto_resume(conn, now_ms=ts, send=send_fn)
     settings = ensure_settings(conn)
-    clamp_stored_risk_pct(conn, send=send_fn, reply_keyboard_fn=reply_keyboard)
+    clamp_stored_risk_pct(
+        conn,
+        send=send_fn,
+        reply_keyboard_fn=lambda pct: reply_keyboard(pct, enabled=bool(ensure_settings(conn)["enabled"])),
+    )
     settings = ensure_settings(conn)
 
     client = futures if futures is not None else build_futures_client()

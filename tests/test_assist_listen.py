@@ -207,12 +207,15 @@ def test_risk_buttons_include_usdt_and_clamp_stored(tmp_path: Path) -> None:
     sent, send = _send_capture()
     from jarvise_assist.keyboard import reply_keyboard
 
-    out = clamp_stored_risk_pct(conn, send=send, reply_keyboard_fn=reply_keyboard)
+    def kb_fn(pct: float) -> dict[str, Any]:
+        return reply_keyboard(pct, enabled=bool(ensure_settings(conn)["enabled"]))
+
+    out = clamp_stored_risk_pct(conn, send=send, reply_keyboard_fn=kb_fn)
     assert out == 3.0
     assert ensure_settings(conn)["risk_pct"] == 3.0
     assert "ปรับเป็น 3%" in sent[-1]["text"]
     n = len(sent)
-    again = clamp_stored_risk_pct(conn, send=send, reply_keyboard_fn=reply_keyboard)
+    again = clamp_stored_risk_pct(conn, send=send, reply_keyboard_fn=kb_fn)
     assert again == 3.0
     assert len(sent) == n
     conn.close()

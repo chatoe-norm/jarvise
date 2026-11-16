@@ -15,7 +15,7 @@ from tests.test_assist_listen import _send_capture
 from tests.test_assist_real_trades import FakeFutures as HistoryFakeFutures
 
 from jarvise_assist.journal import summarize_journal
-from jarvise_assist.keyboard import BTN_EXPLORE, BTN_QUICK, reply_keyboard
+from jarvise_assist.keyboard import BTN_QUICK, BTN_TOGGLE, reply_keyboard
 from jarvise_assist.listen import process_update
 from jarvise_assist.menu import match_menu_label
 from jarvise_assist.pause import bangkok_day_start_ms, day_bot_net_r, evaluate_pause
@@ -974,8 +974,8 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
     assert out.get("kind") == "quick" or out.get("handled")
     assert any("Quick" in s["text"] for s in sent)
     assert match_menu_label(BTN_QUICK) == "quick"
-    kb = reply_keyboard(1.0)
-    assert kb["keyboard"][3] == [{"text": BTN_EXPLORE}, {"text": BTN_QUICK}]
+    kb = reply_keyboard(1.0, enabled=True)
+    assert kb["keyboard"][2] == [{"text": BTN_QUICK}, {"text": BTN_TOGGLE, "style": "success"}]
 
     def _cq(data: str) -> dict[str, Any]:
         return {

@@ -27,8 +27,9 @@ from jarvise_assist.explore import (
     seed_explore_symbol,
     submit_explore_symbol,
 )
-from jarvise_assist.keyboard import BTN_EXPLORE, EXPLORE_RM_PREFIX, reply_keyboard
+from jarvise_assist.keyboard import EXPLORE_RM_PREFIX, LEGACY_BTN_EXPLORE, reply_keyboard
 from jarvise_assist.listen import process_update
+from jarvise_assist.menu import match_menu_label
 from jarvise_assist.store import ensure_settings, insert_explore_symbol, list_explore_symbols
 from jarvise_ingest.db import (
     load_latest_candle,
@@ -248,7 +249,7 @@ def test_listener_fails_closed_without_chat_id(tmp_path: Path, monkeypatch: pyte
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     conn = open_db(tmp_path / "jarvise.db")
     sent: list[str] = []
-    update = {"message": {"chat": {"id": 1}, "text": BTN_EXPLORE}}
+    update = {"message": {"chat": {"id": 1}, "text": LEGACY_BTN_EXPLORE}}
     result = process_update(conn, update, send=lambda text, **_kw: sent.append(text))
     assert result == {"ignored": "no_owner_chat"}
     assert sent == []
@@ -266,13 +267,18 @@ def test_listener_add_and_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     opened = process_update(
         main,
-        {"message": {"chat": {"id": 42}, "text": BTN_EXPLORE}},
+        {"message": {"chat": {"id": 42}, "text": LEGACY_BTN_EXPLORE}},
         send=send,
         answer=lambda *_a, **_k: None,
     )
     assert opened["kind"] == "explore"
     assert ensure_settings(main)["awaiting_explore"] is True
-    assert BTN_EXPLORE in reply_keyboard()["keyboard"][3][0]["text"]
+    assert all(
+        btn.get("text") != LEGACY_BTN_EXPLORE
+        for row in reply_keyboard(1.0, enabled=True)["keyboard"]
+        for btn in row
+    )
+    assert match_menu_label(LEGACY_BTN_EXPLORE) == "explore"
 
     added = process_update(
         main,
