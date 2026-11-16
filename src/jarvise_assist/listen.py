@@ -21,7 +21,7 @@ from jarvise_assist.execute import handle_exec_callback
 from jarvise_assist.explore import remove_explore_symbol, submit_explore_symbol
 from jarvise_assist.futures import build_futures_client, public_exchange_symbol
 from jarvise_assist.journal import handle_journal_callback, store_journal_note
-from jarvise_assist.keyboard import EXPLORE_RM_PREFIX, reply_keyboard
+from jarvise_assist.keyboard import EXPLORE_RM_PREFIX, reply_keyboard_for
 from jarvise_assist.menu import (
     handle_menu_text,
     handle_risk_callback,
@@ -303,7 +303,7 @@ def _ensure_keyboard(conn: Any) -> None:
     if state["keyboard_sent"]:
         return
     settings = ensure_settings(conn)
-    mid = send_message("เมนูผู้ช่วยพร้อมใช้", reply_markup=reply_keyboard(settings["risk_pct"]))
+    mid = send_message("เมนูผู้ช่วยพร้อมใช้", reply_markup=reply_keyboard_for(settings))
     if mid is not None:
         write_telegram_state(conn, keyboard_sent=True)
 

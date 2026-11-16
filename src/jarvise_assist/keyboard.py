@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN
 
 BTN_POSITIONS = "📋 ไม้ที่ถืออยู่"
-BTN_ANYTHING = "🔎 ตอนนี้มีเหรียญไหนน่าเข้า"
+BTN_ANYTHING = "🔎 coin trend"
 BTN_WEEKLY = "📊 ผลสัปดาห์นี้"
-BTN_RISK_PREFIX = "⚙️ ตั้งความเสี่ยงต่อไม้"
-BTN_TOGGLE = "⏸ หยุด / ▶️ เปิด ผู้ช่วย"
-BTN_EXPLORE = "🧪 เหรียญทดลอง"
+BTN_RISK_PREFIX = "⚙️ ความเสี่ยงต่อไม้"
+BTN_TOGGLE = "ผู้ช่วย"
 BTN_QUICK = "⚡ Quick"
+LEGACY_BTN_ANYTHING = "🔎 ตอนนี้มีเหรียญไหนน่าเข้า"
+LEGACY_BTN_RISK_PREFIX = "⚙️ ตั้งความเสี่ยงต่อไม้"
+LEGACY_BTN_TOGGLE = "⏸ หยุด / ▶️ เปิด ผู้ช่วย"
+LEGACY_BTN_EXPLORE = "🧪 เหรียญทดลอง"
 EXPLORE_RM_PREFIX = "explore:rm:"
 
 RISK_CHOICE_PCTS: tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
@@ -21,20 +25,26 @@ RISK_CHOICE_PCTS: tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
 
 def risk_button_label(risk_pct: float) -> str:
     pct = f"{risk_pct:g}" if float(risk_pct) == int(risk_pct) else f"{risk_pct:.1f}"
-    return f"{BTN_RISK_PREFIX} (ตอนนี้ {pct}%)"
+    return f"{BTN_RISK_PREFIX} (🟢 {pct}%)"
 
 
-def reply_keyboard(risk_pct: float = 1.0) -> dict[str, Any]:
+def reply_keyboard(risk_pct: float, *, enabled: bool) -> dict[str, Any]:
+    toggle_btn: dict[str, str] = {"text": BTN_TOGGLE}
+    if enabled:
+        toggle_btn = {"text": BTN_TOGGLE, "style": "success"}
     return {
         "keyboard": [
             [{"text": BTN_POSITIONS}, {"text": BTN_ANYTHING}],
             [{"text": BTN_WEEKLY}, {"text": risk_button_label(risk_pct)}],
-            [{"text": BTN_TOGGLE}],
-            [{"text": BTN_EXPLORE}, {"text": BTN_QUICK}],
+            [{"text": BTN_QUICK}, toggle_btn],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
     }
+
+
+def reply_keyboard_for(settings: Mapping[str, Any]) -> dict[str, Any]:
+    return reply_keyboard(float(settings["risk_pct"]), enabled=bool(settings["enabled"]))
 
 
 def explore_remove_keyboard(symbols: list[str]) -> dict[str, Any]:
