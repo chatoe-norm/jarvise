@@ -593,6 +593,175 @@ def assist_real_report(
         raise typer.Exit(code=1)
 
 
+@assist_app.command("partner-audit")
+def assist_partner_audit(
+    days: Annotated[
+        int,
+        typer.Option("--days", help="Report window in days (1..90). Default 30."),
+    ] = 30,
+    no_binance: Annotated[
+        bool,
+        typer.Option("--no-binance", help="Skip Binance; verify_ledger only."),
+    ] = False,
+    csv_path: Annotated[
+        Path | None,
+        typer.Option("--csv", help="Export partner_event CSV to this new path."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON.")] = False,
+) -> None:
+    """Reconcile futures transfers vs partner ledger. Read-only; never sends Telegram."""
+    import sqlite3
+    from decimal import Decimal
+
+    from jarvise_assist.futures import build_futures_client
+    from jarvise_assist.partner_audit import (
+        CLI_DAYS_DEFAULT,
+        MAX_DAYS,
+        audit_report,
+        export_events_csv,
+        ledger_start_ms,
+    )
+    from jarvise_assist.partner_store import verify_ledger
+    from jarvise_ingest.db import SCHEMA_VERSION
+    from jarvise_ingest.universe_cli import connect_readonly
+
+    if days < 1 or days > MAX_DAYS:
+        typer.echo(f"--days ต้องอยู่ระหว่าง 1 และ {MAX_DAYS}", err=True)
+        raise typer.Exit(code=2)
+    use_days = int(days) if days else CLI_DAYS_DEFAULT
+
+    db_path = analytics_db_path()
+    if not db_path.is_file():
+        typer.echo("ไม่พบฐานข้อมูล analytics", err=True)
+        raise typer.Exit(code=2)
+
+    if csv_path is not None and csv_path.exists():
+        typer.echo("มีไฟล์อยู่แล้ว", err=True)
+        raise typer.Exit(code=2)
+
+    conn = connect_readonly(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        user_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        if user_version != SCHEMA_VERSION:
+            typer.echo(
+                f"schema mismatch: user_version={user_version} expected={SCHEMA_VERSION}",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        if csv_path is not None:
+            try:
+                export_events_csv(conn, csv_path)
+            except FileExistsError:
+                typer.echo("มีไฟล์อยู่แล้ว", err=True)
+                raise typer.Exit(code=2) from None
+
+        verify = verify_ledger(conn)
+        start = ledger_start_ms(conn)
+        if start is None:
+            if json_output:
+                typer.echo(
+                    json.dumps(
+                        {"ok": True, "status": "not_init", "verify_ok": verify.get("ok")},
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                typer.echo("ยังไม่ได้ตั้งต้น")
+                typer.echo("verify_ledger: ผ่าน" if verify.get("ok") else "verify_ledger: ไม่ผ่าน")
+            raise typer.Exit(code=0)
+
+        if no_binance:
+            if json_output:
+                typer.echo(
+                    json.dumps(
+                        {
+                            "ok": bool(verify.get("ok")),
+                            "status": "no_binance",
+                            "verify_ok": verify.get("ok"),
+                            "mismatches": verify.get("mismatches") or [],
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                )
+            else:
+                typer.echo("verify_ledger: ผ่าน" if verify.get("ok") else "verify_ledger: ไม่ผ่าน")
+                typer.echo("ข้าม Binance (--no-binance)")
+            raise typer.Exit(code=0 if verify.get("ok") else 1)
+
+        client = build_futures_client()
+        if client is None:
+            typer.echo("ไม่มี read key — ยังไม่ได้ตรวจ Binance", err=True)
+            raise typer.Exit(code=2)
+
+        import time
+
+        now_ms = int(time.time() * 1000)
+        result = audit_report(conn, client, now_ms=now_ms, days=use_days)
+        if result.status != "ok":
+            err = result.error or ""
+            typer.echo(
+                f"ตรวจ Binance ไม่ได้ ({result.status}" + (f"/{err}" if err else "") + ") — ยังไม่มีข้อสรุป",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        alertable = [f for f in result.findings if f.alertable]
+        exit_code = 0
+        if not verify.get("ok") or alertable:
+            exit_code = 1
+
+        def _dec(v: Decimal) -> str:
+            return str(v)
+
+        payload = {
+            "ok": exit_code == 0,
+            "status": result.status,
+            "verify_ok": bool(verify.get("ok")),
+            "matched": result.matched_n,
+            "pending": result.pending_n,
+            "pre_init_ignored": result.pre_init_ignored_n,
+            "binance_in": _dec(result.binance_in),
+            "binance_out": _dec(result.binance_out),
+            "ledger_in": _dec(result.ledger_in),
+            "ledger_out": _dec(result.ledger_out),
+            "findings": [
+                {
+                    "code": f.code,
+                    "fingerprint": f.fingerprint,
+                    "time_ms": f.time_ms,
+                    "amount": _dec(f.amount),
+                    "partner_name": f.partner_name,
+                    "detail": f.detail,
+                    "alertable": f.alertable,
+                }
+                for f in result.findings
+            ],
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False))
+        else:
+            typer.echo("verify_ledger: ผ่าน" if verify.get("ok") else "verify_ledger: ไม่ผ่าน")
+            typer.echo(f"จับคู่ได้ {result.matched_n}")
+            typer.echo(f"รอในระยะผ่อนผัน {result.pending_n}")
+            typer.echo(f"Binance เข้า {_dec(result.binance_in)} / ออก {_dec(result.binance_out)}")
+            typer.echo(f"สมุด เข้า {_dec(result.ledger_in)} / ออก {_dec(result.ledger_out)}")
+            typer.echo(f"โอนก่อนตั้งต้น (ไม่นับ) {result.pre_init_ignored_n}")
+            if result.findings:
+                typer.echo("รายการที่พบ:")
+                for f in result.findings:
+                    flag = "เตือน" if f.alertable else "รอ"
+                    name = f.partner_name or "-"
+                    typer.echo(f"  [{flag}] {f.code} {name} {_dec(f.amount)} ({f.fingerprint})")
+            else:
+                typer.echo("ไม่พบรายการค้าง")
+        raise typer.Exit(code=exit_code)
+    finally:
+        conn.close()
+
+
 report_app = typer.Typer(help="Read-only owner reports. No orders.")
 app.add_typer(report_app, name="report")
 

@@ -583,14 +583,32 @@ def run_assist_morning_job() -> tuple[int, dict[str, Any]]:
             return 1, payload
         conn = open_db(path)
         try:
-            payload = run_assist_morning(conn, now_ms_value=now)
-        except Exception as exc:  # noqa: BLE001
-            payload = {
-                "ok": False,
-                "paper_only": True,
-                "error": f"{type(exc).__name__}: {exc}",
-                "at_ms": now,
-            }
+            try:
+                payload = run_assist_morning(conn, now_ms_value=now)
+            except Exception as exc:  # noqa: BLE001
+                payload = {
+                    "ok": False,
+                    "paper_only": True,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "at_ms": now,
+                }
+            try:
+                from jarvise_assist.futures import build_futures_client
+                from jarvise_assist.partner_audit import run_partner_audit_job
+
+                payload["partner_audit"] = run_partner_audit_job(
+                    conn,
+                    client=build_futures_client(),
+                    now_ms=now,
+                    send=lambda text: send_message(text),
+                    state_path=path.with_name("partner_audit_state.json"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                payload["partner_audit"] = {
+                    "ok": False,
+                    "status": "error",
+                    "error": type(exc).__name__,
+                }
         finally:
             conn.close()
         at_ms = payload.get("at_ms")
