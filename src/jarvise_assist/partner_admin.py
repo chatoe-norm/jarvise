@@ -11,7 +11,8 @@ import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from jarvise_assist import partner_ledger as pl
 from jarvise_assist import partner_store as ps
@@ -22,6 +23,9 @@ from jarvise_assist.partner_value import (
     read_account_value,
 )
 
+if TYPE_CHECKING:
+    from jarvise_assist.partner_audit import GuardResult
+
 logger = logging.getLogger(__name__)
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -30,6 +34,10 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_.\-\u0E00-\u0E7F]{1,24}$")
 _AMOUNT_RE = re.compile(r"^(?:[0-9]{1,9}(?:\.[0-9]{1,6})?|[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,6})?)$")
 _CMD_RE = re.compile(r"^\s*p(\s|$)", re.IGNORECASE)
 _REQ_ID_RE = re.compile(r"^pr_[0-9a-f]{16}$")
+_GUARD_FORCE_RE = re.compile(r"^(pr_[0-9a-f]{16}):([0-9]{10})$")
+_GUARD_OVERRIDE_S = 900
+_GUARD_FUTURE_S = 60
+_GUARD_MARKER = "\n\n⚠️ ตรวจยอดโอน"
 
 _CENT = Decimal("0.01")
 _NAV_Q = Decimal("0.000001")
@@ -327,8 +335,108 @@ def _request_buttons(request_id: str) -> dict[str, Any]:
     }
 
 
+def _guard_deposit_buttons(rid: str, ts_s: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": "⚠️ ยืนยันทั้งที่มีเตือน", "callback_data": f"pa:df:{rid}:{ts_s}"}],
+            [{"text": "✖️ ยกเลิก", "callback_data": f"pa:dn:{rid}"}],
+        ]
+    }
+
+
+def _guard_request_buttons(rid: str, ts_s: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": "⚠️ ยืนยันทั้งที่มีเตือน", "callback_data": f"pa:rf:{rid}:{ts_s}"}],
+            [{"text": "✖️ ปฏิเสธ", "callback_data": f"pa:rn:{rid}"}],
+        ]
+    }
+
+
 def _paid_button(request_id: str) -> dict[str, Any]:
     return {"inline_keyboard": [[{"text": "💸 โอนแล้ว", "callback_data": f"pa:pd:{request_id}"}]]}
+
+
+def _transfer_guard(
+    conn: sqlite3.Connection,
+    client: Any,
+    *,
+    now_ms: int,
+    req: sqlite3.Row | dict[str, Any],
+) -> tuple[GuardResult, str]:
+    """Run confirm-time transfer guard. Lazy-imports partner_audit (never at module load)."""
+    from jarvise_assist.partner_audit import GuardResult as _GuardResult
+    from jarvise_assist.partner_audit import format_guard_th, guard_check, load_state
+
+    try:
+        deposit_request_id: str | None = None
+        deposit_amount: Decimal | None = None
+        deposit_partner: str | None = None
+        if str(req["kind"]) == "deposit":
+            deposit_request_id = str(req["id"])
+            deposit_amount = ps.usdt_from_micro(int(req["quote_gross_micro"] or 0))
+            partner = ps.get_partner(conn, str(req["partner_id"]))
+            deposit_partner = str(partner["name"]) if partner is not None else "?"
+        result = guard_check(
+            conn,
+            client,
+            now_ms=int(now_ms),
+            deposit_request_id=deposit_request_id,
+            deposit_amount=deposit_amount,
+            deposit_partner=deposit_partner,
+        )
+        last_ok_ms: int | None = None
+        if result.status != "ok":
+            row = conn.execute("PRAGMA database_list").fetchone()
+            db_file = ""
+            if row is not None:
+                db_file = str(row["file"] if hasattr(row, "keys") else row[2] or "")
+            if db_file:
+                state = load_state(Path(db_file).with_name("partner_audit_state.json"))
+                lok = state.get("last_ok_ms")
+                last_ok_ms = int(lok) if lok is not None else None
+        return result, format_guard_th(result, last_ok_ms=last_ok_ms)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("partner transfer guard error type=%s", type(exc).__name__)
+        err = _GuardResult(
+            status="error",
+            checked_at_ms=int(now_ms),
+            findings=[],
+            warn=True,
+            error=type(exc).__name__,
+        )
+        return err, format_guard_th(err, last_ok_ms=None)
+
+
+def _should_run_guard(*, force: bool, ts_s: int | None, now_ms: int) -> bool:
+    if not force:
+        return True
+    if ts_s is None:
+        return True
+    now_s = int(now_ms) // 1000
+    if int(ts_s) > now_s + _GUARD_FUTURE_S:
+        return True
+    if now_s - int(ts_s) > _GUARD_OVERRIDE_S:
+        return True
+    return False
+
+
+def _merge_guard_text(orig: str, guard_text: str) -> str:
+    base = orig
+    idx = base.find(_GUARD_MARKER)
+    if idx >= 0:
+        base = base[:idx]
+    return base + "\n\n" + guard_text
+
+
+def _guard_ok_suffix(result: GuardResult) -> str:
+    if result.status == "not_init":
+        return ""
+    info_n = sum(1 for f in result.findings if f.code in ("near_amount", "non_usdt"))
+    line = "\n✅ ตรวจยอดโอนแล้ว ไม่พบรายการค้าง"
+    if info_n:
+        line += f" (มีหมายเหตุ {info_n} — ดู partner-audit)"
+    return line
 
 
 def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, Any]]:
@@ -1059,11 +1167,21 @@ def handle_partner_callback(
                 edit(int(mid), body, reply_markup=markup)
             return {"ok": False, "reason": "request_not_pending"}
 
-        if data.startswith("pa:dy:"):
-            rid = data[len("pa:dy:") :]
-            if not _REQ_ID_RE.match(rid):
-                _answer("รายการนี้ปิดไปแล้ว")
-                return {"ok": False, "reason": "bad_id"}
+        if data.startswith("pa:dy:") or data.startswith("pa:df:"):
+            force = data.startswith("pa:df:")
+            ts_s: int | None = None
+            if force:
+                m = _GUARD_FORCE_RE.match(data[len("pa:df:") :])
+                if m is None:
+                    _answer("รายการนี้ปิดไปแล้ว")
+                    return {"ok": False, "reason": "bad_id"}
+                rid = m.group(1)
+                ts_s = int(m.group(2))
+            else:
+                rid = data[len("pa:dy:") :]
+                if not _REQ_ID_RE.match(rid):
+                    _answer("รายการนี้ปิดไปแล้ว")
+                    return {"ok": False, "reason": "bad_id"}
             req = conn.execute("SELECT * FROM partner_request WHERE id = ?", (rid,)).fetchone()
             if req is None:
                 _answer("รายการนี้ปิดไปแล้ว")
@@ -1088,7 +1206,27 @@ def handle_partner_callback(
             if due_total > 0:
                 _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอนแล้วกด โอนแล้ว ก่อน (p due)")
                 return {"ok": False, "reason": "payout_due"}
-            av = _read_v(futures, now_ms=now_ms)
+
+            client = _resolve_client(futures)
+            guard_suffix = ""
+            if _should_run_guard(force=force, ts_s=ts_s, now_ms=now_ms):
+                guard_result, guard_text = _transfer_guard(conn, client, now_ms=now_ms, req=req)
+                if guard_result.warn:
+                    _answer("มีเรื่องยอดโอน — อ่านบนการ์ดก่อนยืนยัน")
+                    text = _merge_guard_text(str(msg.get("text") or ""), guard_text)
+                    buttons = _guard_deposit_buttons(rid, int(now_ms) // 1000)
+                    edited_ok = False
+                    if mid is not None:
+                        edited_ok = bool(edit(int(mid), text, reply_markup=buttons))
+                    if mid is None or not edited_ok:
+                        send(text, reply_markup=buttons)
+                    return {"ok": False, "reason": "guard_warn"}
+                guard_suffix = _guard_ok_suffix(guard_result)
+            else:
+                guard_suffix = "\n⚠️ ยืนยันทั้งที่มีคำเตือนยอดโอน"
+                logger.info("partner guard force-confirm id=%s kind=deposit", rid)
+
+            av = _read_v(client, now_ms=now_ms)
             if isinstance(av, AccountValueError):
                 _answer(thai_reason(av.reason, detail=av.detail))
                 return {"ok": False, "reason": av.reason}
@@ -1102,6 +1240,7 @@ def handle_partner_callback(
                     f"NAV ก่อนฝาก {fmt_nav(Decimal(result.get('nav_pre') or 0))} · "
                     f"ทุนหลัง {fmt_usdt(Decimal(result.get('cost_after') or 0))}"
                 )
+                body += guard_suffix
                 if mid is not None:
                     edit(int(mid), body, reply_markup={"inline_keyboard": []})
                 partner = ps.get_partner(conn, str(req["partner_id"]))
@@ -1123,11 +1262,21 @@ def handle_partner_callback(
             _answer(thai_reason(reason))
             return {"ok": False, "reason": reason}
 
-        if data.startswith("pa:ry:"):
-            rid = data[len("pa:ry:") :]
-            if not _REQ_ID_RE.match(rid):
-                _answer("รายการนี้ปิดไปแล้ว")
-                return {"ok": False, "reason": "bad_id"}
+        if data.startswith("pa:ry:") or data.startswith("pa:rf:"):
+            force = data.startswith("pa:rf:")
+            ts_s = None
+            if force:
+                m = _GUARD_FORCE_RE.match(data[len("pa:rf:") :])
+                if m is None:
+                    _answer("รายการนี้ปิดไปแล้ว")
+                    return {"ok": False, "reason": "bad_id"}
+                rid = m.group(1)
+                ts_s = int(m.group(2))
+            else:
+                rid = data[len("pa:ry:") :]
+                if not _REQ_ID_RE.match(rid):
+                    _answer("รายการนี้ปิดไปแล้ว")
+                    return {"ok": False, "reason": "bad_id"}
             req = conn.execute("SELECT * FROM partner_request WHERE id = ?", (rid,)).fetchone()
             if req is None:
                 _answer("รายการนี้ปิดไปแล้ว")
@@ -1153,7 +1302,27 @@ def handle_partner_callback(
             if due_total > 0:
                 _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอนแล้วกด โอนแล้ว ก่อน (p due)")
                 return {"ok": False, "reason": "payout_due"}
-            av = _read_v(futures, now_ms=now_ms)
+
+            client = _resolve_client(futures)
+            guard_suffix = ""
+            if _should_run_guard(force=force, ts_s=ts_s, now_ms=now_ms):
+                guard_result, guard_text = _transfer_guard(conn, client, now_ms=now_ms, req=req)
+                if guard_result.warn:
+                    _answer("มีเรื่องยอดโอน — อ่านบนการ์ดก่อนยืนยัน")
+                    text = _merge_guard_text(str(msg.get("text") or ""), guard_text)
+                    buttons = _guard_request_buttons(rid, int(now_ms) // 1000)
+                    edited_ok = False
+                    if mid is not None:
+                        edited_ok = bool(edit(int(mid), text, reply_markup=buttons))
+                    if mid is None or not edited_ok:
+                        send(text, reply_markup=buttons)
+                    return {"ok": False, "reason": "guard_warn"}
+                guard_suffix = _guard_ok_suffix(guard_result)
+            else:
+                guard_suffix = "\n⚠️ ยืนยันทั้งที่มีคำเตือนยอดโอน"
+                logger.info("partner guard force-confirm id=%s kind=%s", rid, kind)
+
+            av = _read_v(client, now_ms=now_ms)
             if isinstance(av, AccountValueError):
                 _answer(thai_reason(av.reason, detail=av.detail))
                 return {"ok": False, "reason": av.reason}
@@ -1169,6 +1338,7 @@ def handle_partner_callback(
                     body = (
                         f"✅ ทบกำไร {pname} แล้ว · ค่าธรรมเนียม {fmt_usdt(fee)} · ทุนใหม่ {fmt_usdt(cost_after)}"
                     )
+                    body += guard_suffix
                     if mid is not None:
                         edit(int(mid), body, reply_markup={"inline_keyboard": []})
                     if partner is not None:
@@ -1182,6 +1352,7 @@ def handle_partner_callback(
                         f"✅ ยืนยันแล้ว · ค้างจ่าย {fmt_usdt(cash)} USDT ให้ {pname}\n"
                         f"โอนออกจาก futures wallet แล้วค่อยกด โอนแล้ว"
                     )
+                    body += guard_suffix
                     if mid is not None:
                         edit(int(mid), body, reply_markup=_paid_button(rid))
                     if partner is not None:
@@ -1202,6 +1373,7 @@ def handle_partner_callback(
                 else:
                     # close with cash 0
                     body = f"✅ ยืนยันแล้ว · ปิด {pname} แล้ว (ไม่มีเงินออก)"
+                    body += guard_suffix
                     if mid is not None:
                         edit(int(mid), body, reply_markup={"inline_keyboard": []})
                     if partner is not None:

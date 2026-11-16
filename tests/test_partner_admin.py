@@ -182,6 +182,20 @@ def env_chat(monkeypatch: Any) -> None:
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
 
 
+@pytest.fixture(autouse=True)
+def _clean_transfer_guard(monkeypatch: Any) -> None:
+    """P5 guard is covered in test_partner_guard.py; keep legacy confirms clean."""
+    from jarvise_assist.partner_audit import GuardResult
+
+    def _fake(conn: Any, client: Any, *, now_ms: int, req: Any) -> tuple[GuardResult, str]:
+        return (
+            GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False, error=None),
+            "",
+        )
+
+    monkeypatch.setattr(pa, "_transfer_guard", _fake)
+
+
 # ---- parser ------------------------------------------------------------------
 
 
