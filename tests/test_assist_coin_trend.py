@@ -132,6 +132,83 @@ def test_coin_trend_held_btc_risk_budget_ranking(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_held_row_shows_position_side(tmp_path: Path) -> None:
+    """Held BTC LONG with analysis SHORT must show position side, not signal side."""
+    conn = open_db(tmp_path / "held_side.db")
+    ensure_settings(conn)
+    write_settings(conn, risk_pct=1.0, enabled=True)
+    now = _ms_bangkok(2026, 11, 17, 12, 0)
+    btc_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        update_time_ms=now,
+    )
+    btc_stop = {
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "type": "STOP_MARKET",
+        "stopPrice": "97",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+    }
+    _seed_fresh(conn, symbol="BTCUSDT", action="short", confidence=0.80, invalidation=103.0, now=now)
+    _seed_fresh(conn, symbol="ETHUSDT", action="short", confidence=0.70, invalidation=2060.0, now=now)
+    fake = FakeFutures(
+        balance=Decimal("1000"),
+        positions=[btc_pos],
+        orders=[btc_stop],
+        marks={"BTCUSDT": Decimal("100"), "ETHUSDT": Decimal("2000")},
+        steps={"BTCUSDT": Decimal("0.001"), "ETHUSDT": Decimal("0.001")},
+    )
+    messages = render_coin_trend(conn, futures=fake, now_ms=now)
+    assert messages
+    text = next(t for t, _m in messages if "🔎 เทรนด์เหรียญ" in t)
+    lines = [ln for ln in text.splitlines() if ln[:1].isdigit()]
+    btc_line = next(ln for ln in lines if "BTCUSDT" in ln)
+    print("HELD_SIDE_BTC:\n", btc_line)
+    assert "ถืออยู่แล้ว (LONG)" in btc_line
+    assert "(short)" not in btc_line
+    assert "(SHORT)" not in btc_line
+    conn.close()
+
+
+def test_held_row_without_stop_shows_no_distance(tmp_path: Path) -> None:
+    """Held position with no protective stop must not invent a stop distance %."""
+    conn = open_db(tmp_path / "held_no_stop.db")
+    ensure_settings(conn)
+    write_settings(conn, risk_pct=1.0, enabled=True)
+    now = _ms_bangkok(2026, 11, 17, 12, 0)
+    btc_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        update_time_ms=now,
+    )
+    _seed_fresh(conn, symbol="BTCUSDT", action="short", confidence=0.80, invalidation=103.0, now=now)
+    _seed_fresh(conn, symbol="ETHUSDT", action="short", confidence=0.70, invalidation=2060.0, now=now)
+    fake = FakeFutures(
+        balance=Decimal("1000"),
+        positions=[btc_pos],
+        orders=[],
+        marks={"BTCUSDT": Decimal("100"), "ETHUSDT": Decimal("2000")},
+        steps={"BTCUSDT": Decimal("0.001"), "ETHUSDT": Decimal("0.001")},
+    )
+    messages = render_coin_trend(conn, futures=fake, now_ms=now)
+    assert messages
+    text = next(t for t, _m in messages if "🔎 เทรนด์เหรียญ" in t)
+    lines = [ln for ln in text.splitlines() if ln[:1].isdigit()]
+    btc_line = next(ln for ln in lines if "BTCUSDT" in ln)
+    print("HELD_NO_STOP_BTC:\n", btc_line)
+    assert "stop ห่าง" not in btc_line
+    assert "ไม่มี stop" in btc_line
+    conn.close()
+
+
 def test_explain_risk_rejections_kinds() -> None:
     balance = Decimal("1000")
     # 31 + ~30 > 60 (cap 6%) so the top candidate fails risk_budget.

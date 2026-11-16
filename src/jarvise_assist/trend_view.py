@@ -160,8 +160,8 @@ def _position_by_symbol(positions: list[Any]) -> dict[str, Any]:
     return {str(p.symbol).upper(): p for p in positions}
 
 
-def _held_stop_pct(pos: Any, *, analysis: dict[str, Any], orders: list[dict[str, Any]]) -> Decimal | None:
-    """Stop distance % for a held/quick row from protective stop or analysis invalidation."""
+def _held_stop_pct(pos: Any, *, orders: list[dict[str, Any]]) -> Decimal | None:
+    """Stop distance % for a held/quick row from the protective stop only."""
     entry = Decimal(str(pos.entry_price))
     protective = find_protective_stop(
         orders,
@@ -169,12 +169,9 @@ def _held_stop_pct(pos: Any, *, analysis: dict[str, Any], orders: list[dict[str,
         position_side=pos.position_side,
         trade_side=pos.side,
     )
-    if protective is not None:
-        return _stop_distance_pct(entry=entry, stop=protective)
-    inv = analysis.get("invalidation_price")
-    if inv is None:
+    if protective is None:
         return None
-    return _stop_distance_pct(entry=entry, stop=Decimal(str(inv)))
+    return _stop_distance_pct(entry=entry, stop=protective)
 
 
 def build_trend_rows(
@@ -271,14 +268,19 @@ def build_trend_rows(
                 held_risk: Decimal | None = None
                 pos = pos_by_sym.get(symbol)
                 if pos is not None:
-                    held_stop = _held_stop_pct(pos, analysis=analysis, orders=orders)
+                    held_stop = _held_stop_pct(pos, orders=orders)
                 ex = existing_by_sym.get(symbol)
                 if ex is not None:
                     held_risk = _pct_of_balance(ex.risk_usdt, balance)
                 if reason == "open_position":
-                    status = f"📌 ถืออยู่แล้ว ({side})"
+                    if pos is not None:
+                        status = f"📌 ถืออยู่แล้ว ({pos.side.upper()})"
+                    else:
+                        status = "📌 ถืออยู่แล้ว"
                 else:
                     status = _REASON_TH["quick_open"]
+                if reason in {"open_position", "quick_open"} and pos is not None and held_stop is None:
+                    status = f"{status} · ⚠️ ไม่มี stop"
                 row = TrendRow(
                     rank=0,
                     symbol=symbol,
