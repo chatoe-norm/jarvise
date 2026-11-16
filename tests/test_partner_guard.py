@@ -917,15 +917,48 @@ def test_cb_refusal_expired_before_guard(tmp_path: Path, monkeypatch: Any, env_c
     expires = int(created["expires_at_ms"])
     client = FakeClient()
     client.wallet = "1100"
-    stamp = expires // 1000
-    out, _s, _e, _a = _pa_cb(
+    out_dy, _s1, _e1, _a1 = _pa_cb(
         conn,
-        f"pa:df:{rid}:{stamp}",
+        f"pa:dy:{rid}",
         client=client,
         monkeypatch=monkeypatch,
         now_ms=expires + 1,
     )
-    assert out == {"ok": False, "reason": "expired"}
+    assert out_dy == {"ok": False, "reason": "expired"}
+    assert client.calls == []
+    stale = (expires + 1) // 1000 - 1000
+    out_df, _s2, _e2, _a2 = _pa_cb(
+        conn,
+        f"pa:df:{rid}:{stale}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=expires + 1,
+    )
+    assert out_df == {"ok": False, "reason": "expired"}
+    assert client.calls == []
+    conn.close()
+
+
+def test_cb_refusal_dy_payout_due_before_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ref_dy_due.db")
+    bob_id = _setup_bob_with_profit(conn)
+    wd = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10)
+    assert wd.get("ok")
+    assert ps.confirm_request(conn, str(wd["request_id"]), D(_PROFIT_V), NOW + 20).get("ok")
+    carol = ps.create_partner(conn, name="Carol", now_ms=NOW + 25)
+    created = ps.create_request(conn, carol["partner_id"], "deposit", NOW + 30, amount=D("100"))
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    client = FakeClient()
+    client.wallet = _PROFIT_V
+    out, _s, _e, _a = _pa_cb(
+        conn,
+        f"pa:dy:{rid}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=NOW + 40,
+    )
+    assert out == {"ok": False, "reason": "payout_due"}
     assert client.calls == []
     conn.close()
 
@@ -979,6 +1012,15 @@ def test_cb_refusal_not_this_kind_before_guard(tmp_path: Path, monkeypatch: Any,
         now_ms=NOW + 3,
     )
     assert out == {"ok": False, "reason": "not_this_kind"}
+    assert client.calls == []
+    out_ry, _s2, _e2, _a2 = _pa_cb(
+        conn,
+        f"pa:ry:{rid}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=NOW + 3,
+    )
+    assert out_ry == {"ok": False, "reason": "not_this_kind"}
     assert client.calls == []
     conn.close()
 
