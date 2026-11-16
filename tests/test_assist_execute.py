@@ -66,6 +66,7 @@ from jarvise_assist.sizing import (
     admit_signals,
     expected_analysis_bar_ms,
     floor_to_step,
+    portfolio_risk_cap_pct,
     round_level_to_tick,
     size_signal,
 )
@@ -80,6 +81,7 @@ from jarvise_assist.store import (
     now_ms,
     symbol_has_in_flight_exec,
     upsert_watch_position,
+    write_settings,
 )
 from jarvise_assist.watch import flush_held_watch_advice, run_assist_watch
 from jarvise_exchange.binance_spot import BinanceAuth
@@ -2001,9 +2003,10 @@ def test_risk_cap_uses_open_position_real_stop(tmp_path: Path, monkeypatch: pyte
         lambda **_: {"engaged": False, "known": True},
     )
     conn = open_db(tmp_path / "risk.db")
+    write_settings(conn, risk_pct=2.0)
     bar = _ms_bangkok(2026, 11, 2, 3, 0)
     _seed_doge_short(conn, ts=bar)
-    # ETH long with a wide protective stop → 50 USDT risk on 1000 balance (budget 40).
+    # ETH long with a wide protective stop → 50 USDT risk on 1000 balance (2×2% budget = 40).
     eth_pos = {
         "symbol": "ETHUSDT",
         "positionSide": "BOTH",
@@ -2293,12 +2296,120 @@ def test_size_for_execution_requote_cap_and_chase_vs_seen(
     conn.close()
 
 
+def test_ey_confirm_risk_lowered_returns_risk_cap_no_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lowering risk after ec: preview makes ey: return risk_cap with no order POST."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "ey_lower.db")
+    write_settings(conn, risk_pct=3.0, enabled=True)
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
+    assert preview["ok"] is True
+    intent_id = preview["intent_id"]
+    loss = Decimal(str(preview["sized"].loss_at_stop))
+    assert loss > Decimal("20")  # exceeds the 2% cap after lowering to 1%
+    write_settings(conn, risk_pct=1.0)
+    posts_before = sum(1 for m, _, _ in transport.calls if m == "POST")
+    sent: list[str] = []
+    out = handle_exec_callback(
+        conn,
+        f"ey:{intent_id}",
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=now + 1_000,
+    )
+    assert out.get("ok") is False
+    assert any("เต็มเพดานความเสี่ยง" in t for t in sent)
+    posts_after = sum(1 for m, _, _ in transport.calls if m == "POST")
+    assert posts_after == posts_before
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    assert row["status"] == "failed"
+    conn.close()
+
+
+def test_ec_preview_admits_at_3pct_with_1_6pct_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ec: at risk 3% with one 1.6% open position is admitted (cap 6%)."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "ec_16.db")
+    write_settings(conn, risk_pct=3.0, enabled=True)
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    # ETH long: qty 1 × |2000−1984| = 16 USDT = 1.6% of 1000
+    eth_pos = {
+        "symbol": "ETHUSDT",
+        "positionSide": "BOTH",
+        "positionAmt": "1",
+        "entryPrice": "2000",
+        "markPrice": "2000",
+    }
+    eth_stop = {
+        "symbol": "ETHUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "1984",
+        "quantity": "1",
+        "algoId": 77,
+    }
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, [eth_pos]),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, [eth_stop]),
+    }
+    trade = _client(RecordingTransport(handlers))
+    sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
+    assert reason is None and sized is not None
+    preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
+    assert preview["ok"] is True
+    conn.close()
+
+
 def test_size_for_execution_risk_cap_uses_requote_loss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Loss-capped re-quote can exceed the portfolio budget that the old qty cap fit under."""
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     conn = open_db(tmp_path / "requote_risk.db")
+    write_settings(conn, risk_pct=2.0)
     bar = _ms_bangkok(2026, 11, 2, 3, 0)
     now = _ms_bangkok(2026, 11, 2, 8, 20)
     _seed_doge_short(conn, ts=bar)
@@ -2323,7 +2434,7 @@ def test_size_for_execution_risk_cap_uses_requote_loss(
         expires_at_ms=now + 3_600_000,
         sent_at_ms=now - 60_000,
     )
-    # ETH long risks 38 USDT. Portfolio budget is 4% of 1000 = 40.
+    # ETH long risks 38 USDT. Portfolio budget at risk 2% is 4% of 1000 = 40.
     # Qty cap would keep 100 * R(0.003) = 0.3 and fit. Loss cap is 3 and does not.
     eth_pos = {
         "symbol": "ETHUSDT",
@@ -5832,7 +5943,12 @@ def test_stale_open_position_still_blocks_new_entry_and_watch_alerts(
         confidence=0.8,
         symbol_rank=0,
     )
-    admitted, rejected = admit_signals(existing=ideas, candidates=[candidate], balance=Decimal("1000"))
+    admitted, rejected = admit_signals(
+        existing=ideas,
+        candidates=[candidate],
+        balance=Decimal("1000"),
+        max_risk_pct=portfolio_risk_cap_pct(Decimal("1")),
+    )
     assert admitted == []
     assert rejected == [candidate]
     day = _ms_bangkok(2026, 11, 2, 12, 0)

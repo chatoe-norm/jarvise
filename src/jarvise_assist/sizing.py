@@ -18,7 +18,8 @@ _REASON_ORDER = ("step", "leverage_cap", "margin_cap", "requote_cap")
 CHASE_R = Decimal("0.3")
 TARGET_R = Decimal("2")
 MAX_OPEN_IDEAS = 2
-MAX_PORTFOLIO_RISK_PCT = Decimal("4")
+PORTFOLIO_RISK_MULTIPLIER = Decimal("2")
+PORTFOLIO_RISK_CAP_CEILING_PCT = Decimal("6")
 IDEA_LOOKBACK_MS = 4 * 3_600_000
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 # Assist cron: 25 0,4,8,12,16,20 Asia/Bangkok
@@ -373,15 +374,22 @@ def position_risk_usdt(
     return Decimal("0")
 
 
+def portfolio_risk_cap_pct(risk_pct: Decimal) -> Decimal:
+    """Portfolio risk-at-stop cap %: 2× risk_pct, ceiling 6%."""
+    if risk_pct <= 0:
+        return Decimal("0")
+    return min(risk_pct * PORTFOLIO_RISK_MULTIPLIER, PORTFOLIO_RISK_CAP_CEILING_PCT)
+
+
 def admit_signals(
     *,
     existing: list[ExistingIdea],
     candidates: list[SignalCandidate],
     balance: Decimal,
     max_ideas: int = MAX_OPEN_IDEAS,
-    max_risk_pct: Decimal = MAX_PORTFOLIO_RISK_PCT,
+    max_risk_pct: Decimal,
 ) -> tuple[list[SignalCandidate], list[SignalCandidate]]:
-    """Admit by confidence desc (symbol_rank asc tie-break). Reject the rest as risk_cap.
+    """Admit by confidence desc (symbol_rank asc tie-break) under max_risk_pct of balance.
 
     Once one candidate fails a slot or risk budget, every lower-ranked candidate is
     rejected — a smaller later idea is not backfilled.

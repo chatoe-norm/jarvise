@@ -63,6 +63,7 @@ from jarvise_assist.sizing import (
     cap_requote_qty,
     chase_exceeded,
     passes_signal_floor,
+    portfolio_risk_cap_pct,
     round_level_to_tick,
     size_signal,
 )
@@ -1359,7 +1360,12 @@ def size_for_execution(
     cand = SignalCandidate(
         sized=sized, confidence=float(analysis.get("confidence_score") or 0.0), symbol_rank=0
     )
-    admitted, rejected = admit_signals(existing=existing, candidates=[cand], balance=balance)
+    admitted, rejected = admit_signals(
+        existing=existing,
+        candidates=[cand],
+        balance=balance,
+        max_risk_pct=portfolio_risk_cap_pct(risk_pct),
+    )
     if rejected:
         return None, "risk_cap"
     admitted, margin_dropped = assign_shared_leverage(admitted, available_balance=available)
@@ -1611,7 +1617,12 @@ def _confirm_guards_entry(
         step_size=filters.step_size,
     )
     cand = SignalCandidate(sized=sized, confidence=1.0, symbol_rank=0)
-    admitted, rejected = admit_signals(existing=existing, candidates=[cand], balance=balance)
+    admitted, rejected = admit_signals(
+        existing=existing,
+        candidates=[cand],
+        balance=balance,
+        max_risk_pct=portfolio_risk_cap_pct(risk_pct),
+    )
     if rejected:
         return "risk_cap"
     admitted, dropped = assign_shared_leverage(admitted, available_balance=available)

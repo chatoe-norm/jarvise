@@ -25,6 +25,7 @@ from jarvise_assist.quick import (
     render_quick_menu,
     summarize_quick,
     sync_quick_trades,
+    write_quick_settings,
 )
 from jarvise_assist.quick_tags import quick_income_predicate
 from jarvise_assist.real_trades import (
@@ -1002,9 +1003,9 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
     process_update(conn, _cq("qs:no"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 1.0
 
-    # qs:cap:2 confirm shows 6%
+    # qs:cap:2 confirm: main default 1% → cap 2% + quick 2% = 4%
     process_update(conn, _cq("qs:cap:2"), send=send, answer=answer, now_ms_value=now)
-    assert any("ความเสี่ยงรวมสูงสุด 6%" in s["text"] for s in sent)
+    assert any("ความเสี่ยงรวมสูงสุด 4% (หลัก 2% + quick 2%)" in s["text"] for s in sent)
     process_update(conn, _cq("qs:ok:cap:2"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 2.0
 
@@ -1047,6 +1048,17 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
         now_ms_value=now,
     )
     assert any("Quick" in s["text"] for s in sent[-1:])
+    conn.close()
+
+
+def test_quick_menu_total_uses_dynamic_main_cap(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "menu_cap.db")
+    ensure_settings(conn)
+    write_settings(conn, risk_pct=3.0)
+    write_quick_settings(conn, cap_pct=2.0)
+    now = _ms_bangkok(2026, 11, 14, 15, 0)
+    text, _kb = render_quick_menu(conn, now_ms=now)
+    assert "ความเสี่ยงรวมสูงสุด 8% (หลัก 6% + quick 2%)" in text
     conn.close()
 
 

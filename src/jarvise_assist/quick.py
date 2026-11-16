@@ -9,12 +9,14 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Sequence
+from decimal import Decimal
 from typing import Any
 
 from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.pause import bangkok_day_id, bangkok_day_start_ms
 from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
-from jarvise_assist.sizing import MAX_PORTFOLIO_RISK_PCT
+from jarvise_assist.sizing import portfolio_risk_cap_pct
+from jarvise_assist.store import ensure_settings
 
 SendFn = Callable[..., Any]
 
@@ -679,7 +681,8 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
     cap = float(settings["cap_pct"])
     dl = float(settings["day_max_loss_r"])
     st = int(settings["streak_lock_n"])
-    total = float(MAX_PORTFOLIO_RISK_PCT) + cap
+    main_cap = float(portfolio_risk_cap_pct(Decimal(str(ensure_settings(conn)["risk_pct"]))))
+    total = main_cap + cap
     stats = summarize_quick(conn, until_ms=now_ms)
 
     if _is_locked(settings, now_ms=now_ms):
@@ -694,7 +697,8 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
         (
             f"ความเสี่ยงต่อไม้ {_fmt_pct(risk)}% · "
             f"เพดานไม้ quick ที่เปิดพร้อมกัน {_fmt_pct(cap)}% · "
-            f"ความเสี่ยงรวมสูงสุด {_fmt_pct(total)}%"
+            f"ความเสี่ยงรวมสูงสุด {_fmt_pct(total)}% "
+            f"(หลัก {_fmt_pct(main_cap)}% + quick {_fmt_pct(cap)}%)"
         ),
         f"ขาดทุนสูงสุดต่อวัน {_fmt_pct(dl)}R · แพ้ติดกัน {st} ไม้ = ล็อกถึง 00:00",
         f"สถานะ: {status}",
@@ -826,9 +830,12 @@ def _apply_quick_setting(
             send("รับได้แค่ 0.5 / 1 / 1.5 / 2")
             return {"ok": False, "rejected": True}
         if val > CAP_CONFIRM_ABOVE and not confirmed:
-            total = float(MAX_PORTFOLIO_RISK_PCT) + val
+            main_cap = float(portfolio_risk_cap_pct(Decimal(str(ensure_settings(conn)["risk_pct"]))))
+            total = main_cap + val
             send(
-                f"ยืนยันเพดาน {_fmt_pct(val)}%? ความเสี่ยงรวมสูงสุด {_fmt_pct(total)}%",
+                f"ยืนยันเพดาน {_fmt_pct(val)}%? "
+                f"ความเสี่ยงรวมสูงสุด {_fmt_pct(total)}% "
+                f"(หลัก {_fmt_pct(main_cap)}% + quick {_fmt_pct(val)}%)",
                 reply_markup={
                     "inline_keyboard": [
                         [

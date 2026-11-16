@@ -32,6 +32,7 @@ from jarvise_assist.store import (
     insert_signal,
     insert_watch_advice,
     upsert_watch_position,
+    write_settings,
 )
 from jarvise_assist.watch import flush_held_watch_advice, run_assist_watch
 from jarvise_ingest.db import open_db
@@ -802,12 +803,13 @@ def test_n_sizing_risk_cap_exemption(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("JARVISE_ASSIST_EXECUTE", raising=False)
     _patch_kill_clear(monkeypatch)
     now = _ms_bangkok(2026, 11, 14, 12, 25)
-    # qty=1, entry=100, stop=50 → risk 50 USDT on 1000 balance = 5% > 4%
+    # qty=1, entry=100, stop=50 → risk 50 USDT on 1000 balance = 5% > 4% (at risk 2%)
     btc = _pos("BTCUSDT", amt="1", entry="100", mark="100")
     orders = [_stop_order("BTCUSDT", stop="50", qty="1")]
 
     def run(with_quick: bool) -> tuple[Any, str | None]:
         conn = open_db(tmp_path / f"risk_{with_quick}.db")
+        write_settings(conn, risk_pct=2.0)
         if with_quick:
             _insert_quick_trade(conn, status="open", now_ms=now)
         _seed_analysis(

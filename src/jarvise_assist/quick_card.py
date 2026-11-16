@@ -36,10 +36,10 @@ from jarvise_assist.quick import (
 from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.signals import build_existing_ideas
 from jarvise_assist.sizing import (
-    MAX_PORTFOLIO_RISK_PCT,
     SignalCandidate,
     assign_shared_leverage,
     below_min_notional,
+    portfolio_risk_cap_pct,
     round_level_to_tick,
     size_signal,
 )
@@ -105,8 +105,10 @@ def _refusal_quick_cap() -> str:
     return "เกินเพดานความเสี่ยง quick ที่เปิดพร้อมกัน"
 
 
-def _refusal_portfolio_cap() -> str:
-    return "เกินเพดานความเสี่ยงรวม (หลัก + quick ≤ 4%)"
+def _refusal_portfolio_cap(cap: Decimal | None = None) -> str:
+    if cap is not None:
+        return f"เกินเพดานความเสี่ยงรวม (หลัก + quick ≤ {fmt_price(cap)}%)"
+    return "เกินเพดานความเสี่ยงรวม (หลัก + quick)"
 
 
 def _refusal_margin_cap() -> str:
@@ -433,6 +435,7 @@ def build_quick_card(
         return _fail("below_min_notional")
 
     main_risk_pct = Decimal(str(ensure_settings(conn)["risk_pct"]))
+    portfolio_cap_pct = portfolio_risk_cap_pct(main_risk_pct)
     main_ideas = build_existing_ideas(
         conn,
         positions=positions,
@@ -459,8 +462,8 @@ def build_quick_card(
     new_risk = sized.loss_at_stop
     if quick_open + new_risk > balance * (cap_pct / Decimal("100")):
         return _fail("quick_cap")
-    if main_open + quick_open + new_risk > balance * (MAX_PORTFOLIO_RISK_PCT / Decimal("100")):
-        return _fail("portfolio_cap")
+    if main_open + quick_open + new_risk > balance * (portfolio_cap_pct / Decimal("100")):
+        return _fail("portfolio_cap", _refusal_portfolio_cap(portfolio_cap_pct))
 
     fees = fee_breakdown(mark, stop_level)
     f = fees["f"]
@@ -534,7 +537,7 @@ def build_quick_card(
     lines.append(
         f"ความเสี่ยงเปิดอยู่: หลัก {_pct_of_bal(main_open)}% · "
         f"quick {_pct_of_bal(quick_open)}% + ไม้นี้ {_pct_of_bal(new_risk)}% "
-        f"(เพดาน quick {fmt_price(cap_pct)}% · รวม {fmt_price(MAX_PORTFOLIO_RISK_PCT)}%)"
+        f"(เพดาน quick {fmt_price(cap_pct)}% · รวม {fmt_price(portfolio_cap_pct)}%)"
     )
     lines.append(
         f"การ์ดนี้ใช้ได้ถึง {_hhmmss(card_until)} · บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน 10 นาที"

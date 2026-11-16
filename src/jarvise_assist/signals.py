@@ -44,6 +44,7 @@ from jarvise_assist.sizing import (
     chase_exceeded,
     next_assist_run_ms,
     passes_signal_floor,
+    portfolio_risk_cap_pct,
     position_risk_usdt,
     round_level_to_tick,
     size_signal,
@@ -442,7 +443,12 @@ def scan_signal_candidates(
         now_ms=now_ms,
         include_sent_held=not on_demand,
     )
-    admitted, rejected = admit_signals(existing=existing, candidates=candidates, balance=balance)
+    admitted, rejected = admit_signals(
+        existing=existing,
+        candidates=candidates,
+        balance=balance,
+        max_risk_pct=portfolio_risk_cap_pct(risk_pct),
+    )
     for cand in rejected:
         skipped.append({"symbol": cand.sized.symbol, "reason": "risk_cap"})
         if persist:
@@ -810,7 +816,7 @@ def run_assist_morning(
             )
         )
 
-    # Only open positions consume the 2-idea / 4% caps (held peers do not).
+    # Only open positions consume the 2-idea / 2x-risk caps (held peers do not).
     existing = build_existing_ideas(
         conn,
         positions=open_positions,
@@ -821,7 +827,12 @@ def run_assist_morning(
         include_sent_held=False,
     )
     morning_sized = [c for _, c in morning_candidates]
-    admitted, risk_rejected = admit_signals(existing=existing, candidates=morning_sized, balance=balance)
+    admitted, risk_rejected = admit_signals(
+        existing=existing,
+        candidates=morning_sized,
+        balance=balance,
+        max_risk_pct=portfolio_risk_cap_pct(risk_pct),
+    )
     rejected_set = set(risk_rejected)
     for sid, cand in morning_candidates:
         if cand in rejected_set:
