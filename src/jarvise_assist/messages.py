@@ -308,6 +308,28 @@ def format_partial_stop_warning(
     )
 
 
+def _lock_at_stop(
+    *,
+    side: str,
+    qty: Decimal,
+    entry: Decimal,
+    initial_stop: Decimal,
+    new_stop: Decimal,
+) -> tuple[Decimal, Decimal | None]:
+    """Locked PnL at ``new_stop`` and its R multiple (None when risk <= 0)."""
+    side_l = side.lower()
+    if side_l == "long":
+        lock_usdt = (new_stop - entry) * qty
+    else:
+        lock_usdt = (entry - new_stop) * qty
+    risk = abs(entry - initial_stop)
+    if risk <= 0:
+        return lock_usdt, None
+    if qty == 0:
+        return lock_usdt, Decimal("0")
+    return lock_usdt, lock_usdt / (qty * risk)
+
+
 def format_move_stop_advice(
     *,
     symbol: str,
@@ -332,16 +354,10 @@ def format_move_stop_advice(
         old_s = fmt_price_display(old_stop) if old_stop is not None else "ไม่มี"
         new_s = fmt_price_display(new_stop)
         mark_s = fmt_price_display(mark)
-    risk = abs(entry - initial_stop)
-    if side_l == "long":
-        lock_usdt = (new_stop - entry) * qty
-    else:
-        lock_usdt = (entry - new_stop) * qty
-    if risk > 0:
-        lock_r = lock_usdt / (qty * risk) if qty != 0 else Decimal("0")
-        lock_r_s = f"{float(lock_r):+.2f}"
-    else:
-        lock_r_s = "R unknown"
+    lock_usdt, lock_r = _lock_at_stop(
+        side=side, qty=qty, entry=entry, initial_stop=initial_stop, new_stop=new_stop
+    )
+    lock_r_s = f"{float(lock_r):+.2f}" if lock_r is not None else "R unknown"
     lock_usdt_s = f"{float(lock_usdt):+.2f}"
     hhmm = datetime.fromtimestamp(int(expires_at_ms) / 1000.0, tz=BANGKOK).strftime("%H:%M")
     return (
@@ -394,6 +410,12 @@ def format_progress_alert(
     stop_r: Decimal,
     tick: Decimal,
     with_button: bool,
+    pending_stop: Decimal | None = None,
+    pending_source: str | None = None,
+    pending_lock_r: Decimal | None = None,
+    move_button: bool = False,
+    move_expires_at_ms: int | None = None,
+    early_close: bool = False,
 ) -> str:
     """Owner alert that the live mark crossed a progress level. No new order rule."""
     side_label = "LONG" if side.lower() == "long" else "SHORT"
@@ -405,8 +427,28 @@ def format_progress_alert(
         ),
         "แจ้งเพื่อทราบ · กติกาเดิม: เลื่อน BE เมื่อแท่ง 1h ปิดเกิน +0.5R · trail เมื่อเกิน +1R",
     ]
+    if pending_stop is not None:
+        src = str(pending_source or "")
+        if src == "breakeven":
+            src_label = "ทุน"
+        elif src == "trail":
+            src_label = "trail"
+        else:
+            src_label = src
+        reminder = f"📌 ยังไม่ได้เลื่อน stop ตามคำแนะนำ: → {_fmt_price_tick(pending_stop, tick)} ({src_label})"
+        if pending_lock_r is not None:
+            reminder += f" · ล็อก ≈ {float(pending_lock_r):+.2f}R"
+        if not move_button:
+            reminder += " — เลื่อนเองในแอป (Stop-Market, Reduce-Only, Mark Price)"
+        lines.append(reminder)
+        if move_button and move_expires_at_ms is not None:
+            hhmm = datetime.fromtimestamp(int(move_expires_at_ms) / 1000.0, tz=BANGKOK).strftime("%H:%M")
+            lines.append(f"กด 🛡 เลื่อน stop = ตั้ง stop ใหม่ทั้งไม้ แล้วยกเลิก stop เดิม · ปุ่มเลื่อนหมดอายุ {hhmm}")
     if with_button:
-        lines.append("กด ✅ ปิดไม้ = ปิดทั้งไม้ที่ราคาตลาดตอนกด")
+        if early_close:
+            lines.append("กด ⚠️ ปิดก่อนแผน = ปิดทั้งไม้ที่ราคาตลาดตอนกด · ไม่ใช่ทางออกตามแผน")
+        else:
+            lines.append("กด ✅ ปิดไม้ = ปิดทั้งไม้ที่ราคาตลาดตอนกด")
     return "\n".join(lines)
 
 
