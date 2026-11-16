@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from jarvise_assist.messages import _fmt_r_level, fmt_price_display
@@ -135,8 +135,8 @@ def format_journal_card(
     exit_label: str | None = None
     level_s = ""
     if progress:
-        level_s = _fmt_r_level(Decimal(str(checks.get("exit_level"))))
-        exit_label = f"ปิดจากแจ้งเตือน +{level_s}R"
+        level_s = _progress_level_text(checks.get("exit_level"))
+        exit_label = f"ปิดจากแจ้งเตือน +{level_s}R" if level_s else "ปิดจากแจ้งเตือน"
     lines = [
         "📘 บันทึกไม้",
         f"{emoji} {symbol} · {label}",
@@ -151,11 +151,24 @@ def format_journal_card(
     ]
     for key, title in CHECK_LABELS:
         if key == "exit_followed_plan" and progress:
-            lines.append(f"· {title}: ก่อนแผน (ปิดจากแจ้งเตือน +{level_s}R)")
+            lines.append(f"· {title}: ก่อนแผน ({exit_label})")
             continue
         flag = "ผ่าน" if checks.get(key) else "ไม่ผ่าน"
         lines.append(f"· {title}: {flag}")
     return "\n".join(lines)
+
+
+def _progress_level_text(raw: Any) -> str:
+    """Format a progress exit level, or "" when missing/invalid/non-finite."""
+    if raw is None:
+        return ""
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return ""
+    if not value.is_finite():
+        return ""
+    return _fmt_r_level(value)
 
 
 def grade_keyboard(entry_order_id: str) -> dict[str, Any]:
@@ -207,7 +220,8 @@ def collect_auto_checks(conn: Any, trade: dict[str, Any]) -> dict[str, Any]:
         preview = _exit_intent_preview(conn, trade)
         if isinstance(preview, dict) and preview.get("source") == "progress":
             out["exit_source"] = "progress"
-            out["exit_level"] = str(preview["level"])
+            if (level := preview.get("level")) is not None:
+                out["exit_level"] = str(level)
     return out
 
 

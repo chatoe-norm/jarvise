@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.conftest import assist_toggle_confirm
+from tests.assist_helpers import assist_toggle_confirm
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist import listen as listen_mod
@@ -263,4 +263,37 @@ def test_menu_clamp_markup_plain_when_assistant_off(tmp_path: Path) -> None:
     clamp = next(s for s in sent if s.get("reply_markup") and "keyboard" in s["reply_markup"])
     assert "ปรับเป็น 3%" in clamp["text"]
     assert "style" not in _toggle_btn(clamp["reply_markup"])
+    conn.close()
+
+
+def test_risk_confirm_yes_markup_toggle_success_when_enabled(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "risk_on.db")
+    sent, send = _send_capture()
+    write_settings(conn, enabled=True, risk_pct=1.0)
+
+    confirm = _apply_or_confirm_risk(conn, 2.5, send=send)
+    assert confirm.get("confirm") is True
+
+    out = handle_risk_callback(conn, "risk_yes:2.5", send=send)
+    assert out == {"ok": True, "risk_pct": 2.5}
+    assert sent[-1]["text"] == "บันทึกความเสี่ยง 2.5% แล้ว"
+    markup = sent[-1]["reply_markup"]
+    assert markup == reply_keyboard_for(ensure_settings(conn))
+    assert _toggle_btn(markup)["style"] == "success"
+    assert markup["keyboard"][1][1]["text"] == risk_button_label(2.5)
+    assert ensure_settings(conn)["enabled"] is True
+    conn.close()
+
+
+def test_menu_clamp_markup_toggle_success_when_enabled(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "clamp_on.db")
+    day = _ms_bangkok(2026, 10, 27, 12, 0)
+    write_settings(conn, enabled=True, risk_pct=5.0)
+    sent, send = _send_capture()
+    handle_menu_text(conn, BTN_POSITIONS, futures=FakeFutures(), now_ms=day, send=send)
+    clamp = next(s for s in sent if s.get("reply_markup") and "keyboard" in s["reply_markup"])
+    assert clamp["text"] == "ความเสี่ยงที่บันทึกไว้เกิน 3% — ปรับเป็น 3% แล้ว"
+    assert _toggle_btn(clamp["reply_markup"])["style"] == "success"
+    assert clamp["reply_markup"]["keyboard"][1][1]["text"] == risk_button_label(3.0)
+    assert ensure_settings(conn)["risk_pct"] == 3.0
     conn.close()

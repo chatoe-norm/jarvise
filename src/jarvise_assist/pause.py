@@ -156,6 +156,11 @@ def is_paused(settings: dict[str, Any], *, now_ms: int) -> bool:
     return until is not None and int(until) > int(now_ms)
 
 
+def _thru(label: str) -> str:
+    """Space before a numeric date label; keep no space for วันนี้/พรุ่งนี้."""
+    return f"ถึง {label}" if label[:1].isdigit() else f"ถึง{label}"
+
+
 def pause_clear_warning(conn: Any, *, now_ms: int) -> list[str]:
     """Read-only Thai warning lines shown before confirming assist ON while paused."""
     settings = ensure_settings(conn)
@@ -171,7 +176,7 @@ def pause_clear_warning(conn: Any, *, now_ms: int) -> list[str]:
         reason = " (ขาดทุนสัปดาห์นี้)"
     else:
         reason = ""
-    lines = [f"⚠️ จะยกเลิกการหยุดพัก{reason} ที่ตั้งไว้ถึง{bangkok_resume_label(until, now_ms=now_ms)}"]
+    lines = [f"⚠️ จะยกเลิกการหยุดพัก{reason} ที่ตั้งไว้{_thru(bangkok_resume_label(until, now_ms=now_ms))}"]
     if get_edge(conn).get("day_pause_id") == bangkok_day_id(now_ms):
         lines.append(f"⚠️ วันนี้ถ้าขาดทุนเพิ่มอีก 1R จากตอนเปิด จะหยุดพักอีกรอบ ({BOT_ENTRIES_ONLY_TH})")
     if pause_reason == "week_loss":
