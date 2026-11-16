@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
@@ -12,6 +12,7 @@ from jarvise_assist.execute import execution_buttons_enabled
 from jarvise_assist.explore import render_explore_message
 from jarvise_assist.futures import (
     BinanceFuturesClient,
+    FuturesPosition,
     build_futures_client,
     find_protective_stop_info,
     find_take_profit_info,
@@ -72,12 +73,27 @@ from jarvise_notify.telegram import send_message
 SendFn = Callable[..., Any]
 
 _NO_STOP_LINE = "⚠️ ยังไม่มี stop — ตั้ง Stop-Market (Reduce-Only, Mark) ทันที"
+_MARGIN_LABEL = "เงินที่วางจริง (margin)"
 RISK_MIN_PCT = 0.5
 RISK_MAX_PCT = 3.0
 RISK_CONFIRM_ABOVE = 2.0
 TOGGLE_CONFIRM_TTL_S = 60
 TOGGLE_CONFIRM_FUTURE_S = 5
 _TOGGLE_CONFIRM_RE = re.compile(r"^at:(on|onp|off|no):([0-9]{10})$")
+
+
+def _fmt_margin(value: Decimal) -> str:
+    return f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
+
+
+def _margin_text(pos: FuturesPosition) -> str:
+    unit = pos.margin_asset or "USDT"
+    if pos.isolated_wallet is not None and pos.isolated_wallet > 0:
+        return f"{_MARGIN_LABEL} {_fmt_margin(pos.isolated_wallet)} {unit}"
+    if pos.position_initial_margin is not None and pos.position_initial_margin > 0:
+        return f"{_MARGIN_LABEL} ≈ {_fmt_margin(pos.position_initial_margin)} {unit} (cross)"
+    return f"{_MARGIN_LABEL} —"
+
 
 ON_DEMAND_REASON_TH: dict[str, str] = {
     "flat": "ไม่มีแนวโน้ม",
@@ -379,7 +395,7 @@ def render_open_positions(
         )
         side_l = "LONG" if pos.side == "long" else "SHORT"
         if sym not in ASSIST_SYMBOLS:
-            outside = [f"{side_l} · qty {fmt_qty(pos.qty)} · no data, no advice"]
+            outside = [f"{side_l} · qty {fmt_qty(pos.qty)} · {_margin_text(pos)} · no data, no advice"]
             if coverage == "none":
                 outside.append(_NO_STOP_LINE)
             elif coverage == "partial":
@@ -418,7 +434,7 @@ def render_open_positions(
             else None
         )
         details = [
-            f"{side_l} · qty {fmt_qty(pos.qty)}",
+            f"{side_l} · qty {fmt_qty(pos.qty)} · {_margin_text(pos)}",
             f"เข้า {_price_text(pos.entry_price, tick)} · mark {mark_s}",
         ]
         if pos.side == "long":

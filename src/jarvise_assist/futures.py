@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlencode
 
@@ -65,6 +65,9 @@ class FuturesPosition:
     mark_price: Decimal
     update_time_ms: int | None = None
     liquidation_price: Decimal | None = None
+    isolated_wallet: Decimal | None = None
+    position_initial_margin: Decimal | None = None
+    margin_asset: str | None = None
 
     @property
     def side(self) -> str:
@@ -79,6 +82,22 @@ class FuturesPosition:
     @property
     def qty(self) -> Decimal:
         return abs(self.position_amt)
+
+
+def _optional_decimal(raw: Any) -> Decimal | None:
+    """Parse an optional Decimal from a Binance row field; never raises."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    if not value.is_finite():
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -550,6 +569,9 @@ class BinanceFuturesClient:
                     mark_price=Decimal(str(row.get("markPrice") or "0")),
                     update_time_ms=update_ms,
                     liquidation_price=liq,
+                    isolated_wallet=_optional_decimal(row.get("isolatedWallet")),
+                    position_initial_margin=_optional_decimal(row.get("positionInitialMargin")),
+                    margin_asset=(str(row.get("marginAsset") or "").strip().upper() or None),
                 )
             )
         return out
