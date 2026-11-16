@@ -119,6 +119,29 @@ def exit_confirm_keyboard(intent_id: str) -> dict[str, Any]:
     return {"inline_keyboard": [[{"text": "✅ ปิดไม้", "callback_data": f"xx:{intent_id}"}]]}
 
 
+def progress_keyboard(
+    exit_intent_id: str,
+    *,
+    move_intent_id: str | None = None,
+    new_stop: str | None = None,
+    early: bool = True,
+) -> dict[str, Any]:
+    """Progress-alert buttons: optional pending move-stop, then early/plan close."""
+    rows: list[list[dict[str, str]]] = []
+    if move_intent_id is not None and new_stop is not None:
+        rows.append(
+            [
+                {
+                    "text": f"🛡 เลื่อน stop → {new_stop}",
+                    "callback_data": f"ms:{move_intent_id}",
+                }
+            ]
+        )
+    close_label = "⚠️ ปิดก่อนแผน" if early else "✅ ปิดไม้"
+    rows.append([{"text": close_label, "callback_data": f"xx:{exit_intent_id}"}])
+    return {"inline_keyboard": rows}
+
+
 def _risk_choice_label(pct: float, balance: Decimal | None) -> str:
     pct_s = f"{pct:g}"
     if balance is None or balance <= 0:

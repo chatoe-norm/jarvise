@@ -28,9 +28,10 @@ from jarvise_assist.futures import (
     protective_stop_covered_qty,
 )
 from jarvise_assist.journal import journal_on_close
-from jarvise_assist.keyboard import exit_confirm_keyboard, move_stop_keyboard
+from jarvise_assist.keyboard import exit_confirm_keyboard, move_stop_keyboard, progress_keyboard
 from jarvise_assist.messages import (
     _fmt_price_tick,
+    _lock_at_stop,
     format_exit_advice,
     format_move_stop_advice,
     format_no_stop_warning,
@@ -500,6 +501,45 @@ def _process_universe_position(
     mark = pos.mark_price if pos.mark_price > 0 else client.mark_price(pos.symbol)
     entry_time = int(stored.get("entry_time_ms") or now_ms)
     candles_1h = load_candles_in_range(conn, pos.symbol, "1h", since_ms=entry_time, until_ms=int(now_ms))
+    # Trail first so progress can offer a pending move-stop when advice was deduped.
+    trail = current_trail_advice(
+        side=pos.side,
+        entry=pos.entry_price,
+        initial_stop=stop_dec,
+        candles_1h=candles_1h,
+        entry_time_ms=entry_time,
+        now_ms=now_ms,
+        tick=tick,
+        symbol=pos.symbol,
+    )
+    pending_move = False
+    move_deduped = False
+    exit_active = False
+    suggested_pending: Decimal | None = None
+    source_pending: str | None = None
+    if trail is not None:
+        suggested_pending, source_pending = trail
+        pending_move = (
+            suggested_pending > compare_stop if pos.side == "long" else suggested_pending < compare_stop
+        )
+        if pending_move and since is not None:
+            move_deduped = advice_already_sent(
+                conn,
+                symbol=pos.symbol,
+                position_side=pos.position_side,
+                kind="move_stop",
+                reason=source_pending,
+                level=float(suggested_pending),
+                since_ms=since,
+            )
+    if since is not None:
+        exit_active = advice_already_sent(
+            conn,
+            symbol=pos.symbol,
+            position_side=pos.position_side,
+            kind="exit",
+            since_ms=since,
+        )
     progress_sent: list[float] = []
     if not night and since is not None:
         r_now = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
@@ -523,8 +563,18 @@ def _process_universe_position(
                 side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=compare_stop
             )
             reply_markup = None
+            move_expires: int | None = None
+            pending_lock_r: Decimal | None = None
+            if pending_move and suggested_pending is not None:
+                _, pending_lock_r = _lock_at_stop(
+                    side=pos.side,
+                    qty=pos.qty,
+                    entry=pos.entry_price,
+                    initial_stop=stop_dec,
+                    new_stop=suggested_pending,
+                )
             if assist_execute_mode() == "live":
-                intent_id = insert_exec_intent(
+                exit_id = insert_exec_intent(
                     conn,
                     kind="exit",
                     symbol=pos.symbol,
@@ -538,19 +588,88 @@ def _process_universe_position(
                     created_at_ms=now_ms,
                     expires_at_ms=now_ms + PREVIEW_TTL_MS,
                 )
-                reply_markup = exit_confirm_keyboard(intent_id)
-            text = format_progress_alert(
-                symbol=pos.symbol,
-                side=pos.side,
-                level=top_level,
-                r_now=r_now,
-                mark=mark,
-                entry=pos.entry_price,
-                stop=compare_stop,
-                stop_r=stop_r,
-                tick=tick,
-                with_button=reply_markup is not None,
-            )
+                move_intent_id: str | None = None
+                if (
+                    pending_move
+                    and move_deduped
+                    and suggested_pending is not None
+                    and source_pending is not None
+                ):
+                    move_expires = now_ms + MOVE_STOP_TTL_MS
+                    text = format_progress_alert(
+                        symbol=pos.symbol,
+                        side=pos.side,
+                        level=top_level,
+                        r_now=r_now,
+                        mark=mark,
+                        entry=pos.entry_price,
+                        stop=compare_stop,
+                        stop_r=stop_r,
+                        tick=tick,
+                        with_button=True,
+                        pending_stop=suggested_pending,
+                        pending_source=source_pending,
+                        pending_lock_r=pending_lock_r,
+                        move_button=True,
+                        move_expires_at_ms=move_expires,
+                        early_close=not exit_active,
+                    )
+                    move_intent_id = insert_exec_intent(
+                        conn,
+                        kind="move_stop",
+                        symbol=pos.symbol,
+                        side=pos.side,
+                        preview={
+                            "stop": str(suggested_pending),
+                            "qty": str(pos.qty),
+                            "advice_text": text,
+                            "source": source_pending,
+                            "tick": str(tick),
+                            "via": "progress",
+                            "level": str(top_level),
+                        },
+                        created_at_ms=now_ms,
+                        expires_at_ms=move_expires,
+                    )
+                    reply_markup = progress_keyboard(
+                        exit_id,
+                        move_intent_id=move_intent_id,
+                        new_stop=_fmt_price_tick(suggested_pending, tick),
+                        early=not exit_active,
+                    )
+                else:
+                    text = format_progress_alert(
+                        symbol=pos.symbol,
+                        side=pos.side,
+                        level=top_level,
+                        r_now=r_now,
+                        mark=mark,
+                        entry=pos.entry_price,
+                        stop=compare_stop,
+                        stop_r=stop_r,
+                        tick=tick,
+                        with_button=True,
+                        early_close=not exit_active,
+                    )
+                    reply_markup = progress_keyboard(exit_id, early=not exit_active)
+            else:
+                # off / testnet: text-only pending reminder, never intents or markup.
+                text = format_progress_alert(
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    level=top_level,
+                    r_now=r_now,
+                    mark=mark,
+                    entry=pos.entry_price,
+                    stop=compare_stop,
+                    stop_r=stop_r,
+                    tick=tick,
+                    with_button=False,
+                    pending_stop=suggested_pending if pending_move else None,
+                    pending_source=source_pending if pending_move else None,
+                    pending_lock_r=pending_lock_r if pending_move else None,
+                    move_button=False,
+                )
             status = _emit_advice(
                 conn,
                 symbol=pos.symbol,
@@ -587,16 +706,6 @@ def _process_universe_position(
             actions.append(
                 {"symbol": pos.symbol, "action": "progress", "level": float(top_level), "status": status}
             )
-    trail = current_trail_advice(
-        side=pos.side,
-        entry=pos.entry_price,
-        initial_stop=stop_dec,
-        candles_1h=candles_1h,
-        entry_time_ms=entry_time,
-        now_ms=now_ms,
-        tick=tick,
-        symbol=pos.symbol,
-    )
     move_decision: str | None = None
     move_reason: str | None = None
     suggested_d: Decimal | None = None
