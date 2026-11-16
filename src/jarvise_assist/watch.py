@@ -412,6 +412,12 @@ def _process_universe_position(
         step = client.step_size(pos.symbol)
     except Exception:  # noqa: BLE001
         step = Decimal("0")
+    try:
+        tick = client.symbol_filters(pos.symbol).tick_size
+        warn_tick: Decimal | None = tick
+    except Exception:  # noqa: BLE001
+        tick = Decimal("0.01")
+        warn_tick = None
     coverage = protective_stop_coverage(
         orders,
         symbol=pos.symbol,
@@ -449,9 +455,15 @@ def _process_universe_position(
                     covered=covered,
                     position_qty=pos.qty,
                     stop=stop_dec,
+                    tick=warn_tick,
                 )
             else:
-                text = format_no_stop_warning(symbol=pos.symbol, side=pos.side, stop=stop_dec)
+                text = format_no_stop_warning(
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    stop=stop_dec,
+                    tick=warn_tick,
+                )
             # Never hold no-stop overnight.
             status = _emit_advice(
                 conn,
@@ -488,10 +500,6 @@ def _process_universe_position(
     mark = pos.mark_price if pos.mark_price > 0 else client.mark_price(pos.symbol)
     entry_time = int(stored.get("entry_time_ms") or now_ms)
     candles_1h = load_candles_in_range(conn, pos.symbol, "1h", since_ms=entry_time, until_ms=int(now_ms))
-    try:
-        tick = client.symbol_filters(pos.symbol).tick_size
-    except Exception:  # noqa: BLE001
-        tick = Decimal("0.01")
     progress_sent: list[float] = []
     if not night and since is not None:
         r_now = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)

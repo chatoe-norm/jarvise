@@ -8,8 +8,8 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
-from jarvise_assist.messages import fmt_price
-from jarvise_assist.real_trades import format_bkk_window, sync_real_trades
+from jarvise_assist.messages import _fmt_r_level, fmt_price_display
+from jarvise_assist.real_trades import _exit_meta, format_bkk_window, sync_real_trades
 from jarvise_assist.signals import is_night_hold
 from jarvise_assist.store import ensure_settings, get_edge, now_ms
 from jarvise_notify.telegram import send_message
@@ -111,7 +111,9 @@ def stops_only_tightened(side: str, stops: list[float]) -> bool:
 def format_journal_card(
     conn: Any,
     trade: dict[str, Any],
-    checks: dict[str, bool],
+    checks: dict[str, Any],
+    *,
+    tick: Decimal | None = None,
 ) -> str:
     """Thai draft card. Numbers are read from assist_real_trade, not stored here."""
     shown = dict(trade)
@@ -121,14 +123,20 @@ def format_journal_card(
     side = str(shown.get("side") or "").lower()
     emoji = "🔺" if side == "long" else "🔻"
     label = "LONG" if side == "long" else "SHORT"
-    entry = _fmt_px(shown.get("entry_fill_avg"))
-    exit_px = _fmt_px(shown.get("exit_fill_avg"))
+    entry = _fmt_px(shown.get("entry_fill_avg"), tick)
+    exit_px = _fmt_px(shown.get("exit_fill_avg"), tick)
     loss = shown.get("loss_at_stop")
     loss_line = "ไม่ทราบ" if loss is None else f"{float(loss):.2f} USDT"
     net = net_r_of(shown) if loss is not None else None
     net_line = "ไม่ทราบ" if net is None else f"{_signed(net)}R"
     pnl = _net_usdt(shown)
     pnl_line = "ไม่ทราบ" if pnl is None else f"{_signed(pnl)} USDT"
+    progress = checks.get("exit_source") == "progress"
+    exit_label: str | None = None
+    level_s = ""
+    if progress:
+        level_s = _fmt_r_level(Decimal(str(checks.get("exit_level"))))
+        exit_label = f"ปิดจากแจ้งเตือน +{level_s}R"
     lines = [
         "📘 บันทึกไม้",
         f"{emoji} {symbol} · {label}",
@@ -136,12 +144,15 @@ def format_journal_card(
         f"1R = {loss_line}",
         f"ผล {net_line}",
         f"ผลเป็นเงิน {pnl_line}",
-        _exit_line(conn, shown),
-        _timeline_block(shown),
+        _exit_line(conn, shown, exit_label=exit_label),
+        _timeline_block(shown, tick=tick),
         _thesis_line(conn, shown),
         "ตรวจอัตโนมัติ:",
     ]
     for key, title in CHECK_LABELS:
+        if key == "exit_followed_plan" and progress:
+            lines.append(f"· {title}: ก่อนแผน (ปิดจากแจ้งเตือน +{level_s}R)")
+            continue
         flag = "ผ่าน" if checks.get(key) else "ไม่ผ่าน"
         lines.append(f"· {title}: {flag}")
     return "\n".join(lines)
@@ -169,8 +180,12 @@ def tag_keyboard(entry_order_id: str, selected: set[str]) -> dict[str, Any]:
     return {"inline_keyboard": rows}
 
 
-def collect_auto_checks(conn: Any, trade: dict[str, Any]) -> dict[str, bool]:
-    """Freeze the six checks at insert time."""
+def collect_auto_checks(conn: Any, trade: dict[str, Any]) -> dict[str, Any]:
+    """Freeze the six checks at insert time.
+
+    Progress-alert closes keep exit_followed_plan=False and add exit_source /
+    exit_level so the card can render the third state ก่อนแผน.
+    """
     entry_ms = _int_or_none(trade.get("entry_time_ms"))
     side = str(trade.get("side") or "").lower()
     open_n = _open_positions_at(conn, entry_ms)
@@ -180,7 +195,7 @@ def collect_auto_checks(conn: Any, trade: dict[str, Any]) -> dict[str, bool]:
     tightened = _moves_tightened(side, trade.get("planned_stop"), move_stops)
     exit_ok = _exit_followed_plan(conn, trade)
     pause_ok = _not_in_streak_pause(conn, entry_ms)
-    return {
+    out: dict[str, Any] = {
         "open_positions_ok": open_n <= 2,
         "signal_present": signal_ok,
         "stop_existed": stop_ok,
@@ -188,6 +203,12 @@ def collect_auto_checks(conn: Any, trade: dict[str, Any]) -> dict[str, bool]:
         "exit_followed_plan": exit_ok,
         "not_in_streak_pause": pause_ok,
     }
+    if not exit_ok and str(trade.get("exit_kind") or "") == "owner_exit":
+        preview = _exit_intent_preview(conn, trade)
+        if isinstance(preview, dict) and preview.get("source") == "progress":
+            out["exit_source"] = "progress"
+            out["exit_level"] = str(preview["level"])
+    return out
 
 
 def journal_on_close(
@@ -208,7 +229,16 @@ def journal_on_close(
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     send_fn = send or send_message
     sync = sync_fn or sync_real_trades
-    sent = _send_pending(conn, send_fn, now_ms=ts)
+
+    def tick_for(symbol: str) -> Decimal | None:
+        if futures is None:
+            return None
+        try:
+            return futures.symbol_filters(symbol).tick_size
+        except Exception:  # noqa: BLE001 — display falls back to noise-strip
+            return None
+
+    sent = _send_pending(conn, send_fn, now_ms=ts, tick_for=tick_for)
     due = _due_sync_closes(conn, closed, ts)
     synced = False
     sync_error: str | None = None
@@ -223,7 +253,7 @@ def journal_on_close(
             logger.exception("assist journal sync failed")
         else:
             inserted = _insert_missing(conn, since_ms=since, now_ms=ts)
-            sent.extend(_send_pending(conn, send_fn, now_ms=ts))
+            sent.extend(_send_pending(conn, send_fn, now_ms=ts, tick_for=tick_for))
         _record_sync_attempts(conn, due, ts)
     return {
         "ok": True,
@@ -452,7 +482,13 @@ def format_journal_lines(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _send_pending(conn: Any, send: SendFn, *, now_ms: int) -> list[str]:
+def _send_pending(
+    conn: Any,
+    send: SendFn,
+    *,
+    now_ms: int,
+    tick_for: Callable[[str], Decimal | None] | None = None,
+) -> list[str]:
     if is_night_hold(now_ms=int(now_ms)):
         return []
     rows = conn.execute(
@@ -468,12 +504,18 @@ def _send_pending(conn: Any, send: SendFn, *, now_ms: int) -> list[str]:
     sent: list[str] = []
     for raw in rows:
         oid = str(raw["entry_order_id"] if hasattr(raw, "keys") else raw[0])
-        if _send_one(conn, oid, send):
+        if _send_one(conn, oid, send, tick_for=tick_for):
             sent.append(oid)
     return sent
 
 
-def _send_one(conn: Any, entry_order_id: str, send: SendFn) -> bool:
+def _send_one(
+    conn: Any,
+    entry_order_id: str,
+    send: SendFn,
+    *,
+    tick_for: Callable[[str], Decimal | None] | None = None,
+) -> bool:
     trade = _trade_row(conn, entry_order_id)
     journal = _journal_row(conn, entry_order_id)
     if trade is None or journal is None or journal.get("card_message_id") is not None:
@@ -482,7 +524,18 @@ def _send_one(conn: Any, entry_order_id: str, send: SendFn) -> bool:
         checks = json.loads(str(journal.get("auto_checks_json") or "{}"))
     except json.JSONDecodeError:
         checks = {}
-    text = format_journal_card(conn, trade, checks if isinstance(checks, dict) else {})
+    tick: Decimal | None = None
+    if tick_for is not None:
+        try:
+            tick = tick_for(str(trade.get("symbol") or ""))
+        except Exception:  # noqa: BLE001
+            tick = None
+    text = format_journal_card(
+        conn,
+        trade,
+        checks if isinstance(checks, dict) else {},
+        tick=tick,
+    )
     try:
         mid = send(text, reply_markup=grade_keyboard(entry_order_id))
     except Exception:  # noqa: BLE001 — a dead send must not stop the watch loop
@@ -499,7 +552,7 @@ def _insert_missing(conn: Any, *, since_ms: int, now_ms: int) -> list[str]:
         """
         SELECT entry_order_id, intent_id, signal_id, symbol, side, entry_time_ms,
                entry_qty, entry_fill_avg, planned_stop, loss_at_stop, exit_time_ms,
-               exit_fill_avg, exit_kind, realized_pnl_usdt, commission_usdt,
+               exit_fill_avg, exit_kind, exit_order_ids, realized_pnl_usdt, commission_usdt,
                funding_usdt, net_r_real, status
         FROM assist_real_trade
         WHERE entry_time_ms >= ? AND status = 'closed' AND side IN ('long', 'short')
@@ -786,6 +839,55 @@ def _exit_followed_plan(conn: Any, trade: dict[str, Any]) -> bool:
     return row is not None
 
 
+def _exit_intent_preview(conn: Any, trade: dict[str, Any]) -> dict[str, Any] | None:
+    """Preview JSON for the exit market fill linked to this closed trade."""
+    entry_ms = _int_or_none(trade.get("entry_time_ms"))
+    exit_ms = _int_or_none(trade.get("exit_time_ms"))
+    if entry_ms is None or exit_ms is None:
+        return None
+    rows = conn.execute(
+        """
+        SELECT i.preview_json, i.created_at_ms, l.order_or_algo_id
+        FROM assist_exec_intent i
+        INNER JOIN assist_exec_log l ON l.intent_id = i.id
+        WHERE i.kind = 'exit'
+          AND i.symbol = ?
+          AND i.side = ?
+          AND i.created_at_ms >= ?
+          AND i.created_at_ms <= ?
+          AND l.step = 'exit_market'
+        ORDER BY i.created_at_ms DESC
+        """,
+        (
+            str(trade.get("symbol") or "").upper(),
+            str(trade.get("side") or "").lower(),
+            int(entry_ms) - MATCH_PAD_MS,
+            int(exit_ms),
+        ),
+    ).fetchall()
+    if not rows:
+        return None
+    meta_ids: set[str] = set()
+    order_ids = _exit_meta(trade.get("exit_order_ids")).get("order_ids")
+    if isinstance(order_ids, list):
+        for oid in order_ids:
+            meta_ids.add(str(oid))
+    chosen: dict[str, Any] | None = None
+    for raw in rows:
+        item = dict(raw)
+        log_oid = item.get("order_or_algo_id")
+        if log_oid is not None and str(log_oid) in meta_ids:
+            chosen = item
+            break
+    if chosen is None:
+        chosen = dict(rows[0])
+    try:
+        preview = json.loads(str(chosen.get("preview_json") or "{}"))
+    except json.JSONDecodeError:
+        return None
+    return preview if isinstance(preview, dict) else None
+
+
 def _not_in_streak_pause(conn: Any, entry_ms: int | None) -> bool:
     if entry_ms is None:
         return True
@@ -802,9 +904,14 @@ def _not_in_streak_pause(conn: Any, entry_ms: int | None) -> bool:
     return not (int(anchor) <= int(entry_ms) < int(until))
 
 
-def _exit_line(conn: Any, trade: dict[str, Any]) -> str:
+def _exit_line(
+    conn: Any,
+    trade: dict[str, Any],
+    *,
+    exit_label: str | None = None,
+) -> str:
     kind = str(trade.get("exit_kind") or "")
-    label = EXIT_LABELS.get(kind, kind or "ไม่ทราบชนิด")
+    label = exit_label if exit_label is not None else EXIT_LABELS.get(kind, kind or "ไม่ทราบชนิด")
     advice = _last_advice(conn, trade)
     if advice is None:
         return f"ปิด: {label}"
@@ -835,7 +942,7 @@ def _last_advice(conn: Any, trade: dict[str, Any]) -> dict[str, Any] | None:
     return dict(row)
 
 
-def _timeline_block(trade: dict[str, Any]) -> str:
+def _timeline_block(trade: dict[str, Any], *, tick: Decimal | None = None) -> str:
     points = _timeline_points(trade)
     if not points:
         return "เลื่อน stop: ไม่มี"
@@ -844,7 +951,7 @@ def _timeline_block(trade: dict[str, Any]) -> str:
     for index, (stop, locked) in enumerate(points):
         locked_txt = "ไม่ทราบ" if locked is None else f"{_signed(locked)}R"
         label = "stop เริ่ม " if index == 0 and planned is not None else ""
-        lines.append(f"· {label}{_fmt_px(stop)} ล็อก {locked_txt}")
+        lines.append(f"· {label}{_fmt_px(stop, tick)} ล็อก {locked_txt}")
     return "\n".join(lines)
 
 
@@ -1108,10 +1215,14 @@ def _net_usdt(trade: dict[str, Any]) -> float | None:
     return sum(float(part or 0) for part in parts)
 
 
-def _fmt_px(value: Any) -> str:
+def _fmt_px(value: Any, tick: Decimal | None = None) -> str:
     if value is None:
         return "ไม่ทราบ"
-    return fmt_price(Decimal(str(value)))
+    if isinstance(value, float):
+        return fmt_price_display(value, tick)
+    if isinstance(value, Decimal):
+        return fmt_price_display(value, tick)
+    return fmt_price_display(str(value), tick)
 
 
 def _signed(value: float) -> str:

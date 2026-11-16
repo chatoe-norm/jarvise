@@ -26,6 +26,21 @@ def fmt_price(value: Decimal) -> str:
 _fmt_price = fmt_price
 
 
+def fmt_price_display(value: Decimal | float | str, tick: Decimal | None = None) -> str:
+    """Owner-facing price: tick when known, else strip float binary noise.
+
+    Decimal(str(float)) freezes binary residue that fmt_price will not strip, so
+    Decimals without a tick also round-trip through float + .10g.
+    """
+    if tick is not None and tick > 0:
+        return _fmt_price_tick(Decimal(str(value)), tick)
+    if isinstance(value, float):
+        return fmt_price(Decimal(format(value, ".10g")))
+    if isinstance(value, Decimal):
+        return fmt_price(Decimal(format(float(value), ".10g")))
+    return fmt_price(Decimal(str(value)))
+
+
 def _tick_decimals(tick: Decimal) -> int:
     t = tick.normalize()
     exp = t.as_tuple().exponent
@@ -56,8 +71,8 @@ def format_prior_idea_line(
         entry_s = _fmt_price_tick(entry, tick_size)
         stop_s = _fmt_price_tick(stop, tick_size)
     else:
-        entry_s = fmt_price(entry)
-        stop_s = fmt_price(stop)
+        entry_s = fmt_price_display(entry)
+        stop_s = fmt_price_display(stop)
     qty_s = fmt_qty(qty)
     head = label
     if with_time and sent_at_ms:
@@ -192,9 +207,9 @@ def format_signal_message(
             tick_size,
         )
     else:
-        entry_s = fmt_price(sized.entry)
-        stop_s = fmt_price(sized.stop)
-        target_s = fmt_price(sized.target)
+        entry_s = fmt_price_display(sized.entry)
+        stop_s = fmt_price_display(sized.stop)
+        target_s = fmt_price_display(sized.target)
     lines = [
         f"{emoji} {sized.symbol} · {side_label} (4h)",
         f"เข้า: {entry_s}",
@@ -247,11 +262,24 @@ def format_futures_recovered_alert() -> str:
     return "Jarvise trade assist: อ่าน futures ได้แล้ว"
 
 
-def format_no_stop_warning(*, symbol: str, side: str, stop: Decimal) -> str:
+def format_no_stop_warning(
+    *,
+    symbol: str,
+    side: str,
+    stop: Decimal,
+    tick: Decimal | None = None,
+) -> str:
     side_label = "LONG" if side.lower() == "long" else "SHORT"
+    if tick is not None and tick > 0:
+        stop_s = _fmt_price_tick(
+            round_level_to_tick(stop, tick, side=side, kind="stop"),
+            tick,
+        )
+    else:
+        stop_s = fmt_price_display(stop)
     return (
         f"⚠️ {symbol.upper()} {side_label} ไม่มี stop order — "
-        f"ตั้ง Stop-Market (Reduce-Only, Mark Price) ที่ {fmt_price(stop)}"
+        f"ตั้ง Stop-Market (Reduce-Only, Mark Price) ที่ {stop_s}"
     )
 
 
@@ -262,13 +290,21 @@ def format_partial_stop_warning(
     covered: Decimal,
     position_qty: Decimal,
     stop: Decimal,
+    tick: Decimal | None = None,
 ) -> str:
     side_label = "LONG" if side.lower() == "long" else "SHORT"
     covered_s = fmt_qty(covered)
     qty_s = fmt_qty(position_qty)
+    if tick is not None and tick > 0:
+        stop_s = _fmt_price_tick(
+            round_level_to_tick(stop, tick, side=side, kind="stop"),
+            tick,
+        )
+    else:
+        stop_s = fmt_price_display(stop)
     return (
         f"⚠️ {symbol.upper()} {side_label} stop คุมแค่ {covered_s}/{qty_s} — "
-        f"ตั้ง stop ให้ครบทั้งไม้ (Reduce-Only, Mark Price) ที่ {fmt_price(stop)}"
+        f"ตั้ง stop ให้ครบทั้งไม้ (Reduce-Only, Mark Price) ที่ {stop_s}"
     )
 
 
@@ -293,9 +329,9 @@ def format_move_stop_advice(
         new_s = _fmt_price_tick(new_stop, tick)
         mark_s = _fmt_price_tick(mark, tick)
     else:
-        old_s = fmt_price(old_stop) if old_stop is not None else "ไม่มี"
-        new_s = fmt_price(new_stop)
-        mark_s = fmt_price(mark)
+        old_s = fmt_price_display(old_stop) if old_stop is not None else "ไม่มี"
+        new_s = fmt_price_display(new_stop)
+        mark_s = fmt_price_display(mark)
     risk = abs(entry - initial_stop)
     if side_l == "long":
         lock_usdt = (new_stop - entry) * qty

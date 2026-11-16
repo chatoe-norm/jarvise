@@ -2954,7 +2954,7 @@ def test_entry_zero_avg_price_falls_back_to_position_risk(
     transport = RecordingTransport(handlers)
     trade = _client(transport)
     result = run_entry_sequence(conn, intent_id, trade=trade)
-    assert "fill 0.0753 × 759" in result
+    assert "fill 0.07530 × 759" in result
     assert "ถ้าชน stop" in result
     conn.close()
 

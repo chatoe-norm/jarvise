@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,12 @@ from jarvise_assist.journal import (
     summarize_journal,
 )
 from jarvise_assist.listen import process_update
-from jarvise_assist.store import insert_exec_intent, insert_watch_advice, upsert_watch_position
+from jarvise_assist.store import (
+    insert_exec_intent,
+    insert_exec_log,
+    insert_watch_advice,
+    upsert_watch_position,
+)
 from jarvise_assist.watch import run_assist_watch
 from jarvise_assist.weekly import format_weekly_summary
 from jarvise_ingest.db import SCHEMA_VERSION, open_db, upsert_analysis_output
@@ -845,4 +851,215 @@ def test_night_hold_holds_cards_until_morning(tmp_path: Path) -> None:
     )
     assert set(morning_run["sent"]) == {"ada-night", "eth-night"}
     assert len(sent) == 2
+    conn.close()
+
+
+def test_journal_card_exit_price_float_noise(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "noise.db")
+    _trade(
+        conn,
+        entry_order_id="xrp1",
+        symbol="XRPUSDT",
+        side="short",
+        entry_fill=0.95,
+        exit_fill=0.9436999999999999,
+        planned_stop=1.0,
+        exit_kind="owner_exit",
+        signal_id=None,
+        intent_id=None,
+    )
+    trade = dict(conn.execute("SELECT * FROM assist_real_trade WHERE entry_order_id='xrp1'").fetchone())
+    text = format_journal_card(
+        conn,
+        trade,
+        {
+            "open_positions_ok": True,
+            "signal_present": False,
+            "stop_existed": True,
+            "moves_tightened": True,
+            "exit_followed_plan": False,
+            "not_in_streak_pause": True,
+        },
+    )
+    assert "เข้า 0.95 → ออก 0.9437" in text
+    assert "0.9436999999999999" not in text
+    conn.close()
+
+
+def test_journal_on_close_uses_futures_tick_and_falls_back(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "tick-send.db")
+    _seed_card(conn)
+    conn.execute(
+        "UPDATE assist_real_trade SET exit_fill_avg=? WHERE entry_order_id='42'",
+        (0.9436999999999999,),
+    )
+    conn.commit()
+    sent: list[str] = []
+
+    def send(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+        sent.append(text)
+        return 1
+
+    def sync(*_a: Any, **_k: Any) -> None:
+        return None
+
+    fake = FakeFutures(ticks={"ADAUSDT": Decimal("0.0001")})
+    journal_on_close(conn, [], futures=fake, now_ms_value=DAYTIME, send=send, sync_fn=sync)
+    assert "ออก 0.9437" in sent[0]
+    conn.close()
+
+    fallback = open_db(tmp_path / "tick-fallback.db")
+    _seed_card(fallback)
+    fallback.execute(
+        "UPDATE assist_real_trade SET exit_fill_avg=? WHERE entry_order_id='42'",
+        (0.9436999999999999,),
+    )
+    fallback.commit()
+    sent2: list[str] = []
+
+    def send2(text: str, *, reply_markup: dict[str, Any] | None = None) -> int:
+        sent2.append(text)
+        return 1
+
+    class BrokenFilters(FakeFutures):
+        def symbol_filters(self, symbol: str) -> Any:
+            raise RuntimeError("filters down")
+
+    journal_on_close(
+        fallback,
+        [],
+        futures=BrokenFilters(),
+        now_ms_value=DAYTIME,
+        send=send2,
+        sync_fn=sync,
+    )
+    assert "ออก 0.9437" in sent2[0]
+    assert "0.9436999999999999" not in sent2[0]
+    fallback.close()
+
+
+def _progress_exit_setup(
+    conn: Any,
+    *,
+    with_advice: bool = False,
+    with_exit_market_log: bool = True,
+    exit_order_id: str = "99",
+) -> dict[str, Any]:
+    """Closed owner_exit short with an optional progress exit intent."""
+    _trade(
+        conn,
+        entry_order_id="prog1",
+        symbol="XRPUSDT",
+        side="short",
+        entry_fill=0.95,
+        exit_fill=0.9437,
+        planned_stop=1.0,
+        loss_at_stop=1.0,
+        net_r_real=0.54,
+        realized=0.54,
+        exit_kind="owner_exit",
+        signal_id=None,
+        intent_id=None,
+    )
+    conn.execute(
+        "UPDATE assist_real_trade SET exit_order_ids=? WHERE entry_order_id='prog1'",
+        (json.dumps({"order_ids": [int(exit_order_id)]}),),
+    )
+    conn.commit()
+    if with_advice:
+        insert_watch_advice(
+            conn,
+            symbol="XRPUSDT",
+            position_side="BOTH",
+            kind="exit",
+            reason="flat",
+            level=None,
+            approx_r=0.5,
+            status="sent",
+            created_at_ms=ENTRY + 2_000,
+        )
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="XRPUSDT",
+        side="short",
+        preview={
+            "qty": "10",
+            "entry": "0.95",
+            "source": "progress",
+            "level": "0.5",
+        },
+        created_at_ms=EXIT - 1_000,
+        expires_at_ms=EXIT + 60_000,
+    )
+    conn.execute("UPDATE assist_exec_intent SET status='done' WHERE id=?", (intent_id,))
+    conn.commit()
+    if with_exit_market_log:
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step="exit_market",
+            endpoint="/fapi/v1/order",
+            order_or_algo_id=str(exit_order_id),
+            created_at_ms=EXIT - 500,
+        )
+    trade = dict(conn.execute("SELECT * FROM assist_real_trade WHERE entry_order_id='prog1'").fetchone())
+    return trade
+
+
+def test_progress_close_grades_as_early_offered(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "prog-grade.db")
+    trade = _progress_exit_setup(conn)
+    checks = collect_auto_checks(conn, trade)
+    assert checks["exit_followed_plan"] is False
+    assert checks["exit_source"] == "progress"
+    assert checks["exit_level"] == "0.5"
+    text = format_journal_card(conn, trade, checks)
+    assert "ปิด: ปิดจากแจ้งเตือน +0.5R" in text
+    assert "· ปิดตามแผน: ก่อนแผน (ปิดจากแจ้งเตือน +0.5R)" in text
+    plan_line = next(line for line in text.splitlines() if line.startswith("· ปิดตามแผน:"))
+    assert "ไม่ผ่าน" not in plan_line
+    conn.close()
+
+
+def test_progress_close_after_exit_advice_passes(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "prog-advice.db")
+    trade = _progress_exit_setup(conn, with_advice=True)
+    checks = collect_auto_checks(conn, trade)
+    assert checks["exit_followed_plan"] is True
+    assert "exit_source" not in checks
+    text = format_journal_card(conn, trade, checks)
+    assert "· ปิดตามแผน: ผ่าน" in text
+    assert "ก่อนแผน" not in text
+    assert "ปิด: ปิดตามปุ่ม" in text
+    conn.close()
+
+
+def test_owner_exit_without_progress_or_advice_still_fails(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "owner-fail.db")
+    _trade(
+        conn,
+        entry_order_id="manual1",
+        symbol="XRPUSDT",
+        side="short",
+        exit_kind="owner_exit",
+        signal_id=None,
+        intent_id=None,
+    )
+    trade = dict(conn.execute("SELECT * FROM assist_real_trade WHERE entry_order_id='manual1'").fetchone())
+    checks = collect_auto_checks(conn, trade)
+    assert checks["exit_followed_plan"] is False
+    assert "exit_source" not in checks
+    text = format_journal_card(conn, trade, checks)
+    assert "· ปิดตามแผน: ไม่ผ่าน" in text
+    assert "ก่อนแผน" not in text
+    conn.close()
+
+
+def test_progress_link_ignores_done_intent_without_exit_market_log(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "no-log.db")
+    trade = _progress_exit_setup(conn, with_exit_market_log=False)
+    checks = collect_auto_checks(conn, trade)
+    assert checks["exit_followed_plan"] is False
+    assert "exit_source" not in checks
     conn.close()

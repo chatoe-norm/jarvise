@@ -44,6 +44,7 @@ from jarvise_assist.keyboard import entry_confirm_keyboard, move_stop_keyboard
 from jarvise_assist.messages import (
     _fmt_price_tick,
     fmt_price,
+    fmt_price_display,
     fmt_qty,
     format_move_stop_advice,
     format_signal_message,
@@ -142,7 +143,7 @@ MSG_ORDER_NOT_FOUND = "ไม่พบคำสั่งบน Binance"
 def msg_stop_unverifiable(*, symbol: str, qty: Decimal, stop: Decimal) -> str:
     """Filled, but the stop read-back is unreadable after a success response with an algo id."""
     return (
-        f"⚠️ {symbol.upper()} qty {fmt_qty(qty)} stop {fmt_price(stop)} "
+        f"⚠️ {symbol.upper()} qty {fmt_qty(qty)} stop {fmt_price_display(stop)} "
         "เปิดแอปเช็ก stop ตอนนี้ — บอทจะตรวจซ้ำภายใน 5 นาที"
     )
 
@@ -969,7 +970,7 @@ def _msg_close_unconfirmed(
     side_l = "LONG" if side == "long" else "SHORT"
     return (
         f"🚨 ไม้ {symbol.upper()} {side_l} เปิดอยู่ ยังไม่มี stop และปิดไม่ได้ — เข้า Binance ปิดทันที\n"
-        f"qty {qty} · stop {stop}"
+        f"qty {qty} · stop {fmt_price_display(stop)}"
     )
 
 
@@ -2371,17 +2372,21 @@ def run_entry_sequence(
             )
 
     side_l = "LONG" if side == "long" else "SHORT"
+    stop_s = _fmt_price_tick(stop, filters.tick_size)
+    target_s = _fmt_price_tick(target, filters.tick_size)
     if avg is None or avg <= 0:
         return _exec_result(
-            f"✅ เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\nstop {stop} · TP {target}{tp_note}",
+            f"✅ เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\n"
+            f"stop {stop_s} · TP {target_s}{tp_note}",
             status="done",
         )
     loss = abs(avg - stop) * exec_qty
+    avg_s = _fmt_price_tick(avg, filters.tick_size)
     return _exec_result(
         (
             f"✅ เข้า {symbol} {side_l}\n"
-            f"fill {avg} × {exec_qty}\n"
-            f"stop {stop} · TP {target}\n"
+            f"fill {avg_s} × {exec_qty}\n"
+            f"stop {stop_s} · TP {target_s}\n"
             f"ถ้าชน stop ≈ {loss.quantize(Decimal('0.01'))} USDT"
             f"{tp_note}"
         ),
@@ -2804,7 +2809,7 @@ def _finish_flat_exit(
     else:
         pnl_bit = ""
     if avg is not None and avg > 0:
-        text = f"✅ ปิด {symbol} @ {avg}{pnl_bit}"
+        text = f"✅ ปิด {symbol} @ {fmt_price_display(avg)}{pnl_bit}"
     elif include_pnl:
         text = f"✅ ปิด {symbol}{pnl_bit}"
     else:
@@ -4042,7 +4047,7 @@ def _recover_exit_intent(
             position_side=pos_side,
         )
         if avg is not None and avg > 0:
-            text = f"✅ ปิด {symbol} @ {avg}"
+            text = f"✅ ปิด {symbol} @ {fmt_price_display(avg)}"
         else:
             text = f"✅ ปิด {symbol}"
         status = "done"
