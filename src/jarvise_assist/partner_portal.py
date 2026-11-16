@@ -25,6 +25,7 @@ from jarvise_assist.partner_admin import (
     parse_amount,
     send_to_partner,
 )
+from jarvise_assist.partner_positions import render_partner_positions
 from jarvise_assist.partner_value import (
     AccountValue,
     AccountValueError,
@@ -110,6 +111,7 @@ def _card_buttons() -> dict[str, Any]:
                 {"text": "💸 ถอนกำไร", "callback_data": "pp:rq:wd"},
             ],
             [{"text": "🚪 ปิดพอร์ต", "callback_data": "pp:rq:cl"}],
+            [{"text": "📊 ไม้ที่เปิดอยู่", "callback_data": "pp:pos"}],
         ]
     }
 
@@ -576,6 +578,38 @@ def handle_portal_callback(
         if not answered:
             _answer()
         return out
+
+    if data == "pp:pos":
+        _answer()
+        if str(row["status"]) != "active":
+            text = "ปิดพอร์ตแล้ว"
+            ok = False
+            if mid is not None:
+                try:
+                    ok = bool(edit(int(mid), text, reply_markup=None, chat_id=partner_chat))
+                except Exception:  # noqa: BLE001
+                    ok = False
+            if not ok:
+                send_to_partner(send, row, text, reply_markup=None)
+            return {"ok": True, "cmd": "positions"}
+        text = render_partner_positions(conn, _resolve_client(futures), now_ms=now_ms)
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔄 รีเฟรช", "callback_data": "pp:pos"},
+                    {"text": "⬅️ กลับ", "callback_data": "pp:v"},
+                ]
+            ]
+        }
+        ok = False
+        if mid is not None:
+            try:
+                ok = bool(edit(int(mid), text, reply_markup=markup, chat_id=partner_chat))
+            except Exception:  # noqa: BLE001
+                ok = False
+        if not ok:
+            send_to_partner(send, row, text, reply_markup=markup)
+        return {"ok": True, "cmd": "positions"}
 
     _answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
     return {"ok": False, "reason": "unknown"}
