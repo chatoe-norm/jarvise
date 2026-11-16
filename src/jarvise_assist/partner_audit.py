@@ -595,7 +595,8 @@ def reconcile(
             paid_at = item.paid_at_ms if item.paid_at_ms is not None else item.t_ref_ms
             if paid_at < report_start_ms:
                 continue
-            if coverage_start_ms is not None and item.t_lo_ms < coverage_start_ms:
+            # Transfers before ledger start are pre_init and never usable, so the window that matters starts at ledger start.
+            if coverage_start_ms is not None and max(item.t_lo_ms, ledger_start_ms) < coverage_start_ms:
                 continue
             age = now_ms - paid_at
             alertable = age >= GRACE_PAID_MS

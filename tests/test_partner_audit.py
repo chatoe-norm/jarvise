@@ -425,6 +425,55 @@ def test_paid_no_outflow_skipped_before_coverage() -> None:
     assert any(f.code == "paid_no_outflow" for f in r_default.findings)
 
 
+def test_paid_no_outflow_when_t_lo_before_ledger_start() -> None:
+    """Early payout: t_lo < ledger_start == coverage; still alert paid_no_outflow."""
+    s = NOW
+    decided = s + DAY_MS
+    paid_at = decided + HOUR_MS
+    item = LedgerCash(
+        ref="pr:early",
+        kind="payout",
+        direction=-1,
+        partner_name="Bob",
+        amount=D("100"),
+        t_ref_ms=decided,
+        t_lo_ms=decided - PAY_BEFORE_MS,
+        t_hi_ms=paid_at + PAY_AFTER_MS,
+        payout_state="paid",
+        paid_at_ms=paid_at,
+    )
+    assert item.t_lo_ms < s
+    r = reconcile(
+        [],
+        [item],
+        now_ms=paid_at + GRACE_PAID_MS + 1,
+        ledger_start_ms=s,
+        report_start_ms=s,
+        coverage_start_ms=s,
+    )
+    paid = [f for f in r.findings if f.code == "paid_no_outflow"]
+    assert len(paid) == 1
+    assert paid[0].alertable is True
+
+
+def test_near_group_deposit_beats_unmatched() -> None:
+    """Deposit 1000 vs 600+398 in-window → near group match (kills missing near group pass)."""
+    ledger_start = NOW - 10 * DAY_MS
+    t0 = NOW
+    d = _dep(ref="ev:near_grp", amount="1000", t_ref=t0)
+    t_a = _xfer(time_ms=t0 - 1000, amount="600", tran_id="g600")
+    t_b = _xfer(time_ms=t0 - 500, amount="398", tran_id="g398")
+    r = reconcile(
+        [t_a, t_b],
+        [d],
+        now_ms=t0 + GRACE_DEPOSIT_MS + 1,
+        ledger_start_ms=ledger_start,
+        report_start_ms=ledger_start,
+    )
+    assert r.matched_n == 1
+    assert [f.code for f in r.findings] == ["near_amount"]
+
+
 def test_ledger_cash_windows_on_real_db(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "windows.db")
     admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)

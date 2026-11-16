@@ -11,6 +11,7 @@ import pytest
 
 from jarvise_assist import partner_store as ps
 from jarvise_assist.partner_audit import (
+    BINANCE_HISTORY_MS,
     DAY_MS,
     FAIL_ALERT_AFTER_MS,
     GRACE_BINANCE_MS,
@@ -379,17 +380,164 @@ def test_late_mark_paid_no_false_paid_no_outflow(tmp_path: Path) -> None:
             _sent.append(text)
             return 1
 
+        day12_result: dict[str, Any] | None = None
         for day in range(22):
             now = paid_t + HOUR_MS + day * DAY_MS
-            run_partner_audit_job(conn, client=client, now_ms=now, send=send, state_path=state)
+            result = run_partner_audit_job(conn, client=client, now_ms=now, send=send, state_path=state)
+            if lag == 5 and day == 12:
+                day12_result = result
         assert sent == [], f"lag={lag}d unexpected sends: {sent}"
 
         if lag == 5:
+            assert day12_result is not None
+            assert day12_result["matched"] == 1
             day12 = paid_t + HOUR_MS + 12 * DAY_MS
             report = audit_report(conn, client, now_ms=day12, days=14)
             assert report.status == "ok"
             assert not any(f.code == "paid_no_outflow" for f in report.findings)
         conn.close()
+
+
+def test_early_paid_no_outflow_alerts(tmp_path: Path) -> None:
+    """Close at NOW+2d, mark_paid close+1h, no outflow → one กดโอนแล้ว after grace."""
+    db = tmp_path / "early_paid.db"
+    conn = open_db(db)
+    t0 = NOW
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=t0)
+    ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), t0)
+    bob = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=t0 + 1)
+    bid = bob["partner_id"]
+    dep_t = t0 + 60_000
+    ps.apply_deposit(conn, bid, D("100"), D("1100"), dep_t)
+    t_close = t0 + 2 * DAY_MS
+    close = ps.apply_close(conn, bid, D("1100"), t_close)
+    assert close["ok"]
+    paid_t = t_close + HOUR_MS
+    ps.mark_paid(conn, close["request_id"], paid_t)
+    client = FakeClient(
+        [
+            Transfer(
+                time_ms=dep_t,
+                amount=D("100"),
+                asset="USDT",
+                income_type="TRANSFER",
+                tran_id="bob_in",
+            )
+        ]
+    )
+    state = tmp_path / "early_paid_state.json"
+    sent: list[str] = []
+
+    def send(text: str) -> int:
+        sent.append(text)
+        return 1
+
+    for day in range(3):
+        run_partner_audit_job(
+            conn,
+            client=client,
+            now_ms=paid_t + HOUR_MS + day * DAY_MS,
+            send=send,
+            state_path=state,
+        )
+    assert len(sent) == 1
+    assert "กดโอนแล้ว" in sent[0]
+    conn.close()
+
+
+def test_late_paid_no_outflow_fetch_extension_alerts(tmp_path: Path) -> None:
+    """Close+10d, mark_paid +20d after close+1h, no outflow → fetch extension still alerts."""
+    db = tmp_path / "late_paid_alert.db"
+    conn = open_db(db)
+    t0 = NOW
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=t0)
+    ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), t0)
+    bob = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=t0 + 1)
+    bid = bob["partner_id"]
+    dep_t = t0 + DAY_MS
+    ps.apply_deposit(conn, bid, D("100"), D("1100"), dep_t)
+    t_close = t0 + 10 * DAY_MS
+    close = ps.apply_close(conn, bid, D("1100"), t_close)
+    assert close["ok"]
+    # Outflow time close+1h is NOT added — proves unpaid outflow alert via fetch extension.
+    paid_t = t_close + HOUR_MS + 20 * DAY_MS
+    ps.mark_paid(conn, close["request_id"], paid_t)
+    client = FakeClient(
+        [
+            Transfer(
+                time_ms=dep_t,
+                amount=D("100"),
+                asset="USDT",
+                income_type="TRANSFER",
+                tran_id="bob_in",
+            )
+        ]
+    )
+    state = tmp_path / "late_paid_alert_state.json"
+    sent: list[str] = []
+
+    def send(text: str) -> int:
+        sent.append(text)
+        return 1
+
+    for day in range(3):
+        run_partner_audit_job(
+            conn,
+            client=client,
+            now_ms=paid_t + HOUR_MS + day * DAY_MS,
+            send=send,
+            state_path=state,
+        )
+    assert len(sent) == 1
+    assert "กดโอนแล้ว" in sent[0]
+    conn.close()
+
+
+def test_paid_beyond_binance_history_no_alert(tmp_path: Path) -> None:
+    """mark_paid 95d after close+1h, no outflow → coverage older than history → zero sends."""
+    db = tmp_path / "beyond_hist.db"
+    conn = open_db(db)
+    t0 = NOW
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=t0)
+    ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), t0)
+    bob = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=t0 + 1)
+    bid = bob["partner_id"]
+    dep_t = t0 + DAY_MS
+    ps.apply_deposit(conn, bid, D("100"), D("1100"), dep_t)
+    t_close = t0 + 10 * DAY_MS
+    close = ps.apply_close(conn, bid, D("1100"), t_close)
+    assert close["ok"]
+    paid_t = t_close + HOUR_MS + 95 * DAY_MS
+    assert paid_t - (t_close - 3 * DAY_MS) > BINANCE_HISTORY_MS
+    ps.mark_paid(conn, close["request_id"], paid_t)
+    client = FakeClient(
+        [
+            Transfer(
+                time_ms=dep_t,
+                amount=D("100"),
+                asset="USDT",
+                income_type="TRANSFER",
+                tran_id="bob_in",
+            )
+        ]
+    )
+    state = tmp_path / "beyond_hist_state.json"
+    sent: list[str] = []
+
+    def send(text: str) -> int:
+        sent.append(text)
+        return 1
+
+    for day in range(3):
+        run_partner_audit_job(
+            conn,
+            client=client,
+            now_ms=paid_t + HOUR_MS + day * DAY_MS,
+            send=send,
+            state_path=state,
+        )
+    assert sent == []
+    conn.close()
 
 
 def test_job_verify_ledger_fail_alerts_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
