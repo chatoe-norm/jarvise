@@ -15,7 +15,7 @@ import os
 import sqlite3
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -52,6 +52,26 @@ MAX_GROUP = 4
 MAX_GROUP_CANDIDATES = 8
 ALERT_MAX_LINES = 10
 PRUNE_MS = 120 * DAY_MS
+GUARD_MAX_LINES = 6
+GUARD_WARN_CODES = frozenset(
+    {
+        "transfer_in_unrecorded",
+        "transfer_out_unrecorded",
+        "deposit_no_transfer",
+        "paid_no_outflow",
+        "due_but_paid_out",
+        "verify_mismatch",
+        "this_deposit_not_seen",
+        "this_deposit_amount_diff",
+    }
+)
+_GUARD_FETCH_TH: dict[str, str] = {
+    "no_client": "ไม่มีคีย์อ่าน Binance",
+    "read_failed": "อ่าน Binance ไม่สำเร็จ",
+    "incomplete": "ข้อมูลเกิน 1000 แถว",
+    "bad_payload": "ข้อมูล Binance ผิดรูปแบบ",
+    "error": "ระบบตรวจผิดพลาด",
+}
 
 SendFn = Callable[[str], Any]
 _TWO_DP = Decimal("0.01")
@@ -113,6 +133,15 @@ class AuditResult:
 class FetchResult:
     status: str
     transfers: list[Transfer] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class GuardResult:
+    status: str  # ok | not_init | no_client | read_failed | incomplete | bad_payload | error
+    checked_at_ms: int
+    findings: list[Finding]
+    warn: bool
     error: str | None = None
 
 
@@ -988,6 +1017,154 @@ def audit_report(
         ledger_out=result.ledger_out,
         error=result.error,
     )
+
+
+def guard_check(
+    conn: sqlite3.Connection,
+    client: Any | None,
+    *,
+    now_ms: int,
+    deposit_request_id: str | None = None,
+    deposit_amount: Decimal | None = None,
+    deposit_partner: str | None = None,
+) -> GuardResult:
+    """Confirm-time transfer check. SELECT-only; never touches the state file."""
+    now = int(now_ms)
+    start = ledger_start_ms(conn)
+    if start is None:
+        return GuardResult(status="not_init", checked_at_ms=now, findings=[], warn=False, error=None)
+    report_start = max(start, now - JOB_DAYS * DAY_MS)
+    pad_from = max(start, report_start - PAD_MS)
+    if client is None:
+        return GuardResult(status="no_client", checked_at_ms=now, findings=[], warn=True, error=None)
+
+    items = list(ledger_cash(conn, pad_from, now))
+    if deposit_request_id is not None:
+        rid = str(deposit_request_id)
+        items.append(
+            LedgerCash(
+                ref=f"rq:{rid}",
+                kind="deposit",
+                direction=1,
+                partner_name=deposit_partner or "?",
+                amount=deposit_amount if deposit_amount is not None else Decimal("0"),
+                t_ref_ms=now,
+                t_lo_ms=now - DEP_BEFORE_MS,
+                t_hi_ms=now + DEP_AFTER_MS,
+                payout_state=None,
+                paid_at_ms=None,
+            )
+        )
+
+    fetch_from = _fetch_from_ms(items, pad_from=pad_from, report_start=report_start, ledger_start=start)
+    fetched = fetch_transfers(client, fetch_from, now, now_ms=now)
+    if fetched.status != "ok":
+        return GuardResult(
+            status=fetched.status,
+            checked_at_ms=now,
+            findings=[],
+            warn=True,
+            error=fetched.error,
+        )
+
+    coverage_start = max(fetch_from, now - BINANCE_HISTORY_MS)
+    result = reconcile(
+        fetched.transfers,
+        items,
+        now_ms=now,
+        ledger_start_ms=start,
+        report_start_ms=report_start,
+        coverage_start_ms=coverage_start,
+    )
+    findings = list(result.findings)
+    vf = _verify_finding(conn)
+    if vf is not None:
+        findings.append(vf)
+
+    if deposit_request_id is not None:
+        rid = str(deposit_request_id)
+        remapped: list[Finding] = []
+        for f in findings:
+            if f.fingerprint == f"dep:{rid}":
+                remapped.append(replace(f, code="this_deposit_not_seen"))
+            elif f.code == "near_amount" and f.fingerprint.endswith(f":rq:{rid}"):
+                remapped.append(replace(f, code="this_deposit_amount_diff"))
+            else:
+                remapped.append(f)
+        findings = remapped
+
+    findings.sort(key=lambda f: (f.time_ms, f.fingerprint))
+    status = result.status
+    warn = status != "ok" or any(f.code in GUARD_WARN_CODES for f in findings)
+    return GuardResult(
+        status=status,
+        checked_at_ms=now,
+        findings=findings,
+        warn=warn,
+        error=result.error,
+    )
+
+
+def format_guard_th(result: GuardResult, *, last_ok_ms: int | None) -> str:
+    """Thai admin card block for the confirm-time transfer guard."""
+    if result.status != "ok":
+        reason = _GUARD_FETCH_TH.get(result.status, result.status)
+        if result.error:
+            reason = f"{reason}/{result.error}"
+        lines = [
+            f"⚠️ ตรวจยอดโอนไม่ได้ตอนนี้ ({reason}) — ยังไม่รู้ว่ามีโอนที่ไม่ได้บันทึกหรือไม่",
+        ]
+        if last_ok_ms is not None:
+            lines.append(f"ตรวจสำเร็จล่าสุด (รอบเช้า) {_fmt_bkk(int(last_ok_ms))}")
+        else:
+            lines.append("ยังไม่เคยตรวจสำเร็จ")
+        return "\n".join(lines)
+
+    findings = list(result.findings)
+    n = len(findings)
+    lines = [f"⚠️ ตรวจยอดโอนก่อนยืนยัน — พบ {n} เรื่อง"]
+    warn_bullets: list[str] = []
+    info_bullets: list[str] = []
+    for f in findings:
+        dt = _fmt_bkk(f.time_ms)
+        x = _fmt_amt(f.amount)
+        name = f.partner_name or "?"
+        if f.code == "transfer_in_unrecorded":
+            warn_bullets.append(f"• {dt} เงินเข้า +{x} USDT ยังไม่อยู่ในสมุด")
+        elif f.code == "transfer_out_unrecorded":
+            warn_bullets.append(f"• {dt} เงินออก −{x} USDT ยังไม่อยู่ในสมุด")
+        elif f.code == "this_deposit_not_seen":
+            warn_bullets.append(f"• ยังไม่เห็นเงินฝาก {x} USDT ของรายการนี้เข้า futures wallet")
+        elif f.code == "this_deposit_amount_diff":
+            warn_bullets.append(
+                f"• ยอดเข้าจริงต่างจากที่จะบันทึก {x} USDT — ถ้าไม่ตรง ให้ยกเลิกแล้วใช้ p dep {name} <ยอดจริง>"
+            )
+        elif f.code == "deposit_no_transfer":
+            warn_bullets.append(f"• {name}: บันทึกฝาก {x} แต่ไม่เห็นเงินเข้า futures")
+        elif f.code == "paid_no_outflow":
+            warn_bullets.append(f"• {name}: กดโอนแล้ว {x} แต่ไม่เห็นเงินออกจาก futures")
+        elif f.code == "due_but_paid_out":
+            warn_bullets.append(f"• {name}: ค้างจ่าย {x} แต่เงินออกแล้ว {f.detail}")
+        elif f.code == "verify_mismatch":
+            warn_bullets.append("• สมุดไม่ตรงกับประวัติ (verify_ledger)")
+        elif f.code == "near_amount":
+            info_bullets.append(f"• ℹ️ {name}: ยอดต่างจาก Binance {x} USDT")
+        elif f.code == "non_usdt":
+            asset = f.detail or "?"
+            info_bullets.append(f"• ℹ️ {dt} โอน {asset} — ระบบนับเฉพาะ USDT")
+        else:
+            warn_bullets.append(f"• {dt} {f.code} {x}")
+
+    bullets = warn_bullets + info_bullets
+    if len(bullets) > GUARD_MAX_LINES:
+        extra = len(bullets) - GUARD_MAX_LINES
+        bullets = bullets[:GUARD_MAX_LINES]
+        bullets.append(f"และอีก {extra} รายการ")
+    lines.extend(bullets)
+    lines.append(
+        "ยืนยันตอนนี้ = ล็อกตัวเลขด้วยยอดพอร์ตที่รวมเงินก้อนนี้ · ควรบันทึกให้ครบก่อน · ดูทั้งหมด: jarvise assist partner-audit"
+    )
+    return "\n".join(lines)
 
 
 def export_events_csv(conn: sqlite3.Connection, path: Path) -> None:
