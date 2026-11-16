@@ -380,6 +380,7 @@ def reconcile(
     now_ms: int,
     ledger_start_ms: int,
     report_start_ms: int,
+    coverage_start_ms: int | None = None,
 ) -> AuditResult:
     """Pure deterministic matching. PAD-zone rows match but do not create findings."""
     pre_init = 0
@@ -450,7 +451,85 @@ def reconcile(
         if ti in unmatched_t and ii in unmatched_i:
             mark_pair(ti, ii, near=False)
 
-    # Pass 2: near 1:1
+    def run_group_pass(*, exact_only: bool) -> None:
+        nonlocal matched_n
+        group_cands: list[tuple[Decimal, int, tuple[str, ...], list[int], list[int], bool]] = []
+
+        def consider_group(t_idxs: list[int], i_idxs: list[int]) -> None:
+            ts = [usable[i] for i in t_idxs]
+            its = [items[i] for i in i_idxs]
+            if len(ts) == 1:
+                if not all(_in_window(ts[0], it) for it in its):
+                    return
+            else:
+                if not all(_in_window(t, its[0]) for t in ts):
+                    return
+            sum_t = sum((_abs_amt(t) for t in ts), Decimal("0"))
+            sum_i = sum((it.amount for it in its), Decimal("0"))
+            diff = abs(sum_t - sum_i)
+            exact = diff <= EXACT_TOL
+            near = (not exact) and diff <= _near_tol(sum_i if sum_i > 0 else sum_t)
+            if exact_only:
+                if not exact:
+                    return
+                near = False
+            elif not exact and not near:
+                return
+            gap = _group_time_gap(ts, its)
+            group_cands.append((diff, gap, _ids_key(ts, its), list(t_idxs), list(i_idxs), near))
+
+        for ti in list(unmatched_t):
+            t = usable[ti]
+            pool = [ii for ii in unmatched_i if _in_window(t, items[ii])]
+            pool.sort(key=lambda ii: (_time_gap(t, items[ii]), items[ii].ref))
+            pool = pool[:MAX_GROUP_CANDIDATES]
+            for k in range(2, min(MAX_GROUP, len(pool)) + 1):
+                for combo in itertools.combinations(pool, k):
+                    consider_group([ti], list(combo))
+
+        for ii in list(unmatched_i):
+            item = items[ii]
+            pool = [ti for ti in unmatched_t if _in_window(usable[ti], item)]
+            pool.sort(key=lambda ti: (_time_gap(usable[ti], item), usable[ti].tran_id))
+            pool = pool[:MAX_GROUP_CANDIDATES]
+            for k in range(2, min(MAX_GROUP, len(pool)) + 1):
+                for combo in itertools.combinations(pool, k):
+                    consider_group(list(combo), [ii])
+
+        group_cands.sort(key=lambda c: (c[0], c[1], c[2]))
+        for diff, _gap, _ids, t_idxs, i_idxs, near in group_cands:
+            if any(ti not in unmatched_t for ti in t_idxs):
+                continue
+            if any(ii not in unmatched_i for ii in i_idxs):
+                continue
+            for ti in t_idxs:
+                unmatched_t.discard(ti)
+            for ii in i_idxs:
+                unmatched_i.discard(ii)
+                item = items[ii]
+                if item.kind == "payout" and item.payout_state == "due":
+                    due_outflow_ms[item.ref] = min(usable[ti].time_ms for ti in t_idxs)
+            matched_n += 1
+            if near:
+                t0 = usable[t_idxs[0]]
+                i0 = items[i_idxs[0]]
+                if max(t0.time_ms, i0.t_ref_ms) >= report_start_ms:
+                    findings.append(
+                        Finding(
+                            code="near_amount",
+                            fingerprint=f"near:{t0.tran_id}:{i0.ref}",
+                            time_ms=t0.time_ms,
+                            amount=diff,
+                            partner_name=i0.partner_name,
+                            detail=str(diff),
+                            alertable=True,
+                        )
+                    )
+
+    # Pass 2: exact groups
+    run_group_pass(exact_only=True)
+
+    # Pass 3: near 1:1
     near_cands: list[tuple[Decimal, int, str, str, int, int]] = []
     for ti in unmatched_t:
         t = usable[ti]
@@ -466,75 +545,8 @@ def reconcile(
         if ti in unmatched_t and ii in unmatched_i:
             mark_pair(ti, ii, near=True)
 
-    # Pass 3: groups
-    group_cands: list[tuple[Decimal, int, tuple[str, ...], list[int], list[int], bool]] = []
-
-    def consider_group(t_idxs: list[int], i_idxs: list[int]) -> None:
-        ts = [usable[i] for i in t_idxs]
-        its = [items[i] for i in i_idxs]
-        if len(ts) == 1:
-            if not all(_in_window(ts[0], it) for it in its):
-                return
-        else:
-            if not all(_in_window(t, its[0]) for t in ts):
-                return
-        sum_t = sum((_abs_amt(t) for t in ts), Decimal("0"))
-        sum_i = sum((it.amount for it in its), Decimal("0"))
-        diff = abs(sum_t - sum_i)
-        exact = diff <= EXACT_TOL
-        near = (not exact) and diff <= _near_tol(sum_i if sum_i > 0 else sum_t)
-        if not exact and not near:
-            return
-        gap = _group_time_gap(ts, its)
-        group_cands.append((diff, gap, _ids_key(ts, its), list(t_idxs), list(i_idxs), near))
-
-    for ti in list(unmatched_t):
-        t = usable[ti]
-        pool = [ii for ii in unmatched_i if _in_window(t, items[ii])]
-        pool.sort(key=lambda ii: (_time_gap(t, items[ii]), items[ii].ref))
-        pool = pool[:MAX_GROUP_CANDIDATES]
-        for k in range(2, min(MAX_GROUP, len(pool)) + 1):
-            for combo in itertools.combinations(pool, k):
-                consider_group([ti], list(combo))
-
-    for ii in list(unmatched_i):
-        item = items[ii]
-        pool = [ti for ti in unmatched_t if _in_window(usable[ti], item)]
-        pool.sort(key=lambda ti: (_time_gap(usable[ti], item), usable[ti].tran_id))
-        pool = pool[:MAX_GROUP_CANDIDATES]
-        for k in range(2, min(MAX_GROUP, len(pool)) + 1):
-            for combo in itertools.combinations(pool, k):
-                consider_group(list(combo), [ii])
-
-    group_cands.sort(key=lambda c: (c[0], c[1], c[2]))
-    for diff, _gap, _ids, t_idxs, i_idxs, near in group_cands:
-        if any(ti not in unmatched_t for ti in t_idxs):
-            continue
-        if any(ii not in unmatched_i for ii in i_idxs):
-            continue
-        for ti in t_idxs:
-            unmatched_t.discard(ti)
-        for ii in i_idxs:
-            unmatched_i.discard(ii)
-            item = items[ii]
-            if item.kind == "payout" and item.payout_state == "due":
-                due_outflow_ms[item.ref] = min(usable[ti].time_ms for ti in t_idxs)
-        matched_n += 1
-        if near:
-            t0 = usable[t_idxs[0]]
-            i0 = items[i_idxs[0]]
-            if max(t0.time_ms, i0.t_ref_ms) >= report_start_ms:
-                findings.append(
-                    Finding(
-                        code="near_amount",
-                        fingerprint=f"near:{t0.tran_id}:{i0.ref}",
-                        time_ms=t0.time_ms,
-                        amount=diff,
-                        partner_name=i0.partner_name,
-                        detail=str(diff),
-                        alertable=True,
-                    )
-                )
+    # Pass 4: near groups (exact sums still allowed; nothing matched twice)
+    run_group_pass(exact_only=False)
 
     pending_n = 0
 
@@ -582,6 +594,8 @@ def reconcile(
         elif item.kind == "payout" and item.payout_state == "paid":
             paid_at = item.paid_at_ms if item.paid_at_ms is not None else item.t_ref_ms
             if paid_at < report_start_ms:
+                continue
+            if coverage_start_ms is not None and item.t_lo_ms < coverage_start_ms:
                 continue
             age = now_ms - paid_at
             alertable = age >= GRACE_PAID_MS
@@ -786,6 +800,28 @@ def _verify_finding(conn: sqlite3.Connection) -> Finding | None:
     )
 
 
+def _fetch_from_ms(
+    items: list[LedgerCash],
+    *,
+    pad_from: int,
+    report_start: int,
+    ledger_start: int,
+) -> int:
+    """Extend fetch back to paid payout match windows still in the report."""
+    paid_los = [
+        item.t_lo_ms
+        for item in items
+        if item.kind == "payout"
+        and item.payout_state == "paid"
+        and item.paid_at_ms is not None
+        and item.paid_at_ms >= report_start
+    ]
+    fetch_from = int(pad_from)
+    if paid_los:
+        fetch_from = min(fetch_from, min(paid_los))
+    return max(int(ledger_start), fetch_from)
+
+
 def run_partner_audit_job(
     conn: sqlite3.Connection,
     *,
@@ -813,7 +849,9 @@ def run_partner_audit_job(
     state = load_state(state_path)
     alert_sent = False
 
-    fetched = fetch_transfers(client, pad_from, int(now_ms), now_ms=int(now_ms))
+    items = ledger_cash(conn, pad_from, int(now_ms))
+    fetch_from = _fetch_from_ms(items, pad_from=pad_from, report_start=report_start, ledger_start=start)
+    fetched = fetch_transfers(client, fetch_from, int(now_ms), now_ms=int(now_ms))
     if fetched.status != "ok":
         if state.get("fail_since_ms") is None:
             state["fail_since_ms"] = int(now_ms)
@@ -842,13 +880,14 @@ def run_partner_audit_job(
             "error": fetched.error,
         }
 
-    items = ledger_cash(conn, pad_from, int(now_ms))
+    coverage_start = max(fetch_from, int(now_ms) - BINANCE_HISTORY_MS)
     result = reconcile(
         fetched.transfers,
         items,
         now_ms=int(now_ms),
         ledger_start_ms=start,
         report_start_ms=report_start,
+        coverage_start_ms=coverage_start,
     )
     findings = list(result.findings)
     vf = _verify_finding(conn)
@@ -910,7 +949,9 @@ def audit_report(
             ledger_start_ms=start,
             report_start_ms=report_start,
         )
-    fetched = fetch_transfers(client, pad_from, int(now_ms), now_ms=int(now_ms))
+    items = ledger_cash(conn, pad_from, int(now_ms))
+    fetch_from = _fetch_from_ms(items, pad_from=pad_from, report_start=report_start, ledger_start=start)
+    fetched = fetch_transfers(client, fetch_from, int(now_ms), now_ms=int(now_ms))
     if fetched.status != "ok":
         return AuditResult(
             status=fetched.status,
@@ -918,13 +959,14 @@ def audit_report(
             report_start_ms=report_start,
             error=fetched.error,
         )
-    items = ledger_cash(conn, pad_from, int(now_ms))
+    coverage_start = max(fetch_from, int(now_ms) - BINANCE_HISTORY_MS)
     result = reconcile(
         fetched.transfers,
         items,
         now_ms=int(now_ms),
         ledger_start_ms=start,
         report_start_ms=report_start,
+        coverage_start_ms=coverage_start,
     )
     findings = list(result.findings)
     vf = _verify_finding(conn)

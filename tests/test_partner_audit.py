@@ -12,11 +12,14 @@ from jarvise_assist import partner_store as ps
 from jarvise_assist.futures import FAPI_HISTORY_WINDOW_MS, BinanceFuturesClient
 from jarvise_assist.partner_audit import (
     BINANCE_HISTORY_MS,
+    DAY_MS,
     DEP_AFTER_MS,
+    DEP_BEFORE_MS,
     GRACE_BINANCE_MS,
     GRACE_DEPOSIT_MS,
     GRACE_DUE_OUTFLOW_MS,
     GRACE_PAID_MS,
+    HOUR_MS,
     PAD_MS,
     PAY_AFTER_MS,
     PAY_BEFORE_MS,
@@ -242,6 +245,7 @@ def test_fetch_dedupe_zero_drop_clamp() -> None:
     assert all(c["start_ms"] >= clamped for c in client.calls)
     ids = {t.tran_id for t in result.transfers}
     assert ids == {"dup", "ok"}
+    assert len(result.transfers) == 2
 
 
 def test_reconcile_exact_near_beyond() -> None:
@@ -362,6 +366,98 @@ def test_group_match_two_ways() -> None:
         report_start_ms=ledger_start,
     )
     assert r2.matched_n == 1
+
+
+def test_exact_group_beats_near_one_to_one() -> None:
+    """Deposit 1000 vs transfers 995+5 must exact-group match before near 995."""
+    ledger_start = NOW - 10 * DAY_MS
+    t0 = NOW
+    d = _dep(ref="ev:big", amount="1000", t_ref=t0)
+    t_big = _xfer(time_ms=t0 - 1000, amount="995", tran_id="nearish")
+    t_small = _xfer(time_ms=t0 - 500, amount="5", tran_id="rest")
+    r = reconcile(
+        [t_big, t_small],
+        [d],
+        now_ms=t0 + GRACE_DEPOSIT_MS + 1,
+        ledger_start_ms=ledger_start,
+        report_start_ms=ledger_start,
+    )
+    assert r.matched_n == 1
+    assert r.findings == []
+
+
+def test_paid_no_outflow_skipped_before_coverage() -> None:
+    ledger_start = NOW - 100 * DAY_MS
+    report_start = NOW - 14 * DAY_MS
+    coverage = NOW - BINANCE_HISTORY_MS
+    decided = coverage - 1  # t_lo = decided - PAY_BEFORE < coverage
+    paid_at = report_start + DAY_MS
+    item = LedgerCash(
+        ref="pr:old",
+        kind="payout",
+        direction=-1,
+        partner_name="Bob",
+        amount=D("100"),
+        t_ref_ms=decided,
+        t_lo_ms=decided - PAY_BEFORE_MS,
+        t_hi_ms=paid_at + PAY_AFTER_MS,
+        payout_state="paid",
+        paid_at_ms=paid_at,
+    )
+    assert item.t_lo_ms < coverage
+    r = reconcile(
+        [],
+        [item],
+        now_ms=NOW,
+        ledger_start_ms=ledger_start,
+        report_start_ms=report_start,
+        coverage_start_ms=coverage,
+    )
+    assert not any(f.code == "paid_no_outflow" for f in r.findings)
+
+    r_default = reconcile(
+        [],
+        [item],
+        now_ms=NOW,
+        ledger_start_ms=ledger_start,
+        report_start_ms=report_start,
+    )
+    assert any(f.code == "paid_no_outflow" for f in r_default.findings)
+
+
+def test_ledger_cash_windows_on_real_db(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "windows.db")
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)
+    aid = admin["partner_id"]
+    ps.apply_deposit(conn, aid, D("1000"), D("1000"), NOW)  # init — excluded
+    bob = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=NOW + 1)
+    bid = bob["partner_id"]
+    dep_t = NOW + 10_000
+    ps.apply_deposit(conn, bid, D("100"), D("1100"), dep_t)
+    close_t = dep_t + 20_000
+    close = ps.apply_close(conn, bid, D("1100"), close_t)
+    assert close["ok"]
+    rid = close["request_id"]
+
+    due_now = close_t + 5_000
+    items_due = ledger_cash(conn, NOW, due_now)
+    deps = [i for i in items_due if i.kind == "deposit"]
+    assert len(deps) == 1
+    assert deps[0].t_lo_ms == dep_t - DEP_BEFORE_MS
+    assert deps[0].t_hi_ms == dep_t + DEP_AFTER_MS
+    dues = [i for i in items_due if i.kind == "payout" and i.payout_state == "due"]
+    assert len(dues) == 1
+    assert dues[0].t_lo_ms == close_t - PAY_BEFORE_MS
+    assert dues[0].t_hi_ms == due_now + PAY_AFTER_MS
+
+    paid_t = close_t + HOUR_MS
+    ps.mark_paid(conn, rid, paid_t)
+    items_paid = ledger_cash(conn, NOW, paid_t + DAY_MS)
+    paid = [i for i in items_paid if i.kind == "payout" and i.payout_state == "paid"]
+    assert len(paid) == 1
+    assert paid[0].t_lo_ms == close_t - PAY_BEFORE_MS
+    assert paid[0].t_hi_ms == paid_t + PAY_AFTER_MS
+    conn.close()
 
 
 def test_two_equal_deposits_deterministic() -> None:

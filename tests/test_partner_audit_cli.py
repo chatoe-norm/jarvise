@@ -274,3 +274,7 @@ def test_static_guards_portal_and_paths() -> None:
     body = fut.split("def income_rows", 1)[1].split("def user_trades", 1)[0]
     assert "INCOME_PATH" in body
     assert "_PATH" not in body.replace("INCOME_PATH", "")
+    jobs_src = (Path(__file__).resolve().parents[1] / "src" / "jarvise" / "jobs.py").read_text(
+        encoding="utf-8"
+    )
+    assert "send=lambda text: send_message(text)," in jobs_src

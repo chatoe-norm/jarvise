@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from jarvise_assist import partner_store as ps
 from jarvise_assist.partner_audit import (
+    DAY_MS,
     FAIL_ALERT_AFTER_MS,
     GRACE_BINANCE_MS,
+    HOUR_MS,
     Transfer,
+    audit_report,
+    export_events_csv,
     fetch_transfers,
     run_partner_audit_job,
 )
@@ -55,10 +60,6 @@ class FakeClient:
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"unexpected method {name}")
-
-
-def _hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_job_not_init_no_side_effects(tmp_path: Path) -> None:
@@ -164,14 +165,15 @@ def test_job_dedupe_and_send_none(tmp_path: Path) -> None:
         return 42
 
     now = t_xfer + GRACE_BINANCE_MS + 1
-    before = _hash(db)
+    dump0 = list(conn.iterdump())
+    conn.execute("PRAGMA query_only = ON")
     r1 = run_partner_audit_job(conn, client=client, now_ms=now, send=send_ok, state_path=state)
     assert r1["ok"] is True
     assert r1["new"] == 1
     assert r1["alert_sent"] is True
     assert len(sent) == 1
     assert "รายการใหม่" in sent[0]
-    assert _hash(db) == before
+    assert list(conn.iterdump()) == dump0
 
     r2 = run_partner_audit_job(conn, client=client, now_ms=now + 1000, send=send_ok, state_path=state)
     assert r2["new"] == 0
@@ -299,13 +301,14 @@ def test_full_flow_then_unrecorded_alert(tmp_path: Path) -> None:
         return 1
 
     now = paid_t + GRACE_BINANCE_MS + 1
-    before = _hash(db)
+    dump0 = list(conn.iterdump())
+    conn.execute("PRAGMA query_only = ON")
     r1 = run_partner_audit_job(conn, client=client, now_ms=now, send=send, state_path=state)
     assert r1["ok"] is True
     assert r1["new"] == 0
     assert sent == []
     assert ps.verify_ledger(conn)["ok"] is True
-    assert _hash(db) == before
+    assert list(conn.iterdump()) == dump0
 
     client.transfers.append(
         Transfer(
@@ -323,7 +326,126 @@ def test_full_flow_then_unrecorded_alert(tmp_path: Path) -> None:
     assert r3["new"] == 0
     assert len(sent) == 1
     assert ps.verify_ledger(conn)["ok"] is True
-    assert _hash(db) == before
+    assert list(conn.iterdump()) == dump0
+    conn.close()
+
+
+def _late_mark_paid_scenario(tmp_path: Path, *, lag_days: int) -> tuple[Any, FakeClient, int, Path]:
+    """Init + Bob deposit (early) + close at T + outflow + late mark_paid."""
+    db = tmp_path / f"late_{lag_days}.db"
+    conn = open_db(db)
+    t0 = NOW
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=t0)
+    ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), t0)
+    bob = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=t0 + 1)
+    bid = bob["partner_id"]
+    # Deposit well before T-72h so late-day fetch extension does not orphan it
+    dep_t = t0 + DAY_MS
+    ps.apply_deposit(conn, bid, D("100"), D("1100"), dep_t)
+    t_close = t0 + 10 * DAY_MS
+    close = ps.apply_close(conn, bid, D("1100"), t_close)
+    assert close["ok"]
+    rid = close["request_id"]
+    out_t = t_close + HOUR_MS
+    paid_t = out_t + lag_days * DAY_MS
+    ps.mark_paid(conn, rid, paid_t)
+    transfers = [
+        Transfer(
+            time_ms=dep_t,
+            amount=D("100"),
+            asset="USDT",
+            income_type="TRANSFER",
+            tran_id="bob_in",
+        ),
+        Transfer(
+            time_ms=out_t,
+            amount=-D(str(close["cash"])),
+            asset="USDT",
+            income_type="TRANSFER",
+            tran_id="bob_out",
+        ),
+    ]
+    client = FakeClient(transfers)
+    state = tmp_path / f"late_{lag_days}_state.json"
+    return conn, client, paid_t, state
+
+
+def test_late_mark_paid_no_false_paid_no_outflow(tmp_path: Path) -> None:
+    for lag in (5, 1):
+        conn, client, paid_t, state = _late_mark_paid_scenario(tmp_path, lag_days=lag)
+        sent: list[str] = []
+
+        def send(text: str, _sent: list[str] = sent) -> int:
+            _sent.append(text)
+            return 1
+
+        for day in range(22):
+            now = paid_t + HOUR_MS + day * DAY_MS
+            run_partner_audit_job(conn, client=client, now_ms=now, send=send, state_path=state)
+        assert sent == [], f"lag={lag}d unexpected sends: {sent}"
+
+        if lag == 5:
+            day12 = paid_t + HOUR_MS + 12 * DAY_MS
+            report = audit_report(conn, client, now_ms=day12, days=14)
+            assert report.status == "ok"
+            assert not any(f.code == "paid_no_outflow" for f in report.findings)
+        conn.close()
+
+
+def test_job_verify_ledger_fail_alerts_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = tmp_path / "verify.db"
+    conn = open_db(db)
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)
+    ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), NOW)
+    monkeypatch.setattr(
+        "jarvise_assist.partner_audit.verify_ledger",
+        lambda _conn: {"ok": False, "mismatches": [{"x": 1}]},
+    )
+    client = FakeClient()
+    state = tmp_path / "verify_state.json"
+    sent: list[str] = []
+
+    def send(text: str) -> int:
+        sent.append(text)
+        return 1
+
+    r1 = run_partner_audit_job(conn, client=client, now_ms=NOW + DAY_MS, send=send, state_path=state)
+    assert r1["ok"] is True
+    assert len(sent) == 1
+    assert "verify_ledger" in sent[0]
+    r2 = run_partner_audit_job(conn, client=client, now_ms=NOW + DAY_MS + 1000, send=send, state_path=state)
+    assert r2["new"] == 0
+    assert len(sent) == 1
+    conn.close()
+
+
+def test_audit_report_and_csv_read_only(tmp_path: Path) -> None:
+    db = tmp_path / "ro.db"
+    conn = open_db(db)
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)
+    ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), NOW)
+    bob = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=NOW + 1)
+    dep_t = NOW + 10_000
+    ps.apply_deposit(conn, bob["partner_id"], D("100"), D("1100"), dep_t)
+    client = FakeClient(
+        [
+            Transfer(
+                time_ms=dep_t,
+                amount=D("100"),
+                asset="USDT",
+                income_type="TRANSFER",
+                tran_id="bob_in",
+            )
+        ]
+    )
+    dump0 = list(conn.iterdump())
+    conn.execute("PRAGMA query_only = ON")
+    report = audit_report(conn, client, now_ms=dep_t + GRACE_BINANCE_MS, days=14)
+    assert report.status == "ok"
+    csv_path = tmp_path / "events.csv"
+    export_events_csv(conn, csv_path)
+    assert csv_path.is_file()
+    assert list(conn.iterdump()) == dump0
     conn.close()
 
 
