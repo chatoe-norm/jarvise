@@ -5,8 +5,25 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from jarvise_assist.listen import process_update
 from jarvise_ingest.db import open_db
+
+
+@pytest.fixture(autouse=True)
+def _clean_transfer_guard(monkeypatch: Any) -> None:
+    """P5 guard is covered in test_partner_guard.py; keep legacy confirms clean."""
+    from jarvise_assist import partner_admin as pa
+    from jarvise_assist.partner_audit import GuardResult
+
+    def _fake(conn: Any, client: Any, *, now_ms: int, req: Any) -> tuple[GuardResult, str]:
+        return (
+            GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False, error=None),
+            "",
+        )
+
+    monkeypatch.setattr(pa, "_transfer_guard", _fake)
 
 
 def _send_capture() -> tuple[list[dict[str, Any]], Any]:

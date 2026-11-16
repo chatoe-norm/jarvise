@@ -1,14 +1,18 @@
-"""Partner P5 confirm-time transfer guard: guard_check + format_guard_th."""
+"""Partner P5 confirm-time transfer guard: guard_check + callbacks + isolation."""
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from jarvise_assist import partner_admin as pa
+from jarvise_assist import partner_portal as portal
 from jarvise_assist import partner_store as ps
 from jarvise_assist.partner_audit import (
     EXACT_TOL,
@@ -21,10 +25,12 @@ from jarvise_assist.partner_audit import (
     format_guard_th,
     guard_check,
 )
+from jarvise_assist.partner_value import AccountValue, AccountValueError
 from jarvise_ingest.db import open_db
 
 D = Decimal
 NOW = 1_700_000_000_000
+ADMIN = "42"
 
 
 class FakeClient:
@@ -376,3 +382,437 @@ def test_format_guard_max_lines() -> None:
     text = format_guard_th(r, last_ok_ms=None)
     assert "และอีก 2 รายการ" in text
     assert text.count("\n• ") <= 6
+
+
+# ---- callback helpers --------------------------------------------------------
+
+
+def _patch_read(monkeypatch: Any, client: FakeClient) -> None:
+    def fake(cli: Any, *, now_ms: int, attempts: int = 3) -> AccountValue | AccountValueError:
+        if cli is None:
+            return AccountValueError(reason="no_client")
+        if isinstance(cli, FakeClient) and cli.wallet is not None:
+            w = D(cli.wallet)
+            u = D(cli.unrealized)
+            return AccountValue(
+                wallet=w,
+                unrealized=u,
+                value=w + u,
+                open_positions=0 if u == 0 else 1,
+                read_at_ms=now_ms,
+            )
+        return AccountValueError(reason="no_client")
+
+    monkeypatch.setattr(pa, "read_account_value", fake)
+    monkeypatch.setattr(portal, "read_account_value", fake)
+
+
+def _send_capture() -> tuple[list[dict[str, Any]], Any]:
+    sent: list[dict[str, Any]] = []
+
+    def send(
+        text: str, *, reply_markup: dict[str, Any] | None = None, chat_id: str | None = None, **kw: Any
+    ) -> int:
+        mid = len(sent) + 1
+        entry: dict[str, Any] = {"text": text, "reply_markup": reply_markup, "message_id": mid}
+        if chat_id is not None:
+            entry["chat_id"] = chat_id
+        sent.append(entry)
+        return mid
+
+    return sent, send
+
+
+def _edit_capture() -> tuple[list[dict[str, Any]], Any]:
+    edited: list[dict[str, Any]] = []
+
+    def edit(
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+        chat_id: str | None = None,
+        **kw: Any,
+    ) -> bool:
+        entry: dict[str, Any] = {"message_id": message_id, "text": text, "reply_markup": reply_markup}
+        if chat_id is not None:
+            entry["chat_id"] = chat_id
+        edited.append(entry)
+        return True
+
+    return edited, edit
+
+
+def _answer_capture() -> tuple[list[Any], Any]:
+    answers: list[Any] = []
+
+    def answer(cq_id: str, text: str | None = None) -> bool:
+        answers.append((cq_id, text))
+        return True
+
+    return answers, answer
+
+
+def _owner_cb(*, data: str, mid: int = 7, text: str = "preview") -> dict[str, Any]:
+    return {
+        "id": "cq1",
+        "data": data,
+        "from": {"id": 42},
+        "message": {"message_id": mid, "chat": {"id": 42, "type": "private"}, "text": text},
+    }
+
+
+@pytest.fixture
+def env_chat(monkeypatch: Any) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+
+
+def _setup_bob_with_profit(conn: Any, *, now_ms: int = NOW) -> str:
+    """Init admin + Bob deposit; Bob has profit at V≈2300. Returns bob partner id."""
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=now_ms)
+    ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), now_ms)
+    bob = ps.create_partner(conn, name="Bob", now_ms=now_ms + 1)
+    # 600 at V=1600 → 375 units; equity > cost when V > 2200
+    ps.apply_deposit(conn, bob["partner_id"], D("600"), D("1600"), now_ms + 2)
+    return str(bob["partner_id"])
+
+
+_PROFIT_V = "2300"
+
+
+def _pa_cb(
+    conn: Any,
+    data: str,
+    *,
+    client: FakeClient,
+    monkeypatch: Any,
+    now_ms: int,
+    text: str = "preview",
+    mid: int = 7,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[Any]]:
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    edited, edit = _edit_capture()
+    answers, answer = _answer_capture()
+    out = pa.handle_partner_callback(
+        conn,
+        data,
+        callback=_owner_cb(data=data, mid=mid, text=text),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=now_ms,
+    )
+    return out, sent, edited, answers
+
+
+# ---- callback tests (real guard) ---------------------------------------------
+
+
+def test_cb_pa_ry_warn_blocks_confirm(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ry_warn.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    t_xfer = NOW + 11
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_ry")])
+    client.wallet = _PROFIT_V
+    n_income_before = 0
+    out, sent, edited, answers = _pa_cb(
+        conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=t_xfer + 60_000
+    )
+    assert out == {"ok": False, "reason": "guard_warn"}
+    req = ps.get_request(conn, rid)
+    assert req is not None and str(req["status"]) == "pending"
+    assert req["payout_state"] in (None, "none") or str(req["payout_state"]) == "none"
+    assert client.balance_calls == 0  # no _read_v
+    assert edited
+    assert "ตรวจยอดโอนก่อนยืนยัน" in edited[0]["text"]
+    assert "ยังไม่อยู่ในสมุด" in edited[0]["text"]
+    kb = edited[0]["reply_markup"]["inline_keyboard"]
+    assert kb[0][0]["callback_data"].startswith(f"pa:rf:{rid}:")
+    assert all("chat_id" not in s for s in sent)
+    assert "มีเรื่องยอดโอน" in (answers[0][1] or "")
+    assert len(client.calls) > n_income_before
+    conn.close()
+
+
+def test_cb_pa_rf_within_900_confirms(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "rf_ok.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    rid = str(created["request_id"])
+    t_xfer = NOW + 11
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_rf")])
+    client.wallet = _PROFIT_V
+    now = t_xfer + 60_000
+    out1, _s1, edited1, _a1 = _pa_cb(conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now)
+    assert out1["reason"] == "guard_warn"
+    stamp = edited1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    # force within 900s (same second window)
+    out2, sent2, edited2, _a2 = _pa_cb(
+        conn,
+        f"pa:rf:{rid}:{stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=now + 1000,
+        text=edited1[0]["text"],
+    )
+    assert out2.get("ok") is True
+    assert "ยืนยันทั้งที่มีคำเตือนยอดโอน" in edited2[0]["text"]
+    assert str(ps.get_request(conn, rid)["status"]) == "confirmed"
+    # partner notify has no guard text
+    partner_msgs = [s for s in sent2 if s.get("chat_id")]
+    assert partner_msgs == [] or all("ตรวจยอดโอน" not in s["text"] for s in partner_msgs)
+    conn.close()
+
+
+def test_cb_pa_rf_after_901_reruns_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "rf_old.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    rid = str(created["request_id"])
+    t_xfer = NOW + 11
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_old")])
+    client.wallet = _PROFIT_V
+    now = t_xfer + 60_000
+    out1, _s, edited1, _a = _pa_cb(conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now)
+    assert out1["reason"] == "guard_warn"
+    old_stamp = int(edited1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1])
+    later = now + 901_000
+    out2, _s2, edited2, _a2 = _pa_cb(
+        conn,
+        f"pa:rf:{rid}:{old_stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=later,
+        text=edited1[0]["text"],
+    )
+    assert out2 == {"ok": False, "reason": "guard_warn"}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    new_stamp = int(edited2[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1])
+    assert new_stamp == later // 1000
+    assert new_stamp != old_stamp
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "data", ["pa:rf:not-an-id:1234567890", "pa:df:zz:1234567890", "pa:rf:pr_0123456789abcdef"]
+)
+def test_cb_malformed_force(tmp_path: Path, monkeypatch: Any, env_chat: None, data: str) -> None:
+    conn = open_db(tmp_path / "mal.db")
+    _init_ledger(conn)
+    client = FakeClient()
+    client.wallet = "1000"
+    out, _s, _e, answers = _pa_cb(conn, data, client=client, monkeypatch=monkeypatch, now_ms=NOW + 1)
+    assert out.get("ok") is False
+    assert "รายการนี้ปิดไปแล้ว" in (answers[0][1] or "")
+    conn.close()
+
+
+def test_cb_clean_pa_ry_first_tap(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ry_clean.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    rid = str(created["request_id"])
+    # Match Bob's recorded deposit so the convert confirm is clean
+    client = FakeClient([_xfer(time_ms=NOW + 2, amount="600", tran_id="bob_dep_clean")])
+    client.wallet = _PROFIT_V
+    out, _s, edited, _a = _pa_cb(
+        conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 20
+    )
+    assert out.get("ok") is True
+    assert "ตรวจยอดโอนแล้ว ไม่พบรายการค้าง" in edited[0]["text"]
+    assert str(ps.get_request(conn, rid)["status"]) == "confirmed"
+    conn.close()
+
+
+def test_cb_double_tap_pa_ry_settled(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ry_dbl.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    rid = str(created["request_id"])
+    client = FakeClient([_xfer(time_ms=NOW + 2, amount="600", tran_id="bob_dep_dbl")])
+    client.wallet = _PROFIT_V
+    _pa_cb(conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 20)
+    client.calls.clear()
+    out2, _s2, edited2, answers2 = _pa_cb(
+        conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 30
+    )
+    assert out2.get("ok") is False
+    assert out2.get("reason") == "request_not_pending"
+    assert "รายการนี้ปิดไปแล้ว" in (answers2[0][1] or "")
+    assert client.calls == []  # settled before guard → zero income_rows
+    assert edited2  # settled view
+    conn.close()
+
+
+def test_cb_pa_dy_matching_inflow_confirms(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dy_ok.db")
+    _init_ledger(conn)
+    bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"))
+    rid = str(created["request_id"])
+    t_xfer = NOW + 3
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="100", tran_id="dep_match")])
+    client.wallet = "1100"
+    out, sent, edited, _a = _pa_cb(
+        conn, f"pa:dy:{rid}", client=client, monkeypatch=monkeypatch, now_ms=t_xfer + 30_000
+    )
+    assert out.get("ok") is True
+    assert "บันทึกฝากแล้ว" in edited[0]["text"]
+    assert "ตรวจยอดโอนแล้ว ไม่พบรายการค้าง" in edited[0]["text"]
+    assert str(ps.get_request(conn, rid)["status"]) == "confirmed"
+    partner_msgs = [s for s in sent if "chat_id" in s]
+    assert all("ตรวจยอดโอน" not in s["text"] for s in partner_msgs)
+    conn.close()
+
+
+def test_cb_pa_dy_no_inflow_warns_no_event(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dy_miss.db")
+    _init_ledger(conn)
+    bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
+    n_ev = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"))
+    rid = str(created["request_id"])
+    client = FakeClient()
+    client.wallet = "1100"
+    out, _s, edited, _a = _pa_cb(conn, f"pa:dy:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 3)
+    assert out == {"ok": False, "reason": "guard_warn"}
+    assert "ยังไม่เห็นเงินฝาก" in edited[0]["text"]
+    assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == n_ev
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    conn.close()
+
+
+def test_cb_guard_raising_warns_type_only(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "raise.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    rid = str(created["request_id"])
+    client = FakeClient()
+    client.wallet = _PROFIT_V
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("secret detail must not leak")
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", boom)
+    out, _s, edited, _a = _pa_cb(
+        conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 20
+    )
+    assert out == {"ok": False, "reason": "guard_warn"}
+    assert "RuntimeError" in edited[0]["text"]
+    assert "secret detail" not in edited[0]["text"]
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    conn.close()
+
+
+def test_cb_second_warning_replaces_marker_once(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "repl.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    rid = str(created["request_id"])
+    t_xfer = NOW + 11
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_rep")])
+    client.wallet = _PROFIT_V
+    now = t_xfer + 60_000
+    _o1, _s1, edited1, _a1 = _pa_cb(conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now)
+    assert edited1[0]["text"].count("⚠️ ตรวจยอดโอน") == 1
+    _o2, _s2, edited2, _a2 = _pa_cb(
+        conn,
+        f"pa:ry:{rid}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=now + 1000,
+        text=edited1[0]["text"],
+    )
+    assert edited2[0]["text"].count("\n\n⚠️ ตรวจยอดโอน") == 1
+    assert edited2[0]["text"].count("⚠️ ตรวจยอดโอนก่อนยืนยัน") == 1
+    conn.close()
+
+
+def test_cb_portal_request_pa_ry_runs_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "portal_ry.db")
+    bob_id = _setup_bob_with_profit(conn)
+    # bind Bob and create convert via portal
+    invite = ps.create_invite(conn, bob_id, now_ms=NOW + 5)
+    assert invite.get("ok")
+    code = str(invite["code"])
+    bound = ps.bind_invite(conn, code, "501", admin_chat_id=ADMIN, now_ms=NOW + 6)
+    assert bound.get("ok")
+    client = FakeClient([_xfer(time_ms=NOW + 12, amount="33", tran_id="portal_orphan")])
+    client.wallet = _PROFIT_V
+    _patch_read(monkeypatch, client)
+    portal.reset_value_cache()
+    sent, send = _send_capture()
+    portal.handle_portal_callback(
+        conn,
+        "pp:go:cv",
+        callback={
+            "id": "cqp",
+            "data": "pp:go:cv",
+            "from": {"id": 501},
+            "message": {"message_id": 9, "chat": {"id": 501, "type": "private"}, "text": "x"},
+        },
+        send=send,
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=client,
+        now_ms=NOW + 15,
+    )
+    admin_cards = [s for s in sent if "chat_id" not in s and "reply_markup" in s and s["reply_markup"]]
+    assert admin_cards
+    rid = admin_cards[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    assert rid.startswith("pr_")
+    out, _s, edited, _a = _pa_cb(
+        conn,
+        f"pa:ry:{rid}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=NOW + 16,
+        text=admin_cards[0]["text"],
+    )
+    assert out == {"ok": False, "reason": "guard_warn"}
+    assert "ตรวจยอดโอนก่อนยืนยัน" in edited[0]["text"]
+    conn.close()
+
+
+# ---- isolation ---------------------------------------------------------------
+
+
+def test_isolation_portal_does_not_load_partner_audit() -> None:
+    import os
+
+    repo = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo / "src")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, jarvise_assist.partner_portal; assert 'jarvise_assist.partner_audit' not in sys.modules",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(repo),
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+
+
+def test_isolation_no_module_level_partner_audit_import() -> None:
+    admin = Path("src/jarvise_assist/partner_admin.py").read_text(encoding="utf-8")
+    for line in admin.splitlines():
+        if not line or line[0] in " \t":
+            continue
+        assert "partner_audit" not in line or line.lstrip().startswith("#")
+    # TYPE_CHECKING block may mention partner_audit indented — already skipped by column-0 check
+    portal_text = Path("src/jarvise_assist/partner_portal.py").read_text(encoding="utf-8")
+    for line in portal_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("from ") or stripped.startswith("import "):
+            assert "partner_audit" not in stripped
+            assert "guard" not in stripped
