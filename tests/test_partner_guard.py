@@ -477,6 +477,14 @@ def _setup_bob_with_profit(conn: Any, *, now_ms: int = NOW) -> str:
     return str(bob["partner_id"])
 
 
+def _bind_partner(conn: Any, partner_id: str, *, tg: str = "501", now_ms: int = NOW) -> None:
+    """Bind partner to a Telegram chat (same pattern as portal tests)."""
+    invite = ps.create_invite(conn, partner_id, now_ms=now_ms)
+    assert invite.get("ok")
+    bound = ps.bind_invite(conn, str(invite["code"]), tg, admin_chat_id=ADMIN, now_ms=now_ms + 1)
+    assert bound.get("ok")
+
+
 _PROFIT_V = "2300"
 
 
@@ -533,7 +541,7 @@ def test_cb_pa_ry_warn_blocks_confirm(tmp_path: Path, monkeypatch: Any, env_chat
     assert "ยังไม่อยู่ในสมุด" in edited[0]["text"]
     kb = edited[0]["reply_markup"]["inline_keyboard"]
     assert kb[0][0]["callback_data"].startswith(f"pa:rf:{rid}:")
-    assert all("chat_id" not in s for s in sent)
+    assert sent == []
     assert "มีเรื่องยอดโอน" in (answers[0][1] or "")
     assert len(client.calls) > n_income_before
     conn.close()
@@ -776,6 +784,280 @@ def test_cb_portal_request_pa_ry_runs_guard(tmp_path: Path, monkeypatch: Any, en
     )
     assert out == {"ok": False, "reason": "guard_warn"}
     assert "ตรวจยอดโอนก่อนยืนยัน" in edited[0]["text"]
+    conn.close()
+
+
+def test_cb_pa_dy_warn_then_df_override(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "dy_df.db")
+    _init_ledger(conn)
+    bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
+    bob_id = str(bob["partner_id"])
+    _bind_partner(conn, bob_id, tg="501", now_ms=NOW + 2)
+    created = ps.create_request(conn, bob_id, "deposit", NOW + 4, amount=D("100"))
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    client = FakeClient()
+    client.wallet = "1100"
+    now = NOW + 5
+    out1, sent1, edited1, _a1 = _pa_cb(
+        conn, f"pa:dy:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now
+    )
+    assert out1 == {"ok": False, "reason": "guard_warn"}
+    assert edited1[0]["reply_markup"]["inline_keyboard"] == [
+        [{"text": "⚠️ ยืนยันทั้งที่มีเตือน", "callback_data": f"pa:df:{rid}:{now // 1000}"}],
+        [{"text": "✖️ ยกเลิก", "callback_data": f"pa:dn:{rid}"}],
+    ]
+    assert sent1 == []
+    stamp = now // 1000
+    client.calls.clear()
+    out2, sent2, edited2, _a2 = _pa_cb(
+        conn,
+        f"pa:df:{rid}:{stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=now + 899_000,
+        text=edited1[0]["text"],
+    )
+    assert out2.get("ok") is True
+    assert client.calls == []
+    assert "บันทึกฝากแล้ว" in edited2[0]["text"]
+    assert "⚠️ ยืนยันทั้งที่มีคำเตือนยอดโอน" in edited2[0]["text"]
+    partner_msgs = [s["text"] for s in sent2 if s.get("chat_id") == "501"]
+    assert partner_msgs == ["✅ บันทึกเงินฝาก 100.00 USDT แล้ว · ทุนรวม 100.00 USDT"]
+    n_ev = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
+    out3, _s3, _e3, _a3 = _pa_cb(
+        conn,
+        f"pa:df:{rid}:{stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=now + 899_000,
+        text=edited2[0]["text"],
+    )
+    assert out3.get("ok") is False
+    assert out3.get("reason") == "request_not_pending"
+    assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == n_ev
+    conn.close()
+
+
+def test_cb_force_future_stamp_reruns_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "rf_future.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    t_xfer = NOW + 11
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_future")])
+    client.wallet = _PROFIT_V
+    now = t_xfer + 60_000
+    stamp = now // 1000 + 120
+    out, _s, _e, _a = _pa_cb(
+        conn,
+        f"pa:rf:{rid}:{stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=now,
+    )
+    assert out == {"ok": False, "reason": "guard_warn"}
+    assert client.calls != []
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    conn.close()
+
+
+def test_cb_ry_warn_bound_partner_gets_nothing(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ry_bound.db")
+    bob_id = _setup_bob_with_profit(conn)
+    _bind_partner(conn, bob_id, tg="501", now_ms=NOW + 3)
+    created = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10)
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    t_xfer = NOW + 11
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_wd")])
+    client.wallet = _PROFIT_V
+    now = t_xfer + 60_000
+    out1, sent1, edited1, _a1 = _pa_cb(
+        conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now
+    )
+    assert out1 == {"ok": False, "reason": "guard_warn"}
+    assert sent1 == []
+    stamp = edited1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    client.calls.clear()
+    out2, sent2, edited2, _a2 = _pa_cb(
+        conn,
+        f"pa:rf:{rid}:{stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=now + 1000,
+        text=edited1[0]["text"],
+    )
+    assert out2.get("ok") is True
+    assert str(ps.get_request(conn, rid)["payout_state"]) == "due"
+    partner_msgs = [s["text"] for s in sent2 if s.get("chat_id") == "501"]
+    assert len(partner_msgs) == 1
+    cash = ps.usdt_from_micro(int(ps.get_request(conn, rid)["payout_micro"]))
+    fee_row = conn.execute(
+        "SELECT fee_micro FROM partner_event WHERE request_id = ? AND kind = 'withdraw_profit'",
+        (rid,),
+    ).fetchone()
+    assert fee_row is not None
+    fee = ps.usdt_from_micro(int(fee_row["fee_micro"]))
+    expected = f"✅ แอดมินยืนยันถอนกำไร {pa.fmt_usdt(cash)} USDT (ค่าธรรมเนียม {pa.fmt_usdt(fee)}) · รอโอน"
+    assert partner_msgs[0] == expected
+    assert "ตรวจยอดโอน" not in partner_msgs[0]
+    assert "⚠️ ยืนยันทั้งที่" not in partner_msgs[0]
+    conn.close()
+
+
+def test_cb_refusal_expired_before_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ref_exp.db")
+    _init_ledger(conn)
+    bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"))
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    expires = int(created["expires_at_ms"])
+    client = FakeClient()
+    client.wallet = "1100"
+    stamp = expires // 1000
+    out, _s, _e, _a = _pa_cb(
+        conn,
+        f"pa:df:{rid}:{stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=expires + 1,
+    )
+    assert out == {"ok": False, "reason": "expired"}
+    assert client.calls == []
+    conn.close()
+
+
+def test_cb_refusal_payout_due_before_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ref_due.db")
+    bob_id = _setup_bob_with_profit(conn)
+    wd = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10)
+    assert wd.get("ok")
+    conf = ps.confirm_request(conn, str(wd["request_id"]), D(_PROFIT_V), NOW + 20)
+    assert conf.get("ok")
+    assert str(ps.get_request(conn, str(wd["request_id"]))["payout_state"]) == "due"
+    created = ps.create_request(conn, bob_id, "convert", NOW + 30)
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    client = FakeClient()
+    client.wallet = _PROFIT_V
+    stamp = (NOW + 40) // 1000
+    out_ry, _s1, _e1, _a1 = _pa_cb(
+        conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 40
+    )
+    assert out_ry == {"ok": False, "reason": "payout_due"}
+    assert client.calls == []
+    out_rf, _s2, _e2, _a2 = _pa_cb(
+        conn,
+        f"pa:rf:{rid}:{stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=NOW + 40,
+    )
+    assert out_rf == {"ok": False, "reason": "payout_due"}
+    assert client.calls == []
+    conn.close()
+
+
+def test_cb_refusal_not_this_kind_before_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ref_kind.db")
+    _init_ledger(conn)
+    bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"))
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    client = FakeClient()
+    client.wallet = "1100"
+    stamp = (NOW + 3) // 1000
+    out, _s, _e, _a = _pa_cb(
+        conn,
+        f"pa:rf:{rid}:{stamp}",
+        client=client,
+        monkeypatch=monkeypatch,
+        now_ms=NOW + 3,
+    )
+    assert out == {"ok": False, "reason": "not_this_kind"}
+    assert client.calls == []
+    conn.close()
+
+
+def test_cb_read_failure_shows_last_ok(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    db = tmp_path / "read_fail.db"
+    conn = open_db(db)
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    state = Path(str(db)).with_name("partner_audit_state.json")
+    state.write_text(
+        json.dumps({"v": 1, "alerted": {}, "last_ok_ms": NOW, "fail_since_ms": None, "fail_alerted": False}),
+        encoding="utf-8",
+    )
+    before_state = state.read_text(encoding="utf-8")
+    mtime = state.stat().st_mtime_ns
+    client = FakeClient()
+    client.wallet = _PROFIT_V
+    client.exc = ConnectionError("down")
+    out, _s, edited, _a = _pa_cb(
+        conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 20
+    )
+    assert out == {"ok": False, "reason": "guard_warn"}
+    text = edited[0]["text"]
+    assert "ตรวจยอดโอนไม่ได้ตอนนี้" in text
+    assert "ConnectionError" in text
+    assert "ตรวจสำเร็จล่าสุด (รอบเช้า)" in text
+    assert "down" not in text
+    assert "ไม่พบรายการค้าง" not in text
+    assert state.read_text(encoding="utf-8") == before_state
+    assert state.stat().st_mtime_ns == mtime
+    conn.close()
+
+
+def test_cb_edit_fails_sends_one_card(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "edit_fail.db")
+    bob_id = _setup_bob_with_profit(conn)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    assert created.get("ok")
+    rid = str(created["request_id"])
+    t_xfer = NOW + 11
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_edit")])
+    client.wallet = _PROFIT_V
+    _patch_read(monkeypatch, client)
+    sent, send = _send_capture()
+    edited: list[dict[str, Any]] = []
+
+    def edit(
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+        chat_id: str | None = None,
+        **kw: Any,
+    ) -> bool:
+        entry: dict[str, Any] = {"message_id": message_id, "text": text, "reply_markup": reply_markup}
+        if chat_id is not None:
+            entry["chat_id"] = chat_id
+        edited.append(entry)
+        return False
+
+    answers, answer = _answer_capture()
+    data = f"pa:ry:{rid}"
+    out = pa.handle_partner_callback(
+        conn,
+        data,
+        callback=_owner_cb(data=data, mid=7, text="preview"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=t_xfer + 60_000,
+    )
+    assert out == {"ok": False, "reason": "guard_warn"}
+    assert len(sent) == 1
+    assert "chat_id" not in sent[0]
+    assert sent[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].startswith(f"pa:rf:{rid}:")
     conn.close()
 
 
