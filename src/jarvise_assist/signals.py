@@ -480,6 +480,8 @@ def scan_signal_candidates(
         "rejected": rejected,
         "margin_dropped": margin_dropped,
         "skipped": skipped,
+        "candidates": candidates,
+        "existing": existing,
         "balance_usdt": float(balance),
         "available_usdt": float(available),
         "positions": positions,

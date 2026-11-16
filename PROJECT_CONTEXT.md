@@ -394,6 +394,8 @@ P5 autonomy flag + scheduler; remaining `macro_onchain_sentiment` fields (ETF fl
 - **2026-10-17** — Deferred items: [PR #176](https://github.com/chatoe-norm/jarvise/pull/176) point-in-time universe remove/reset (`delisted_at`, no row deletes), per-symbol sync/backfill results (`synced/warnings/failed`), lazy routes (first-load JS 1,007 → 437 KB). [PR #177](https://github.com/chatoe-norm/jarvise/pull/177) `web` gets the same paper universe/timeframe env as `jobs`. [PR #178](https://github.com/chatoe-norm/jarvise/pull/178) news headlines: parenthesized + paced GDELT queries, Google News RSS fallback, `POST /jobs/news-reaction` + n8n `jrvsNewsReact0749`. Live stays false; floors/formula unchanged.
 - **2026-10-17** — Replay stop leak fixed (replay-only); the corrected pre-registered grid still fails (MTF on × trail OOS EV −0.625 < 0); the IS entry-gate audit found no gate that improves total PnL, so the analyzer is unchanged. See `docs/research/2026-10-17-ledger-cause-and-replay.md`.
 
+- **2026-11-17** — Assist 🔎 coin-trend ranking: display-only confidence-ordered view with refined risk-cap reasons; admission and order paths unchanged; portfolio cap via post-#353 `portfolio_risk_cap_pct` (2× risk %, ceiling 6%).
+
 Cadence: short-lived branches + PR + auto-Deploy on green `main`; every feature has landed via spec/plan first.
 
 ---
