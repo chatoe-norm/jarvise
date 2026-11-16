@@ -56,7 +56,13 @@ from jarvise_assist.pause import (
 from jarvise_assist.quick import render_quick_menu
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN
 from jarvise_assist.signals import scan_signal_candidates
-from jarvise_assist.sizing import below_min_notional, cap_requote_qty, chase_exceeded, next_assist_run_ms
+from jarvise_assist.sizing import (
+    below_min_notional,
+    cap_requote_qty,
+    chase_exceeded,
+    next_assist_run_ms,
+    portfolio_risk_cap_pct,
+)
 from jarvise_assist.store import (
     clamp_stored_risk_pct,
     ensure_settings,
@@ -729,7 +735,11 @@ def handle_risk_callback(
             return {"ok": False, "rejected": True}
         week_start_risk_pct(conn)
         write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
-        send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard_for(ensure_settings(conn)))
+        cap = float(portfolio_risk_cap_pct(Decimal(str(pct))))
+        send(
+            f"บันทึกความเสี่ยง {pct:g}% แล้ว · เพดานความเสี่ยงรวม {cap:g}%",
+            reply_markup=reply_keyboard_for(ensure_settings(conn)),
+        )
         return {"ok": True, "risk_pct": pct}
     if data == "risk_no":
         write_settings(conn, awaiting_risk=None, pending_risk_pct=None)
@@ -768,5 +778,9 @@ def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn) -> dict[str, 
         return {"ok": True, "confirm": True, "pending": pct}
     week_start_risk_pct(conn)
     write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
-    send(f"บันทึกความเสี่ยง {pct:g}% แล้ว", reply_markup=reply_keyboard_for(ensure_settings(conn)))
+    cap = float(portfolio_risk_cap_pct(Decimal(str(pct))))
+    send(
+        f"บันทึกความเสี่ยง {pct:g}% แล้ว · เพดานความเสี่ยงรวม {cap:g}%",
+        reply_markup=reply_keyboard_for(ensure_settings(conn)),
+    )
     return {"ok": True, "risk_pct": pct}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -31,7 +32,6 @@ from jarvise_assist.messages import (
 from jarvise_assist.signals import is_night_hold, run_assist_morning, run_assist_signals
 from jarvise_assist.sizing import (
     MAX_LEVERAGE,
-    MAX_PORTFOLIO_RISK_PCT,
     ExistingIdea,
     SignalCandidate,
     SizedSignal,
@@ -43,6 +43,7 @@ from jarvise_assist.sizing import (
     next_4h_close_ms,
     next_assist_run_ms,
     passes_signal_floor,
+    portfolio_risk_cap_pct,
     round_level_to_tick,
     size_signal,
 )
@@ -55,6 +56,7 @@ from jarvise_assist.store import (
     list_held_signals,
     list_held_watch_advice,
     upsert_watch_position,
+    write_settings,
 )
 from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_assist.watch import run_assist_watch
@@ -903,6 +905,61 @@ def _seed_candle(
     conn.commit()
 
 
+def test_portfolio_risk_cap_pct_helper() -> None:
+    assert portfolio_risk_cap_pct(Decimal("3")) == Decimal("6")
+    assert portfolio_risk_cap_pct(Decimal("2")) == Decimal("4")
+    assert portfolio_risk_cap_pct(Decimal("0.5")) == Decimal("1.0")
+    assert portfolio_risk_cap_pct(Decimal("3.5")) == Decimal("6")
+    assert portfolio_risk_cap_pct(Decimal("0")) == Decimal("0")
+
+
+def test_incident_replay_admit_at_6_not_4() -> None:
+    """2026-11-17: balance 431, open 6.96, candidate 12.93 — needs 6% cap."""
+    balance = Decimal("431")
+    existing = [ExistingIdea(symbol="BTCUSDT", side="long", risk_usdt=Decimal("6.96"))]
+    sized = size_signal(
+        symbol="ETHUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("90"),
+        balance=balance,
+        risk_pct=Decimal("3"),
+        step_size=Decimal("0.001"),
+    )
+    assert sized is not None
+    # Pin the incident candidate loss so the budget math is exact.
+    sized = replace(sized, loss_at_stop=Decimal("12.93"))
+    cand = SignalCandidate(sized=sized, confidence=0.8, symbol_rank=0)
+    admitted6, rejected6 = admit_signals(
+        existing=existing,
+        candidates=[cand],
+        balance=balance,
+        max_risk_pct=Decimal("6"),
+    )
+    assert admitted6 == [cand]
+    assert rejected6 == []
+    admitted4, rejected4 = admit_signals(
+        existing=existing,
+        candidates=[cand],
+        balance=balance,
+        max_risk_pct=Decimal("4"),
+    )
+    assert admitted4 == []
+    assert rejected4 == [cand]
+    # Exactly equal sum is admitted (strict ">").
+    equal_existing = [ExistingIdea(symbol="BTCUSDT", side="long", risk_usdt=Decimal("12.93"))]
+    admitted_eq, rejected_eq = admit_signals(
+        existing=equal_existing,
+        candidates=[cand],
+        balance=balance,
+        max_risk_pct=Decimal("6"),
+    )
+    assert admitted_eq == [cand]
+    assert rejected_eq == []
+    with pytest.raises(TypeError):
+        admit_signals(existing=existing, candidates=[cand], balance=balance)  # type: ignore[call-arg]
+
+
 def test_admit_signals_stops_after_first_reject() -> None:
     sized_hi = size_signal(
         symbol="ADAUSDT",
@@ -941,6 +998,7 @@ def test_admit_signals_stops_after_first_reject() -> None:
             SignalCandidate(sized=sized_mid, confidence=0.70, symbol_rank=5),
         ],
         balance=Decimal("100"),
+        max_risk_pct=portfolio_risk_cap_pct(Decimal("2")),
     )
     assert [c.sized.symbol for c in admitted] == ["ADAUSDT"]
     assert [c.sized.symbol for c in rejected] == ["DOGEUSDT", "XRPUSDT"]
@@ -949,6 +1007,7 @@ def test_admit_signals_stops_after_first_reject() -> None:
 def test_risk_cap_sends_highest_confidence_only(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "risk.db")
     ensure_settings(conn)
+    write_settings(conn, risk_pct=2.0)
     day = _ms_bangkok(2026, 10, 27, 12, 25)
     # One existing open idea occupies a slot.
     existing = size_signal(
@@ -1006,6 +1065,75 @@ def test_blocked_record_failure_still_sends_real_signal(
 
     monkeypatch.setattr("jarvise_assist.signals.record_blocked_signal", boom)
     test_risk_cap_sends_highest_confidence_only(tmp_path)
+
+
+def test_two_fresh_3pct_ideas_both_admitted(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "two3.db")
+    write_settings(conn, risk_pct=3.0)
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    for sym, conf, inv in (
+        ("ADAUSDT", 0.80, 0.42),
+        ("DOGEUSDT", 0.70, 0.21),
+    ):
+        _seed_analysis(conn, symbol=sym, action="short", confidence=conf, invalidation=inv, ts=day - 60_000)
+    fake = FakeFutures(
+        balance=Decimal("100"),
+        marks={"ADAUSDT": Decimal("0.40"), "DOGEUSDT": Decimal("0.20")},
+        steps={"ADAUSDT": Decimal("1"), "DOGEUSDT": Decimal("1")},
+    )
+    payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+    created = {c["symbol"] for c in payload["created"]}
+    assert created == {"ADAUSDT", "DOGEUSDT"}
+    assert not any(s.get("reason") == "risk_cap" for s in payload["skipped"])
+    conn.close()
+
+
+def test_older_higher_pct_position_binds_cap(tmp_path: Path) -> None:
+    """Open position risking 3% of balance: settings 2% rejects; 3% admits."""
+    day = _ms_bangkok(2026, 10, 27, 12, 25)
+    # qty=0.3, entry=100, stop=90 → risk 3 USDT = 3% of 100
+    btc = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.3"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        update_time_ms=day - 60_000,
+    )
+    stop_order = {
+        "symbol": "BTCUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "90",
+        "quantity": "0.3",
+        "algoId": 1,
+    }
+
+    def _run(risk: float) -> dict[str, Any]:
+        conn = open_db(tmp_path / f"older_{risk}.db")
+        write_settings(conn, risk_pct=risk)
+        _seed_analysis(
+            conn, symbol="ADAUSDT", action="short", confidence=0.8, invalidation=0.42, ts=day - 60_000
+        )
+        fake = FakeFutures(
+            balance=Decimal("100"),
+            positions=[btc],
+            orders=[stop_order],
+            marks={"ADAUSDT": Decimal("0.40"), "BTCUSDT": Decimal("100")},
+            steps={"ADAUSDT": Decimal("1"), "BTCUSDT": Decimal("0.001")},
+        )
+        payload = run_assist_signals(conn, futures=fake, now_ms_value=day, send=lambda _t: True)
+        conn.close()
+        return payload
+
+    at_2 = _run(2.0)
+    assert at_2["created"] == []
+    assert any(s.get("symbol") == "ADAUSDT" and s.get("reason") == "risk_cap" for s in at_2["skipped"])
+    at_3 = _run(3.0)
+    assert any(c.get("symbol") == "ADAUSDT" for c in at_3["created"])
+    assert not any(s.get("symbol") == "ADAUSDT" and s.get("reason") == "risk_cap" for s in at_3["skipped"])
 
 
 def test_below_min_notional_does_not_raise_qty(tmp_path: Path) -> None:
@@ -2467,13 +2595,14 @@ def test_risk_and_margin_caps_apply_after_requote_loss_cap() -> None:
     assert capped.qty > first_qty
     assert capped.loss_at_stop <= first_loss
 
-    budget = balance * (MAX_PORTFOLIO_RISK_PCT / Decimal("100"))
+    budget = balance * (portfolio_risk_cap_pct(Decimal("2")) / Decimal("100"))
     expected_loss = expected * fresh.r_distance
     existing_risk = budget - expected_loss + Decimal("0.01")
     admitted, rejected = admit_signals(
         existing=[ExistingIdea(symbol="ETHUSDT", side="long", risk_usdt=existing_risk)],
         candidates=[SignalCandidate(sized=capped, confidence=0.8, symbol_rank=0)],
         balance=balance,
+        max_risk_pct=portfolio_risk_cap_pct(Decimal("2")),
     )
     assert admitted == []
     assert len(rejected) == 1

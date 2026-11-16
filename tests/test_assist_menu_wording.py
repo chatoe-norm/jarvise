@@ -276,7 +276,7 @@ def test_risk_confirm_yes_markup_toggle_success_when_enabled(tmp_path: Path) -> 
 
     out = handle_risk_callback(conn, "risk_yes:2.5", send=send)
     assert out == {"ok": True, "risk_pct": 2.5}
-    assert sent[-1]["text"] == "บันทึกความเสี่ยง 2.5% แล้ว"
+    assert sent[-1]["text"] == "บันทึกความเสี่ยง 2.5% แล้ว · เพดานความเสี่ยงรวม 5%"
     markup = sent[-1]["reply_markup"]
     assert markup == reply_keyboard_for(ensure_settings(conn))
     assert _toggle_btn(markup)["style"] == "success"

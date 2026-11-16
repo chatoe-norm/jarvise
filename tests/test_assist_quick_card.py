@@ -669,9 +669,48 @@ def test_refusal_quick_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     conn.close()
 
 
+def test_quick_portfolio_gate_uses_main_risk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Main 3% with 3% open: quick passes. Main 2% with 3% open: portfolio_cap ≤ 4%."""
+    _forbid_trade_client(monkeypatch)
+    btc = _pos("BTCUSDT", amt="3", entry="100", mark="100")
+    stop = _stop_order("BTCUSDT", stop="90", qty="3")  # risk = 30 = 3% of 1000
+    fake = _happy_fake(
+        positions=[btc],
+        orders=[stop],
+        marks={"SUIUSDT": Decimal("2.0000"), "BTCUSDT": Decimal("100")},
+        ticks={"SUIUSDT": Decimal("0.0001"), "BTCUSDT": Decimal("0.1")},
+        steps={"SUIUSDT": Decimal("0.1"), "BTCUSDT": Decimal("0.001")},
+    )
+
+    def _seed(conn: Any, *, main_risk: float) -> None:
+        _seed_settings(conn)
+        write_settings(conn, risk_pct=main_risk)
+        # New ~1.5% must fit under quick cap 2% so the portfolio gate is what fires.
+        write_quick_settings(conn, risk_pct=1.5, cap_pct=2.0)
+
+    conn_ok = open_db(tmp_path / "qg_ok.db")
+    _seed(conn_ok, main_risk=3.0)
+    card_ok = build_quick_card(
+        conn_ok, fake, symbol="SUIUSDT", side="long", stop=Decimal("1.994"), now_ms=NOW
+    )
+    assert card_ok["ok"] is True
+    conn_ok.close()
+
+    conn_bad = open_db(tmp_path / "qg_bad.db")
+    _seed(conn_bad, main_risk=2.0)
+    card_bad = build_quick_card(
+        conn_bad, fake, symbol="SUIUSDT", side="long", stop=Decimal("1.994"), now_ms=NOW
+    )
+    assert card_bad["ok"] is False
+    assert card_bad["reason"] == "portfolio_cap"
+    assert "≤ 4%" in card_bad["text"]
+    conn_bad.close()
+
+
 def test_refusal_portfolio_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     conn = open_db(tmp_path / "pc.db")
     _seed_settings(conn)
+    write_settings(conn, risk_pct=2.0)
     # BTC main position risk 36 via stop order
     btc = _pos("BTCUSDT", amt="0.36", entry="100", mark="100")
     stop = _stop_order("BTCUSDT", stop="0", qty="0.36")  # bad — use 90
@@ -686,7 +725,13 @@ def test_refusal_portfolio_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         ticks={"SUIUSDT": Decimal("0.0001"), "BTCUSDT": Decimal("0.1")},
         steps={"SUIUSDT": Decimal("0.1"), "BTCUSDT": Decimal("0.001")},
     )
-    _assert_refusal(conn, fake, reason="portfolio_cap", monkeypatch=monkeypatch)
+    _assert_refusal(
+        conn,
+        fake,
+        reason="portfolio_cap",
+        monkeypatch=monkeypatch,
+        text_has="เกินเพดานความเสี่ยงรวม (หลัก + quick ≤ 4%)",
+    )
     conn.close()
 
 
