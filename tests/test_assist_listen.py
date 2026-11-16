@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.conftest import assist_toggle_confirm
+from tests.assist_helpers import assist_toggle_confirm
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist import listen as listen_mod

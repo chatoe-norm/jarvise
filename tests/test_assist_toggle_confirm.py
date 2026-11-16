@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.conftest import assist_toggle_confirm
+from tests.assist_helpers import assist_toggle_confirm
 from tests.test_assist_day_loss import NOW, _futures, _trade
 
 from jarvise_assist.keyboard import (
@@ -454,6 +454,7 @@ def test_process_update_owner_vs_foreign(tmp_path: Path, monkeypatch: pytest.Mon
     out_f = process_update(conn, foreign, send=send, answer=answer, edit=edit, now_ms_value=NOW)
     assert out_f.get("ignored") == "foreign_chat"
     assert _snap(conn) == before
+    assert answers == [] and edits == [] and sent == []
 
     owner = {
         "update_id": 2,
@@ -465,7 +466,14 @@ def test_process_update_owner_vs_foreign(tmp_path: Path, monkeypatch: pytest.Mon
     }
     out_o = process_update(conn, owner, send=send, answer=answer, edit=edit, now_ms_value=NOW)
     assert "unhandled_callback" not in out_o
-    assert out_o.get("applied") is True or out_o.get("ok") is True
+    assert out_o["ok"] is True
+    assert out_o["applied"] is True
+    assert out_o["enabled"] is False
+    assert ensure_settings(conn)["enabled"] is False
+    assert answers == [("cq-o", None)]
+    assert edits == [(2, "ปิดผู้ช่วย — ✅ ยืนยันแล้ว", {"inline_keyboard": []})]
+    assert [s["text"] for s in sent] == [out_o["text"]]
+    assert "style" not in sent[-1]["reply_markup"]["keyboard"][2][1]
     conn.close()
 
 
@@ -500,6 +508,23 @@ def test_legacy_toggle_asks_confirm_no_refresh(tmp_path: Path) -> None:
     assert out.get("menu_refreshed") is not True
     assert all(s["text"] != "เมนูอัปเดตแล้ว" for s in sent)
     assert _snap(conn) == before
+    conn.close()
+
+
+def test_legacy_toggle_confirm_menu_style_follows_enabled(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "legacy-style.db")
+    write_settings(conn, enabled=True)
+    sent, send = _send_capture()
+
+    out_off = assist_toggle_confirm(conn, now_ms=NOW, send=send, button=LEGACY_BTN_TOGGLE)
+    assert out_off.get("applied") is True
+    assert ensure_settings(conn)["enabled"] is False
+    assert sent[-1]["reply_markup"]["keyboard"][2][1] == {"text": BTN_TOGGLE}
+
+    out_on = assist_toggle_confirm(conn, now_ms=NOW, send=send, button=LEGACY_BTN_TOGGLE)
+    assert out_on.get("applied") is True
+    assert ensure_settings(conn)["enabled"] is True
+    assert sent[-1]["reply_markup"]["keyboard"][2][1] == {"text": BTN_TOGGLE, "style": "success"}
     conn.close()
 
 
