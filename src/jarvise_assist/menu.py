@@ -72,6 +72,11 @@ from jarvise_assist.store import (
     write_settings,
 )
 from jarvise_assist.trail_advice import current_trail_advice
+from jarvise_assist.trend_view import (
+    _fit_telegram,
+    build_trend_rows,
+    render_trend_ranking,
+)
 from jarvise_assist.weekly import run_assist_weekly
 from jarvise_ingest.db import load_candles_in_range
 from jarvise_notify.telegram import send_message
@@ -176,9 +181,18 @@ def handle_menu_text(
         send_fn(body)
         result = {"handled": True, "kind": kind, "text": body}
     elif kind == "anything":
-        body, markup = render_anything_now(conn, futures=futures, now_ms=now_ms)
-        send_fn(body, reply_markup=markup)
-        result = {"handled": True, "kind": kind, "text": body}
+        messages = render_coin_trend(conn, futures=futures, now_ms=now_ms)
+        texts: list[str] = []
+        for body, markup in messages:
+            # reply_markup only on the idea message (last when ranking precedes it).
+            send_fn(body, reply_markup=markup)
+            texts.append(body)
+        result = {
+            "handled": True,
+            "kind": kind,
+            "text": "\n\n".join(texts),
+            "messages": len(messages),
+        }
     elif kind == "weekly":
         payload = run_assist_weekly(conn, futures=futures, now_ms_value=now_ms, send=send_fn)
         result = {"handled": True, "kind": kind, "text": payload.get("text"), "payload": payload}
@@ -642,33 +656,15 @@ def render_empty_on_demand(skipped: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def render_anything_now(
+def _idea_blocks_from_scan(
     conn: Any,
+    result: dict[str, Any],
     *,
-    futures: BinanceFuturesClient | None = None,
+    client: BinanceFuturesClient,
     now_ms: int,
-) -> tuple[str, dict[str, Any] | None]:
-    settings = ensure_settings(conn)
-    if not settings["enabled"]:
-        return "ผู้ช่วยปิดอยู่ · ยังเฝ้าไม้ที่เปิดอยู่", None
-    if is_paused(settings, now_ms=now_ms):
-        return format_paused_until(int(settings["paused_until_ms"]), now_ms=now_ms), None
-    client = futures if futures is not None else build_futures_client()
-    if client is None:
-        return "อ่าน futures ไม่ได้", None
-    try:
-        result = scan_signal_candidates(
-            conn,
-            futures=client,
-            now_ms=now_ms,
-            persist=False,
-            on_demand=True,
-        )
-    except Exception:  # noqa: BLE001
-        return "อ่าน futures ไม่ได้", None
-    admitted = result.get("admitted") or []
-    if not admitted:
-        return render_empty_on_demand(list(result.get("skipped") or [])), None
+) -> tuple[str, dict[str, Any] | None, dict[str, str]]:
+    """Build today's idea message + markup + per-symbol idea_status from one scan."""
+    admitted = list(result.get("admitted") or [])
     balance = Decimal(str(result.get("balance_usdt") or 0))
     expires = next_assist_run_ms(now_ms)
     configs = safe_symbol_configs(client)
@@ -684,6 +680,7 @@ def render_anything_now(
             ticks[sym] = Decimal("0")
     blocks: list[str] = []
     offered: list[tuple[str, str]] = []
+    idea_status: dict[str, str] = {}
     for cand in admitted:
         text, offer_entry = _render_on_demand_idea(
             conn,
@@ -696,12 +693,75 @@ def render_anything_now(
             filters=filters_by_symbol.get(cand.sized.symbol),
         )
         blocks.append(text)
+        sym = cand.sized.symbol
         if offer_entry:
-            offered.append((cand.sized.symbol, cand.sized.side))
+            offered.append((sym, cand.sized.side))
+            idea_status[sym] = "✅ เปิดได้ ↓"
+        elif text.startswith(sym):
+            idea_status[sym] = text[len(sym) :].lstrip(" ").lstrip("·").strip()
+        else:
+            idea_status[sym] = text
     markup = None
     if execution_buttons_enabled(conn) and offered:
         markup = anything_now_keyboard(offered)
-    return "\n\n".join(blocks), markup
+    return "\n\n".join(blocks), markup, idea_status
+
+
+def render_coin_trend(
+    conn: Any,
+    *,
+    futures: BinanceFuturesClient | None = None,
+    now_ms: int,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """Ranking message plus today's idea message (display-only; one scan)."""
+    settings = ensure_settings(conn)
+    if not settings["enabled"]:
+        return [("ผู้ช่วยปิดอยู่ · ยังเฝ้าไม้ที่เปิดอยู่", None)]
+    if is_paused(settings, now_ms=now_ms):
+        return [(format_paused_until(int(settings["paused_until_ms"]), now_ms=now_ms), None)]
+    client = futures if futures is not None else build_futures_client()
+    if client is None:
+        return [("อ่าน futures ไม่ได้", None)]
+    try:
+        result = scan_signal_candidates(
+            conn,
+            futures=client,
+            now_ms=now_ms,
+            persist=False,
+            on_demand=True,
+        )
+    except Exception:  # noqa: BLE001
+        return [("อ่าน futures ไม่ได้", None)]
+
+    admitted = list(result.get("admitted") or [])
+    idea_text = ""
+    idea_markup: dict[str, Any] | None = None
+    idea_status: dict[str, str] = {}
+    if admitted:
+        idea_text, idea_markup, idea_status = _idea_blocks_from_scan(
+            conn, result, client=client, now_ms=now_ms
+        )
+
+    rows, footer = build_trend_rows(conn, result, idea_status, now_ms)
+    if not rows:
+        # No passing coin → today's empty on-demand output unchanged.
+        return [(render_empty_on_demand(list(result.get("skipped") or [])), None)]
+
+    ranking = _fit_telegram(render_trend_ranking(rows, footer))
+    if not admitted:
+        return [(ranking, None)]
+    return [(ranking, None), (idea_text, idea_markup)]
+
+
+def render_anything_now(
+    conn: Any,
+    *,
+    futures: BinanceFuturesClient | None = None,
+    now_ms: int,
+) -> tuple[str, dict[str, Any] | None]:
+    """Compatibility wrapper: returns the last coin-trend message (ideas or empty)."""
+    messages = render_coin_trend(conn, futures=futures, now_ms=now_ms)
+    return messages[-1]
 
 
 def handle_risk_callback(
