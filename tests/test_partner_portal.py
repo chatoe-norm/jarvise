@@ -479,6 +479,7 @@ def test_static_guards_portal() -> None:
         "create_partner",
         "create_invite",
         "unbind_partner",
+        "partner_audit",
     )
     for line in text.splitlines():
         stripped = line.strip()
