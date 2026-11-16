@@ -651,6 +651,29 @@ class BinanceFuturesClient:
         payload = self._signed_get(INCOME_PATH, params, provider="binance_fapi_income")
         return list(payload) if isinstance(payload, list) else []
 
+    def income_rows(
+        self,
+        *,
+        start_ms: int,
+        end_ms: int,
+        income_type: str,
+        limit: int = 1000,
+        symbol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Signed GET /fapi/v1/income. Raises when the payload is not a list."""
+        params: dict[str, Any] = {
+            "limit": int(limit),
+            "startTime": int(start_ms),
+            "endTime": int(end_ms),
+            "incomeType": income_type,
+        }
+        if symbol:
+            params["symbol"] = symbol.upper()
+        payload = self._signed_get(INCOME_PATH, params, provider="binance_fapi_income")
+        if not isinstance(payload, list):
+            raise ValueError("unexpected income response type")
+        return list(payload)
+
     def user_trades(
         self,
         symbol: str,
