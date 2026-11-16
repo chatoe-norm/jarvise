@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.conftest import assist_toggle_confirm
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
 from jarvise_assist import listen as listen_mod
@@ -108,10 +109,10 @@ def test_toggle_reply_markup_style_matches_enabled(tmp_path: Path) -> None:
     sent, send = _send_capture()
     day = _ms_bangkok(2026, 10, 27, 12, 0)
     assert ensure_settings(conn)["enabled"] is True
-    handle_menu_text(conn, BTN_TOGGLE, now_ms=day, send=send)
+    assist_toggle_confirm(conn, now_ms=day, send=send)
     assert ensure_settings(conn)["enabled"] is False
     assert "style" not in _toggle_btn(sent[-1]["reply_markup"])
-    handle_menu_text(conn, BTN_TOGGLE, now_ms=day, send=send)
+    assist_toggle_confirm(conn, now_ms=day, send=send)
     assert ensure_settings(conn)["enabled"] is True
     assert _toggle_btn(sent[-1]["reply_markup"])["style"] == "success"
     conn.close()
@@ -160,17 +161,17 @@ def test_new_anything_does_not_refresh(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_legacy_toggle_still_toggles_without_extra_refresh(tmp_path: Path) -> None:
+def test_legacy_toggle_asks_confirm_without_extra_refresh(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "legacy_tog.db")
     sent, send = _send_capture()
     day = _ms_bangkok(2026, 10, 27, 12, 0)
     assert ensure_settings(conn)["enabled"] is True
     out = handle_menu_text(conn, LEGACY_BTN_TOGGLE, now_ms=day, send=send)
     assert out.get("kind") == "toggle"
-    assert ensure_settings(conn)["enabled"] is False
+    assert out.get("confirm") is True
+    assert ensure_settings(conn)["enabled"] is True
     assert out.get("menu_refreshed") is not True
     assert all(s["text"] != "เมนูอัปเดตแล้ว" for s in sent)
-    assert "style" not in _toggle_btn(sent[-1]["reply_markup"])
     conn.close()
 
 
