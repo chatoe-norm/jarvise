@@ -27,6 +27,7 @@ from jarvise_assist.menu import (
 from jarvise_assist.pause import (
     BOT_ENTRIES_ONLY_TH,
     bangkok_day_id,
+    bangkok_resume_label,
     evaluate_pause,
     next_0820_bangkok_ms,
     pause_clear_warning,
@@ -508,6 +509,22 @@ def test_legacy_toggle_asks_confirm_no_refresh(tmp_path: Path) -> None:
     assert out.get("menu_refreshed") is not True
     assert all(s["text"] != "เมนูอัปเดตแล้ว" for s in sent)
     assert _snap(conn) == before
+    conn.close()
+
+
+def test_pause_clear_warning_space_before_numeric_date(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "thru.db")
+    far = NOW + 3 * 86_400_000
+    write_settings(conn, enabled=False, paused_until_ms=far, pause_reason="streak")
+    label = bangkok_resume_label(far, now_ms=NOW)
+    assert label[:1].isdigit()
+    far_line = pause_clear_warning(conn, now_ms=NOW)[0]
+    assert f"ที่ตั้งไว้ถึง {label}" in far_line
+
+    near = NOW + 3_600_000
+    write_settings(conn, paused_until_ms=near, pause_reason="streak")
+    near_line = pause_clear_warning(conn, now_ms=NOW)[0]
+    assert "ที่ตั้งไว้ถึงวันนี้" in near_line
     conn.close()
 
 
