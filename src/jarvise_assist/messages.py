@@ -398,6 +398,16 @@ def _fmt_r_level(level: Decimal) -> str:
     return text or "0"
 
 
+def progress_alert_after_tap(text: str) -> str:
+    """Drop stale move/press lines from a progress alert after an ms: tap or expiry."""
+    kept = [
+        line
+        for line in str(text).splitlines()
+        if not (line.startswith("📌 ยังไม่ได้เลื่อน") or line.startswith("กด "))
+    ]
+    return "\n".join(kept)
+
+
 def format_progress_alert(
     *,
     symbol: str,

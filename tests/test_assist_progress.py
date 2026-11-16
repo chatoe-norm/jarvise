@@ -907,6 +907,106 @@ def test_progress_move_tap_expired_restores_notice_without_buttons(
     conn.close()
 
 
+def test_progress_move_tap_order_params_and_clean_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-clean.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    sent, send = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send)
+    alert_text = _progress(sent)[0]["text"]
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    handlers = _progress_move_handlers(intent_id=move_id)
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (trade, None))
+    edits: list[tuple[Any, ...]] = []
+
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-ms-clean",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day,
+    )
+    posts = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+    assert len(posts) == 1
+    params = posts[0][2]
+    assert params.get("algoType") == "CONDITIONAL"
+    assert params.get("type") == "STOP_MARKET"
+    assert params.get("side") == "BUY"
+    assert params.get("positionSide") == "BOTH"
+    assert Decimal(str(params.get("triggerPrice"))) == SUGGESTED_BE
+    assert params.get("quantity") == "100"
+    assert params.get("reduceOnly") == "true"
+    assert params.get("workingType") == "MARK_PRICE"
+    assert params.get("clientAlgoId") == client_order_id(move_id, "ms")
+    assert "closePosition" not in params
+    clean = "\n".join(alert_text.splitlines()[:3])
+    assert edits == [(4, clean, {"inline_keyboard": []})]
+    assert not any(line.startswith("📌") or line.startswith("กด ") for line in edits[0][1].splitlines())
+    conn.close()
+
+
+def test_progress_move_tap_expired_edit_drops_stale_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-exp-clean.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    sent_watch, send_watch = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
+    alert_text = _progress(sent_watch)[0]["text"]
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    transport = RecordingTransport(_progress_move_handlers(intent_id=move_id))
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
+    sent: list[str] = []
+    edits: list[tuple[Any, ...]] = []
+
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-ms-exp-clean",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day + MOVE_STOP_TTL_MS + 1_000,
+    )
+    clean = "\n".join(alert_text.splitlines()[:3])
+    assert not any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in transport.calls)
+    assert edits == [(4, clean, {"inline_keyboard": []})]
+    assert not any(line.startswith("📌") or line.startswith("กด ") for line in edits[0][1].splitlines())
+    assert sent == [MSG_MOVE_STOP_EXPIRED]
+    conn.close()
+
+
 def test_progress_move_tap_level_changed_sends_fresh_advice_no_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

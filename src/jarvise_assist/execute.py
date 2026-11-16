@@ -48,6 +48,7 @@ from jarvise_assist.messages import (
     fmt_qty,
     format_move_stop_advice,
     format_signal_message,
+    progress_alert_after_tap,
 )
 from jarvise_assist.pause import is_paused
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN, quick_symbols
@@ -3188,6 +3189,13 @@ def handle_exec_callback(
             if isinstance(preview, dict):
                 advice_body = preview.get("advice_text")
             edit_body = str(advice_body) if (prefix == "ms:" and advice_body) else MSG_EXPIRED
+            if (
+                prefix == "ms:"
+                and advice_body
+                and isinstance(preview, dict)
+                and preview.get("via") == "progress"
+            ):
+                edit_body = progress_alert_after_tap(edit_body)
             if mid is not None:
                 edit(int(mid), edit_body, reply_markup={"inline_keyboard": []})
             send(expired_text)
@@ -3250,6 +3258,8 @@ def handle_exec_callback(
                 return
             preview = intent.get("preview") or {}
             body = preview.get("advice_text") if isinstance(preview, dict) else None
+            if body and isinstance(preview, dict) and preview.get("via") == "progress":
+                body = progress_alert_after_tap(str(body))
             edit(int(mid), str(body) if body else MSG_CANCELLED, reply_markup={"inline_keyboard": []})
 
         def _finish_send(result: str, *, markup: dict[str, Any] | None = None) -> dict[str, Any]:
