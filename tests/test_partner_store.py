@@ -37,9 +37,9 @@ def _n_events(conn: sqlite3.Connection, *, kind: str | None = None) -> int:
 
 
 def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 30
+    assert SCHEMA_VERSION == 31
     fresh = open_db(tmp_path / "fresh.db")
-    assert schema_version(fresh) == 30
+    assert schema_version(fresh) == 31
     for table in ("partner", "partner_event", "partner_request"):
         row = fresh.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -61,7 +61,7 @@ def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
     }
     fresh.close()
 
-    # Stamp a DB at user_version 29, then reopen → 30; existing rows untouched
+    # Stamp a DB at user_version 29, then reopen → 31; existing rows untouched
     path = tmp_path / "from29.db"
     conn = open_db(path)
     # Use an existing table that migration 30 must not touch
@@ -82,7 +82,7 @@ def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 30
+    assert schema_version(conn) == 31
     after = conn.execute("SELECT COUNT(*) AS n FROM assist_settings").fetchone()
     n_after = after[0] if not hasattr(after, "keys") else after["n"]
     assert n_after == n_before
@@ -92,6 +92,61 @@ def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
 
     applied = migrate(conn)
     assert applied == []
+    conn.close()
+
+
+def test_migration_31_adds_request_source_on_v30_db_idempotent(tmp_path: Path) -> None:
+    path = tmp_path / "from30.db"
+    conn = open_db(path)
+    now = 1_700_000_000_000
+    a = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)
+    rid = ps.create_request(conn, a["partner_id"], "close", now + 1, source="portal")["request_id"]
+    # Simulate a true v30 DB: no source column, user_version 30.
+    conn.execute("ALTER TABLE partner_request DROP COLUMN source")
+    conn.execute("PRAGMA user_version = 30")
+    conn.commit()
+    conn.close()
+
+    conn = open_db(path)
+    assert schema_version(conn) == 31
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(partner_request)")}
+    assert "source" in cols
+    # No backfill: the pre-31 row keeps NULL.
+    row = conn.execute("SELECT source FROM partner_request WHERE id = ?", (rid,)).fetchone()
+    assert row["source"] is None
+    from jarvise_ingest.db import migrate
+
+    total_before = conn.total_changes
+    assert migrate(conn) == []
+    assert conn.total_changes == total_before
+    conn.close()
+
+    # Re-stamping to 30 with the column already present re-runs 31 as a no-op.
+    conn = open_db(path)
+    conn.execute("PRAGMA user_version = 30")
+    conn.commit()
+    assert migrate(conn) == ["31:partner_request_source"]
+    assert schema_version(conn) == 31
+    conn.close()
+
+
+def test_create_request_requires_known_source(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "src.db")
+    now = 1_700_000_000_000
+    a = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)
+    a_id = a["partner_id"]
+    with pytest.raises(TypeError):
+        ps.create_request(conn, a_id, "close", now + 1)  # type: ignore[call-arg]
+    for bad in ("", "Portal", "owner", None):
+        out = ps.create_request(conn, a_id, "close", now + 2, source=bad)  # type: ignore[arg-type]
+        assert out == {"ok": False, "reason": "bad_source"}
+    assert conn.execute("SELECT COUNT(*) AS n FROM partner_request").fetchone()["n"] == 0
+    for src in ("admin", "portal"):
+        out = ps.create_request(conn, a_id, "close", now + 3, source=src)
+        assert out["ok"] is True
+        got = conn.execute("SELECT source FROM partner_request WHERE id = ?", (out["request_id"],)).fetchone()
+        assert got["source"] == src
+        ps.reject_request(conn, out["request_id"], now + 4)
     conn.close()
 
 
@@ -427,7 +482,7 @@ def test_confirm_and_mark_paid_idempotent_and_rollback(
     a_id, b_id = a["partner_id"], b["partner_id"]
     ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
     ps.apply_deposit(conn, b_id, D("100"), D("1100"), now + 20)
-    created = ps.create_request(conn, b_id, "close", now + 30)
+    created = ps.create_request(conn, b_id, "close", now + 30, source="admin")
     assert created["ok"]
     rid = created["request_id"]
     r1 = ps.confirm_request(conn, rid, D("1100"), now + 40)
@@ -443,7 +498,7 @@ def test_confirm_and_mark_paid_idempotent_and_rollback(
     c = ps.create_partner(conn, name="Carol", is_admin=False, now_ms=now + 60)
     c_id = c["partner_id"]
     ps.apply_deposit(conn, c_id, D("100"), D("1200"), now + 70)
-    created2 = ps.create_request(conn, c_id, "close", now + 80)
+    created2 = ps.create_request(conn, c_id, "close", now + 80, source="admin")
     rid2 = created2["request_id"]
     n0 = _n_events(conn)
     status0 = conn.execute("SELECT status FROM partner_request WHERE id = ?", (rid2,)).fetchone()["status"]
@@ -589,10 +644,10 @@ def test_create_request_deposit_rules(tmp_path: Path) -> None:
     a_id, b_id = a["partner_id"], b["partner_id"]
     ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
 
-    low = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("49.99"))
+    low = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("49.99"), source="admin")
     assert low["ok"] is False and low["reason"] == "below_min_deposit"
 
-    ok = ps.create_request(conn, b_id, "deposit", now + 30, amount=D("50"))
+    ok = ps.create_request(conn, b_id, "deposit", now + 30, amount=D("50"), source="admin")
     assert ok["ok"] is True
     row = conn.execute(
         "SELECT quote_gross_micro, expires_at_ms FROM partner_request WHERE id = ?",
@@ -601,16 +656,16 @@ def test_create_request_deposit_rules(tmp_path: Path) -> None:
     assert int(row["quote_gross_micro"]) == 50_000_000
     assert int(row["expires_at_ms"]) == now + 30 + 86_400_000
 
-    no_amt = ps.create_request(conn, a_id, "deposit", now + 40)
+    no_amt = ps.create_request(conn, a_id, "deposit", now + 40, source="admin")
     assert no_amt["ok"] is False and no_amt["reason"] == "bad_args"
     # Clear Bob's pending via reject so we can test close+amount on a free partner
     ps.reject_request(conn, ok["request_id"], now + 41)
-    bad_close = ps.create_request(conn, b_id, "close", now + 42, amount=D("10"))
+    bad_close = ps.create_request(conn, b_id, "close", now + 42, amount=D("10"), source="admin")
     assert bad_close["ok"] is False and bad_close["reason"] == "bad_args"
 
     ps.apply_deposit(conn, b_id, D("100"), D("1100"), now + 50)
     ps.apply_close(conn, b_id, D("1100"), now + 60)
-    closed_req = ps.create_request(conn, b_id, "deposit", now + 70, amount=D("50"))
+    closed_req = ps.create_request(conn, b_id, "deposit", now + 70, amount=D("50"), source="admin")
     assert closed_req["ok"] is False and closed_req["reason"] == "closed"
     conn.close()
 
@@ -623,13 +678,13 @@ def test_one_pending_and_expiry(tmp_path: Path) -> None:
     a_id, b_id = a["partner_id"], b["partner_id"]
     ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
 
-    r1 = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("50"))
+    r1 = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("50"), source="admin")
     assert r1["ok"]
-    r2 = ps.create_request(conn, b_id, "close", now + 21)
+    r2 = ps.create_request(conn, b_id, "close", now + 21, source="admin")
     assert r2["ok"] is False and r2["reason"] == "request_pending"
 
     expires_at = int(r1["expires_at_ms"])
-    r3 = ps.create_request(conn, b_id, "close", expires_at)
+    r3 = ps.create_request(conn, b_id, "close", expires_at, source="admin")
     assert r3["ok"] is True
     old = conn.execute("SELECT status FROM partner_request WHERE id = ?", (r1["request_id"],)).fetchone()
     assert old["status"] == "expired"
@@ -637,7 +692,7 @@ def test_one_pending_and_expiry(tmp_path: Path) -> None:
     # New pending close; confirm at exactly expires_at_ms → not pending
     # First reject the close we just made, make a short-lived request via SQL expires
     ps.reject_request(conn, r3["request_id"], expires_at + 1)
-    created = ps.create_request(conn, b_id, "close", expires_at + 2)
+    created = ps.create_request(conn, b_id, "close", expires_at + 2, source="admin")
     assert created["ok"]
     # Force expires_at_ms to a known value
     conn.execute(
@@ -661,7 +716,7 @@ def test_deposit_request_full_flow_nav_1_2(tmp_path: Path) -> None:
     view_a0 = ps.view_partner(conn, a_id, D("1200"))
     assert view_a0["nav"] == D("1.2")
 
-    req = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("100"))
+    req = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("100"), source="admin")
     assert req["ok"]
     conf = ps.confirm_request(conn, req["request_id"], D("1299.5"), now + 30, amount_received=D("99.5"))
     assert conf["ok"] is True
@@ -700,7 +755,7 @@ def test_deposit_while_close_payout_due(tmp_path: Path) -> None:
     due = closed["cash"]
     assert due > 0
     view_a0 = ps.view_partner(conn, a_id, D("1200"))
-    req = ps.create_request(conn, c_id, "deposit", now + 40, amount=D("100"))
+    req = ps.create_request(conn, c_id, "deposit", now + 40, amount=D("100"), source="admin")
     conf = ps.confirm_request(conn, req["request_id"], D("1300"), now + 50, amount_received=D("100"))
     assert conf["ok"]
     # units at (raw V - amount - due) / U = (1300 - 100 - due) / 1000
@@ -719,7 +774,7 @@ def test_reject_then_confirm_writes_nothing(tmp_path: Path) -> None:
     b = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=now + 1)
     a_id, b_id = a["partner_id"], b["partner_id"]
     ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
-    req = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("50"))
+    req = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("50"), source="admin")
     assert ps.reject_request(conn, req["request_id"], now + 30)["ok"]
     n0 = _n_events(conn)
     bad = ps.confirm_request(conn, req["request_id"], D("1050"), now + 40, amount_received=D("50"))
@@ -738,14 +793,14 @@ def test_deposit_pending_blocks_withdraw_and_close(tmp_path: Path) -> None:
     ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
     ps.apply_deposit(conn, c_id, D("200"), D("1200"), now + 20)
     # Grow for profit
-    b_dep = ps.create_request(conn, b_id, "deposit", now + 30, amount=D("50"))
+    b_dep = ps.create_request(conn, b_id, "deposit", now + 30, amount=D("50"), source="admin")
     assert b_dep["ok"]
     n0 = _n_events(conn)
     wd = ps.apply_withdraw_profit(conn, c_id, D("1440"), now + 40)
     assert wd["ok"] is False and wd["reason"] == "deposit_pending"
     assert _n_events(conn) == n0
 
-    c_close = ps.create_request(conn, c_id, "close", now + 50)
+    c_close = ps.create_request(conn, c_id, "close", now + 50, source="admin")
     # Bob still holds pending deposit → C cannot create? one pending per partner — C is free
     assert c_close["ok"] is True
     conf = ps.confirm_request(conn, c_close["request_id"], D("1440"), now + 60)
@@ -767,7 +822,7 @@ def test_deposit_pending_blocks_withdraw_and_close(tmp_path: Path) -> None:
     ps.apply_deposit(conn, d_id, D("100"), D("1540"), now + 100)
     # Mark paid on C close so due doesn't confuse
     ps.mark_paid(conn, conf2["request_id"], now + 101)
-    exp_req = ps.create_request(conn, b_id, "deposit", now + 110, amount=D("50"))
+    exp_req = ps.create_request(conn, b_id, "deposit", now + 110, amount=D("50"), source="admin")
     assert exp_req["ok"]
     expires = int(exp_req["expires_at_ms"])
     # Leave as pending but now >= expires (not swept)
@@ -791,18 +846,18 @@ def test_verify_ledger_mixed_request_flow(tmp_path: Path) -> None:
     a_id, b_id, c_id = a["partner_id"], b["partner_id"], c["partner_id"]
     ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
 
-    dep = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("100"))
+    dep = ps.create_request(conn, b_id, "deposit", now + 20, amount=D("100"), source="admin")
     conf_dep = ps.confirm_request(conn, dep["request_id"], D("1100"), now + 30, amount_received=D("100"))
     assert conf_dep["ok"]
 
     ps.apply_deposit(conn, c_id, D("100"), D("1200"), now + 40)
-    close_req = ps.create_request(conn, c_id, "close", now + 50)
+    close_req = ps.create_request(conn, c_id, "close", now + 50, source="admin")
     conf_close = ps.confirm_request(conn, close_req["request_id"], D("1200"), now + 60)
     assert conf_close["ok"]
     assert ps.mark_paid(conn, close_req["request_id"], now + 70)["ok"]
 
     # Withdraw cancelled for no_profit (loss)
-    wd_req = ps.create_request(conn, b_id, "withdraw_profit", now + 80)
+    wd_req = ps.create_request(conn, b_id, "withdraw_profit", now + 80, source="admin")
     assert wd_req["ok"]
     # Drop mark so B has no profit: raw V low
     cancelled = ps.confirm_request(conn, wd_req["request_id"], D("900"), now + 90)
@@ -814,7 +869,7 @@ def test_verify_ledger_mixed_request_flow(tmp_path: Path) -> None:
         == "cancelled"
     )
 
-    exp = ps.create_request(conn, b_id, "close", now + 100)
+    exp = ps.create_request(conn, b_id, "close", now + 100, source="admin")
     assert exp["ok"]
     n_exp = ps.expire_requests(conn, int(exp["expires_at_ms"]))
     assert n_exp >= 1

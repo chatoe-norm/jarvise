@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from jarvise_assist import partner_ledger as pl
+from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
 from jarvise_assist.futures import build_futures_client
 from jarvise_assist.partner_value import (
@@ -566,6 +567,9 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
         name_line = f"· {name}"
         if p["telegram_user_id"] is not None:
             name_line += " · TG ✅"
+        joined = partner_rules.joined_at_ms(conn, pid)
+        if joined is not None:
+            name_line += f" · เข้าร่วม {partner_rules.fmt_date(joined)}"
         block = [name_line, f"  หน่วย {fmt_units(units)} · ส่วนแบ่ง {share} · ทุน {fmt_usdt(cost)}"]
         if v_ok:
             view = ps.view_partner(conn, pid, account_for_view)
@@ -713,7 +717,7 @@ def _handle_dep(
         send(thai_reason(plan.reason))
         return {"ok": False, "reason": plan.reason}
 
-    created = ps.create_request(conn, partner_id, "deposit", now_ms, amount=amount)
+    created = ps.create_request(conn, partner_id, "deposit", now_ms, amount=amount, source="admin")
     if not created.get("ok"):
         reason = str(created.get("reason") or "")
         if reason == "request_pending":
@@ -855,7 +859,7 @@ def _admin_request_message(
     if isinstance(av, AccountValueError):
         send(thai_reason(av.reason, detail=av.detail))
         return {"ok": False, "reason": av.reason}
-    created = ps.create_request(conn, str(row["id"]), kind, now_ms)
+    created = ps.create_request(conn, str(row["id"]), kind, now_ms, source="admin")
     if not created.get("ok"):
         send(thai_reason(str(created.get("reason") or "")))
         return {"ok": False, "reason": created.get("reason")}
@@ -868,7 +872,7 @@ def _admin_request_message(
     if not isinstance(n, pl.Refusal):
         units = ps.units_from_e8(int(row["units_e8"]))
         cost = ps.usdt_from_micro(int(row["cost_micro"]))
-        fee_rate = Decimal(int(row["fee_rate_bps"])) / Decimal("10000")
+        fee_rate = ps.fee_rate_from_bps(int(row["fee_rate_bps"]))
         if kind == "convert":
             cv = pl.plan_convert(units=units, cost=cost, fee_rate=fee_rate, nav=n)
             if not isinstance(cv, pl.Refusal):

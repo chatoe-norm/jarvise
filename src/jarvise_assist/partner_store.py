@@ -42,6 +42,7 @@ REQUEST_TTL_MS = 86_400_000
 INVITE_TTL_MS = 86_400_000
 MIN_DEPOSIT_USDT = Decimal("50")
 _REQUEST_KINDS = frozenset({"deposit", "convert", "withdraw_profit", "close"})
+_REQUEST_SOURCES = frozenset({"admin", "portal"})
 _CANCEL_ON_CONFIRM = frozenset({"no_profit", "below_min"})
 
 
@@ -73,7 +74,7 @@ def _new_request_id() -> str:
     return f"pr_{uuid.uuid4().hex[:16]}"
 
 
-def _fee_rate_from_bps(bps: int) -> Decimal:
+def fee_rate_from_bps(bps: int) -> Decimal:
     return Decimal(int(bps)) / BPS
 
 
@@ -284,7 +285,7 @@ def view_partner(conn: sqlite3.Connection, partner_id: str, account_value: Decim
     v = value_of(
         units=units_from_e8(int(row["units_e8"])),
         cost=usdt_from_micro(int(row["cost_micro"])),
-        fee_rate=_fee_rate_from_bps(int(row["fee_rate_bps"])),
+        fee_rate=fee_rate_from_bps(int(row["fee_rate_bps"])),
         nav=n,
     )
     return {
@@ -474,8 +475,8 @@ def _insert_confirmed_payout_request(
         """
         INSERT INTO partner_request (
             id, partner_id, kind, status, payout_state, payout_micro,
-            created_at_ms, expires_at_ms, decided_at_ms
-        ) VALUES (?, ?, ?, 'confirmed', ?, ?, ?, ?, ?)
+            created_at_ms, expires_at_ms, decided_at_ms, source
+        ) VALUES (?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, 'admin')
         """,
         (rid, partner_id, kind, payout_state, payout_micro, ts, ts, ts),
     )
@@ -583,7 +584,7 @@ def _apply_convert_tx(
     plan = plan_convert(
         units=units_from_e8(int(row["units_e8"])),
         cost=usdt_from_micro(int(row["cost_micro"])),
-        fee_rate=_fee_rate_from_bps(int(row["fee_rate_bps"])),
+        fee_rate=fee_rate_from_bps(int(row["fee_rate_bps"])),
         nav=n,
     )
     if isinstance(plan, Refusal):
@@ -669,7 +670,7 @@ def _apply_withdraw_profit_tx(
     plan = plan_withdraw_profit(
         units=units_from_e8(int(row["units_e8"])),
         cost=usdt_from_micro(int(row["cost_micro"])),
-        fee_rate=_fee_rate_from_bps(int(row["fee_rate_bps"])),
+        fee_rate=fee_rate_from_bps(int(row["fee_rate_bps"])),
         nav=n,
     )
     if isinstance(plan, Refusal):
@@ -780,7 +781,7 @@ def _apply_close_tx(
     plan = plan_close(
         units=partner_units,
         cost=partner_cost,
-        fee_rate=_fee_rate_from_bps(int(row["fee_rate_bps"])),
+        fee_rate=fee_rate_from_bps(int(row["fee_rate_bps"])),
         nav=n,
     )
     if isinstance(plan, Refusal):
@@ -983,15 +984,21 @@ def create_request(
     kind: str,
     now_ms: int,
     amount: Decimal | None = None,
+    *,
+    source: str,
 ) -> dict[str, Any]:
     """Create a pending partner_request.
 
     For kind ``deposit``, ``quote_gross_micro`` holds the amount the partner
-    states; all other quote_* columns stay NULL in this phase.
+    states; all other quote_* columns stay NULL in this phase. ``source`` is
+    required: ``portal`` when the partner submitted it, ``admin`` for owner
+    commands. Unknown values return ``bad_source``.
     """
+    if kind not in _REQUEST_KINDS:
+        return {"ok": False, "reason": "bad_kind"}
+    if source not in _REQUEST_SOURCES:
+        return {"ok": False, "reason": "bad_source"}
     with transaction(conn):
-        if kind not in _REQUEST_KINDS:
-            return {"ok": False, "reason": "bad_kind"}
         quote_gross: int | None = None
         if kind == "deposit":
             if amount is None:
@@ -1038,10 +1045,10 @@ def create_request(
             """
             INSERT INTO partner_request (
                 id, partner_id, kind, status, payout_state,
-                quote_gross_micro, created_at_ms, expires_at_ms
-            ) VALUES (?, ?, ?, 'pending', 'none', ?, ?, ?)
+                quote_gross_micro, created_at_ms, expires_at_ms, source
+            ) VALUES (?, ?, ?, 'pending', 'none', ?, ?, ?, ?)
             """,
-            (rid, partner_id, kind, quote_gross, ts, expires),
+            (rid, partner_id, kind, quote_gross, ts, expires, source),
         )
         return {"ok": True, "request_id": rid, "expires_at_ms": expires}
 

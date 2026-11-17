@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from jarvise_assist import partner_ledger as pl
+from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
 from jarvise_assist.futures import build_futures_client
 from jarvise_assist.partner_admin import (
@@ -26,6 +27,7 @@ from jarvise_assist.partner_admin import (
     send_to_partner,
 )
 from jarvise_assist.partner_positions import render_partner_positions
+from jarvise_assist.partner_rules import Block
 from jarvise_assist.partner_value import (
     AccountValue,
     AccountValueError,
@@ -39,7 +41,7 @@ _CACHE_TTL_MS = 30_000
 _START_RE = re.compile(r"^/start(@[A-Za-z0-9_]+)?\s+([A-Za-z0-9_-]{20,64})$")
 _DEP_TEXT_RE = re.compile(r"^ฝาก\s+(\S+)$")
 _KIND_CODE = {"cv": "convert", "wd": "withdraw_profit", "cl": "close"}
-_MIN_DEP = Decimal("50")
+_BAD_DEP_TEXT = f"จำนวนไม่ถูกต้อง (ขั้นต่ำ {ps.MIN_DEPOSIT_USDT} USDT)"
 
 # Portal-only V cache: (AccountValue, read_at_ms, due_total, total_units) or None
 _value_cache: tuple[AccountValue, int, Decimal, Decimal] | None = None
@@ -129,7 +131,12 @@ def _read_v_cached(
     return av
 
 
-def _card_buttons() -> dict[str, Any]:
+def _card_buttons(locks: dict[str, Block] | None = None) -> dict[str, Any]:
+    """Active-card keyboard. Locked buttons change only ``text``; callbacks stay ``pp:rq:*``."""
+    locks = locks or {}
+    cv = locks.get("cv")
+    wd = locks.get("wd")
+    cl = locks.get("cl")
     return {
         "inline_keyboard": [
             [
@@ -137,13 +144,42 @@ def _card_buttons() -> dict[str, Any]:
                 {"text": "💰 แจ้งฝาก", "callback_data": "pp:dep"},
             ],
             [
-                {"text": "🔁 ทบกำไร", "callback_data": "pp:rq:cv"},
-                {"text": "💸 ถอนกำไร", "callback_data": "pp:rq:wd"},
+                {"text": cv.label if cv is not None else "🔁 ทบกำไร", "callback_data": "pp:rq:cv"},
+                {"text": wd.label if wd is not None else "💸 ถอนกำไร", "callback_data": "pp:rq:wd"},
             ],
-            [{"text": "🚪 ปิดพอร์ต", "callback_data": "pp:rq:cl"}],
+            [
+                {
+                    "text": cl.label if cl is not None else "🚪 ปิดพอร์ต",
+                    "callback_data": "pp:rq:cl",
+                }
+            ],
             [{"text": "📊 ไม้ที่เปิดอยู่", "callback_data": "pp:pos"}],
         ]
     }
+
+
+def _nav_for_rules(conn: sqlite3.Connection, av: AccountValue) -> Decimal | None:
+    due = ps.payouts_due_total(conn)
+    u_total = ps.total_units(conn)
+    n = pl.nav(av.value - due, u_total)
+    if isinstance(n, pl.Refusal):
+        return None
+    return n
+
+
+def _locks_for_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    nav: Decimal | None,
+    now_ms: int,
+) -> dict[str, Block]:
+    out: dict[str, Block] = {}
+    for code, kind in (("cv", "convert"), ("wd", "withdraw_profit"), ("cl", "close")):
+        blocked = partner_rules.block(conn, row, kind, nav=nav, now_ms=now_ms)
+        if blocked is not None:
+            out[code] = blocked
+    return out
 
 
 def _go_buttons(code: str) -> dict[str, Any]:
@@ -179,10 +215,6 @@ def _admin_request_buttons(request_id: str) -> dict[str, Any]:
     }
 
 
-def _fee_rate(row: sqlite3.Row) -> Decimal:
-    return Decimal(int(row["fee_rate_bps"])) / Decimal("10000")
-
-
 def _estimate(
     conn: sqlite3.Connection, row: sqlite3.Row, kind: str, av: AccountValue
 ) -> tuple[Decimal, Decimal, Decimal] | str:
@@ -194,7 +226,7 @@ def _estimate(
         return n.reason
     units = ps.units_from_e8(int(row["units_e8"]))
     cost = ps.usdt_from_micro(int(row["cost_micro"]))
-    fee_rate = _fee_rate(row)
+    fee_rate = ps.fee_rate_from_bps(int(row["fee_rate_bps"]))
     if kind == "convert":
         cv = pl.plan_convert(units=units, cost=cost, fee_rate=fee_rate, nav=n)
         if isinstance(cv, pl.Refusal):
@@ -225,6 +257,13 @@ def _build_card(
     cost = ps.usdt_from_micro(int(row["cost_micro"]))
     units = ps.units_from_e8(int(row["units_e8"]))
     pid = str(row["id"])
+    joined = partner_rules.joined_at_ms(conn, pid)
+
+    def _header() -> list[str]:
+        lines = [f"พอร์ตของ {name} · {stamp}"]
+        if joined is not None:
+            lines.append(f"เข้าร่วม {partner_rules.fmt_date(joined)}")
+        return lines
 
     def _pending_and_due(lines: list[str]) -> None:
         pending = conn.execute(
@@ -250,43 +289,56 @@ def _build_card(
                 lines.append(f"รอโอน {fmt_usdt(x)} USDT")
         return "\n".join(lines), None
 
+    nav: Decimal | None = None
+    if isinstance(av, AccountValue):
+        nav = _nav_for_rules(conn, av)
+    locks = _locks_for_row(conn, row, nav=nav, now_ms=now_ms)
+    markup = _card_buttons(locks)
+
     if isinstance(av, AccountValueError):
-        lines = [
-            f"พอร์ตของ {name} · {stamp}",
-            "อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง",
-            f"ทุน {fmt_usdt(cost)} USDT",
-        ]
+        lines = _header()
+        lines.extend(
+            [
+                "อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง",
+                f"ทุน {fmt_usdt(cost)} USDT",
+            ]
+        )
         _pending_and_due(lines)
-        return "\n".join(lines), _card_buttons()
+        return "\n".join(lines), markup
 
     if units == 0 and cost == 0:
-        lines = [f"พอร์ตของ {name} · {stamp}", "ยังไม่มีเงินในพอร์ต"]
+        lines = _header()
+        lines.append("ยังไม่มีเงินในพอร์ต")
         _pending_and_due(lines)
-        return "\n".join(lines), _card_buttons()
+        return "\n".join(lines), markup
 
     view = ps.view_partner(conn, pid, av.value)
     if not view.get("ok"):
-        lines = [
-            f"พอร์ตของ {name} · {stamp}",
-            "อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง",
-            f"ทุน {fmt_usdt(cost)} USDT",
-        ]
+        lines = _header()
+        lines.extend(
+            [
+                "อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง",
+                f"ทุน {fmt_usdt(cost)} USDT",
+            ]
+        )
         _pending_and_due(lines)
-        return "\n".join(lines), _card_buttons()
+        return "\n".join(lines), markup
 
     net = Decimal(view["net"])
     pnl = net - cost
     pct = fmt_pct(pnl, cost)
     if pct != "—" and pnl > 0 and not pct.startswith("+"):
         pct = f"+{pct}"
-    lines = [
-        f"พอร์ตของ {name} · {stamp}",
-        f"ทุน {fmt_usdt(cost)} USDT",
-        f"ยอดสุทธิ {fmt_usdt(net)} USDT (หลังหักค่าธรรมเนียม)",
-        f"{_state_emoji(str(view['state']))} {fmt_signed_usdt(pnl)} ({pct})",
-    ]
+    lines = _header()
+    lines.extend(
+        [
+            f"ทุน {fmt_usdt(cost)} USDT",
+            f"ยอดสุทธิ {fmt_usdt(net)} USDT (หลังหักค่าธรรมเนียม)",
+            f"{_state_emoji(str(view['state']))} {fmt_signed_usdt(pnl)} ({pct})",
+        ]
+    )
     _pending_and_due(lines)
-    return "\n".join(lines), _card_buttons()
+    return "\n".join(lines), markup
 
 
 def _send_card(
@@ -315,16 +367,16 @@ def _handle_deposit_text(
         send_to_partner(send, row, "ปิดพอร์ตแล้ว")
         return {"ok": False, "reason": "closed"}
     amount = parse_amount(amount_raw, allow_zero=False)
-    if amount is None or amount < _MIN_DEP:
-        send_to_partner(send, row, "จำนวนไม่ถูกต้อง (ขั้นต่ำ 50 USDT)")
+    if amount is None or amount < ps.MIN_DEPOSIT_USDT:
+        send_to_partner(send, row, _BAD_DEP_TEXT)
         return {"ok": False, "reason": "bad_amount"}
-    created = ps.create_request(conn, str(row["id"]), "deposit", now_ms, amount=amount)
+    created = ps.create_request(conn, str(row["id"]), "deposit", now_ms, amount=amount, source="portal")
     if not created.get("ok"):
         reason = str(created.get("reason") or "")
         if reason == "request_pending":
             send_to_partner(send, row, "มีคำขอค้างอยู่ รอแอดมิน")
             return {"ok": False, "reason": "request_pending"}
-        send_to_partner(send, row, "จำนวนไม่ถูกต้อง (ขั้นต่ำ 50 USDT)")
+        send_to_partner(send, row, _BAD_DEP_TEXT)
         return {"ok": False, "reason": reason}
     rid = str(created["request_id"])
     send_to_partner(send, row, f"แจ้งฝาก {fmt_usdt(amount)} USDT แล้ว รอแอดมินยืนยัน")
@@ -403,6 +455,7 @@ def _preview_request(
     row: sqlite3.Row,
     code: str,
     *,
+    answer: Any,
     edit: Any,
     send: Any,
     msg: dict[str, Any],
@@ -411,6 +464,15 @@ def _preview_request(
 ) -> dict[str, Any]:
     kind = _KIND_CODE[code]
     av = _read_v_cached(conn, futures, now_ms=now_ms)
+    nav: Decimal | None = None
+    if isinstance(av, AccountValue):
+        nav = _nav_for_rules(conn, av)
+    blocked = partner_rules.block(conn, row, kind, nav=nav, now_ms=now_ms)
+    if blocked is not None:
+        answer(blocked.toast)
+        return {"ok": False, "reason": blocked.code}
+    answer()
+
     mid = msg.get("message_id")
     partner_chat = str(row["telegram_user_id"])
     if isinstance(av, AccountValueError):
@@ -469,7 +531,30 @@ def _submit_request(
     now_ms: int,
 ) -> dict[str, Any]:
     kind = _KIND_CODE[code]
-    created = ps.create_request(conn, str(row["id"]), kind, now_ms)
+    # Non-money rules first (closed / pending / close clock) so a
+    # closed partner still gets "ปิดพอร์ตแล้ว" even when V is unreadable.
+    early = partner_rules.block(conn, row, kind, nav=None, now_ms=now_ms)
+    if early is not None:
+        answer(early.toast)
+        return {"ok": False, "reason": early.code}
+
+    av = _read_v_cached(conn, futures, now_ms=now_ms)
+    if kind in ("convert", "withdraw_profit"):
+        if isinstance(av, AccountValueError):
+            answer("อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง")
+            return {"ok": False, "reason": av.reason}
+        nav = _nav_for_rules(conn, av)
+        if nav is None:
+            # block() skips the 20 USDT mins on nav=None; fail closed instead.
+            answer("อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง")
+            return {"ok": False, "reason": "nav_not_positive"}
+        blocked = partner_rules.block(conn, row, kind, nav=nav, now_ms=now_ms)
+        if blocked is not None:
+            answer(blocked.toast)
+            return {"ok": False, "reason": blocked.code}
+    # close: money mins do not apply; unreadable V keeps today's create_request path
+
+    created = ps.create_request(conn, str(row["id"]), kind, now_ms, source="portal")
     if not created.get("ok"):
         reason = str(created.get("reason") or "")
         if reason == "request_pending":
@@ -478,7 +563,6 @@ def _submit_request(
         answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
         return {"ok": False, "reason": reason}
     rid = str(created["request_id"])
-    av = _read_v_cached(conn, futures, now_ms=now_ms)
     cash = Decimal("0")
     fee = Decimal("0")
     if isinstance(av, AccountValue):
@@ -560,10 +644,13 @@ def handle_portal_callback(
         )
 
     if data == "pp:dep":
+        if str(row["status"]) != "active":
+            _answer("ปิดพอร์ตแล้ว")
+            return {"ok": False, "reason": "closed"}
         _answer()
         tip = (
             "โอนเงินให้แอดมินตามที่ตกลงกัน แล้วพิมพ์ ฝาก <จำนวน> เช่น ฝาก 500\n"
-            "ขั้นต่ำ 50 USDT · แอดมินจะบันทึกหลังเงินเข้าพอร์ตแล้ว"
+            f"ขั้นต่ำ {ps.MIN_DEPOSIT_USDT} USDT · แอดมินจะบันทึกหลังเงินเข้าพอร์ตแล้ว"
         )
         send_to_partner(send, row, tip)
         return {"ok": True, "cmd": "dep_help"}
@@ -586,9 +673,16 @@ def handle_portal_callback(
         if code not in _KIND_CODE:
             _answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
             return {"ok": False, "reason": "unknown"}
-        _answer()
         return _preview_request(
-            conn, row, code, edit=edit, send=send, msg=msg, futures=futures, now_ms=now_ms
+            conn,
+            row,
+            code,
+            answer=_answer,
+            edit=edit,
+            send=send,
+            msg=msg,
+            futures=futures,
+            now_ms=now_ms,
         )
 
     if data.startswith("pp:go:"):

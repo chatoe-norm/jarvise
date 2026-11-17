@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 30).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 31).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -663,7 +663,8 @@ CREATE TABLE IF NOT EXISTS partner_request (
     created_at_ms INTEGER NOT NULL,
     expires_at_ms INTEGER NOT NULL,
     decided_at_ms INTEGER,
-    paid_at_ms INTEGER
+    paid_at_ms INTEGER,
+    source TEXT DEFAULT NULL  -- migration 31: 'portal' | 'admin'; NULL = row created before migration 31
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_partner_request_one_pending
     ON partner_request (partner_id) WHERE status = 'pending';

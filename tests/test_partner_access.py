@@ -154,7 +154,7 @@ def test_unbind_clears_fields(tmp_path: Path) -> None:
 def test_get_request_and_list_helpers(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "lists.db")
     _, b_id = _setup(conn)
-    req = ps.create_request(conn, b_id, "deposit", NOW + 10, amount=D("100"))
+    req = ps.create_request(conn, b_id, "deposit", NOW + 10, amount=D("100"), source="admin")
     assert req["ok"]
     rid = req["request_id"]
     got = ps.get_request(conn, rid)
