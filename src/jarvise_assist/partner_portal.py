@@ -75,7 +75,37 @@ def _gate(message_or_cb_msg: dict[str, Any], from_user: dict[str, Any] | None) -
 def _resolve_client(futures: Any) -> Any:
     if futures is not None:
         return futures
-    return build_futures_client()
+    try:
+        return build_futures_client()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("partner portal futures client unavailable: %s", type(exc).__name__)
+        return None
+
+
+def _edit_or_unchanged(
+    *,
+    msg: dict[str, Any],
+    text: str,
+    markup: dict[str, Any] | None,
+    mid: Any,
+    partner_chat: str,
+    edit: Any,
+    send: Any,
+    row: Any,
+    cmd: str,
+) -> dict[str, Any]:
+    """Edit when text changed; skip edit/send when Telegram would say unchanged."""
+    if msg.get("text") == text:
+        return {"ok": True, "cmd": cmd, "unchanged": True}
+    ok = False
+    if mid is not None:
+        try:
+            ok = bool(edit(int(mid), text, reply_markup=markup, chat_id=partner_chat))
+        except Exception:  # noqa: BLE001
+            ok = False
+    if not ok:
+        send_to_partner(send, row, text, reply_markup=markup)
+    return {"ok": True, "cmd": cmd}
 
 
 def _read_v_cached(
@@ -517,15 +547,17 @@ def handle_portal_callback(
         _answer()
         av = _read_v_cached(conn, futures, now_ms=now_ms)
         text, markup = _build_card(conn, row, av, now_ms=now_ms)
-        ok = False
-        if mid is not None:
-            try:
-                ok = bool(edit(int(mid), text, reply_markup=markup, chat_id=partner_chat))
-            except Exception:  # noqa: BLE001
-                ok = False
-        if not ok:
-            send_to_partner(send, row, text, reply_markup=markup)
-        return {"ok": True, "cmd": "refresh"}
+        return _edit_or_unchanged(
+            msg=msg,
+            text=text,
+            markup=markup,
+            mid=mid,
+            partner_chat=partner_chat,
+            edit=edit,
+            send=send,
+            row=row,
+            cmd="refresh",
+        )
 
     if data == "pp:dep":
         _answer()
@@ -601,15 +633,17 @@ def handle_portal_callback(
                 ]
             ]
         }
-        ok = False
-        if mid is not None:
-            try:
-                ok = bool(edit(int(mid), text, reply_markup=markup, chat_id=partner_chat))
-            except Exception:  # noqa: BLE001
-                ok = False
-        if not ok:
-            send_to_partner(send, row, text, reply_markup=markup)
-        return {"ok": True, "cmd": "positions"}
+        return _edit_or_unchanged(
+            msg=msg,
+            text=text,
+            markup=markup,
+            mid=mid,
+            partner_chat=partner_chat,
+            edit=edit,
+            send=send,
+            row=row,
+            cmd="positions",
+        )
 
     _answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
     return {"ok": False, "reason": "unknown"}
