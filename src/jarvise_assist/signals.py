@@ -488,6 +488,7 @@ def scan_signal_candidates(
         "orders": orders,
         "persist": persist,
         "on_demand": on_demand,
+        "max_risk_pct": portfolio_risk_cap_pct(risk_pct),
     }
 
 
