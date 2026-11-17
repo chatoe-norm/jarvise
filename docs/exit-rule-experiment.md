@@ -49,7 +49,7 @@ Migration 32 adds snapshots a later replay cannot rebuild:
 - each advice card (kind, time, mark, wick, 1h spot close, R now, suggested stop, approximate R after the 5 bps/side taker fee, distance from mark)
 - owner tap, ignore, or the 07:30 manual-move note, with latency
 - exchange stop history
-- exit source on `assist_real_trade.exit_source` (`initial_stop`, `be_stop`, `trail_stop`, `tp`, `manual`, `early_exit`, and the other labels)
+- exit source on `assist_real_trade.exit_source` (`initial_stop`, `be_stop`, `trail_stop`, `tp`, `manual`, `manual_stop`, `early_exit`, and the other labels)
 - ATR at entry on the watch row and copied onto the real trade
 
 Realised fees and funding stay the existing `commission_usdt` and `funding_usdt` columns. ⚠️ offers and taps are rows of their own. Nothing here places, moves, or cancels an order.

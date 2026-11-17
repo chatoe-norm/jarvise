@@ -2501,6 +2501,9 @@ def _send_fresh_move_stop_advice(
         if mid is not None:
             set_exec_intent_message_id(conn, new_id, int(mid))
         if mid:
+            # watch imports this module at load. Import here so `import watch` can finish first.
+            from jarvise_assist.watch import approx_r_multiple
+
             r_now = approx_r_multiple(side=side, entry=pos.entry_price, initial_stop=initial_stop, mark=mark)
             log_card(
                 conn,
@@ -4461,7 +4464,3 @@ def run_exec_recovery(
         except Exception:  # noqa: BLE001
             logger.exception("exec recovery failed intent_id=%s", intent_id)
     return {"ok": True, "claimed": claimed}
-
-
-# watch imports this module. The name is resolved at call time, after both modules exist.
-from jarvise_assist.watch import approx_r_multiple  # noqa: E402

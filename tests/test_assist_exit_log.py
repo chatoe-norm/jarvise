@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,17 @@ from jarvise_assist.store import (
 from jarvise_assist.watch import _link_or_freeze_stop, flush_held_watch_advice, run_assist_watch
 from jarvise_ingest.db import SCHEMA_VERSION, open_db, schema_version, upsert_market_technicals
 from jarvise_ingest.db import migrate as run_migrate
+
+
+def test_import_watch_before_execute() -> None:
+    """watch imports execute at module load. That import must succeed on its own."""
+    proc = subprocess.run(
+        [sys.executable, "-c", "import jarvise_assist.watch; import jarvise_assist.execute"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_resolve_exit_source_labels() -> None:
