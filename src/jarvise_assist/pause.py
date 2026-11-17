@@ -106,12 +106,12 @@ def monday_bangkok_ms(now_ms: int) -> int:
 
 def streak_pause_text(*, until_ms: int, now_ms: int) -> str:
     label = bangkok_resume_label(until_ms, now_ms=now_ms)
-    return f"⏸ หยุดส่ง signal ถึง{label} — แพ้ติดกัน 3 ไม้"
+    return f"⏸ หยุดส่ง signal {_thru(label)} — แพ้ติดกัน 3 ไม้"
 
 
 def week_loss_pause_text(pct: Decimal, *, until_ms: int, now_ms: int) -> str:
     label = bangkok_resume_label(until_ms, now_ms=now_ms)
-    return f"⏸ หยุดส่ง signal ถึง{label} — ขาดทุนสัปดาห์นี้ {float(pct):.1f}%"
+    return f"⏸ หยุดส่ง signal {_thru(label)} — ขาดทุนสัปดาห์นี้ {float(pct):.1f}%"
 
 
 def format_signed_r(net: Decimal) -> str:
@@ -125,12 +125,12 @@ def format_signed_r(net: Decimal) -> str:
 def day_loss_pause_text(net: Decimal, *, until_ms: int, now_ms: int) -> str:
     """End clock comes from the real pause time, the same way format_paused_until does."""
     label = bangkok_resume_label(until_ms, now_ms=now_ms)
-    return f"⏸ หยุดส่ง signal ถึง{label} — วันนี้ {format_signed_r(net)} ({BOT_ENTRIES_ONLY_TH})"
+    return f"⏸ หยุดส่ง signal {_thru(label)} — วันนี้ {format_signed_r(net)} ({BOT_ENTRIES_ONLY_TH})"
 
 
 def day_loss_deeper_pause_text(net: Decimal, *, until_ms: int, now_ms: int) -> str:
     label = bangkok_resume_label(until_ms, now_ms=now_ms)
-    return f"⏸ หยุดส่ง signal ถึง{label} — วันนี้ {format_signed_r(net)} ลึกกว่าตอนเปิดต่ออีก 1R ({BOT_ENTRIES_ONLY_TH})"
+    return f"⏸ หยุดส่ง signal {_thru(label)} — วันนี้ {format_signed_r(net)} ลึกกว่าตอนเปิดต่ออีก 1R ({BOT_ENTRIES_ONLY_TH})"
 
 
 def day_loss_resume_text(net: Decimal) -> str:
@@ -148,7 +148,7 @@ def _quantize_r(value: Any) -> Decimal:
 
 def format_paused_until(paused_until_ms: int, *, now_ms: int) -> str:
     label = bangkok_resume_label(paused_until_ms, now_ms=now_ms)
-    return f"หยุดพักถึง{label}"
+    return f"หยุดพัก{_thru(label)}"
 
 
 def is_paused(settings: dict[str, Any], *, now_ms: int) -> bool:

@@ -356,3 +356,26 @@ def test_day_loss_deeper_text_uses_resume_label() -> None:
     until = next_0820_bangkok_ms(now)
     text = day_loss_deeper_pause_text(Decimal("-4.0"), until_ms=until, now_ms=now)
     assert text == (f"⏸ หยุดส่ง signal ถึงพรุ่งนี้ 08:20 — วันนี้ -4.0R ลึกกว่าตอนเปิดต่ออีก 1R ({BOT_ENTRIES_ONLY_TH})")
+
+
+def test_pause_texts_space_before_numeric_date() -> None:
+    now = _ms_bangkok(*MON, 15, 0)
+    far = _ms_bangkok(2026, 11, 12, 8, 20)
+    assert bangkok_resume_label(far, now_ms=now) == "12/11 08:20"
+    assert streak_pause_text(until_ms=far, now_ms=now) == "⏸ หยุดส่ง signal ถึง 12/11 08:20 — แพ้ติดกัน 3 ไม้"
+    assert (
+        week_loss_pause_text(Decimal("4.2"), until_ms=far, now_ms=now)
+        == "⏸ หยุดส่ง signal ถึง 12/11 08:20 — ขาดทุนสัปดาห์นี้ 4.2%"
+    )
+    assert (
+        day_loss_pause_text(Decimal("-3.0"), until_ms=far, now_ms=now)
+        == f"⏸ หยุดส่ง signal ถึง 12/11 08:20 — วันนี้ -3.0R ({BOT_ENTRIES_ONLY_TH})"
+    )
+    assert (
+        day_loss_deeper_pause_text(Decimal("-4.0"), until_ms=far, now_ms=now)
+        == f"⏸ หยุดส่ง signal ถึง 12/11 08:20 — วันนี้ -4.0R ลึกกว่าตอนเปิดต่ออีก 1R ({BOT_ENTRIES_ONLY_TH})"
+    )
+    assert format_paused_until(far, now_ms=now) == "หยุดพักถึง 12/11 08:20"
+    tomorrow = next_0820_bangkok_ms(now)
+    assert streak_pause_text(until_ms=tomorrow, now_ms=now) == "⏸ หยุดส่ง signal ถึงพรุ่งนี้ 08:20 — แพ้ติดกัน 3 ไม้"
+    assert format_paused_until(tomorrow, now_ms=now) == "หยุดพักถึงพรุ่งนี้ 08:20"
