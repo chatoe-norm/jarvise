@@ -22,13 +22,21 @@ from jarvise_assist.execute import (
     MSG_ALREADY_CLOSED,
     MSG_EXIT_POSITION_CHANGED,
     MSG_MOVE_STOP_EXPIRED,
+    MSG_OFF,
+    MSG_PREORDER_MOVE,
+    PREVIEW_TTL_MS,
     client_order_id,
 )
 from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.journal import _exit_line, _last_advice
 from jarvise_assist.keyboard import progress_keyboard
 from jarvise_assist.listen import process_update
-from jarvise_assist.messages import _fmt_price_tick, _lock_at_stop, format_progress_alert
+from jarvise_assist.messages import (
+    _fmt_price_tick,
+    _lock_at_stop,
+    format_progress_alert,
+    progress_alert_after_tap,
+)
 from jarvise_assist.store import insert_exec_intent, insert_watch_advice, write_settings
 from jarvise_assist.watch import run_assist_watch
 from jarvise_ingest.db import open_db
@@ -646,6 +654,8 @@ def test_progress_live_deduped_move_offers_move_and_early_close(
         "tick": str(TICK),
         "via": "progress",
         "level": "0.5",
+        "exit_intent_id": exit_id,
+        "early_close": True,
     }
     assert by_kind["move_stop"][3] == day + MOVE_STOP_TTL_MS
     assert alerts[0]["reply_markup"] == progress_keyboard(
@@ -923,6 +933,7 @@ def test_progress_move_tap_order_params_and_clean_edit(
     _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send)
     alert_text = _progress(sent)[0]["text"]
     move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    exit_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='exit'").fetchone()[0])
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     handlers = _progress_move_handlers(intent_id=move_id)
     transport = RecordingTransport(handlers)
@@ -957,9 +968,13 @@ def test_progress_move_tap_order_params_and_clean_edit(
     assert params.get("workingType") == "MARK_PRICE"
     assert params.get("clientAlgoId") == client_order_id(move_id, "ms")
     assert "closePosition" not in params
-    clean = "\n".join(alert_text.splitlines()[:3])
-    assert edits == [(4, clean, {"inline_keyboard": []})]
-    assert not any(line.startswith("📌") or line.startswith("กด ") for line in edits[0][1].splitlines())
+    kept_lines = alert_text.splitlines()[:3] + [
+        line for line in alert_text.splitlines() if line.startswith("กด ⚠️ ปิดก่อนแผน")
+    ]
+    kept = "\n".join(kept_lines)
+    assert edits == [(4, kept, progress_keyboard(exit_id, early=True))]
+    assert not any(line.startswith("📌") or line.startswith("กด 🛡") for line in edits[0][1].splitlines())
+    assert any(line.startswith("กด ⚠️ ปิดก่อนแผน") for line in edits[0][1].splitlines())
     conn.close()
 
 
@@ -979,6 +994,7 @@ def test_progress_move_tap_expired_edit_drops_stale_lines(
     _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
     alert_text = _progress(sent_watch)[0]["text"]
     move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    exit_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='exit'").fetchone()[0])
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     transport = RecordingTransport(_progress_move_handlers(intent_id=move_id))
     monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
@@ -999,10 +1015,14 @@ def test_progress_move_tap_expired_edit_drops_stale_lines(
         edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
         now_ms_value=day + MOVE_STOP_TTL_MS + 1_000,
     )
-    clean = "\n".join(alert_text.splitlines()[:3])
+    kept_lines = alert_text.splitlines()[:3] + [
+        line for line in alert_text.splitlines() if line.startswith("กด ⚠️ ปิดก่อนแผน")
+    ]
+    kept = "\n".join(kept_lines)
     assert not any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in transport.calls)
-    assert edits == [(4, clean, {"inline_keyboard": []})]
-    assert not any(line.startswith("📌") or line.startswith("กด ") for line in edits[0][1].splitlines())
+    assert edits == [(4, kept, progress_keyboard(exit_id, early=True))]
+    assert not any(line.startswith("📌") or line.startswith("กด 🛡") for line in edits[0][1].splitlines())
+    assert any(line.startswith("กด ⚠️ ปิดก่อนแผน") for line in edits[0][1].splitlines())
     assert sent == [MSG_MOVE_STOP_EXPIRED]
     conn.close()
 
@@ -1095,6 +1115,406 @@ def test_progress_move_tap_after_close_no_order(tmp_path: Path, monkeypatch: pyt
     )
     assert sent == [MSG_ALREADY_CLOSED]
     assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_progress_failed_move_keeps_xx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Level-changed (no order) still keeps the progress close row."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-keep-fail.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    sent_watch, send_watch = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    exit_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='exit'").fetchone()[0])
+    conn.execute(
+        "UPDATE market_technicals SET low=?, close=? WHERE symbol=? AND timeframe=? AND timestamp=?",
+        (0.1580, 0.1590, "ADAUSDT", "1h", entry_ms),
+    )
+    conn.commit()
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    handlers = _progress_move_handlers(intent_id=move_id)
+    transport = RecordingTransport(handlers)
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
+    edits: list[tuple[Any, ...]] = []
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-keep-fail",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day + 60_000,
+    )
+    assert edits
+    assert edits[0][2] == progress_keyboard(exit_id, early=True)
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_progress_handler_error_keeps_xx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-handler-err.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    sent_watch, send_watch = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    exit_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='exit'").fetchone()[0])
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    transport = RecordingTransport(_progress_move_handlers(intent_id=move_id))
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
+
+    def _boom(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("jarvise_assist.execute.run_move_stop_sequence", _boom)
+    edits: list[tuple[Any, ...]] = []
+    sent: list[str] = []
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-handler-err",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day,
+    )
+    assert edits
+    assert edits[0][2] == progress_keyboard(exit_id, early=True)
+    assert MSG_PREORDER_MOVE in sent
+    move_status = conn.execute("SELECT status FROM assist_exec_intent WHERE id=?", (move_id,)).fetchone()[0]
+    exit_status = conn.execute("SELECT status FROM assist_exec_intent WHERE id=?", (exit_id,)).fetchone()[0]
+    assert move_status == "failed"
+    assert exit_status == "preview"
+    conn.close()
+
+
+def test_progress_position_closed_strips_xx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-closed-strip.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    sent_watch, send_watch = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    handlers = _progress_move_handlers(intent_id=move_id, position_rows=(200, []))
+    transport = RecordingTransport(handlers)
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
+    sent: list[str] = []
+    edits: list[tuple[Any, ...]] = []
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-closed-strip",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day,
+    )
+    assert sent == [MSG_ALREADY_CLOSED]
+    assert edits
+    assert edits[0][2] == {"inline_keyboard": []}
+    assert not any(line.startswith("กด ") for line in edits[0][1].splitlines())
+    conn.close()
+
+
+def test_progress_exit_already_used_strips_xx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-exit-done.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    sent_watch, send_watch = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    exit_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='exit'").fetchone()[0])
+    conn.execute(
+        "UPDATE assist_exec_intent SET status='done', result_text='closed' WHERE id=?",
+        (exit_id,),
+    )
+    conn.commit()
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    transport = RecordingTransport(_progress_move_handlers(intent_id=move_id))
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
+    edits: list[tuple[Any, ...]] = []
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-exit-done",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day,
+    )
+    posts = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+    assert len(posts) == 1
+    assert edits
+    assert edits[0][2] == {"inline_keyboard": []}
+    conn.close()
+
+
+def test_progress_plan_close_label_kept_after_ms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-plan-close.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    insert_watch_advice(
+        conn,
+        symbol="ADAUSDT",
+        position_side="BOTH",
+        kind="exit",
+        reason="flat",
+        level=None,
+        approx_r=0.5,
+        status="sent",
+        created_at_ms=entry_ms + 1_000,
+        sent_at_ms=entry_ms + 1_000,
+    )
+    sent_watch, send_watch = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
+    alert_text = _progress(sent_watch)[0]["text"]
+    assert "กด ✅ ปิดไม้" in alert_text
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    exit_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='exit'").fetchone()[0])
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    transport = RecordingTransport(_progress_move_handlers(intent_id=move_id))
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
+    edits: list[tuple[Any, ...]] = []
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-plan-close",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day,
+    )
+    assert edits
+    assert edits[0][2] == progress_keyboard(exit_id, early=False)
+    assert any(line.startswith("กด ✅ ปิดไม้") for line in edits[0][1].splitlines())
+    conn.close()
+
+
+def test_progress_ms_after_exit_ttl_still_keeps_xx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-after-exit-ttl.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    sent_watch, send_watch = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    exit_row = conn.execute(
+        "SELECT id, status, result_text, expires_at_ms FROM assist_exec_intent WHERE kind='exit'"
+    ).fetchone()
+    exit_id = str(exit_row[0])
+    exit_before = (exit_row[1], exit_row[2], exit_row[3])
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    transport = RecordingTransport(_progress_move_handlers(intent_id=move_id))
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
+    edits: list[tuple[Any, ...]] = []
+    tap_ms = day + PREVIEW_TTL_MS + 60_000
+    assert tap_ms < day + MOVE_STOP_TTL_MS
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-after-exit-ttl",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=tap_ms,
+    )
+    assert edits
+    assert edits[0][2] == progress_keyboard(exit_id, early=True)
+    exit_after = conn.execute(
+        "SELECT status, result_text, expires_at_ms FROM assist_exec_intent WHERE id=?",
+        (exit_id,),
+    ).fetchone()
+    assert tuple(exit_after) == exit_before
+    conn.close()
+
+
+def test_standalone_move_stop_still_strips_buttons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    conn = open_db(tmp_path / "ms-standalone.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    advice = "standalone move advice body"
+    # Seed a watch position so the sequence can evaluate (then fail level/advice).
+    _seed_stop(conn, day)
+    entry_ms = day - 3_600_000
+    _seed_be_candle(conn, entry_ms)
+    exit_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="ADAUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.1673"},
+        created_at_ms=day,
+        expires_at_ms=day + PREVIEW_TTL_MS,
+    )
+    intent_id = insert_exec_intent(
+        conn,
+        kind="move_stop",
+        symbol="ADAUSDT",
+        side="short",
+        preview={
+            "stop": str(SUGGESTED_BE),
+            "qty": "100",
+            "advice_text": advice,
+            "source": "breakeven",
+            "tick": str(TICK),
+            "exit_intent_id": exit_id,
+            # no via=progress → standalone card
+        },
+        created_at_ms=day,
+        expires_at_ms=day + MOVE_STOP_TTL_MS,
+    )
+    # Need watch row for move sequence; insert via a live watch run then wipe intents? Simpler: empty position.
+    handlers = _progress_move_handlers(intent_id=intent_id, position_rows=(200, []))
+    transport = RecordingTransport(handlers)
+    monkeypatch.setattr("jarvise_assist.execute.build_trade_client", lambda: (_client(transport), None))
+    edits: list[tuple[Any, ...]] = []
+    sent: list[str] = []
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-standalone",
+                "data": f"ms:{intent_id}",
+                "message": {"chat": {"id": 111}, "message_id": 7, "text": advice},
+            }
+        },
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day,
+    )
+    assert sent == [MSG_ALREADY_CLOSED]
+    assert edits == [(7, advice, {"inline_keyboard": []})]
+    conn.close()
+
+
+def test_progress_alert_after_tap_keep_close_line() -> None:
+    sample = "\n".join(
+        [
+            "📈 ADAUSDT SHORT ถึง +0.5R แล้ว (ตอนนี้ +0.50R)",
+            "mark 0.1636 · entry 0.1673 · stop ปัจจุบัน 0.1748 (-1.00R)",
+            FOOTER,
+            "📌 ยังไม่ได้เลื่อน stop ตามคำแนะนำ: → 0.1670 (ทุน)",
+            "กด 🛡 เลื่อน stop = ตั้ง stop ใหม่ทั้งไม้ แล้วยกเลิก stop เดิม · ปุ่มเลื่อนหมดอายุ 12:10",
+            "กด ⚠️ ปิดก่อนแผน = ปิดทั้งไม้ที่ราคาตลาดตอนกด · ไม่ใช่ทางออกตามแผน",
+        ]
+    )
+    default = progress_alert_after_tap(sample)
+    assert default == "\n".join(sample.splitlines()[:3])
+    assert "กด " not in default
+    assert "📌" not in default
+    kept = progress_alert_after_tap(sample, keep_close_line=True)
+    assert "📌" not in kept
+    assert "กด 🛡" not in kept
+    assert "กด ⚠️ ปิดก่อนแผน" in kept
+    plan = sample.replace(
+        "กด ⚠️ ปิดก่อนแผน = ปิดทั้งไม้ที่ราคาตลาดตอนกด · ไม่ใช่ทางออกตามแผน", "กด ✅ ปิดไม้ = ปิดทั้งไม้ที่ราคาตลาดตอนกด"
+    )
+    kept_plan = progress_alert_after_tap(plan, keep_close_line=True)
+    assert "กด ✅ ปิดไม้" in kept_plan
+    assert "กด 🛡" not in kept_plan
+
+
+def test_progress_ms_off_makes_no_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (None, "no_key"))
+    conn = open_db(tmp_path / "ms-off.db")
+    day = _ms_bangkok(2026, 11, 14, 12, 0)
+    entry_ms = day - 3_600_000
+    _seed_stop(conn, day)
+    _seed_be_candle(conn, entry_ms)
+    _preseed_move_dedupe(conn, entry_ms=entry_ms)
+    sent_watch, send_watch = _capture()
+    _watch(conn, mark=_r_mark("0.5"), now=day, entry_ms=entry_ms, send=send_watch)
+    move_id = str(conn.execute("SELECT id FROM assist_exec_intent WHERE kind='move_stop'").fetchone()[0])
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "off")
+    edits: list[tuple[Any, ...]] = []
+    sent: list[str] = []
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-ms-off",
+                "data": f"ms:{move_id}",
+                "message": {"chat": {"id": 111}, "message_id": 4, "text": "progress"},
+            }
+        },
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda mid, text, **kw: edits.append((mid, text, kw.get("reply_markup"))),
+        now_ms_value=day,
+    )
+    assert edits == []
+    assert MSG_OFF in sent
     conn.close()
 
 
