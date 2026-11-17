@@ -88,6 +88,15 @@ def _q_usdt(value: Decimal) -> Decimal:
     return Decimal(value).quantize(USDT_QUANT, rounding=ROUND_DOWN)
 
 
+def name_key(name: str) -> str:
+    """Trimmed, case-insensitive identity of a partner name.
+
+    Closed partners stay in the comparison. A return is a new account with a
+    new name; reusing a closed name would make ``p`` commands ambiguous.
+    """
+    return str(name).strip().casefold()
+
+
 def create_partner(
     conn: sqlite3.Connection,
     *,
@@ -96,11 +105,22 @@ def create_partner(
     now_ms: int,
     fee_rate_bps: int = 5000,
 ) -> dict[str, Any]:
-    """Insert a partner row. Admin forces fee_rate_bps = 0."""
+    """Insert a partner row. Admin forces fee_rate_bps = 0.
+
+    The name check and the insert share one transaction. A second admin still
+    raises ``IntegrityError`` from the single-admin index.
+    """
+    stored = str(name).strip()
+    key = stored.casefold()
     pid = _new_partner_id()
     fee = 0 if is_admin else int(fee_rate_bps)
     ts = int(now_ms)
     with transaction(conn):
+        if not key:
+            return {"ok": False, "reason": "bad_name"}
+        taken = conn.execute("SELECT name FROM partner").fetchall()
+        if any(name_key(str(row["name"])) == key for row in taken):
+            return {"ok": False, "reason": "duplicate_name"}
         conn.execute(
             """
             INSERT INTO partner (
@@ -108,7 +128,7 @@ def create_partner(
                 created_at_ms, updated_at_ms
             ) VALUES (?, ?, ?, ?, 0, 0, 'active', ?, ?)
             """,
-            (pid, name, 1 if is_admin else 0, fee, ts, ts),
+            (pid, stored, 1 if is_admin else 0, fee, ts, ts),
         )
     return {"ok": True, "partner_id": pid}
 

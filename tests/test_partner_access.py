@@ -599,6 +599,10 @@ def test_closed_start_with_spent_invite_shows_the_card(
     assert ps.apply_deposit(conn, b_id, D("100"), D("1100"), NOW + 5)["ok"]
     closed = ps.apply_close(conn, b_id, D("1100"), NOW + 6)
     assert closed["ok"] is True and D(closed["cash"]) > 0
+    before = ps.get_partner(conn, b_id)
+    assert before is not None
+    dues = [(str(d["id"]), int(d["payout_micro"] or 0)) for d in ps.list_due_payouts(conn)]
+    assert dues
     portal.reset_value_cache()
     sent, send = _send_capture()
     out = portal.handle_portal_text(
@@ -613,8 +617,14 @@ def test_closed_start_with_spent_invite_shows_the_card(
     assert "ปิดพอร์ตแล้ว" in note
     assert "รอโอน" in note
     assert "ลิงก์เชิญไม่ถูกต้อง" not in note
-    assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
-    assert ps.get_partner(conn, b_id)["invite_hash"] is None
+    after = ps.get_partner(conn, b_id)
+    assert after is not None
+    assert after["telegram_user_id"] == TG
+    assert after["invite_hash"] is None
+    assert after["status"] == "closed"
+    assert int(after["units_e8"]) == int(before["units_e8"])
+    assert int(after["cost_micro"]) == int(before["cost_micro"])
+    assert [(str(d["id"]), int(d["payout_micro"] or 0)) for d in ps.list_due_payouts(conn)] == dues
     conn.close()
 
 
@@ -1348,4 +1358,188 @@ def test_p_closed_paid_label_ignores_an_older_withdrawal(tmp_path: Path, env_cha
     text = sent[0]["text"]
     assert "ไม่มีเงินออก" in text
     assert "โอนแล้ว" not in text
+    conn.close()
+
+
+def test_close_payout_paid_flips_label_and_sends_the_summary(tmp_path: Path, env_chat: None) -> None:
+    """รอโอน becomes โอนแล้ว only when the close payout itself is paid."""
+    conn = open_db(tmp_path / "close-paid.db")
+    join = _ms(2026, 10, 1, 0, 30)
+    _, b_id = _admin_and_partner(conn, now_ms=join - 60_000)
+    _bind(conn, b_id, now_ms=join - 30_000)
+    assert ps.apply_deposit(conn, b_id, D("1000"), D("2000"), join)["ok"]
+    assert ps.apply_withdraw_profit(conn, b_id, D("4000"), join + 60_000)["ok"]
+    closed = ps.apply_close(conn, b_id, D("4000"), join + 120_000)
+    assert closed["ok"] is True and D(closed["cash"]) > 0
+    close_cash = pa.fmt_usdt(D(closed["cash"]))
+    assert ps.close_summary(conn, b_id)["close_payout_state"] == "due"
+    dues = ps.list_due_payouts(conn)
+    wd_id = next(str(d["id"]) for d in dues if str(d["kind"]) == "withdraw_profit")
+    cl_id = next(str(d["id"]) for d in dues if str(d["kind"]) == "close")
+
+    sent, send = _send_capture()
+    pa.handle_partner_text(
+        conn, "p closed", message=_owner_msg("p closed"), send=send, futures=None, now_ms=join + 130_000
+    )
+    assert "รอโอน" in sent[0]["text"]
+    assert "โอนแล้ว" not in sent[0]["text"]
+
+    sent_wd, send_wd = _send_capture()
+    paid_wd = pa.handle_partner_callback(
+        conn,
+        f"pa:pd:{wd_id}",
+        callback=_owner_cb(data=f"pa:pd:{wd_id}"),
+        send=send_wd,
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=None,
+        now_ms=join + 140_000,
+    )
+    assert paid_wd == {"ok": True, "cmd": "paid"}
+    assert ps.close_summary(conn, b_id)["close_payout_state"] == "due"
+    assert "บอทจะไม่แสดงยอดอีก" not in _partner_texts(sent_wd)[0]
+    sent_mid, send_mid = _send_capture()
+    pa.handle_partner_text(
+        conn, "p closed", message=_owner_msg("p closed"), send=send_mid, futures=None, now_ms=join + 150_000
+    )
+    assert "รอโอน" in sent_mid[0]["text"]
+    assert "โอนแล้ว" not in sent_mid[0]["text"]
+
+    sent_cl, send_cl = _send_capture()
+    paid_cl = pa.handle_partner_callback(
+        conn,
+        f"pa:pd:{cl_id}",
+        callback=_owner_cb(data=f"pa:pd:{cl_id}"),
+        send=send_cl,
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=None,
+        now_ms=join + 160_000,
+    )
+    assert paid_cl == {"ok": True, "cmd": "paid"}
+    assert ps.close_summary(conn, b_id)["close_payout_state"] == "paid"
+    final = _partner_texts(sent_cl)[0]
+    assert "เข้าร่วม 01/10/2026" in final
+    assert "ปิดเมื่อ 01/10/2026" in final
+    assert f"ยอดปิด {close_cash} USDT" in final
+    assert f"โอน {close_cash} USDT" in final
+    sent_done, send_done = _send_capture()
+    pa.handle_partner_text(
+        conn, "p closed", message=_owner_msg("p closed"), send=send_done, futures=None, now_ms=join + 170_000
+    )
+    assert "โอนแล้ว" in sent_done[0]["text"]
+    assert "รอโอน" not in sent_done[0]["text"]
+    conn.close()
+
+
+def test_create_partner_rejects_case_and_space_variants(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "names.db")
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)
+    assert admin["ok"] is True
+    assert ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), NOW)["ok"]
+    first = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
+    assert first["ok"] is True
+    for variant in ("bob", "BOB", " bob ", "Bob "):
+        again = ps.create_partner(conn, name=variant, now_ms=NOW + 2)
+        assert again == {"ok": False, "reason": "duplicate_name"}
+    assert ps.create_partner(conn, name="   ", now_ms=NOW + 3) == {"ok": False, "reason": "bad_name"}
+    assert [str(row["name"]) for row in ps.list_partners(conn)] == ["admin", "Bob"]
+
+    assert ps.apply_close(conn, first["partner_id"], D("1000"), NOW + 4)["ok"]
+    closed = ps.create_partner(conn, name="  bOb", now_ms=NOW + 5)
+    assert closed == {"ok": False, "reason": "duplicate_name"}
+    fresh = ps.create_partner(conn, name="Cara", now_ms=NOW + 6)
+    assert fresh["ok"] is True
+    spaced = ps.create_partner(conn, name="  Dee ", now_ms=NOW + 7)
+    assert spaced["ok"] is True
+    assert ps.get_partner(conn, spaced["partner_id"])["name"] == "Dee"
+    assert ps.create_partner(conn, name="dee", now_ms=NOW + 8) == {"ok": False, "reason": "duplicate_name"}
+    assert ps.get_partner(conn, first["partner_id"])["status"] == "closed"
+    assert ps.get_partner(conn, fresh["partner_id"])["name"] == "Cara"
+    conn.close()
+
+
+def test_p_add_and_invite_refuse_a_closed_partner(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "closed-cmd.db")
+    _patch_value(monkeypatch, "1100")
+    _, bob = _admin_and_partner(conn, "Bob")
+    _bind(conn, bob, now_ms=NOW + 2)
+    assert ps.apply_deposit(conn, bob, D("100"), D("1100"), NOW + 5)["ok"]
+    closed = ps.apply_close(conn, bob, D("1100"), NOW + 6)
+    assert closed["ok"] is True and D(closed["cash"]) > 0
+    before = ps.get_partner(conn, bob)
+    assert before is not None
+    dues = [
+        (str(d["id"]), str(d["payout_state"]), int(d["payout_micro"] or 0)) for d in ps.list_due_payouts(conn)
+    ]
+    events = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
+
+    sent_add, send_add = _send_capture()
+    added = pa.handle_partner_text(
+        conn,
+        "p add bob",
+        message=_owner_msg("p add bob"),
+        send=send_add,
+        futures=object(),
+        now_ms=NOW + 7,
+    )
+    assert added == {"ok": False, "reason": "duplicate_name"}
+    assert "ปิดแล้ว" in sent_add[0]["text"]
+    assert "ชื่อใหม่" in sent_add[0]["text"]
+    assert sum(1 for row in ps.list_partners(conn) if not row["is_admin"]) == 1
+
+    sent_inv, send_inv = _send_capture()
+    invited = pa.handle_partner_text(
+        conn,
+        "p invite Bob",
+        message=_owner_msg("p invite Bob"),
+        send=send_inv,
+        futures=object(),
+        now_ms=NOW + 8,
+    )
+    assert invited == {"ok": False, "reason": "payout_due"}
+    assert "ยังรอโอน" in sent_inv[0]["text"]
+    assert "ออกลิงก์ใหม่ไม่ได้" in sent_inv[0]["text"]
+    after = ps.get_partner(conn, bob)
+    assert after is not None
+    assert after["status"] == "closed"
+    assert after["telegram_user_id"] == TG
+    assert after["invite_hash"] is None
+    assert int(after["units_e8"]) == int(before["units_e8"])
+    assert int(after["cost_micro"]) == int(before["cost_micro"])
+    assert [
+        (str(d["id"]), str(d["payout_state"]), int(d["payout_micro"] or 0)) for d in ps.list_due_payouts(conn)
+    ] == dues
+    assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == events
+
+    cara = ps.create_partner(conn, name="Cara", now_ms=NOW + 9)
+    assert cara["ok"] is True
+    cid = str(cara["partner_id"])
+    issued = ps.create_invite(conn, cid, now_ms=NOW + 10)
+    assert issued["ok"] is True
+    quiet = ps.apply_close(conn, cid, D("1100"), NOW + 11)
+    assert quiet["ok"] is True and D(quiet["cash"]) == 0
+    held = ps.get_partner(conn, cid)
+    assert held is not None
+    hash_before = held["invite_hash"]
+    exp_before = held["invite_expires_at_ms"]
+    sent_q, send_q = _send_capture()
+    quiet_invite = pa.handle_partner_text(
+        conn,
+        "p invite Cara",
+        message=_owner_msg("p invite Cara"),
+        send=send_q,
+        futures=object(),
+        now_ms=NOW + 12,
+    )
+    assert quiet_invite == {"ok": False, "reason": "closed"}
+    assert "ออกลิงก์ให้บัญชีเดิมไม่ได้" in sent_q[0]["text"]
+    assert "ชื่อใหม่" in sent_q[0]["text"]
+    still = ps.get_partner(conn, cid)
+    assert still is not None
+    assert still["status"] == "closed"
+    assert still["invite_hash"] == hash_before
+    assert still["invite_expires_at_ms"] == exp_before
+    assert still["telegram_user_id"] is None
+    assert ps.list_due_payouts(conn)  # Bob's close payout is still due
     conn.close()

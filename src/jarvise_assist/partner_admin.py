@@ -72,6 +72,8 @@ _FAIL_MSG = "ทำไม่สำเร็จ — ยังไม่บัน�
 _STORE_TH: dict[str, str] = {
     "not_found": "ไม่พบพาร์ทเนอร์",
     "closed": "พาร์ทเนอร์ปิดแล้ว",
+    "duplicate_name": "มีชื่อนี้แล้ว — ใช้ชื่อใหม่",
+    "bad_name": "ชื่อว่างไม่ได้",
     "nav_not_positive": "ยอดพอร์ตน้อยกว่าเงินฝาก — เงินเข้า futures wallet แล้วหรือยัง",
     "amount_not_positive": "จำนวนต้องมากกว่าศูนย์",
     "below_min_deposit": "ฝากขั้นต่ำ 50 USDT",
@@ -285,10 +287,19 @@ def _has_events(conn: sqlite3.Connection) -> bool:
 
 
 def _find_partner_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM partner WHERE lower(name) = lower(?)",
-        (name,),
-    ).fetchone()
+    key = ps.name_key(name)
+    if not key:
+        return None
+    for row in ps.list_partners(conn):
+        if ps.name_key(str(row["name"])) == key:
+            return row
+    return None
+
+
+def _name_taken_text(name: str, *, closed: bool) -> str:
+    if closed:
+        return f"{name} ปิดแล้ว — ใช้ชื่อนี้ซ้ำไม่ได้\nเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)"
+    return f"มีชื่อ {name} อยู่แล้ว — ใช้ชื่อใหม่"
 
 
 def _pending_request(conn: sqlite3.Connection, partner_id: str, *, now_ms: int) -> sqlite3.Row | None:
@@ -652,14 +663,21 @@ def _handle_add(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: int) 
     if not _has_events(conn):
         send("ยังไม่ได้ตั้งต้น\nพิมพ์ p init")
         return {"ok": False, "reason": "not_init"}
-    if _find_partner_by_name(conn, name) is not None:
-        send(f"มีชื่อ {name} อยู่แล้ว")
-        return {"ok": False, "reason": "duplicate"}
+    existing = _find_partner_by_name(conn, name)
+    if existing is not None:
+        send(_name_taken_text(name, closed=str(existing["status"]) == "closed"))
+        return {"ok": False, "reason": "duplicate_name"}
     try:
-        ps.create_partner(conn, name=name, fee_rate_bps=5000, now_ms=now_ms)
+        created = ps.create_partner(conn, name=name, fee_rate_bps=5000, now_ms=now_ms)
     except sqlite3.IntegrityError:
-        send(f"มีชื่อ {name} อยู่แล้ว")
-        return {"ok": False, "reason": "duplicate"}
+        send(_name_taken_text(name, closed=False))
+        return {"ok": False, "reason": "duplicate_name"}
+    if not created.get("ok"):
+        again = _find_partner_by_name(conn, name)
+        closed = again is not None and str(again["status"]) == "closed"
+        reason = str(created.get("reason") or "duplicate_name")
+        send(_name_taken_text(name, closed=closed) if reason == "duplicate_name" else thai_reason(reason))
+        return {"ok": False, "reason": reason}
     send(f"เพิ่ม {name} แล้ว · ค่าธรรมเนียม 50% · ยังไม่มีเงิน")
     return {"ok": True, "cmd": "add", "name": name}
 
@@ -816,7 +834,11 @@ def _handle_invite(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: in
         send(thai_reason("not_found"))
         return {"ok": False, "reason": "not_found"}
     if str(row["status"]) == "closed":
-        send(thai_reason("closed"))
+        # Never reopen. A new account is p add with a new name; a due payout stays due.
+        if _due_for(conn, str(row["id"])):
+            send(f"{name} ปิดแล้วและยังรอโอน — ออกลิงก์ใหม่ไม่ได้\nโอนให้ครบก่อน แล้วเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)")
+            return {"ok": False, "reason": "payout_due"}
+        send(f"{name} ปิดแล้ว — ออกลิงก์ให้บัญชีเดิมไม่ได้\nเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)")
         return {"ok": False, "reason": "closed"}
     if int(row["is_admin"]) == 1:
         send("แอดมินไม่ใช้ลิงก์เชิญ")
