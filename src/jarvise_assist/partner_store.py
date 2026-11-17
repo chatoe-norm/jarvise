@@ -173,31 +173,51 @@ def bind_invite(
     admin_chat_id: str,
     now_ms: int,
 ) -> dict[str, Any]:
-    """Bind a Telegram user to a partner via invite code. One transaction."""
+    """Bind a Telegram user via invite code, in one transaction.
+
+    A Telegram id still on a closed partner is moved onto the new row only
+    when that closed row has no payout due. The old unbind and the new bind
+    commit together. A due payout returns ``closed_payout_due`` and writes
+    nothing (the new invite hash and the old binding stay as they are).
+    There is no reopen: the new row is a separate account.
+    """
     tg = str(telegram_user_id)
     if tg == str(admin_chat_id):
         return {"ok": False, "reason": "admin_id"}
     digest = hashlib.sha256(str(code).encode()).hexdigest()
-    with transaction(conn):
-        row = conn.execute(
-            "SELECT * FROM partner WHERE invite_hash = ?",
-            (digest,),
-        ).fetchone()
-        if (
-            row is None
-            or str(row["status"]) == "closed"
-            or int(row["is_admin"]) == 1
-            or row["invite_expires_at_ms"] is None
-            or int(row["invite_expires_at_ms"]) <= int(now_ms)
-        ):
-            return {"ok": False, "reason": "invite_invalid"}
-        existing = conn.execute(
-            "SELECT 1 FROM partner WHERE telegram_user_id = ? LIMIT 1",
-            (tg,),
-        ).fetchone()
-        if existing is not None:
-            return {"ok": False, "reason": "tg_in_use"}
-        try:
+    try:
+        with transaction(conn):
+            row = conn.execute(
+                "SELECT * FROM partner WHERE invite_hash = ?",
+                (digest,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["status"]) == "closed"
+                or int(row["is_admin"]) == 1
+                or row["invite_expires_at_ms"] is None
+                or int(row["invite_expires_at_ms"]) <= int(now_ms)
+            ):
+                return {"ok": False, "reason": "invite_invalid"}
+            existing = conn.execute(
+                "SELECT * FROM partner WHERE telegram_user_id = ?",
+                (tg,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["id"]) == str(row["id"]) or str(existing["status"]) != "closed":
+                    return {"ok": False, "reason": "tg_in_use"}
+                still_due = [d for d in list_due_payouts(conn) if str(d["partner_id"]) == str(existing["id"])]
+                if still_due:
+                    return {"ok": False, "reason": "closed_payout_due"}
+                conn.execute(
+                    """
+                    UPDATE partner
+                    SET telegram_user_id = NULL, invite_hash = NULL,
+                        invite_expires_at_ms = NULL, updated_at_ms = ?
+                    WHERE id = ?
+                    """,
+                    (int(now_ms), str(existing["id"])),
+                )
             conn.execute(
                 """
                 UPDATE partner
@@ -207,9 +227,9 @@ def bind_invite(
                 """,
                 (tg, int(now_ms), str(row["id"])),
             )
-        except sqlite3.IntegrityError:
-            return {"ok": False, "reason": "tg_in_use"}
-        return {"ok": True, "partner_id": str(row["id"]), "name": str(row["name"])}
+            return {"ok": True, "partner_id": str(row["id"]), "name": str(row["name"])}
+    except sqlite3.IntegrityError:
+        return {"ok": False, "reason": "tg_in_use"}
 
 
 def unbind_partner(conn: sqlite3.Connection, partner_id: str, *, now_ms: int) -> dict[str, Any]:
@@ -250,6 +270,81 @@ def list_due_payouts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             """
         )
     )
+
+
+def close_summary(conn: sqlite3.Connection, partner_id: str) -> dict[str, Any]:
+    """Join date, close date, close cash, and every due or paid payout.
+
+    Read-only. Used by the closed partner card and ``p closed``. Does not
+    read the futures wallet, so it still works when account value cannot be read.
+    """
+    pid = str(partner_id)
+    row = get_partner(conn, pid)
+    if row is None:
+        return {"ok": False, "reason": "not_found"}
+    joined = conn.execute(
+        """
+        SELECT MIN(created_at_ms) AS m
+        FROM partner_event
+        WHERE partner_id = ? AND kind = 'deposit'
+        """,
+        (pid,),
+    ).fetchone()
+    joined_at = int(joined["m"]) if joined is not None and joined["m"] is not None else None
+    close_ev = conn.execute(
+        """
+        SELECT created_at_ms, cash_micro
+        FROM partner_event
+        WHERE partner_id = ? AND kind = 'close'
+        ORDER BY rowid DESC
+        LIMIT 1
+        """,
+        (pid,),
+    ).fetchone()
+    if close_ev is None:
+        closed_at: int | None = None
+        close_cash = Decimal("0")
+    else:
+        closed_at = int(close_ev["created_at_ms"])
+        close_cash = usdt_from_micro(abs(int(close_ev["cash_micro"])))
+    dues = [
+        {
+            "request_id": str(due["id"]),
+            "kind": str(due["kind"]),
+            "cash": usdt_from_micro(int(due["payout_micro"] or 0)),
+            "decided_at_ms": int(due["decided_at_ms"] or due["created_at_ms"]),
+        }
+        for due in list_due_payouts(conn)
+        if str(due["partner_id"]) == pid
+    ]
+    paid_rows = conn.execute(
+        """
+        SELECT * FROM partner_request
+        WHERE partner_id = ? AND payout_state = 'paid'
+        ORDER BY paid_at_ms, id
+        """,
+        (pid,),
+    ).fetchall()
+    paid = [
+        {
+            "request_id": str(item["id"]),
+            "kind": str(item["kind"]),
+            "cash": usdt_from_micro(int(item["payout_micro"] or 0)),
+            "paid_at_ms": int(item["paid_at_ms"] or 0),
+        }
+        for item in paid_rows
+    ]
+    return {
+        "ok": True,
+        "partner_id": pid,
+        "name": str(row["name"]),
+        "status": str(row["status"]),
+        "joined_at_ms": joined_at,
+        "closed_at_ms": closed_at,
+        "close_cash": close_cash,
+        "dues": dues,
+        "paid": paid,
+    }
 
 
 def list_pending_requests(conn: sqlite3.Connection, *, now_ms: int) -> list[sqlite3.Row]:
