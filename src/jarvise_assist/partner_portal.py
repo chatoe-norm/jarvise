@@ -283,10 +283,22 @@ def _build_card(
 
     if str(row["status"]) == "closed":
         lines = [f"พอร์ตของ {name} · {stamp}", "ปิดพอร์ตแล้ว"]
-        for d in ps.list_due_payouts(conn):
-            if str(d["partner_id"]) == pid:
-                x = ps.usdt_from_micro(int(d["payout_micro"] or 0))
-                lines.append(f"รอโอน {fmt_usdt(x)} USDT")
+        summary = ps.close_summary(conn, pid)
+        if summary.get("ok"):
+            joined_ms = summary.get("joined_at_ms")
+            closed_ms = summary.get("closed_at_ms")
+            lines.append(
+                "เข้าร่วม " + (partner_rules.fmt_date(int(joined_ms)) if joined_ms is not None else "—")
+            )
+            lines.append(
+                "ปิดเมื่อ " + (partner_rules.fmt_date(int(closed_ms)) if closed_ms is not None else "—")
+            )
+            close_cash = summary.get("close_cash")
+            if not isinstance(close_cash, Decimal):
+                close_cash = Decimal("0")
+            lines.append(f"ยอดปิด {fmt_usdt(close_cash)} USDT")
+            for due in summary.get("dues") or []:
+                lines.append(f"รอโอน {fmt_usdt(Decimal(due['cash']))} USDT")
         return "\n".join(lines), None
 
     nav: Decimal | None = None
@@ -410,20 +422,33 @@ def handle_portal_text(
     tg = str(from_user.get("id"))
     row = ps.partner_by_telegram_id(conn, tg)
     text = str(message.get("text") or "")
-    if row is not None:
+    start = _START_RE.match(text.strip())
+    # A closed partner who is still bound may /start a new account. Any other
+    # text, including /start while the account is still active, keeps the card.
+    if row is not None and not (start is not None and str(row["status"]) == "closed"):
         dep = _DEP_TEXT_RE.match(text.strip())
         if dep is not None:
             return _handle_deposit_text(conn, row, dep.group(1), send=send, now_ms=now_ms)
         return _send_card(conn, row, send=send, futures=futures, now_ms=now_ms)
 
-    m = _START_RE.match(text.strip())
-    if m is None:
+    if start is None:
         return {"ignored": "foreign_chat"}
 
-    code = m.group(2)
+    code = start.group(2)
     admin_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     bound = ps.bind_invite(conn, code, tg, admin_chat_id=admin_chat, now_ms=now_ms)
     if not bound.get("ok"):
+        reason = str(bound.get("reason") or "")
+        if reason == "closed_payout_due":
+            refusal = "บัญชีเดิมยังมียอดรอโอน — ผูกบัญชีใหม่ไม่ได้จนกว่าแอดมินจะโอนครบ"
+            try:
+                send(refusal, chat_id=str(chat.get("id")))
+            except Exception:  # noqa: BLE001
+                logger.warning("portal closed-rebind refusal failed: %s", "Exception")
+            return {"ok": False, "reason": "closed_payout_due"}
+        # Still bound: a spent or unknown code is not a new account.
+        if row is not None:
+            return _send_card(conn, row, send=send, futures=futures, now_ms=now_ms)
         try:
             send(
                 "ลิงก์เชิญไม่ถูกต้องหรือหมดอายุ — ขอลิงก์ใหม่จากแอดมิน",

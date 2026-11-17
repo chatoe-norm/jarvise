@@ -61,6 +61,7 @@ HELP_TEXT = (
     "p cv <ชื่อ> — สร้างคำขอทบกำไร\n"
     "p wd <ชื่อ> — สร้างคำขอถอนกำไร\n"
     "p close <ชื่อ> — สร้างคำขอปิดพอร์ต\n"
+    "p closed — พาร์ทเนอร์ที่ปิดแล้ว\n"
     "p due — รายการค้างจ่ายและคำขอค้าง\n"
     "ถอนเงินต้นแอดมิน: p cost admin <ทุนใหม่> <เหตุผล> แล้ว p wd admin"
 )
@@ -201,8 +202,8 @@ def send_to_partner(
                     data = str(btn.get("callback_data") or "")
                     if not data.startswith("pp:"):
                         return False
-        send(text, reply_markup=reply_markup, chat_id=str(tg))
-        return True
+        result = send(text, reply_markup=reply_markup, chat_id=str(tg))
+        return result is not None and result is not False
     except Exception as exc:  # noqa: BLE001
         logger.warning("partner send failed: %s", type(exc).__name__)
         return False
@@ -260,6 +261,8 @@ def parse_partner_command(text: str) -> dict[str, Any] | None:
         if len(parts) != 3 or not _NAME_RE.match(parts[2]):
             return {"error": "usage"}
         return {"cmd": "close", "name": parts[2]}
+    if head == "closed" and len(parts) == 2:
+        return {"cmd": "closed"}
     if head == "due" and len(parts) == 2:
         return {"cmd": "due"}
     return {"error": "usage"}
@@ -836,11 +839,100 @@ def _handle_invite(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: in
     return {"ok": True, "cmd": "invite"}
 
 
+def _due_for(conn: sqlite3.Connection, partner_id: str) -> list[sqlite3.Row]:
+    pid = str(partner_id)
+    return [row for row in ps.list_due_payouts(conn) if str(row["partner_id"]) == pid]
+
+
+def _warn_send_fail(name: str) -> str:
+    return f"⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ — ยังไม่ตัดการผูก (p unbind {name})"
+
+
+def _warn_send_fail_due() -> str:
+    return "⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ — ยังไม่ตัดการผูก"
+
+
+def _warn_still_due() -> str:
+    return "⚠️ ยังมียอดค้างจ่าย — ยังไม่ตัดการผูก (โอนให้ครบก่อน)"
+
+
+def _close_fact_lines(conn: sqlite3.Connection, partner_id: str) -> list[str]:
+    """Join date, close date, and close amount. Empty when the partner is missing."""
+    summary = ps.close_summary(conn, partner_id)
+    if not summary.get("ok"):
+        return []
+    joined = summary.get("joined_at_ms")
+    closed = summary.get("closed_at_ms")
+    cash = summary.get("close_cash")
+    if not isinstance(cash, Decimal):
+        cash = _ZERO
+    return [
+        "เข้าร่วม " + (partner_rules.fmt_date(int(joined)) if joined is not None else "—"),
+        "ปิดเมื่อ " + (partner_rules.fmt_date(int(closed)) if closed is not None else "—"),
+        f"ยอดปิด {fmt_usdt(cash)} USDT",
+    ]
+
+
+def _closing_note(conn: sqlite3.Connection, partner_id: str, *, cash: Decimal, fee: Decimal) -> str:
+    """Partner-facing close summary. Does not read the futures wallet."""
+    lines = ["✅ แอดมินยืนยันปิดพอร์ต", *_close_fact_lines(conn, partner_id)]
+    if fee > 0:
+        lines.append(f"ค่าธรรมเนียม {fmt_usdt(fee)} USDT")
+    if cash <= 0:
+        lines.append("ไม่มีเงินออก")
+    summary = ps.close_summary(conn, partner_id)
+    if summary.get("ok"):
+        for due in summary.get("dues") or []:
+            lines.append(f"รอโอน {fmt_usdt(Decimal(due['cash']))} USDT")
+    return "\n".join(lines)
+
+
+def _release_closed_binding(
+    conn: sqlite3.Connection,
+    partner: sqlite3.Row,
+    *,
+    send: Any,
+    note: str,
+    now_ms: int,
+) -> list[str]:
+    """Send ``note`` first. Unbind only when that send returned True and nothing is due.
+
+    A partner with no Telegram id, and the admin row, are left as they are: no send
+    and no warning. Active partners are notified and left bound.
+    """
+    tg = partner["telegram_user_id"]
+    if tg is None or int(partner["is_admin"] or 0) == 1:
+        return []
+    sent_ok = send_to_partner(send, partner, note)
+    if str(partner["status"]) != "closed":
+        return []
+    name = str(partner["name"])
+    dues = _due_for(conn, str(partner["id"]))
+    if sent_ok and not dues:
+        ps.unbind_partner(conn, str(partner["id"]), now_ms=now_ms)
+        return []
+    warnings: list[str] = []
+    if not sent_ok:
+        warnings.append(_warn_send_fail_due() if dues else _warn_send_fail(name))
+    if dues:
+        warnings.append(_warn_still_due())
+    return warnings
+
+
+def _append_warnings(body: str, warnings: list[str]) -> str:
+    if not warnings:
+        return body
+    return body + "\n" + "\n".join(warnings)
+
+
 def _handle_unbind(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: int) -> dict[str, Any]:
     row = _find_partner_by_name(conn, name)
     if row is None:
         send(thai_reason("not_found"))
         return {"ok": False, "reason": "not_found"}
+    if str(row["status"]) == "closed" and _due_for(conn, str(row["id"])):
+        send(f"{name} ปิดแล้วและยังมียอดรอโอน — ยกเลิกการผูกไม่ได้")
+        return {"ok": False, "reason": "payout_due"}
     ps.unbind_partner(conn, str(row["id"]), now_ms=now_ms)
     send(f"ยกเลิกการผูก {name} แล้ว")
     return {"ok": True, "cmd": "unbind"}
@@ -975,6 +1067,93 @@ def _handle_due(conn: sqlite3.Connection, *, send: Any, now_ms: int) -> dict[str
     return {"ok": True, "cmd": "due", "n": msgs}
 
 
+def _closed_sort_key(summary: dict[str, Any]) -> tuple[int, str]:
+    raw = summary.get("closed_at_ms")
+    stamp = int(raw) if raw is not None else -1
+    return (-stamp, str(summary.get("name") or ""))
+
+
+def _fmt_bkk_date(ms: Any) -> str:
+    if ms is None:
+        return "—"
+    return partner_rules.fmt_date(int(ms))
+
+
+_CLOSED_TEXT_MAX = 4096
+
+
+def _closed_status(summary: dict[str, Any]) -> str:
+    """Label for the close payout only. A paid profit withdrawal does not count."""
+    state = summary.get("close_payout_state")
+    cash = summary.get("close_cash")
+    if not isinstance(cash, Decimal):
+        cash = _ZERO
+    if state == "paid":
+        return "โอนแล้ว"
+    if state == "due":
+        return f"รอโอน {fmt_usdt(cash)} USDT"
+    return "ไม่มีเงินออก"
+
+
+def _closed_partner_line(summary: dict[str, Any]) -> str:
+    name = str(summary.get("name") or "")
+    cash = summary.get("close_cash")
+    if not isinstance(cash, Decimal):
+        cash = _ZERO
+    closed = _fmt_bkk_date(summary.get("closed_at_ms"))
+    return f"· {name} · ปิด {closed} · {fmt_usdt(cash)} USDT · {_closed_status(summary)}"
+
+
+def _render_closed(summaries: list[dict[str, Any]]) -> tuple[str, int]:
+    """Newest first, at most 40 rows, and never longer than a Telegram message."""
+    total = len(summaries)
+    header = f"พาร์ทเนอร์ที่ปิดแล้ว ({total})"
+    lines = [_closed_partner_line(summary) for summary in summaries]
+    shown = min(_MAX_PARTNERS_SHOWN, len(lines))
+    while True:
+        extra = total - shown
+        parts = [header, *lines[:shown]]
+        if extra > 0:
+            parts.append(f"อีก {extra} คน")
+        text = "\n".join(parts)
+        if len(text) <= _CLOSED_TEXT_MAX or shown == 0:
+            return text, shown
+        shown -= 1
+
+
+def _handle_closed(conn: sqlite3.Connection, *, send: Any) -> dict[str, Any]:
+    summaries: list[dict[str, Any]] = []
+    for row in ps.list_partners(conn):
+        if str(row["status"]) != "closed":
+            continue
+        summary = ps.close_summary(conn, str(row["id"]))
+        if summary.get("ok"):
+            summaries.append(summary)
+    summaries.sort(key=_closed_sort_key)
+    if not summaries:
+        send("ยังไม่มีพาร์ทเนอร์ที่ปิด")
+        return {"ok": True, "cmd": "closed", "n": 0}
+    text, shown = _render_closed(summaries)
+    send(text)
+    return {"ok": True, "cmd": "closed", "n": shown}
+
+
+def _show_admin(
+    body: str,
+    warnings: list[str],
+    *,
+    mid: Any,
+    edit: Any,
+    send: Any,
+) -> None:
+    """Edit the admin card. If that fails and there are warnings, send them as a new message."""
+    edited = False
+    if mid is not None:
+        edited = bool(edit(int(mid), body, reply_markup={"inline_keyboard": []}))
+    if warnings and not edited:
+        send(body)
+
+
 def handle_partner_text(
     conn: sqlite3.Connection,
     text: str,
@@ -1045,6 +1224,8 @@ def handle_partner_text(
             return _handle_cv_wd_close(
                 conn, str(parsed["name"]), "close", send=send, futures=futures, now_ms=now_ms
             )
+        if cmd == "closed":
+            return _handle_closed(conn, send=send)
         if cmd == "due":
             return _handle_due(conn, send=send, now_ms=now_ms)
         send(HELP_TEXT)
@@ -1371,17 +1552,21 @@ def handle_partner_callback(
                             send_to_partner(
                                 send,
                                 partner,
-                                f"✅ แอดมินยืนยันปิดพอร์ต · จะได้รับ {fmt_usdt(cash)} USDT "
-                                f"(ค่าธรรมเนียม {fmt_usdt(fee)}) · รอโอน",
+                                _closing_note(conn, str(partner["id"]), cash=cash, fee=fee),
                             )
                 else:
-                    # close with cash 0
+                    # close with cash 0: tell the partner first, then unbind only
+                    # when that send succeeded and this partner has nothing due.
                     body = f"✅ ยืนยันแล้ว · ปิด {pname} แล้ว (ไม่มีเงินออก)"
                     body += guard_suffix
-                    if mid is not None:
-                        edit(int(mid), body, reply_markup={"inline_keyboard": []})
+                    warnings = []
                     if partner is not None:
-                        ps.unbind_partner(conn, str(partner["id"]), now_ms=now_ms)
+                        note = _closing_note(conn, str(partner["id"]), cash=cash, fee=fee)
+                        if not _due_for(conn, str(partner["id"])):
+                            note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
+                        warnings = _release_closed_binding(conn, partner, send=send, note=note, now_ms=now_ms)
+                        body = _append_warnings(body, warnings)
+                    _show_admin(body, warnings, mid=mid, edit=edit, send=send)
                 return {"ok": True, "cmd": "confirm", "kind": kind}
             reason = str(result.get("reason") or "")
             if reason in ("no_profit", "below_min"):
@@ -1451,24 +1636,19 @@ def handle_partner_callback(
                 partner = ps.get_partner(conn, str(req["partner_id"])) if req is not None else None
                 pname = str(partner["name"]) if partner is not None else "?"
                 _answer()
-                if mid is not None:
-                    edit(
-                        int(mid),
-                        f"💸 โอนแล้ว {fmt_usdt(amount)} USDT ให้ {pname}",
-                        reply_markup={"inline_keyboard": []},
-                    )
+                warnings = []
                 if partner is not None:
                     note = f"💸 แอดมินแจ้งว่าโอน {fmt_usdt(amount)} USDT ให้คุณแล้ว"
-                    closed = str(partner["status"]) == "closed"
-                    other_due = [
-                        d for d in ps.list_due_payouts(conn) if str(d["partner_id"]) == str(partner["id"])
-                    ]
-                    if closed and not other_due:
+                    # mark_paid already cleared this row. Unbind only when it was
+                    # the last due payout and the partner actually received the note.
+                    if str(partner["status"]) == "closed" and not _due_for(conn, str(partner["id"])):
+                        facts = _close_fact_lines(conn, str(partner["id"]))
+                        if facts:
+                            note += "\n" + "\n".join(facts)
                         note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
-                        send_to_partner(send, partner, note)
-                        ps.unbind_partner(conn, str(partner["id"]), now_ms=now_ms)
-                    else:
-                        send_to_partner(send, partner, note)
+                    warnings = _release_closed_binding(conn, partner, send=send, note=note, now_ms=now_ms)
+                body = _append_warnings(f"💸 โอนแล้ว {fmt_usdt(amount)} USDT ให้ {pname}", warnings)
+                _show_admin(body, warnings, mid=mid, edit=edit, send=send)
                 return {"ok": True, "cmd": "paid"}
             _answer("รายการนี้ปิดไปแล้ว")
             if mid is not None:
