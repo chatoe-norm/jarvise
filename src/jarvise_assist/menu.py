@@ -54,7 +54,6 @@ from jarvise_assist.pause import (
     week_start_risk_pct,
 )
 from jarvise_assist.quick import render_quick_menu
-from jarvise_assist.quick_tags import MSG_QUICK_OPEN
 from jarvise_assist.signals import scan_signal_candidates
 from jarvise_assist.sizing import (
     below_min_notional,
@@ -73,8 +72,9 @@ from jarvise_assist.store import (
 )
 from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_assist.trend_view import (
-    _fit_telegram,
     build_trend_rows,
+    fit_telegram,
+    reason_label,
     render_trend_ranking,
 )
 from jarvise_assist.weekly import run_assist_weekly
@@ -104,22 +104,6 @@ def _margin_text(pos: FuturesPosition) -> str:
     if pos.position_initial_margin is not None and pos.position_initial_margin > 0:
         return f"{_MARGIN_LABEL} ≈ {_fmt_margin(pos.position_initial_margin)} {unit} (cross)"
     return f"{_MARGIN_LABEL} —"
-
-
-ON_DEMAND_REASON_TH: dict[str, str] = {
-    "flat": "ไม่มีแนวโน้ม",
-    "low_confidence": "ความมั่นใจต่ำ",
-    "stale_analysis": "ข้อมูลยังไม่อัปเดต",
-    "open_position": "ถืออยู่แล้ว",
-    "risk_cap": "เต็มเพดานความเสี่ยง",
-    "below_min_notional": "ไม้เล็กกว่าขั้นต่ำ",
-    "margin_cap": "margin ไม่พอ",
-    "size_failed": "คำนวณขนาดไม้ไม่ได้",
-    "same_idea": "ส่งไปแล้วใน 24 ชม.",
-    "requote_cap_zero": "จำกัดตามไอเดียแรกแล้วขนาดเหลือ 0 — ไม่ส่ง",
-    "requote_no_baseline": "ไม่มีขนาดอ้างอิงจากไอเดียแรก",
-    "quick_open": MSG_QUICK_OPEN,
-}
 
 
 def match_menu_label(text: str) -> str | None:
@@ -564,12 +548,7 @@ def render_open_positions(
 
 
 def _reason_line(symbol: str, reason: str) -> str:
-    label = ON_DEMAND_REASON_TH.get(reason)
-    if label is None and reason.startswith("mark:"):
-        label = "อ่านราคาไม่ได้"
-    if label is None:
-        return f"{symbol} {reason}"
-    return f"{symbol} {label}"
+    return f"{symbol} {reason_label(reason)}"
 
 
 def _format_first_send_line(seen: dict[str, Any], *, tick_size: Decimal | None = None) -> str:
@@ -600,15 +579,15 @@ def _render_on_demand_idea(
     tick_size: Decimal | None = None,
     account_config: Any = None,
     filters: Any = None,
-) -> tuple[str, bool]:
-    """Return (text, offer_entry). offer_entry is False for reason lines."""
+) -> tuple[str, bool, Any | None]:
+    """Return (text, offer_entry, final_sized). final_sized is None on reason lines."""
     sized = cand.sized
     seen = latest_seen_idea(conn, symbol=sized.symbol, side=sized.side, now_ms=now_ms)
     if seen is not None:
         entry = Decimal(str(seen["entry"]))
         stop = Decimal(str(seen["stop"]))
         if chase_exceeded(side=sized.side, entry=entry, stop=stop, mark=sized.entry):
-            return f"{sized.symbol} ราคาวิ่งไปแล้ว — ไม่แนะนำไล่", False
+            return f"{sized.symbol} ราคาวิ่งไปแล้ว — ไม่แนะนำไล่", False, None
         first_qty = Decimal(str(seen["qty"])) if seen.get("qty") is not None else None
         first_loss = Decimal(str(seen["loss_at_stop"])) if seen.get("loss_at_stop") is not None else None
         anchor_ms = seen.get("sent_at_ms") or seen.get("created_at_ms")
@@ -621,14 +600,14 @@ def _render_on_demand_idea(
             anchor_sent_at_ms=int(anchor_ms) if anchor_ms else None,
         )
         if sized is None:
-            return _reason_line(cand.sized.symbol, cap_reason or "requote_no_baseline"), False
+            return _reason_line(cand.sized.symbol, cap_reason or "requote_no_baseline"), False, None
         if filters is not None and below_min_notional(
             qty=sized.qty,
             notional=sized.notional,
             min_qty=filters.min_qty,
             min_notional=filters.min_notional,
         ):
-            return _reason_line(sized.symbol, "below_min_notional"), False
+            return _reason_line(sized.symbol, "below_min_notional"), False, None
         body = format_signal_message(
             sized,
             expires_at_ms=expires_at_ms,
@@ -636,7 +615,7 @@ def _render_on_demand_idea(
             tick_size=tick_size,
             account_config=account_config,
         )
-        return f"{body}\n{_format_first_send_line(seen, tick_size=tick_size)}", True
+        return f"{body}\n{_format_first_send_line(seen, tick_size=tick_size)}", True, sized
     return (
         format_signal_message(
             sized,
@@ -646,6 +625,7 @@ def _render_on_demand_idea(
             account_config=account_config,
         ),
         True,
+        sized,
     )
 
 
@@ -662,8 +642,8 @@ def _idea_blocks_from_scan(
     *,
     client: BinanceFuturesClient,
     now_ms: int,
-) -> tuple[str, dict[str, Any] | None, dict[str, str]]:
-    """Build today's idea message + markup + per-symbol idea_status from one scan."""
+) -> tuple[str, dict[str, Any] | None, dict[str, str], dict[str, Decimal]]:
+    """Build today's idea message + markup + idea_status + idea_loss from one scan."""
     admitted = list(result.get("admitted") or [])
     balance = Decimal(str(result.get("balance_usdt") or 0))
     expires = next_assist_run_ms(now_ms)
@@ -681,8 +661,9 @@ def _idea_blocks_from_scan(
     blocks: list[str] = []
     offered: list[tuple[str, str]] = []
     idea_status: dict[str, str] = {}
+    idea_loss: dict[str, Decimal] = {}
     for cand in admitted:
-        text, offer_entry = _render_on_demand_idea(
+        text, offer_entry, final_sized = _render_on_demand_idea(
             conn,
             cand,
             now_ms=now_ms,
@@ -697,6 +678,8 @@ def _idea_blocks_from_scan(
         if offer_entry:
             offered.append((sym, cand.sized.side))
             idea_status[sym] = "✅ เปิดได้ ↓"
+            if final_sized is not None:
+                idea_loss[sym] = final_sized.loss_at_stop
         elif text.startswith(sym):
             idea_status[sym] = text[len(sym) :].lstrip(" ").lstrip("·").strip()
         else:
@@ -704,7 +687,7 @@ def _idea_blocks_from_scan(
     markup = None
     if execution_buttons_enabled(conn) and offered:
         markup = anything_now_keyboard(offered)
-    return "\n\n".join(blocks), markup, idea_status
+    return "\n\n".join(blocks), markup, idea_status, idea_loss
 
 
 def render_coin_trend(
@@ -737,17 +720,18 @@ def render_coin_trend(
     idea_text = ""
     idea_markup: dict[str, Any] | None = None
     idea_status: dict[str, str] = {}
+    idea_loss: dict[str, Decimal] = {}
     if admitted:
-        idea_text, idea_markup, idea_status = _idea_blocks_from_scan(
+        idea_text, idea_markup, idea_status, idea_loss = _idea_blocks_from_scan(
             conn, result, client=client, now_ms=now_ms
         )
 
-    rows, footer = build_trend_rows(conn, result, idea_status, now_ms)
+    rows, footer = build_trend_rows(conn, result, idea_status, now_ms, idea_loss=idea_loss)
     if not rows:
         # No passing coin → today's empty on-demand output unchanged.
         return [(render_empty_on_demand(list(result.get("skipped") or [])), None)]
 
-    ranking = _fit_telegram(render_trend_ranking(rows, footer))
+    ranking = fit_telegram(render_trend_ranking(rows, footer))
     if not admitted:
         return [(ranking, None)]
     return [(ranking, None), (idea_text, idea_markup)]

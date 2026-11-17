@@ -10,10 +10,16 @@ from typing import Any
 import pytest
 from tests.test_assist import FakeFutures, _ms_bangkok, _seed_analysis
 
+import jarvise_assist.trend_view as trend_view
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.keyboard import BTN_ANYTHING
-from jarvise_assist.menu import handle_menu_text, render_anything_now, render_coin_trend
+from jarvise_assist.menu import (
+    _reason_line,
+    handle_menu_text,
+    render_anything_now,
+    render_coin_trend,
+)
 from jarvise_assist.signals import scan_signal_candidates
 from jarvise_assist.sizing import (
     MAX_OPEN_IDEAS,
@@ -25,9 +31,11 @@ from jarvise_assist.sizing import (
 )
 from jarvise_assist.store import ensure_settings, insert_signal, write_settings
 from jarvise_assist.trend_view import (
-    _fit_telegram,
+    ON_DEMAND_REASON_TH,
     _utf16_len,
     explain_risk_rejections,
+    fit_telegram,
+    render_trend_ranking,
 )
 from jarvise_ingest.db import open_db
 
@@ -534,7 +542,7 @@ def test_fit_telegram_and_length_guard(tmp_path: Path, monkeypatch: pytest.Monke
     now = _ms_bangkok(2026, 11, 17, 12, 0)
     monkeypatch.setattr("jarvise_assist.trend_view.MAX_OPEN_IDEAS", 4)
     monkeypatch.setattr(
-        "jarvise_assist.trend_view.portfolio_risk_cap_pct",
+        "jarvise_assist.signals.portfolio_risk_cap_pct",
         lambda _r: Decimal("8"),
     )
     real_admit = admit_signals
@@ -592,18 +600,203 @@ def test_fit_telegram_and_length_guard(tmp_path: Path, monkeypatch: pytest.Monke
     messages = render_coin_trend(conn, futures=fake, now_ms=now)
     for text, _markup in messages:
         assert _utf16_len(text) <= 4096
-    # Idea blocks (message 2+) must never be trimmed by _fit_telegram.
+    # Idea blocks (message 2+) must never be trimmed by fit_telegram.
     if len(messages) >= 2:
         idea = messages[1][0]
-        assert _fit_telegram(idea) == idea
+        assert fit_telegram(idea) == idea
     # Synthetic oversize ranking shrinks.
     fat = "🔎 เทรนด์เหรียญ · เรียงตามความมั่นใจ (สูง→ต่ำ)\nความมั่นใจไม่ใช่โอกาสชนะ · เป้า 2R ทุกไม้\n"
     fat += "\n".join(f"{i}. COIN{i} LONG · มั่นใจ 0.99 · stop ห่าง 1.0% · เสี่ยง 1.0% → x" for i in range(1, 80))
     fat += "\nไม่มีสัญญาณ: Z ไม่มีแนวโน้ม"
-    trimmed = _fit_telegram(fat, limit=500)
+    trimmed = fit_telegram(fat, limit=500)
     assert _utf16_len(trimmed) <= 500
     assert "ไม่มีสัญญาณ:" not in trimmed or _utf16_len(trimmed) <= 500
     conn.close()
+
+
+def test_held_row_no_stop_risk_is_estimate(tmp_path: Path) -> None:
+    """Held with no protective stop: risk is an estimate, side labeled as signal."""
+    conn = open_db(tmp_path / "held_est.db")
+    ensure_settings(conn)
+    write_settings(conn, risk_pct=1.0, enabled=True)
+    now = _ms_bangkok(2026, 11, 17, 12, 0)
+    btc_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        update_time_ms=now,
+    )
+    _seed_fresh(conn, symbol="BTCUSDT", action="short", confidence=0.80, invalidation=103.0, now=now)
+    _seed_fresh(conn, symbol="ETHUSDT", action="short", confidence=0.70, invalidation=2060.0, now=now)
+    fake = FakeFutures(
+        balance=Decimal("1000"),
+        positions=[btc_pos],
+        orders=[],
+        marks={"BTCUSDT": Decimal("100"), "ETHUSDT": Decimal("2000")},
+        steps={"BTCUSDT": Decimal("0.001"), "ETHUSDT": Decimal("0.001")},
+    )
+    messages = render_coin_trend(conn, futures=fake, now_ms=now)
+    assert messages
+    text = next(t for t, _m in messages if "🔎 เทรนด์เหรียญ" in t)
+    lines = [ln for ln in text.splitlines() if ln[:1].isdigit()]
+    btc_line = next(ln for ln in lines if "BTCUSDT" in ln)
+    print("HELD_ESTIMATE_BTC:\n", btc_line)
+    assert "สัญญาณ SHORT" in btc_line
+    assert "เสี่ยง ~" in btc_line
+    assert "(ประมาณ)" in btc_line
+    assert "ไม่มี stop" in btc_line
+    conn.close()
+
+
+def test_held_row_with_stop_risk_not_estimate(tmp_path: Path) -> None:
+    """Held with a protective stop: risk % is exact, not approximate wording."""
+    conn = open_db(tmp_path / "held_exact.db")
+    ensure_settings(conn)
+    write_settings(conn, risk_pct=1.0, enabled=True)
+    now = _ms_bangkok(2026, 11, 17, 12, 0)
+    btc_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        update_time_ms=now,
+    )
+    btc_stop = {
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "type": "STOP_MARKET",
+        "stopPrice": "97",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+    }
+    _seed_fresh(conn, symbol="BTCUSDT", action="short", confidence=0.80, invalidation=103.0, now=now)
+    _seed_fresh(conn, symbol="ETHUSDT", action="short", confidence=0.70, invalidation=2060.0, now=now)
+    fake = FakeFutures(
+        balance=Decimal("1000"),
+        positions=[btc_pos],
+        orders=[btc_stop],
+        marks={"BTCUSDT": Decimal("100"), "ETHUSDT": Decimal("2000")},
+        steps={"BTCUSDT": Decimal("0.001"), "ETHUSDT": Decimal("0.001")},
+    )
+    messages = render_coin_trend(conn, futures=fake, now_ms=now)
+    assert messages
+    text = next(t for t, _m in messages if "🔎 เทรนด์เหรียญ" in t)
+    lines = [ln for ln in text.splitlines() if ln[:1].isdigit()]
+    btc_line = next(ln for ln in lines if "BTCUSDT" in ln)
+    print("HELD_EXACT_BTC:\n", btc_line)
+    assert "เสี่ยง 0.3%" in btc_line
+    assert "(ประมาณ)" not in btc_line
+    assert "สัญญาณ SHORT" in btc_line
+    conn.close()
+
+
+def test_openable_risk_matches_requote_capped_idea(tmp_path: Path) -> None:
+    """Ranking risk % matches idea-block loss after re-quote cap to a prior sent idea."""
+    conn = open_db(tmp_path / "requote_parity.db")
+    ensure_settings(conn)
+    write_settings(conn, risk_pct=1.0, enabled=True)
+    now = _ms_bangkok(2026, 11, 17, 12, 0)
+    _seed_fresh(conn, symbol="ADAUSDT", action="short", confidence=0.85, invalidation=0.42, now=now)
+    first = size_signal(
+        symbol="ADAUSDT",
+        side="short",
+        entry=Decimal("0.40"),
+        stop=Decimal("0.42"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("0.5"),
+        step_size=Decimal("1"),
+    )
+    assert first is not None
+    insert_signal(
+        conn,
+        first,
+        status="sent",
+        created_at_ms=now - 3_600_000,
+        expires_at_ms=now + 3_600_000,
+        sent_at_ms=now - 3_600_000,
+    )
+    fake = FakeFutures(
+        balance=Decimal("1000"),
+        marks={"ADAUSDT": Decimal("0.40")},
+        steps={"ADAUSDT": Decimal("1")},
+    )
+    messages = render_coin_trend(conn, futures=fake, now_ms=now)
+    ranking = messages[0][0]
+    lines = [ln for ln in ranking.splitlines() if ln[:1].isdigit()]
+    ada_line = next(ln for ln in lines if "ADAUSDT" in ln)
+    print("REQUOTE_RANK_ADA:\n", ada_line)
+    assert "เสี่ยง 0.5%" in ada_line
+    assert len(messages) >= 2
+    idea = messages[1][0]
+    print("REQUOTE_IDEA_ADA:\n", idea)
+    m = re.search(r"ถ้าชน stop เสีย: [0-9.]+ USDT \(([0-9.]+)%\)", idea)
+    assert m is not None
+    assert float(m.group(1)) == pytest.approx(0.5, abs=0.05)
+    conn.close()
+
+
+def test_openable_risk_after_margin_shrink(tmp_path: Path) -> None:
+    """Lone admit shrunk by assign_shared_leverage: ranking risk uses post-shrink loss."""
+    conn = open_db(tmp_path / "margin_shrink.db")
+    ensure_settings(conn)
+    write_settings(conn, risk_pct=1.0, enabled=True)
+    now = _ms_bangkok(2026, 11, 17, 12, 0)
+    # entry 2000, stop 2060 → r=60; risk 1% of 1000 → loss≈10, notional≈332.
+    # available 20 → needs L>5 → shrink to notional 100, loss=3 → 0.3%.
+    _seed_fresh(conn, symbol="ETHUSDT", action="short", confidence=0.90, invalidation=2060.0, now=now)
+    fake = FakeFutures(
+        balance=Decimal("1000"),
+        available=Decimal("20"),
+        marks={"ETHUSDT": Decimal("2000")},
+        steps={"ETHUSDT": Decimal("0.001")},
+    )
+    scan = scan_signal_candidates(conn, futures=fake, now_ms=now, persist=False, on_demand=True)
+    admitted = list(scan["admitted"])
+    assert len(admitted) == 1
+    cand = next(c for c in scan["candidates"] if c.sized.symbol == "ETHUSDT")
+    shrunk = admitted[0].sized
+    assert shrunk.loss_at_stop < cand.sized.loss_at_stop
+    assert "margin_cap" in shrunk.reduce_reasons
+    expected_pct = (shrunk.loss_at_stop / Decimal("1000")) * Decimal("100")
+    expected_s = f"{float(expected_pct):.1f}"
+    messages = render_coin_trend(conn, futures=fake, now_ms=now)
+    ranking = messages[0][0]
+    lines = [ln for ln in ranking.splitlines() if ln[:1].isdigit()]
+    eth_line = next(ln for ln in lines if "ETHUSDT" in ln)
+    print("MARGIN_SHRINK_ETH:\n", eth_line)
+    assert f"เสี่ยง {expected_s}%" in eth_line
+    conn.close()
+
+
+def test_reason_label_single_source() -> None:
+    for k in ON_DEMAND_REASON_TH:
+        assert _reason_line("X", k) == f"X {trend_view.ON_DEMAND_REASON_TH[k]}"
+    assert _reason_line("X", "mark:ReadTimeout") == "X อ่านราคาไม่ได้"
+    assert _reason_line("X", "weird") == "X weird"
+    menu_src = Path(__file__).resolve().parents[1] / "src" / "jarvise_assist" / "menu.py"
+    assert "ON_DEMAND_REASON_TH: dict" not in menu_src.read_text(encoding="utf-8")
+
+
+def test_scan_returns_max_risk_pct(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "max_risk.db")
+    ensure_settings(conn)
+    now = _ms_bangkok(2026, 11, 17, 12, 0)
+    fake = FakeFutures(balance=Decimal("1000"))
+    write_settings(conn, risk_pct=3.0, enabled=True)
+    scan3 = scan_signal_candidates(conn, futures=fake, now_ms=now, persist=False, on_demand=True)
+    assert Decimal(str(scan3["max_risk_pct"])) == Decimal("6")
+    write_settings(conn, risk_pct=1.0, enabled=True)
+    scan1 = scan_signal_candidates(conn, futures=fake, now_ms=now, persist=False, on_demand=True)
+    assert Decimal(str(scan1["max_risk_pct"])) == Decimal("2")
+    conn.close()
+
+
+def test_header_reads_target_r() -> None:
+    text = render_trend_ranking([], "")
+    assert "เป้า 2R ทุกไม้" in text
 
 
 def test_handle_menu_sends_each_message(tmp_path: Path) -> None:

@@ -5,7 +5,8 @@ Pure helpers: no Telegram sends, no DB writes, no admission changes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -14,20 +15,19 @@ from jarvise_assist.futures import find_protective_stop
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN
 from jarvise_assist.sizing import (
     MAX_OPEN_IDEAS,
+    TARGET_R,
     ExistingIdea,
     SignalCandidate,
     analysis_is_fresh,
     passes_signal_floor,
-    portfolio_risk_cap_pct,
 )
-from jarvise_assist.store import ensure_settings
 from jarvise_ingest.db import load_latest_analysis
 
 RiskKind = Literal["slot_cap", "risk_budget", "no_backfill"]
 
 _SKIP_RANK_REASONS = frozenset({"open_position", "quick_open"})
 
-_REASON_TH: dict[str, str] = {
+ON_DEMAND_REASON_TH: dict[str, str] = {
     "flat": "ไม่มีแนวโน้ม",
     "low_confidence": "ความมั่นใจต่ำ",
     "stale_analysis": "ข้อมูลยังไม่อัปเดต",
@@ -61,6 +61,8 @@ class TrendRow:
     stop_pct: Decimal | None
     risk_pct_of_balance: Decimal | None
     status: str
+    held: bool = False
+    risk_estimated: bool = False
 
 
 def _pct_of_balance(amount: Decimal, balance: Decimal) -> Decimal:
@@ -80,8 +82,8 @@ def _fmt_cap(value: Decimal | float) -> str:
     return f"{f:.1f}"
 
 
-def _reason_label(reason: str) -> str:
-    label = _REASON_TH.get(reason)
+def reason_label(reason: str) -> str:
+    label = ON_DEMAND_REASON_TH.get(reason)
     if label is None and reason.startswith("mark:"):
         return "อ่านราคาไม่ได้"
     if label is None:
@@ -179,6 +181,8 @@ def build_trend_rows(
     scan: dict[str, Any],
     idea_status: dict[str, str],
     now_ms: int,
+    *,
+    idea_loss: Mapping[str, Decimal] | None = None,
 ) -> tuple[list[TrendRow], str]:
     """Build ranked rows and a footer line for non-passing coins.
 
@@ -193,8 +197,9 @@ def build_trend_rows(
     skipped: list[dict[str, Any]] = list(scan.get("skipped") or [])
     positions = list(scan.get("positions") or [])
     orders = list(scan.get("orders") or [])
+    loss_by_sym = dict(idea_loss or {})
 
-    max_risk_pct = portfolio_risk_cap_pct(Decimal(str(ensure_settings(conn)["risk_pct"])))
+    max_risk_pct = Decimal(str(scan["max_risk_pct"]))
     explains = explain_risk_rejections(
         existing,
         candidates,
@@ -205,6 +210,7 @@ def build_trend_rows(
     )
 
     cand_by_sym = _candidate_by_symbol(candidates)
+    admitted_by_sym = _candidate_by_symbol(admitted)
     existing_by_sym = _existing_by_symbol(existing)
     pos_by_sym = _position_by_symbol(positions)
     admitted_syms = {c.sized.symbol for c in admitted}
@@ -225,24 +231,30 @@ def build_trend_rows(
             cand = cand_by_sym[symbol]
             sized = cand.sized
             stop_pct = _stop_distance_pct(entry=sized.entry, stop=sized.stop)
-            risk_pct = _pct_of_balance(sized.loss_at_stop, balance)
+            if symbol in loss_by_sym:
+                loss = loss_by_sym[symbol]
+            elif symbol in admitted_by_sym:
+                loss = admitted_by_sym[symbol].sized.loss_at_stop
+            else:
+                loss = sized.loss_at_stop
+            risk_pct = _pct_of_balance(loss, balance)
             if symbol in admitted_syms:
                 status = idea_status.get(symbol) or "✅ เปิดได้ ↓"
             elif symbol in margin_syms:
-                status = _REASON_TH["margin_cap"]
+                status = ON_DEMAND_REASON_TH["margin_cap"]
             elif symbol in rejected_syms:
                 expl = explains.get(symbol)
-                status = _format_risk_status(expl) if expl is not None else _REASON_TH["risk_cap"]
+                status = _format_risk_status(expl) if expl is not None else ON_DEMAND_REASON_TH["risk_cap"]
             elif reason == "below_min_notional":
-                status = _REASON_TH["below_min_notional"]
+                status = ON_DEMAND_REASON_TH["below_min_notional"]
             elif reason == "margin_cap":
-                status = _REASON_TH["margin_cap"]
+                status = ON_DEMAND_REASON_TH["margin_cap"]
             elif reason is not None and reason.startswith("mark:"):
-                status = _reason_label(reason)
+                status = reason_label(reason)
             elif reason == "size_failed":
-                status = _REASON_TH["size_failed"]
+                status = ON_DEMAND_REASON_TH["size_failed"]
             else:
-                status = _reason_label(reason or "risk_cap")
+                status = reason_label(reason or "risk_cap")
             row = TrendRow(
                 rank=0,
                 symbol=symbol,
@@ -278,9 +290,10 @@ def build_trend_rows(
                     else:
                         status = "📌 ถืออยู่แล้ว"
                 else:
-                    status = _REASON_TH["quick_open"]
+                    status = ON_DEMAND_REASON_TH["quick_open"]
                 if reason in {"open_position", "quick_open"} and pos is not None and held_stop is None:
                     status = f"{status} · ⚠️ ไม่มี stop"
+                risk_estimated = pos is not None and held_stop is None and held_risk is not None
                 row = TrendRow(
                     rank=0,
                     symbol=symbol,
@@ -289,13 +302,15 @@ def build_trend_rows(
                     stop_pct=held_stop,
                     risk_pct_of_balance=held_risk,
                     status=status,
+                    held=True,
+                    risk_estimated=risk_estimated,
                 )
                 ranked_raw.append((-conf, symbol_rank[symbol], symbol, row))
             else:
-                footer_parts.append(f"{symbol} {_reason_label(reason or 'flat')}")
+                footer_parts.append(f"{symbol} {reason_label(reason or 'flat')}")
             continue
 
-        # mark: / size_failed / below_min without a candidate entry (should be rare).
+        # Floor-passing coins with no candidate: mark:* (mark/filter read failed), size_failed, or below_min_notional before sizing. margin_cap and same_idea are defensive only (margin_cap always has a candidate; on_demand never emits same_idea).
         if reason is not None and (
             reason.startswith("mark:")
             or reason in {"size_failed", "below_min_notional", "margin_cap", "same_idea"}
@@ -314,30 +329,20 @@ def build_trend_rows(
                     confidence=conf,
                     stop_pct=None,
                     risk_pct_of_balance=None,
-                    status=_reason_label(reason),
+                    status=reason_label(reason),
                 )
                 ranked_raw.append((-conf, symbol_rank[symbol], symbol, row))
             else:
-                footer_parts.append(f"{symbol} {_reason_label(reason)}")
+                footer_parts.append(f"{symbol} {reason_label(reason)}")
             continue
 
         # flat / low_confidence / stale / missing → footer.
-        footer_parts.append(f"{symbol} {_reason_label(reason or 'flat')}")
+        footer_parts.append(f"{symbol} {reason_label(reason or 'flat')}")
 
     ranked_raw.sort(key=lambda t: (t[0], t[1], t[2]))
     rows: list[TrendRow] = []
     for i, (_neg_c, _rank, _sym, row) in enumerate(ranked_raw, start=1):
-        rows.append(
-            TrendRow(
-                rank=i,
-                symbol=row.symbol,
-                side=row.side,
-                confidence=row.confidence,
-                stop_pct=row.stop_pct,
-                risk_pct_of_balance=row.risk_pct_of_balance,
-                status=row.status,
-            )
-        )
+        rows.append(replace(row, rank=i))
     footer = ""
     if footer_parts:
         # Keep universe order for the footer pieces we collected in ASSIST_SYMBOLS walk.
@@ -346,17 +351,23 @@ def build_trend_rows(
 
 
 def _format_row(row: TrendRow) -> str:
-    parts = [f"{row.rank}. {row.symbol} {row.side} · มั่นใจ {row.confidence:.2f}"]
+    if row.held:
+        parts = [f"{row.rank}. {row.symbol} สัญญาณ {row.side} · มั่นใจ {row.confidence:.2f}"]
+    else:
+        parts = [f"{row.rank}. {row.symbol} {row.side} · มั่นใจ {row.confidence:.2f}"]
     if row.stop_pct is not None:
         parts.append(f"stop ห่าง {_fmt_pct1(row.stop_pct)}%")
     if row.risk_pct_of_balance is not None:
-        parts.append(f"เสี่ยง {_fmt_pct1(row.risk_pct_of_balance)}%")
+        if row.risk_estimated:
+            parts.append(f"เสี่ยง ~{_fmt_pct1(row.risk_pct_of_balance)}% (ประมาณ)")
+        else:
+            parts.append(f"เสี่ยง {_fmt_pct1(row.risk_pct_of_balance)}%")
     mid = " · ".join(parts)
     return f"{mid} → {row.status}"
 
 
 def render_trend_ranking(rows: list[TrendRow], footer: str) -> str:
-    header = "🔎 เทรนด์เหรียญ · เรียงตามความมั่นใจ (สูง→ต่ำ)\nความมั่นใจไม่ใช่โอกาสชนะ · เป้า 2R ทุกไม้"
+    header = f"🔎 เทรนด์เหรียญ · เรียงตามความมั่นใจ (สูง→ต่ำ)\nความมั่นใจไม่ใช่โอกาสชนะ · เป้า {_fmt_cap(TARGET_R)}R ทุกไม้"
     body_lines = [_format_row(r) for r in rows]
     chunks = [header]
     if body_lines:
@@ -370,7 +381,7 @@ def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def _fit_telegram(text: str, limit: int = 3900) -> str:
+def fit_telegram(text: str, limit: int = 3900) -> str:
     """Trim ranking text to ``limit`` UTF-16 units. Drops footer first, then lowest rows."""
     if _utf16_len(text) <= limit:
         return text
