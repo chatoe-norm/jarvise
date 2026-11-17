@@ -906,7 +906,7 @@ def get_watch_position(conn: Any, symbol: str, position_side: str) -> dict[str, 
         """
         SELECT symbol, position_side, side, entry, qty, in_universe, signal_id,
                initial_stop, initial_stop_source, entry_time_ms, no_stop_latched,
-               last_seen_ms, closed_at_ms
+               last_seen_ms, closed_at_ms, atr_at_entry
         FROM assist_watch_position
         WHERE symbol=? AND position_side=?
         """,

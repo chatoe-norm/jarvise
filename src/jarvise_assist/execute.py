@@ -31,6 +31,7 @@ from jarvise_assist.exec_outcome import (
 from jarvise_assist.exec_outcome import (
     query_fill_after_unknown as _query_fill_tri,
 )
+from jarvise_assist.exit_log import log_card, record_intent_action
 from jarvise_assist.futures import (
     FAPI_BASE,
     FuturesPosition,
@@ -2473,6 +2474,7 @@ def _send_fresh_move_stop_advice(
         initial_stop=initial_stop,
         expires_at_ms=expires_at,
         tick=tick,
+        source=source,
     )
     new_id = insert_exec_intent(
         conn,
@@ -2496,6 +2498,27 @@ def _send_fresh_move_stop_advice(
         )
         if mid is not None:
             set_exec_intent_message_id(conn, new_id, int(mid))
+        if mid:
+            log_card(
+                conn,
+                symbol=symbol,
+                position_side=pos.position_side,
+                side=side,
+                kind="move_stop",
+                source=source,
+                shown_at_ms=int(now_ms_value),
+                mark=mark,
+                entry=pos.entry_price,
+                initial_stop=initial_stop,
+                qty=pos.qty,
+                suggested_stop=new_stop,
+                exchange_stop=protective,
+                had_button=True,
+                delivered=True,
+                intent_id=new_id,
+                entry_time_ms=pos.update_time_ms,
+                entry_bar=False,
+            )
     return new_id
 
 
@@ -3156,6 +3179,8 @@ def handle_exec_callback(
                 text = str(intent.get("result_text") or "ทำไปแล้ว")
                 send(text)
                 return {"ok": True, "replay": True, "text": text}
+        if declined:
+            record_intent_action(conn, intent or {}, action="ignore", action_at_ms=ts)
         answer("ไม่เลื่อน")
         advice_body = None
         if intent is not None:
@@ -3219,6 +3244,8 @@ def handle_exec_callback(
             answer()
             if not wrote:
                 return {"ok": False, "reason": "lost_write"}
+            if prefix == "ms:":
+                record_intent_action(conn, intent, action="ignore", action_at_ms=ts)
             advice_body = None
             preview = intent.get("preview") or {}
             if isinstance(preview, dict):
@@ -3260,6 +3287,7 @@ def handle_exec_callback(
             send("กำลังทำอยู่")
             return {"ok": False, "reason": "race"}
 
+        record_intent_action(conn, intent, action="tap", action_at_ms=ts)
         answer()
         auth_reason: str | None = None
         client: BinanceTradeClient | None

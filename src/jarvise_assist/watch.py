@@ -17,6 +17,14 @@ from jarvise_assist.execute import (
     build_trade_client,
     cancel_jv_orders_for_symbol,
 )
+from jarvise_assist.exit_log import (
+    log_card,
+    note_atr_at_entry,
+    note_early_exit_ignores,
+    note_exchange_stop,
+    record_response,
+    sweep_expired_move_ignores,
+)
 from jarvise_assist.futures import (
     BinanceFuturesClient,
     FuturesKeyUnsafeError,
@@ -32,11 +40,13 @@ from jarvise_assist.keyboard import exit_confirm_keyboard, move_stop_keyboard, p
 from jarvise_assist.messages import (
     _fmt_price_tick,
     _lock_at_stop,
+    approx_r_after_fees,
     format_exit_advice,
     format_move_stop_advice,
     format_no_stop_warning,
     format_partial_stop_warning,
     format_progress_alert,
+    stop_gap_r,
 )
 from jarvise_assist.pause import evaluate_day_loss_pause, evaluate_pause, maybe_auto_resume
 from jarvise_assist.quick import sync_quick_trades
@@ -292,6 +302,18 @@ def _ensure_watch_row(
     return stored
 
 
+def _latest_atr(conn: Any, symbol: str, now_ms: int) -> Decimal | None:
+    """Newest stored ATR on the assist timeframe. The same read the ATR stop uses."""
+    since = int(now_ms) - 30 * 24 * 3_600_000
+    candles = load_candles_in_range(conn, symbol, ASSIST_TIMEFRAME, since_ms=since, until_ms=int(now_ms))
+    for row in reversed(candles):
+        if row.get("atr_14") is not None:
+            atr = Decimal(str(row["atr_14"]))
+            if atr > 0:
+                return atr
+    return None
+
+
 def _link_or_freeze_stop(
     conn: Any,
     pos: FuturesPosition,
@@ -299,6 +321,12 @@ def _link_or_freeze_stop(
     *,
     now_ms: int,
 ) -> dict[str, Any]:
+    # Snapshot ATR once. Does not change the stop that gets frozen below.
+    if stored.get("atr_at_entry") is None:
+        atr_snap = _latest_atr(conn, pos.symbol, now_ms)
+        if atr_snap is not None:
+            note_atr_at_entry(conn, symbol=pos.symbol, position_side=pos.position_side, atr=atr_snap)
+            stored["atr_at_entry"] = float(atr_snap)
     if stored.get("initial_stop") is not None:
         return stored
     linked = find_linkable_signal(conn, symbol=pos.symbol, side=pos.side, now_ms=now_ms)
@@ -322,13 +350,7 @@ def _link_or_freeze_stop(
         assert refreshed is not None
         return refreshed
 
-    since = int(now_ms) - 30 * 24 * 3_600_000
-    candles = load_candles_in_range(conn, pos.symbol, ASSIST_TIMEFRAME, since_ms=since, until_ms=int(now_ms))
-    atr: Decimal | None = None
-    for row in reversed(candles):
-        if row.get("atr_14") is not None:
-            atr = Decimal(str(row["atr_14"]))
-            break
+    atr = _latest_atr(conn, pos.symbol, now_ms)
     if atr is None or atr <= 0:
         return stored
     stop = initial_atr_stop(side=pos.side, entry=pos.entry_price, atr=atr)
@@ -432,6 +454,20 @@ def _process_universe_position(
         symbol=pos.symbol,
         position_side=pos.position_side,
         trade_side=pos.side,
+    )
+    note_exchange_stop(
+        conn,
+        symbol=pos.symbol,
+        position_side=pos.position_side,
+        observed_at_ms=now_ms,
+        stop_price=protective,
+        covered_qty=protective_stop_covered_qty(
+            orders,
+            symbol=pos.symbol,
+            position_side=pos.position_side,
+            trade_side=pos.side,
+        ),
+        position_qty=pos.qty,
     )
     if coverage in {"none", "partial"}:
         no_stop_reason = "partial" if coverage == "partial" else "missing"
@@ -565,6 +601,8 @@ def _process_universe_position(
             reply_markup = None
             move_expires: int | None = None
             pending_lock_r: Decimal | None = None
+            pending_after_fees: Decimal | None = None
+            pending_gap_r: Decimal | None = None
             if pending_move and suggested_pending is not None:
                 _, pending_lock_r = _lock_at_stop(
                     side=pos.side,
@@ -573,7 +611,25 @@ def _process_universe_position(
                     initial_stop=stop_dec,
                     new_stop=suggested_pending,
                 )
+                pending_after_fees = approx_r_after_fees(
+                    side=pos.side,
+                    qty=pos.qty,
+                    entry=pos.entry_price,
+                    initial_stop=stop_dec,
+                    new_stop=suggested_pending,
+                )
+                pending_gap_r = stop_gap_r(
+                    side=pos.side,
+                    entry=pos.entry_price,
+                    initial_stop=stop_dec,
+                    mark=mark,
+                    new_stop=suggested_pending,
+                )
+            exit_id: str | None = None
+            move_intent_id: str | None = None
+            early_offer = False
             if assist_execute_mode() == "live":
+                early_offer = not exit_active
                 exit_id = insert_exec_intent(
                     conn,
                     kind="exit",
@@ -588,7 +644,6 @@ def _process_universe_position(
                     created_at_ms=now_ms,
                     expires_at_ms=now_ms + PREVIEW_TTL_MS,
                 )
-                move_intent_id: str | None = None
                 if (
                     pending_move
                     and move_deduped
@@ -610,6 +665,8 @@ def _process_universe_position(
                         pending_stop=suggested_pending,
                         pending_source=source_pending,
                         pending_lock_r=pending_lock_r,
+                        pending_after_fees=pending_after_fees,
+                        pending_gap_r=pending_gap_r,
                         move_button=True,
                         move_expires_at_ms=move_expires,
                         early_close=not exit_active,
@@ -670,6 +727,8 @@ def _process_universe_position(
                     pending_stop=suggested_pending if pending_move else None,
                     pending_source=source_pending if pending_move else None,
                     pending_lock_r=pending_lock_r if pending_move else None,
+                    pending_after_fees=pending_after_fees if pending_move else None,
+                    pending_gap_r=pending_gap_r if pending_move else None,
                     move_button=False,
                 )
             status = _emit_advice(
@@ -689,6 +748,70 @@ def _process_universe_position(
                 reply_markup=reply_markup,
             )
             if status == "sent":
+                log_card(
+                    conn,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    side=pos.side,
+                    kind="progress",
+                    source=f"r{top_level}",
+                    shown_at_ms=now_ms,
+                    mark=mark,
+                    entry=pos.entry_price,
+                    initial_stop=stop_dec,
+                    qty=pos.qty,
+                    suggested_stop=suggested_pending if pending_move else None,
+                    r_now=r_now,
+                    exchange_stop=protective,
+                    had_button=reply_markup is not None,
+                    delivered=True,
+                    intent_id=exit_id,
+                    entry_time_ms=entry_time,
+                    candles_1h=candles_1h,
+                )
+                if early_offer and exit_id is not None:
+                    log_card(
+                        conn,
+                        symbol=pos.symbol,
+                        position_side=pos.position_side,
+                        side=pos.side,
+                        kind="early_exit_offer",
+                        source="progress",
+                        shown_at_ms=now_ms,
+                        mark=mark,
+                        entry=pos.entry_price,
+                        initial_stop=stop_dec,
+                        qty=pos.qty,
+                        r_now=r_now,
+                        exchange_stop=protective,
+                        had_button=True,
+                        delivered=True,
+                        intent_id=exit_id,
+                        entry_time_ms=entry_time,
+                        candles_1h=candles_1h,
+                    )
+                if move_intent_id is not None and suggested_pending is not None:
+                    log_card(
+                        conn,
+                        symbol=pos.symbol,
+                        position_side=pos.position_side,
+                        side=pos.side,
+                        kind="move_stop",
+                        source=source_pending,
+                        shown_at_ms=now_ms,
+                        mark=mark,
+                        entry=pos.entry_price,
+                        initial_stop=stop_dec,
+                        qty=pos.qty,
+                        suggested_stop=suggested_pending,
+                        r_now=r_now,
+                        exchange_stop=protective,
+                        had_button=True,
+                        delivered=True,
+                        intent_id=move_intent_id,
+                        entry_time_ms=entry_time,
+                        candles_1h=candles_1h,
+                    )
                 progress_sent = [float(level) for level in pending]
                 for level in pending:
                     if level == top_level:
@@ -729,8 +852,10 @@ def _process_universe_position(
                 initial_stop=stop_dec,
                 expires_at_ms=expires_at,
                 tick=tick,
+                source=_source,
             )
             move_markup = None
+            intent_id: str | None = None
             # Buttons/intents only in live daytime sends that will not dedupe-skip.
             if (
                 assist_execute_mode() == "live"
@@ -777,6 +902,30 @@ def _process_universe_position(
                 since_ms=since,
                 reply_markup=move_markup,
             )
+            if status in {"sent", "held"}:
+                log_card(
+                    conn,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    side=pos.side,
+                    kind="move_stop",
+                    source=_source,
+                    shown_at_ms=now_ms,
+                    mark=mark,
+                    entry=pos.entry_price,
+                    initial_stop=stop_dec,
+                    qty=pos.qty,
+                    suggested_stop=suggested_d,
+                    r_now=approx_r_multiple(
+                        side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark
+                    ),
+                    exchange_stop=protective,
+                    had_button=move_markup is not None,
+                    delivered=status == "sent",
+                    intent_id=intent_id,
+                    entry_time_ms=entry_time,
+                    candles_1h=candles_1h,
+                )
             actions.append(
                 {
                     "symbol": pos.symbol,
@@ -807,6 +956,7 @@ def _process_universe_position(
         r_mult = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
         text = format_exit_advice(symbol=pos.symbol, side=pos.side, reason=reason, approx_r=r_mult)
         exit_markup = None
+        exit_intent_id: str | None = None
         if (
             assist_execute_mode() == "live"
             and not night
@@ -820,7 +970,7 @@ def _process_universe_position(
                 since_ms=since,
             )
         ):
-            intent_id = insert_exec_intent(
+            exit_intent_id = insert_exec_intent(
                 conn,
                 kind="exit",
                 symbol=pos.symbol,
@@ -829,7 +979,7 @@ def _process_universe_position(
                 created_at_ms=now_ms,
                 expires_at_ms=now_ms + PREVIEW_TTL_MS,
             )
-            exit_markup = exit_confirm_keyboard(intent_id)
+            exit_markup = exit_confirm_keyboard(exit_intent_id)
         status = _emit_advice(
             conn,
             symbol=pos.symbol,
@@ -846,6 +996,27 @@ def _process_universe_position(
             since_ms=since,
             reply_markup=exit_markup,
         )
+        if status in {"sent", "held"}:
+            log_card(
+                conn,
+                symbol=pos.symbol,
+                position_side=pos.position_side,
+                side=pos.side,
+                kind="exit",
+                source=reason,
+                shown_at_ms=now_ms,
+                mark=mark,
+                entry=pos.entry_price,
+                initial_stop=stop_dec,
+                qty=pos.qty,
+                r_now=r_mult,
+                exchange_stop=protective,
+                had_button=exit_markup is not None,
+                delivered=status == "sent",
+                intent_id=exit_intent_id,
+                entry_time_ms=entry_time,
+                candles_1h=candles_1h,
+            )
         actions.append({"symbol": pos.symbol, "action": "exit", "reason": reason, "status": status})
 
     best_low, best_high = post_entry_extremes(
@@ -939,6 +1110,7 @@ def flush_held_watch_advice(
             r_mult = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
             text = format_exit_advice(symbol=pos.symbol, side=pos.side, reason=reason, approx_r=r_mult)
             exit_markup = None
+            intent_id: str | None = None
             if assist_execute_mode() == "live":
                 # Intent from the current position (not the held row); xx: matches qty+entry.
                 intent_id = insert_exec_intent(
@@ -955,6 +1127,25 @@ def flush_held_watch_advice(
             if sent_ok:
                 mark_watch_advice_sent(conn, str(row["id"]), sent_at_ms=now_ms_value)
                 sent.append(str(row["id"]))
+                log_card(
+                    conn,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    side=pos.side,
+                    kind="exit",
+                    source=reason,
+                    shown_at_ms=now_ms_value,
+                    mark=mark,
+                    entry=pos.entry_price,
+                    initial_stop=stop_dec,
+                    qty=pos.qty,
+                    r_now=r_mult,
+                    had_button=exit_markup is not None,
+                    delivered=True,
+                    intent_id=intent_id if exit_markup is not None else None,
+                    entry_time_ms=int(stored["entry_time_ms"]) if stored.get("entry_time_ms") else None,
+                    entry_bar=False,
+                )
             continue
         if kind == "move_stop":
             protective = find_protective_stop(
@@ -990,10 +1181,45 @@ def flush_held_watch_advice(
                 initial_stop=stop_dec,
                 expires_at_ms=now_ms_value + MOVE_STOP_TTL_MS,
                 tick=tick,
+                source=str(row.get("reason") or "") or None,
+                with_button=False,
             )
             if send(text):
                 mark_watch_advice_sent(conn, str(row["id"]), sent_at_ms=now_ms_value)
                 sent.append(str(row["id"]))
+                # No 🛡 button on the 07:30 card. Record that the stop was left for the app.
+                card_id = log_card(
+                    conn,
+                    symbol=pos.symbol,
+                    position_side=pos.position_side,
+                    side=pos.side,
+                    kind="morning_move",
+                    source=str(row.get("reason") or "") or None,
+                    shown_at_ms=now_ms_value,
+                    mark=mark,
+                    entry=pos.entry_price,
+                    initial_stop=stop_dec,
+                    qty=pos.qty,
+                    suggested_stop=suggested,
+                    r_now=approx_r_multiple(
+                        side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark
+                    ),
+                    exchange_stop=protective,
+                    had_button=False,
+                    delivered=True,
+                    entry_time_ms=int(stored["entry_time_ms"]) if stored.get("entry_time_ms") else None,
+                    entry_bar=False,
+                )
+                held_at = row.get("created_at_ms")
+                record_response(
+                    conn,
+                    symbol=pos.symbol,
+                    kind="move_stop",
+                    action="manual",
+                    action_at_ms=now_ms_value,
+                    shown_at_ms=int(held_at) if held_at is not None else now_ms_value,
+                    card_id=card_id,
+                )
     return {"sent": sent, "dropped": dropped}
 
 
@@ -1106,6 +1332,8 @@ def run_assist_watch(
         day_pause = evaluate_day_loss_pause(conn, now_ms=ts, send=send_fn)
         if day_pause.get("reason") in {"day_loss", "day_loss_deeper"}:
             pause_info = day_pause
+    sweep_expired_move_ignores(conn, now_ms=ts)
+    note_early_exit_ignores(conn, closed, now_ms=ts)
     result: dict[str, Any] = {
         "ok": True,
         "paper_only": True,

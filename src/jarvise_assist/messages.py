@@ -8,6 +8,8 @@ from typing import Any
 
 from jarvise_assist.futures import SymbolAccountConfig
 from jarvise_assist.sizing import SizedSignal, floor_to_step, round_level_to_tick
+from jarvise_assist.track import FEE_BPS_PER_SIDE
+from jarvise_paper.profit_lock import DEFAULT_BREAKEVEN_R, DEFAULT_TRAIL_AFTER_R
 
 # Asia/Bangkok has no DST; avoid the tzdata package on Windows.
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -330,6 +332,94 @@ def _lock_at_stop(
     return lock_usdt, lock_usdt / (qty * risk)
 
 
+def _fmt_r_level(level: Decimal) -> str:
+    """+0.5R / +1R / +1.5R — no trailing zeros. The leading '+' is added by callers."""
+    text = format(level.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _fmt_signed_r(value: Decimal | None) -> str:
+    if value is None:
+        return "R unknown"
+    return f"{float(value):+.2f}R"
+
+
+def _rule_r_label(level: float) -> str:
+    """+0.5R / +1R from the profit-lock constants the advice actually uses."""
+    return f"+{_fmt_r_level(Decimal(str(level)))}R"
+
+
+def wick_rule_line(*, source: str) -> str:
+    """Owner line for the trigger ``trail_stop_with_source`` implements.
+
+    Favorable travel is the high (long) or low (short) of a closed 1h spot bar,
+    not that bar's close. The R levels are the profit-lock constants.
+    """
+    if source == "trail":
+        level = _rule_r_label(DEFAULT_TRAIL_AFTER_R)
+    else:
+        level = _rule_r_label(DEFAULT_BREAKEVEN_R)
+    return f"เกณฑ์: ไส้แท่ง 1h สปอตที่ปิดแล้วแตะ {level}"
+
+
+# Progress alerts restate the same wick rule. Built from the constants so a
+# close-price sentence cannot drift back in while the code still reads wicks.
+PROGRESS_RULE_LINE = (
+    "แจ้งเพื่อทราบ · กติกาเดิม: "
+    f"เลื่อน BE เมื่อไส้แท่ง 1h สปอตที่ปิดแล้วแตะ {_rule_r_label(DEFAULT_BREAKEVEN_R)}"
+    f" · trail เมื่อไส้แตะ {_rule_r_label(DEFAULT_TRAIL_AFTER_R)}"
+)
+MANUAL_MOVE_LINE = "ยังไม่ได้เลื่อน stop — ถ้าต้องการ ให้เลื่อนเองในแอป (Stop-Market, Reduce-Only, Mark Price)"
+
+
+def approx_r_after_fees(
+    *,
+    side: str,
+    qty: Decimal,
+    entry: Decimal,
+    initial_stop: Decimal,
+    new_stop: Decimal,
+    fee_bps_per_side: Decimal | None = None,
+) -> Decimal | None:
+    """Locked R at ``new_stop`` after the assist taker fee on entry and on the stop.
+
+    Fee is ``FEE_BPS_PER_SIDE`` (Binance USDⓈ-M VIP0 taker) each side. Slippage
+    is not included. None when the initial risk is not positive.
+    """
+    lock_usdt, _lock_r = _lock_at_stop(
+        side=side, qty=qty, entry=entry, initial_stop=initial_stop, new_stop=new_stop
+    )
+    risk = abs(entry - initial_stop)
+    if risk <= 0 or qty == 0:
+        return None
+    bps = fee_bps_per_side if fee_bps_per_side is not None else Decimal(str(FEE_BPS_PER_SIDE))
+    fee = (bps / Decimal("10000")) * abs(qty) * (abs(entry) + abs(new_stop))
+    return (lock_usdt - fee) / (abs(qty) * risk)
+
+
+def stop_gap_r(
+    *,
+    side: str,
+    entry: Decimal,
+    initial_stop: Decimal,
+    mark: Decimal,
+    new_stop: Decimal,
+) -> Decimal | None:
+    """Signed distance from the current mark to the proposed stop, in initial R.
+
+    Positive when the stop is still on the protective side of the mark
+    (below a long, above a short).
+    """
+    risk = abs(entry - initial_stop)
+    if risk <= 0:
+        return None
+    if side.lower() == "long":
+        return (mark - new_stop) / risk
+    return (new_stop - mark) / risk
+
+
 def format_move_stop_advice(
     *,
     symbol: str,
@@ -342,8 +432,14 @@ def format_move_stop_advice(
     initial_stop: Decimal,
     expires_at_ms: int,
     tick: Decimal | None = None,
+    source: str | None = None,
+    with_button: bool = True,
 ) -> str:
-    """Move-stop advice body. Levels already tick-rounded by the caller."""
+    """Move-stop advice body. Levels already tick-rounded by the caller.
+
+    ``with_button=False`` is the 07:30 flush: the stop was not moved and there
+    is no button, so the text must not mention a button or an expiry.
+    """
     side_l = side.lower()
     side_label = "LONG" if side_l == "long" else "SHORT"
     if tick is not None and tick > 0:
@@ -357,16 +453,27 @@ def format_move_stop_advice(
     lock_usdt, lock_r = _lock_at_stop(
         side=side, qty=qty, entry=entry, initial_stop=initial_stop, new_stop=new_stop
     )
-    lock_r_s = f"{float(lock_r):+.2f}" if lock_r is not None else "R unknown"
+    after = approx_r_after_fees(side=side, qty=qty, entry=entry, initial_stop=initial_stop, new_stop=new_stop)
+    gap = stop_gap_r(side=side, entry=entry, initial_stop=initial_stop, mark=mark, new_stop=new_stop)
     lock_usdt_s = f"{float(lock_usdt):+.2f}"
-    hhmm = datetime.fromtimestamp(int(expires_at_ms) / 1000.0, tz=BANGKOK).strftime("%H:%M")
-    return (
-        f"{symbol.upper()} {side_label} · qty {fmt_qty(qty)}\n"
-        f"stop {old_s} → {new_s}\n"
-        f"mark {mark_s}\n"
-        f"ล็อก ≈ {lock_r_s}R ({lock_usdt_s} USDT) (ก่อนค่าธรรมเนียม)\n"
-        f"ปุ่มหมดอายุ {hhmm}"
-    )
+    lines = [
+        f"{symbol.upper()} {side_label} · qty {fmt_qty(qty)}",
+        f"stop {old_s} → {new_s}",
+        f"mark {mark_s}",
+        (
+            f"ล็อก ≈ {_fmt_signed_r(lock_r)} ({lock_usdt_s} USDT) (ก่อนค่าธรรมเนียม)"
+            f" · หลังค่าธรรมเนียม ≈ {_fmt_signed_r(after)}"
+        ),
+        f"ห่าง mark {_fmt_signed_r(gap)}",
+    ]
+    if source in {"breakeven", "trail"}:
+        lines.append(wick_rule_line(source=str(source)))
+    if with_button:
+        hhmm = datetime.fromtimestamp(int(expires_at_ms) / 1000.0, tz=BANGKOK).strftime("%H:%M")
+        lines.append(f"ปุ่มหมดอายุ {hhmm}")
+    else:
+        lines.append(MANUAL_MOVE_LINE)
+    return "\n".join(lines)
 
 
 def format_exit_advice(
@@ -388,14 +495,6 @@ def format_exit_advice(
         detail = reason
     r_s = f"{float(approx_r):.1f}"
     return f"✅ {symbol.upper()} {side_label} · ออกตอนนี้\n{detail} · ประมาณ {r_s}R"
-
-
-def _fmt_r_level(level: Decimal) -> str:
-    """+0.5R / +1R / +1.5R — no trailing zeros."""
-    text = format(level.normalize(), "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return text or "0"
 
 
 def progress_alert_after_tap(text: str, *, keep_close_line: bool = False) -> str:
@@ -429,6 +528,8 @@ def format_progress_alert(
     pending_stop: Decimal | None = None,
     pending_source: str | None = None,
     pending_lock_r: Decimal | None = None,
+    pending_after_fees: Decimal | None = None,
+    pending_gap_r: Decimal | None = None,
     move_button: bool = False,
     move_expires_at_ms: int | None = None,
     early_close: bool = False,
@@ -441,7 +542,7 @@ def format_progress_alert(
             f"mark {_fmt_price_tick(mark, tick)} · entry {_fmt_price_tick(entry, tick)} · "
             f"stop ปัจจุบัน {_fmt_price_tick(stop, tick)} ({stop_r:+.2f}R)"
         ),
-        "แจ้งเพื่อทราบ · กติกาเดิม: เลื่อน BE เมื่อแท่ง 1h ปิดเกิน +0.5R · trail เมื่อเกิน +1R",
+        PROGRESS_RULE_LINE,
     ]
     if pending_stop is not None:
         src = str(pending_source or "")
@@ -454,6 +555,10 @@ def format_progress_alert(
         reminder = f"📌 ยังไม่ได้เลื่อน stop ตามคำแนะนำ: → {_fmt_price_tick(pending_stop, tick)} ({src_label})"
         if pending_lock_r is not None:
             reminder += f" · ล็อก ≈ {float(pending_lock_r):+.2f}R"
+        if pending_after_fees is not None:
+            reminder += f" · หลังค่าธรรมเนียม ≈ {float(pending_after_fees):+.2f}R"
+        if pending_gap_r is not None:
+            reminder += f" · ห่าง mark {float(pending_gap_r):+.2f}R"
         if not move_button:
             reminder += " — เลื่อนเองในแอป (Stop-Market, Reduce-Only, Mark Price)"
         lines.append(reminder)

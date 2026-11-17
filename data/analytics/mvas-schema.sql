@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 31).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 32).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -439,6 +439,7 @@ CREATE TABLE IF NOT EXISTS assist_watch_position (
     no_stop_latched INTEGER NOT NULL DEFAULT 0,
     last_seen_ms INTEGER NOT NULL,
     closed_at_ms INTEGER,
+    atr_at_entry REAL,  -- migration 32: ATR frozen when the position is first watched
     PRIMARY KEY (symbol, position_side)
 );
 
@@ -529,6 +530,8 @@ CREATE TABLE IF NOT EXISTS assist_real_trade (
     drift_signal_bps REAL,
     slip_stop_bps REAL,
     income_status TEXT,
+    exit_source TEXT,  -- migration 32: initial_stop / be_stop / trail_stop / tp / manual / early_exit
+    atr_at_entry REAL,  -- migration 32: ATR frozen at entry; NULL on rows closed before it
     status TEXT NOT NULL,
     updated_at_ms INTEGER NOT NULL
 );
@@ -668,3 +671,59 @@ CREATE TABLE IF NOT EXISTS partner_request (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_partner_request_one_pending
     ON partner_request (partner_id) WHERE status = 'pending';
+
+-- Exit telemetry (migration 32). Advice snapshots, tap/ignore, exchange stop history.
+-- Realised commission_usdt and funding_usdt stay on assist_real_trade.
+CREATE TABLE IF NOT EXISTS assist_exit_card (
+    id TEXT PRIMARY KEY,
+    advice_id TEXT,
+    intent_id TEXT,
+    symbol TEXT NOT NULL,
+    position_side TEXT NOT NULL,
+    side TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT,
+    shown_at_ms INTEGER NOT NULL,
+    mark REAL,
+    wick REAL,
+    close_1h REAL,
+    r_now REAL,
+    suggested_stop REAL,
+    approx_r_after_fees REAL,
+    exchange_stop REAL,
+    had_button INTEGER NOT NULL DEFAULT 0,
+    delivered INTEGER NOT NULL DEFAULT 1,
+    atr_at_entry REAL
+);
+CREATE INDEX IF NOT EXISTS idx_assist_exit_card_pos
+    ON assist_exit_card (symbol, position_side, shown_at_ms);
+
+CREATE TABLE IF NOT EXISTS assist_exit_response (
+    id TEXT PRIMARY KEY,
+    card_id TEXT,
+    intent_id TEXT,
+    symbol TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    action TEXT NOT NULL,
+    shown_at_ms INTEGER,
+    action_at_ms INTEGER NOT NULL,
+    latency_ms INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_assist_exit_response_intent_action
+    ON assist_exit_response (intent_id, action)
+    WHERE intent_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_assist_exit_response_card_action
+    ON assist_exit_response (card_id, action)
+    WHERE card_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS assist_exchange_stop (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    position_side TEXT NOT NULL,
+    observed_at_ms INTEGER NOT NULL,
+    stop_price REAL,
+    covered_qty REAL,
+    position_qty REAL
+);
+CREATE INDEX IF NOT EXISTS idx_assist_exchange_stop_pos
+    ON assist_exchange_stop (symbol, position_side, observed_at_ms);
