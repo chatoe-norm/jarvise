@@ -586,6 +586,38 @@ def test_paid_button_unbinds_only_the_last_due(tmp_path: Path, monkeypatch: Any,
     conn.close()
 
 
+def test_closed_start_with_spent_invite_shows_the_card(
+    tmp_path: Path, monkeypatch: Any, env_chat: None
+) -> None:
+    conn = open_db(tmp_path / "spent-start.db")
+    _patch_value(monkeypatch, "1100")
+    _, b_id = _admin_and_partner(conn, "Bob")
+    inv = ps.create_invite(conn, b_id, now_ms=NOW + 2)
+    assert inv["ok"] is True
+    code = str(inv["code"])
+    assert ps.bind_invite(conn, code, TG, admin_chat_id=ADMIN, now_ms=NOW + 3)["ok"]
+    assert ps.apply_deposit(conn, b_id, D("100"), D("1100"), NOW + 5)["ok"]
+    closed = ps.apply_close(conn, b_id, D("1100"), NOW + 6)
+    assert closed["ok"] is True and D(closed["cash"]) > 0
+    portal.reset_value_cache()
+    sent, send = _send_capture()
+    out = portal.handle_portal_text(
+        conn,
+        _pmsg(f"/start {code}"),
+        send=send,
+        futures=object(),
+        now_ms=NOW + 9,
+    )
+    assert out == {"ok": True, "cmd": "card"}
+    note = _partner_texts(sent)[0]
+    assert "ปิดพอร์ตแล้ว" in note
+    assert "รอโอน" in note
+    assert "ลิงก์เชิญไม่ถูกต้อง" not in note
+    assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
+    assert ps.get_partner(conn, b_id)["invite_hash"] is None
+    conn.close()
+
+
 def test_start_while_due_keeps_invite_then_binds_after_paid(
     tmp_path: Path, monkeypatch: Any, env_chat: None
 ) -> None:
@@ -1285,33 +1317,35 @@ def test_close_summary_is_in_the_cash_out_and_final_paid_notes(
 
 
 def test_p_closed_paid_label_ignores_an_older_withdrawal(tmp_path: Path, env_chat: None) -> None:
+    """A paid profit withdrawal must not label a zero-cash close as โอนแล้ว."""
     conn = open_db(tmp_path / "close-state.db")
     _, b_id = _admin_and_partner(conn)
-    assert ps.apply_deposit(conn, b_id, D("1000"), D("2000"), NOW + 5)["ok"]
-    assert ps.apply_withdraw_profit(conn, b_id, D("4000"), NOW + 6)["ok"]
-    assert ps.apply_close(conn, b_id, D("4000"), NOW + 7)["ok"]
-    assert ps.close_summary(conn, b_id)["close_payout_state"] == "due"
+    closed = ps.apply_close(conn, b_id, D("1000"), NOW + 5)
+    assert closed["ok"] is True and D(closed["cash"]) == 0
+    assert ps.close_summary(conn, b_id)["close_payout_state"] == "none"
+    conn.execute(
+        """
+        INSERT INTO partner_request (
+            id, partner_id, kind, status, payout_state, payout_micro,
+            created_at_ms, expires_at_ms, decided_at_ms, paid_at_ms, source
+        ) VALUES (?, ?, 'withdraw_profit', 'confirmed', 'paid', ?, ?, ?, ?, ?, 'admin')
+        """,
+        (
+            "pr_aabbccddeeff0011",
+            b_id,
+            ps.usdt_to_micro(D("10")),
+            NOW + 6,
+            NOW + 7,
+            NOW + 6,
+            NOW + 8,
+        ),
+    )
+    conn.commit()
     sent, send = _send_capture()
     pa.handle_partner_text(
-        conn, "p closed", message=_owner_msg("p closed"), send=send, futures=None, now_ms=NOW + 8
+        conn, "p closed", message=_owner_msg("p closed"), send=send, futures=None, now_ms=NOW + 9
     )
-    assert "รอโอน" in sent[0]["text"]
-    assert "โอนแล้ว" not in sent[0]["text"]
-    wd_id = next(str(d["id"]) for d in ps.list_due_payouts(conn) if str(d["kind"]) == "withdraw_profit")
-    assert ps.mark_paid(conn, wd_id, NOW + 9)["ok"]
-    assert ps.close_summary(conn, b_id)["close_payout_state"] == "due"
-    sent2, send2 = _send_capture()
-    pa.handle_partner_text(
-        conn, "p closed", message=_owner_msg("p closed"), send=send2, futures=None, now_ms=NOW + 10
-    )
-    assert "รอโอน" in sent2[0]["text"]
-    assert "โอนแล้ว" not in sent2[0]["text"]
-    cl_id = next(str(d["id"]) for d in ps.list_due_payouts(conn) if str(d["kind"]) == "close")
-    assert ps.mark_paid(conn, cl_id, NOW + 11)["ok"]
-    sent3, send3 = _send_capture()
-    pa.handle_partner_text(
-        conn, "p closed", message=_owner_msg("p closed"), send=send3, futures=None, now_ms=NOW + 12
-    )
-    assert "โอนแล้ว" in sent3[0]["text"]
-    assert "รอโอน" not in sent3[0]["text"]
+    text = sent[0]["text"]
+    assert "ไม่มีเงินออก" in text
+    assert "โอนแล้ว" not in text
     conn.close()

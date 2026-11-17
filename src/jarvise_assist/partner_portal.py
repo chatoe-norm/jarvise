@@ -438,13 +438,17 @@ def handle_portal_text(
     admin_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     bound = ps.bind_invite(conn, code, tg, admin_chat_id=admin_chat, now_ms=now_ms)
     if not bound.get("ok"):
-        if str(bound.get("reason") or "") == "closed_payout_due":
+        reason = str(bound.get("reason") or "")
+        if reason == "closed_payout_due":
             refusal = "บัญชีเดิมยังมียอดรอโอน — ผูกบัญชีใหม่ไม่ได้จนกว่าแอดมินจะโอนครบ"
             try:
                 send(refusal, chat_id=str(chat.get("id")))
             except Exception:  # noqa: BLE001
                 logger.warning("portal closed-rebind refusal failed: %s", "Exception")
             return {"ok": False, "reason": "closed_payout_due"}
+        # Still bound: a spent or unknown code is not a new account.
+        if row is not None:
+            return _send_card(conn, row, send=send, futures=futures, now_ms=now_ms)
         try:
             send(
                 "ลิงก์เชิญไม่ถูกต้องหรือหมดอายุ — ขอลิงก์ใหม่จากแอดมิน",
