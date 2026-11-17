@@ -84,7 +84,7 @@ from jarvise_notify.telegram import send_message
 SendFn = Callable[..., Any]
 
 _NO_STOP_LINE = "⚠️ ยังไม่มี stop — ตั้ง Stop-Market (Reduce-Only, Mark) ทันที"
-_MARGIN_LABEL = "เงินที่วางจริง (margin)"
+_MARGIN_LABEL = "margin"
 RISK_MIN_PCT = 0.5
 RISK_MAX_PCT = 3.0
 RISK_CONFIRM_ABOVE = 2.0
