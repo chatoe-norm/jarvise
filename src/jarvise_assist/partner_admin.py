@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from jarvise_assist import partner_ledger as pl
+from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
 from jarvise_assist.futures import build_futures_client
 from jarvise_assist.partner_value import (
@@ -566,6 +567,9 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
         name_line = f"· {name}"
         if p["telegram_user_id"] is not None:
             name_line += " · TG ✅"
+        joined = partner_rules.joined_at_ms(conn, pid)
+        if joined is not None:
+            name_line += f" · เข้าร่วม {partner_rules.fmt_date(joined)}"
         block = [name_line, f"  หน่วย {fmt_units(units)} · ส่วนแบ่ง {share} · ทุน {fmt_usdt(cost)}"]
         if v_ok:
             view = ps.view_partner(conn, pid, account_for_view)

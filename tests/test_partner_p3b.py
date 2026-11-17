@@ -33,6 +33,14 @@ def _clean_transfer_guard(monkeypatch: Any) -> None:
     monkeypatch.setattr(pa, "_transfer_guard", _fake)
 
 
+@pytest.fixture(autouse=True)
+def _zero_close_min_days(monkeypatch: Any) -> None:
+    """Partner rules are covered in test_partner_rules.py; keep legacy flows clean."""
+    import jarvise_assist.partner_rules as partner_rules
+
+    monkeypatch.setattr(partner_rules, "CLOSE_MIN_DAYS", 0)
+
+
 class FakeValueClient:
     def __init__(
         self,
