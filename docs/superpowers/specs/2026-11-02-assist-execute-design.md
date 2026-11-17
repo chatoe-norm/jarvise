@@ -1,6 +1,7 @@
 # Trade assistant: one-tap execution with owner confirm
 
 Date: 2026-11-02. Status: approved by the owner on 2026-11-02.
+> Update 2026-11-17 (PR #353): "4% total risk" in §6.2 and §10 item 4 is now total risk-at-stop ≤ 2× the current assist risk_pct, ceiling 6%. AGENTS.md is current.
 Builds on `2026-10-25-trade-assistant-design.md` (signals, watch, sizing, menu).
 
 ## 1. Intent

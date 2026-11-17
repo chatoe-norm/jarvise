@@ -777,14 +777,7 @@ def handle_risk_callback(
             send("รับได้แค่ 0.5–3 — ลองใหม่หรือยกเลิกด้วยเมนู")
             write_settings(conn, awaiting_risk=None, pending_risk_pct=None)
             return {"ok": False, "rejected": True}
-        week_start_risk_pct(conn)
-        write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
-        cap = float(portfolio_risk_cap_pct(Decimal(str(pct))))
-        send(
-            f"บันทึกความเสี่ยง {pct:g}% แล้ว · เพดานความเสี่ยงรวม {cap:g}%",
-            reply_markup=reply_keyboard_for(ensure_settings(conn)),
-        )
-        return {"ok": True, "risk_pct": pct}
+        return _save_risk_pct(conn, pct, send=send)
     if data == "risk_no":
         write_settings(conn, awaiting_risk=None, pending_risk_pct=None)
         settings = ensure_settings(conn)
@@ -815,11 +808,7 @@ def handle_risk_number(
     return {**_apply_or_confirm_risk(conn, pct, send=send), "handled": True}
 
 
-def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn) -> dict[str, Any]:
-    if pct > RISK_CONFIRM_ABOVE:
-        write_settings(conn, awaiting_risk="confirm", pending_risk_pct=pct)
-        send(f"ยืนยัน {pct:g}%?", reply_markup=risk_confirm_keyboard(pct))
-        return {"ok": True, "confirm": True, "pending": pct}
+def _save_risk_pct(conn: Any, pct: float, *, send: SendFn) -> dict[str, Any]:
     week_start_risk_pct(conn)
     write_settings(conn, risk_pct=pct, awaiting_risk=None, pending_risk_pct=None)
     cap = float(portfolio_risk_cap_pct(Decimal(str(pct))))
@@ -828,3 +817,11 @@ def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn) -> dict[str, 
         reply_markup=reply_keyboard_for(ensure_settings(conn)),
     )
     return {"ok": True, "risk_pct": pct}
+
+
+def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn) -> dict[str, Any]:
+    if pct > RISK_CONFIRM_ABOVE:
+        write_settings(conn, awaiting_risk="confirm", pending_risk_pct=pct)
+        send(f"ยืนยัน {pct:g}%?", reply_markup=risk_confirm_keyboard(pct))
+        return {"ok": True, "confirm": True, "pending": pct}
+    return _save_risk_pct(conn, pct, send=send)
