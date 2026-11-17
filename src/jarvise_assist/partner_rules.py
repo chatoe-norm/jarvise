@@ -66,7 +66,12 @@ def next_month_start(now_ms: int) -> date:
 
 
 def convert_used_this_month(conn: sqlite3.Connection, partner_id: str, now_ms: int) -> bool:
-    """True when a portal-submitted convert was confirmed in the current Bangkok month.
+    """True when a confirmed portal convert was REQUESTED in the current Bangkok month.
+
+    The month is taken from ``partner_request.created_at_ms``, not the confirm
+    (event) time: a request made 30/11 and confirmed 01/12 uses November, and
+    December stays free. Only confirmed converts (a convert event exists) count;
+    a still-pending request is covered by the one-pending rule instead.
 
     Admin ``p cv`` converts (request source 'admin') do not use up the
     partner's monthly portal convert. NULL source follows ``NULL_SOURCE_LOCKS``.
@@ -86,7 +91,7 @@ def convert_used_this_month(conn: sqlite3.Connection, partner_id: str, now_ms: i
         SELECT 1 FROM partner_event e
         JOIN partner_request r ON r.id = e.request_id
         WHERE e.partner_id = ? AND e.kind = 'convert' AND {source_is_portal}
-          AND e.created_at_ms >= ? AND e.created_at_ms < ?
+          AND r.created_at_ms >= ? AND r.created_at_ms < ?
         LIMIT 1
         """,
         (str(partner_id), lo, hi),

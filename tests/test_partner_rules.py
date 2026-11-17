@@ -932,17 +932,18 @@ def _pending_count(conn: Any, pid: str) -> int:
     )
 
 
-@pytest.mark.parametrize("confirm_offset", [-1, 0])
+@pytest.mark.parametrize("submit_offset", [-1, 0])
 def test_month_boundary_utc_ms_exact(
-    tmp_path: Path, monkeypatch: Any, env_chat: None, confirm_offset: int
+    tmp_path: Path, monkeypatch: Any, env_chat: None, submit_offset: int
 ) -> None:
-    """Bangkok month starts at 17:00:00.000 UTC the day before; the window is [lo, hi)."""
+    """Bangkok month starts at 17:00:00.000 UTC the day before; the window is [lo, hi) on the
+    request's created_at_ms (confirm time does not matter)."""
     dec_start = _ms(2026, 12, 1, 0, 0)
     assert dec_start == int(datetime(2026, 11, 30, 17, 0, tzinfo=UTC).timestamp() * 1000)
-    conn, pid = _setup_partner(tmp_path, f"edge{confirm_offset}.db", monkeypatch, join_ms=_ms(2026, 9, 1))
-    confirm_ms = dec_start + confirm_offset
-    _portal_cv_confirmed(conn, pid, monkeypatch, submit_ms=dec_start - 1000, confirm_ms=confirm_ms)
-    in_nov = confirm_offset < 0
+    conn, pid = _setup_partner(tmp_path, f"edge{submit_offset}.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    submit_ms = dec_start + submit_offset
+    _portal_cv_confirmed(conn, pid, monkeypatch, submit_ms=submit_ms, confirm_ms=dec_start + 1000)
+    in_nov = submit_offset < 0
     assert partner_rules.convert_used_this_month(conn, pid, dec_start - 1) is in_nov
     assert partner_rules.convert_used_this_month(conn, pid, dec_start) is (not in_nov)
     assert partner_rules.convert_used_this_month(conn, pid, _ms(2026, 12, 31, 23, 59)) is (not in_nov)
@@ -1131,18 +1132,59 @@ def test_withdraw_min_exact_20_and_rounding(tmp_path: Path, monkeypatch: Any, en
 
 
 def test_cross_month_confirm_attribution(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
-    """Documents current behavior (P1-4, owner undecided): a convert counts in the month it is
-    CONFIRMED, not the month it was requested."""
+    """Owner decision (PR #361): a portal convert counts in the Bangkok month it was REQUESTED
+    (partner_request.created_at_ms), not the month it was confirmed."""
     conn, pid = _setup_partner(tmp_path, "xmonth.db", monkeypatch, join_ms=_ms(2026, 9, 1))
     submit = _ms(2026, 11, 30, 23, 0)
     confirm = _ms(2026, 12, 1, 0, 30)
-    rid = _portal_cv_confirmed(conn, pid, monkeypatch, submit_ms=submit, confirm_ms=confirm)
-    created = int(conn.execute("SELECT created_at_ms FROM partner_request WHERE id=?", (rid,)).fetchone()[0])
-    assert created == submit
-    assert partner_rules.convert_used_this_month(conn, pid, _ms(2026, 11, 30, 23, 59)) is False
-    assert partner_rules.convert_used_this_month(conn, pid, confirm + 1) is True
-    # December's portal convert is used; another one is refused at create.
-    assert ps.create_request(conn, pid, "convert", confirm + 100, source="portal") == {
+    _, _, _, sub = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=submit)
+    assert sub["ok"] is True, sub
+    rid = str(sub["request_id"])
+    # While the November request is pending, another November convert hits the one-pending rule.
+    assert ps.create_request(conn, pid, "convert", submit + 60_000, source="portal") == {
+        "ok": False,
+        "reason": "request_pending",
+    }
+    # Pending only: no convert event yet, so the month is not used by this function.
+    assert partner_rules.convert_used_this_month(conn, pid, submit + 60_000) is False
+    _admin_confirm(conn, rid, monkeypatch=monkeypatch, wallet="1400", now_ms=confirm)
+    req = conn.execute(
+        "SELECT status, source, created_at_ms FROM partner_request WHERE id=?", (rid,)
+    ).fetchone()
+    assert (req["status"], req["source"], int(req["created_at_ms"])) == ("confirmed", "portal", submit)
+    ev = conn.execute(
+        "SELECT created_at_ms FROM partner_event WHERE request_id=? AND kind='convert'", (rid,)
+    ).fetchone()
+    assert int(ev["created_at_ms"]) == confirm
+    # Attributed to November (request month), not December (confirm month).
+    assert partner_rules.convert_used_this_month(conn, pid, _ms(2026, 11, 30, 23, 59)) is True
+    assert partner_rules.convert_used_this_month(conn, pid, confirm + 1) is False
+    row = ps.get_partner(conn, pid)
+    assert row is not None
+    b = partner_rules.block(conn, row, "convert", nav=D("1.2"), now_ms=confirm + 1)
+    assert b is None or b.code != "convert_month"
+    conn.close()
+
+
+def test_cross_month_confirm_leaves_next_month_free(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    """Reverse case: after a Nov-requested / Dec-confirmed convert, a December portal convert is
+    allowed; once that one is confirmed, December is used."""
+    conn, pid = _setup_partner(tmp_path, "xmonth_rev.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    submit = _ms(2026, 11, 30, 23, 0)
+    confirm = _ms(2026, 12, 1, 0, 30)
+    _portal_cv_confirmed(conn, pid, monkeypatch, submit_ms=submit, confirm_ms=confirm, wallet="1400")
+    # December portal convert through the real portal path: create succeeds and confirms.
+    dec_submit = confirm + 60_000
+    rid2 = _portal_cv_confirmed(
+        conn, pid, monkeypatch, submit_ms=dec_submit, confirm_ms=dec_submit + 100, wallet="1600"
+    )
+    created2 = int(
+        conn.execute("SELECT created_at_ms FROM partner_request WHERE id=?", (rid2,)).fetchone()[0]
+    )
+    assert created2 == dec_submit
+    # Now December is used; a third portal convert in December is refused at create.
+    assert partner_rules.convert_used_this_month(conn, pid, dec_submit + 200) is True
+    assert ps.create_request(conn, pid, "convert", dec_submit + 300, source="portal") == {
         "ok": False,
         "reason": "convert_month",
     }
