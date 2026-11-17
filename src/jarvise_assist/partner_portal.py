@@ -548,6 +548,10 @@ def _submit_request(
             answer("อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง")
             return {"ok": False, "reason": av.reason}
         nav = _nav_for_rules(conn, av)
+        if nav is None:
+            # block() skips the 20 USDT mins on nav=None; fail closed instead.
+            answer("อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง")
+            return {"ok": False, "reason": "nav_not_positive"}
         blocked = partner_rules.block(conn, row, kind, nav=nav, now_ms=now_ms)
         if blocked is not None:
             answer(blocked.toast)

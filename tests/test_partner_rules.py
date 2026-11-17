@@ -598,6 +598,24 @@ def test_pp_go_cv_wd_v_error(tmp_path: Path, monkeypatch: Any, env_chat: None) -
     conn.close()
 
 
+def test_pp_go_cv_wd_nav_refused(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    """V readable but pool NAV refuses (V - due <= 0, units > 0): fail closed like V error."""
+    conn = open_db(tmp_path / "navref.db")
+    join_ms = _ms(2026, 9, 1)
+    _init_pool(conn, monkeypatch, now_ms=join_ms - 10)
+    pid = _bind(conn, now_ms=join_ms - 5)
+    _deposit(conn, pid, D("200"), D("1200"), join_ms)
+    before = _counts(conn)
+    for data in ("pp:go:cv", "pp:go:wd"):
+        a, s, e, o = _tap(conn, data, monkeypatch=monkeypatch, wallet="0", now_ms=NOW)
+        assert o == {"ok": False, "reason": "nav_not_positive"}
+        assert a == [("cq1", "อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง")]
+        assert s == [] and e == []
+    assert _counts(conn) == before
+    assert not partner_rules._pending(conn, pid, NOW)
+    conn.close()
+
+
 def test_owner_override_under_min_and_twice(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "override.db")
     join_ms = _ms(2026, 9, 1)
