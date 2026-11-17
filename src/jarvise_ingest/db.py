@@ -919,7 +919,11 @@ def _migrate_assist_exit_telemetry(conn: sqlite3.Connection) -> None:
             exchange_stop REAL,
             had_button INTEGER NOT NULL DEFAULT 0,
             delivered INTEGER NOT NULL DEFAULT 1,
-            atr_at_entry REAL
+            atr_at_entry REAL,
+            gap_r REAL,
+            entry REAL,
+            initial_stop REAL,
+            qty REAL
         )
         """
     )
@@ -977,6 +981,10 @@ def _migrate_assist_exit_telemetry(conn: sqlite3.Connection) -> None:
         ON assist_exchange_stop (symbol, position_side, observed_at_ms)
         """
     )
+    _add_column_if_missing(conn, "assist_exit_card", "gap_r", "REAL")
+    _add_column_if_missing(conn, "assist_exit_card", "entry", "REAL")
+    _add_column_if_missing(conn, "assist_exit_card", "initial_stop", "REAL")
+    _add_column_if_missing(conn, "assist_exit_card", "qty", "REAL")
     _add_column_if_missing(conn, "assist_real_trade", "exit_source", "TEXT")
     _add_column_if_missing(conn, "assist_real_trade", "atr_at_entry", "REAL")
     _add_column_if_missing(conn, "assist_watch_position", "atr_at_entry", "REAL")

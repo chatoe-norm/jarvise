@@ -1164,6 +1164,21 @@ def sync_real_trades(
     start = int(since_ms)
     rows = build_real_rows(conn, client, since_ms=start, until_ms=until_ms)
     with transaction(conn):
+        # A stored ATR must survive the delete/insert. COALESCE(preserved, built).
+        preserved: dict[str, Any] = {}
+        prior = conn.execute(
+            """
+            SELECT entry_order_id, atr_at_entry FROM assist_real_trade
+            WHERE entry_time_ms >= ? AND atr_at_entry IS NOT NULL
+            """,
+            (start,),
+        )
+        for raw in prior:
+            item = dict(raw) if hasattr(raw, "keys") else None
+            if item is None:
+                preserved[str(raw[0])] = raw[1]
+            else:
+                preserved[str(item["entry_order_id"])] = item["atr_at_entry"]
         conn.execute(
             "DELETE FROM assist_real_trade WHERE entry_time_ms >= ?",
             (start,),
@@ -1171,6 +1186,11 @@ def sync_real_trades(
         placeholders = ",".join("?" for _ in _INSERT_COLS)
         col_sql = ",".join(_INSERT_COLS)
         for row in rows:
+            oid = str(row.get("entry_order_id") or "")
+            built = row.get("atr_at_entry")
+            stored_atr = preserved.get(oid)
+            # COALESCE(preserved, built): a non-NULL snapshot is never replaced.
+            row["atr_at_entry"] = stored_atr if stored_atr is not None else built
             conn.execute(
                 f"INSERT INTO assist_real_trade ({col_sql}) VALUES ({placeholders})",
                 [row.get(c) for c in _INSERT_COLS],
@@ -1867,7 +1887,7 @@ def _upsert_real_row(conn: Any, row: dict[str, Any]) -> None:
     placeholders = ",".join("?" for _ in _INSERT_COLS)
     col_sql = ",".join(_INSERT_COLS)
     updates = ", ".join(
-        "atr_at_entry=COALESCE(excluded.atr_at_entry, assist_real_trade.atr_at_entry)"
+        "atr_at_entry=COALESCE(assist_real_trade.atr_at_entry, excluded.atr_at_entry)"
         if col == "atr_at_entry"
         else f"{col}=excluded.{col}"
         for col in _INSERT_COLS

@@ -456,12 +456,13 @@ def format_move_stop_advice(
     after = approx_r_after_fees(side=side, qty=qty, entry=entry, initial_stop=initial_stop, new_stop=new_stop)
     gap = stop_gap_r(side=side, entry=entry, initial_stop=initial_stop, mark=mark, new_stop=new_stop)
     lock_usdt_s = f"{float(lock_usdt):+.2f}"
+    lock_prefix = "ถ้าเลื่อน ล็อก ≈" if not with_button else "ล็อก ≈"
     lines = [
         f"{symbol.upper()} {side_label} · qty {fmt_qty(qty)}",
         f"stop {old_s} → {new_s}",
         f"mark {mark_s}",
         (
-            f"ล็อก ≈ {_fmt_signed_r(lock_r)} ({lock_usdt_s} USDT) (ก่อนค่าธรรมเนียม)"
+            f"{lock_prefix} {_fmt_signed_r(lock_r)} ({lock_usdt_s} USDT) (ก่อนค่าธรรมเนียม)"
             f" · หลังค่าธรรมเนียม ≈ {_fmt_signed_r(after)}"
         ),
         f"ห่าง mark {_fmt_signed_r(gap)}",

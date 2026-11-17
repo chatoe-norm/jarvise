@@ -693,7 +693,11 @@ CREATE TABLE IF NOT EXISTS assist_exit_card (
     exchange_stop REAL,
     had_button INTEGER NOT NULL DEFAULT 0,
     delivered INTEGER NOT NULL DEFAULT 1,
-    atr_at_entry REAL
+    atr_at_entry REAL,
+    gap_r REAL,
+    entry REAL,
+    initial_stop REAL,
+    qty REAL
 );
 CREATE INDEX IF NOT EXISTS idx_assist_exit_card_pos
     ON assist_exit_card (symbol, position_side, shown_at_ms);

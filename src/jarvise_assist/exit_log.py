@@ -16,11 +16,16 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-from jarvise_assist.messages import approx_r_after_fees
+from jarvise_assist.futures import protective_stop_covered_qty
+from jarvise_assist.messages import approx_r_after_fees, stop_gap_r
 from jarvise_assist.trail_advice import ONE_H_MS, candle_extremes_after_entry, post_entry_extremes
 from jarvise_ingest.db import load_candles_in_range
 
 logger = logging.getLogger(__name__)
+
+# A watch row and a real trade are the same entry only inside this window.
+ENTRY_MATCH_MS = 4 * 3_600_000
+_IGNORE_LOOKBACK_MS = 7 * 24 * 3_600_000
 
 # Finer than assist_real_trade.exit_kind, which records every stop as "stop".
 EXIT_SOURCES = (
@@ -30,6 +35,7 @@ EXIT_SOURCES = (
     "moved_stop",
     "tp",
     "manual",
+    "manual_stop",
     "early_exit",
     "owner_exit",
     "emergency",
@@ -83,6 +89,8 @@ def resolve_exit_source(
             if move_source == "trail":
                 return "trail_stop"
             return "moved_stop"
+        if not detail:
+            return "manual_stop"
         return "manual"
     return None
 
@@ -122,6 +130,40 @@ def move_source_for_orders(
     return None
 
 
+def _preview_early(preview: dict[str, Any]) -> bool:
+    return bool(preview.get("early_close"))
+
+
+def _exit_preview_for_order(conn: Any, order: dict[str, Any], order_id: str) -> dict[str, Any] | None:
+    """Preview of the exit intent that placed this closing order, if we logged it."""
+    cid = str(order.get("clientOrderId") or "")
+    row = None
+    if cid:
+        row = conn.execute(
+            """
+            SELECT intent_id FROM assist_exec_log
+            WHERE step='exit_market' AND client_order_id=?
+            ORDER BY created_at_ms DESC LIMIT 1
+            """,
+            (cid,),
+        ).fetchone()
+    if row is None and order_id:
+        row = conn.execute(
+            """
+            SELECT intent_id FROM assist_exec_log
+            WHERE step='exit_market' AND order_or_algo_id=?
+            ORDER BY created_at_ms DESC LIMIT 1
+            """,
+            (str(order_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    intent_id = str(_row(row).get("intent_id") or "")
+    if not intent_id:
+        return None
+    return _preview(conn, intent_id)
+
+
 def early_exit_was_tapped(
     conn: Any,
     *,
@@ -129,24 +171,46 @@ def early_exit_was_tapped(
     side: str,
     entry_time_ms: int | None,
     exit_time_ms: int | None,
+    orders_by_id: dict[str, dict[str, Any]] | None = None,
+    exit_order_ids: list[str] | None = None,
 ) -> bool:
-    """True when a done ⚠️ exit intent in the trade window carried early_close."""
+    """True when the order that closed the trade was a ⚠️ (preview early_close).
+
+    An earlier ⚠️ tap in the same window does not count when a later ✅ order
+    is the one that closed.
+    """
+    linked: list[dict[str, Any]] = []
+    if orders_by_id and exit_order_ids:
+        for oid in exit_order_ids:
+            preview = _exit_preview_for_order(conn, orders_by_id.get(str(oid)) or {}, str(oid))
+            if preview is not None:
+                linked.append(preview)
+    if linked:
+        return any(_preview_early(preview) for preview in linked)
     if entry_time_ms is None or exit_time_ms is None:
         return False
-    # The ⚠️ offer is logged on assist_exit_card. The exit intent preview itself
-    # stays qty/entry/source/level, so this does not depend on a new preview key.
+    # No order link: the latest successful exit in the window decides.
+    # A bare ⚠️ tap with no filled exit_market is not the close.
     row = conn.execute(
         """
-        SELECT 1
-        FROM assist_exit_response r
-        INNER JOIN assist_exit_card c ON c.id = r.card_id
-        WHERE c.symbol=? AND c.side=? AND r.kind='early_exit' AND r.action='tap'
-          AND r.action_at_ms >= ? AND r.action_at_ms <= ?
+        SELECT i.preview_json
+        FROM assist_exec_intent i
+        INNER JOIN assist_exec_log l ON l.intent_id = i.id AND l.step='exit_market'
+        WHERE i.kind='exit' AND i.symbol=? AND lower(i.side)=? AND i.status='done'
+          AND l.created_at_ms >= ? AND l.created_at_ms <= ?
+        ORDER BY l.created_at_ms DESC
         LIMIT 1
         """,
         (str(symbol).upper(), str(side).lower(), int(entry_time_ms), int(exit_time_ms)),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    raw = _row(row).get("preview_json")
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return False
+    return _preview_early(parsed) if isinstance(parsed, dict) else False
 
 
 def exit_source_for_close(
@@ -176,6 +240,8 @@ def exit_source_for_close(
         side=side,
         entry_time_ms=entry_time_ms,
         exit_time_ms=exit_time_ms,
+        orders_by_id=orders_by_id,
+        exit_order_ids=exit_order_ids,
     )
     return resolve_exit_source(
         exit_kind=exit_kind,
@@ -192,29 +258,31 @@ def lookup_atr_at_entry(
     side: str,
     entry_time_ms: int | None,
 ) -> float | None:
-    """ATR frozen on the watch row nearest this entry. None when it was never snapshotted."""
+    """ATR frozen on the watch row for this entry.
+
+    None when the trade has no entry time, the watch row has no entry time, or
+    the two times are more than four hours apart. Never falls back to a later trade.
+    """
     if entry_time_ms is None:
-        row = conn.execute(
-            """
-            SELECT atr_at_entry FROM assist_watch_position
-            WHERE symbol=? AND side=? AND atr_at_entry IS NOT NULL
-            ORDER BY entry_time_ms DESC LIMIT 1
-            """,
-            (symbol.upper(), side.lower()),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """
-            SELECT atr_at_entry FROM assist_watch_position
-            WHERE symbol=? AND side=? AND atr_at_entry IS NOT NULL
-            ORDER BY ABS(COALESCE(entry_time_ms, 0) - ?) ASC
-            LIMIT 1
-            """,
-            (symbol.upper(), side.lower(), int(entry_time_ms)),
-        ).fetchone()
+        return None
+    row = conn.execute(
+        """
+        SELECT atr_at_entry, entry_time_ms FROM assist_watch_position
+        WHERE symbol=? AND side=? AND atr_at_entry IS NOT NULL
+        ORDER BY ABS(COALESCE(entry_time_ms, 0) - ?) ASC
+        LIMIT 1
+        """,
+        (symbol.upper(), side.lower(), int(entry_time_ms)),
+    ).fetchone()
     if row is None:
         return None
-    return _f(_row(row).get("atr_at_entry"))
+    data = _row(row)
+    watch_entry = data.get("entry_time_ms")
+    if watch_entry is None:
+        return None
+    if abs(int(watch_entry) - int(entry_time_ms)) > ENTRY_MATCH_MS:
+        return None
+    return _f(data.get("atr_at_entry"))
 
 
 def _extremes(
@@ -313,15 +381,27 @@ def log_card(
             if close_1h is None:
                 close_1h = got_close
         after: float | None = None
-        if entry is not None and initial_stop is not None and qty is not None and suggested_stop is not None:
-            net = approx_r_after_fees(
-                side=side,
-                qty=Decimal(str(qty)),
-                entry=Decimal(str(entry)),
-                initial_stop=Decimal(str(initial_stop)),
-                new_stop=Decimal(str(suggested_stop)),
-            )
-            after = _f(net)
+        gap: float | None = None
+        if entry is not None and initial_stop is not None and suggested_stop is not None:
+            if qty is not None:
+                net = approx_r_after_fees(
+                    side=side,
+                    qty=Decimal(str(qty)),
+                    entry=Decimal(str(entry)),
+                    initial_stop=Decimal(str(initial_stop)),
+                    new_stop=Decimal(str(suggested_stop)),
+                )
+                after = _f(net)
+            if mark is not None:
+                gap = _f(
+                    stop_gap_r(
+                        side=side,
+                        entry=Decimal(str(entry)),
+                        initial_stop=Decimal(str(initial_stop)),
+                        mark=Decimal(str(mark)),
+                        new_stop=Decimal(str(suggested_stop)),
+                    )
+                )
         if atr_at_entry is None:
             atr_at_entry = lookup_atr_at_entry(conn, symbol=symbol, side=side, entry_time_ms=entry_time_ms)
         card_id = f"exc_{uuid.uuid4().hex[:16]}"
@@ -330,8 +410,9 @@ def log_card(
             INSERT INTO assist_exit_card (
                 id, advice_id, intent_id, symbol, position_side, side, kind, source,
                 shown_at_ms, mark, wick, close_1h, r_now, suggested_stop,
-                approx_r_after_fees, exchange_stop, had_button, delivered, atr_at_entry
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                approx_r_after_fees, exchange_stop, had_button, delivered, atr_at_entry,
+                gap_r, entry, initial_stop, qty
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 card_id,
@@ -353,6 +434,10 @@ def log_card(
                 1 if had_button else 0,
                 1 if delivered else 0,
                 atr_at_entry,
+                gap,
+                _f(entry),
+                _f(initial_stop),
+                _f(qty),
             ),
         )
         conn.commit()
@@ -444,27 +529,34 @@ def record_response(
 
 
 def record_intent_action(conn: Any, intent: dict[str, Any], *, action: str, action_at_ms: int) -> None:
-    """Log a move-stop or exit tap/ignore. Entry confirms (ey:) are not exit telemetry."""
-    kind = str(intent.get("kind") or "")
-    if kind not in {"move_stop", "exit"}:
-        return
-    preview = intent.get("preview")
-    response_kind = kind
-    intent_id = str(intent.get("id") or "")
-    if kind == "exit" and isinstance(preview, dict) and preview.get("source") == "progress":
-        # ⚠️ is the progress exit whose offer row was stored. ✅ ปิดไม้ has no offer row.
-        # The exit preview itself is not given an early_close key.
-        if preview.get("early_close") or (intent_id and _has_early_card(conn, intent_id)):
-            response_kind = "early_exit"
-    record_response(
-        conn,
-        symbol=str(intent.get("symbol") or ""),
-        kind=response_kind,
-        action=action,
-        action_at_ms=int(action_at_ms),
-        shown_at_ms=int(intent["created_at_ms"]) if intent.get("created_at_ms") is not None else None,
-        intent_id=intent_id or None,
-    )
+    """Log a move-stop or exit tap/ignore. Entry confirms (ey:) are not exit telemetry.
+
+    The whole body is swallowed. A missing card table must not stop an order.
+    """
+    try:
+        kind = str(intent.get("kind") or "")
+        if kind not in {"move_stop", "exit"}:
+            return
+        preview = intent.get("preview")
+        response_kind = kind
+        intent_id = str(intent.get("id") or "")
+        if kind == "exit" and isinstance(preview, dict) and preview.get("source") == "progress":
+            # ⚠️ is the preview flag. The offer row covers intents written before that flag.
+            # ✅ (early_close false) is not relabelled because an offer row exists.
+            flagged = preview.get("early_close")
+            if flagged is True or (flagged is None and intent_id and _has_early_card(conn, intent_id)):
+                response_kind = "early_exit"
+        record_response(
+            conn,
+            symbol=str(intent.get("symbol") or ""),
+            kind=response_kind,
+            action=action,
+            action_at_ms=int(action_at_ms),
+            shown_at_ms=int(intent["created_at_ms"]) if intent.get("created_at_ms") is not None else None,
+            intent_id=intent_id or None,
+        )
+    except Exception:  # noqa: BLE001 — a log write must not change the order path
+        logger.exception("assist exit intent action log failed")
 
 
 def sweep_expired_move_ignores(conn: Any, *, now_ms: int) -> None:
@@ -472,11 +564,21 @@ def sweep_expired_move_ignores(conn: Any, *, now_ms: int) -> None:
     try:
         rows = conn.execute(
             """
-            SELECT id, symbol, created_at_ms, expires_at_ms
-            FROM assist_exec_intent
-            WHERE kind='move_stop' AND status='preview' AND expires_at_ms < ?
+            SELECT i.id, i.symbol, i.created_at_ms, i.expires_at_ms
+            FROM assist_exec_intent i
+            WHERE i.kind='move_stop' AND i.status='preview'
+              AND i.expires_at_ms < ?
+              AND i.expires_at_ms >= ?
+              AND EXISTS (
+                  SELECT 1 FROM assist_exit_card c
+                  WHERE c.intent_id = i.id AND c.delivered = 1
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM assist_exit_response r
+                  WHERE r.intent_id = i.id AND r.action = 'ignore'
+              )
             """,
-            (int(now_ms),),
+            (int(now_ms), int(now_ms) - _IGNORE_LOOKBACK_MS),
         ).fetchall()
     except Exception:  # noqa: BLE001
         logger.exception("assist exit ignore sweep failed")
@@ -547,11 +649,24 @@ def note_exchange_stop(
     position_side: str,
     observed_at_ms: int,
     stop_price: Decimal | float | None,
-    covered_qty: Decimal | float | None,
+    covered_qty: Decimal | float | None = None,
     position_qty: Decimal | float | None,
+    orders: list[dict[str, Any]] | None = None,
+    trade_side: str | None = None,
 ) -> None:
-    """Append the resting protective stop when it changes. Same value is not repeated."""
+    """Append the resting protective stop when it changes. Same value is not repeated.
+
+    When ``orders`` is passed, covered quantity is computed inside this try so a
+    bad order row cannot escape into the watch decision.
+    """
     try:
+        if orders is not None and trade_side is not None:
+            covered_qty = protective_stop_covered_qty(
+                orders,
+                symbol=symbol,
+                position_side=position_side,
+                trade_side=trade_side,
+            )
         price = _f(stop_price)
         covered = _f(covered_qty)
         qty = _f(position_qty)

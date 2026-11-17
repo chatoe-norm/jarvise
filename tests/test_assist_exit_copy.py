@@ -68,6 +68,7 @@ def test_copy_follows_the_wick_the_code_uses_and_not_the_close() -> None:
     assert "หลังค่าธรรมเนียม ≈ +0.03R" in text
     assert "ห่าง mark +0.27R" in text
     assert "ล็อก ≈ +0.07R" in text
+    assert "ถ้าเลื่อน" not in text
     assert "ปิดเกิน" not in text
     assert "แท่ง 1h ปิด" not in text
     assert "ราคาปิด" not in text
@@ -87,6 +88,7 @@ def test_copy_follows_the_wick_the_code_uses_and_not_the_close() -> None:
         with_button=False,
     )
     assert MANUAL_MOVE_LINE in flushed
+    assert "ถ้าเลื่อน ล็อก ≈" in flushed
     assert "ปุ่ม" not in flushed
     assert "หมดอายุ" not in flushed
     assert "ยังไม่ได้เลื่อน stop" in flushed

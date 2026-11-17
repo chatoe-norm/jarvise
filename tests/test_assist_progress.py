@@ -474,6 +474,7 @@ def test_progress_live_attaches_the_early_close_button(
         "entry": "0.1673",
         "source": "progress",
         "level": "0.5",
+        "early_close": True,
     }
     assert expires_at == day + 120_000
     assert alerts[0]["reply_markup"] == progress_keyboard(str(intent_id), early=True)
@@ -663,6 +664,7 @@ def test_progress_live_deduped_move_offers_move_and_early_close(
         "entry": "0.1673",
         "source": "progress",
         "level": "0.5",
+        "early_close": True,
     }
     move_preview = json.loads(by_kind["move_stop"][2])
     assert move_preview == {

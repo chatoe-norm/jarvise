@@ -18,6 +18,7 @@ from jarvise_assist.execute import (
     cancel_jv_orders_for_symbol,
 )
 from jarvise_assist.exit_log import (
+    ENTRY_MATCH_MS,
     log_card,
     note_atr_at_entry,
     note_early_exit_ignores,
@@ -303,14 +304,16 @@ def _ensure_watch_row(
 
 
 def _latest_atr(conn: Any, symbol: str, now_ms: int) -> Decimal | None:
-    """Newest stored ATR on the assist timeframe. The same read the ATR stop uses."""
+    """Newest stored ATR on the assist timeframe, including a non-positive value.
+
+    The loop stops at the newest non-null ``atr_14``. A zero does not walk back
+    to an older bar. The caller still refuses to freeze a stop when it is <= 0.
+    """
     since = int(now_ms) - 30 * 24 * 3_600_000
     candles = load_candles_in_range(conn, symbol, ASSIST_TIMEFRAME, since_ms=since, until_ms=int(now_ms))
     for row in reversed(candles):
         if row.get("atr_14") is not None:
-            atr = Decimal(str(row["atr_14"]))
-            if atr > 0:
-                return atr
+            return Decimal(str(row["atr_14"]))
     return None
 
 
@@ -321,12 +324,16 @@ def _link_or_freeze_stop(
     *,
     now_ms: int,
 ) -> dict[str, Any]:
-    # Snapshot ATR once. Does not change the stop that gets frozen below.
+    # Snapshot ATR once, only for an entry still inside the match window.
+    # A position already open at deploy stays NULL. Does not change the stop.
     if stored.get("atr_at_entry") is None:
-        atr_snap = _latest_atr(conn, pos.symbol, now_ms)
-        if atr_snap is not None:
-            note_atr_at_entry(conn, symbol=pos.symbol, position_side=pos.position_side, atr=atr_snap)
-            stored["atr_at_entry"] = float(atr_snap)
+        entry_ms = stored.get("entry_time_ms")
+        fresh = entry_ms is not None and int(now_ms) - int(entry_ms) <= ENTRY_MATCH_MS
+        if fresh:
+            atr_snap = _latest_atr(conn, pos.symbol, now_ms)
+            if atr_snap is not None and atr_snap > 0:
+                note_atr_at_entry(conn, symbol=pos.symbol, position_side=pos.position_side, atr=atr_snap)
+                stored["atr_at_entry"] = float(atr_snap)
     if stored.get("initial_stop") is not None:
         return stored
     linked = find_linkable_signal(conn, symbol=pos.symbol, side=pos.side, now_ms=now_ms)
@@ -461,13 +468,9 @@ def _process_universe_position(
         position_side=pos.position_side,
         observed_at_ms=now_ms,
         stop_price=protective,
-        covered_qty=protective_stop_covered_qty(
-            orders,
-            symbol=pos.symbol,
-            position_side=pos.position_side,
-            trade_side=pos.side,
-        ),
         position_qty=pos.qty,
+        orders=orders,
+        trade_side=pos.side,
     )
     if coverage in {"none", "partial"}:
         no_stop_reason = "partial" if coverage == "partial" else "missing"
@@ -640,6 +643,7 @@ def _process_universe_position(
                         "entry": str(pos.entry_price),
                         "source": "progress",
                         "level": str(top_level),
+                        "early_close": not exit_active,
                     },
                     created_at_ms=now_ms,
                     expires_at_ms=now_ms + PREVIEW_TTL_MS,
@@ -1207,17 +1211,17 @@ def flush_held_watch_advice(
                     exchange_stop=protective,
                     had_button=False,
                     delivered=True,
+                    advice_id=str(row["id"]),
                     entry_time_ms=int(stored["entry_time_ms"]) if stored.get("entry_time_ms") else None,
                     entry_bar=False,
                 )
-                held_at = row.get("created_at_ms")
+                # The stop was not moved. Latency stays NULL: this is not a tap.
                 record_response(
                     conn,
                     symbol=pos.symbol,
                     kind="move_stop",
                     action="manual",
                     action_at_ms=now_ms_value,
-                    shown_at_ms=int(held_at) if held_at is not None else now_ms_value,
                     card_id=card_id,
                 )
     return {"sent": sent, "dropped": dropped}
@@ -1332,8 +1336,14 @@ def run_assist_watch(
         day_pause = evaluate_day_loss_pause(conn, now_ms=ts, send=send_fn)
         if day_pause.get("reason") in {"day_loss", "day_loss_deeper"}:
             pause_info = day_pause
-    sweep_expired_move_ignores(conn, now_ms=ts)
-    note_early_exit_ignores(conn, closed, now_ms=ts)
+    try:
+        sweep_expired_move_ignores(conn, now_ms=ts)
+    except Exception:  # noqa: BLE001 — an ignore sweep must not stop the watch result
+        logger.exception("assist exit ignore sweep failed")
+    try:
+        note_early_exit_ignores(conn, closed, now_ms=ts)
+    except Exception:  # noqa: BLE001 — an ignore note must not stop the watch result
+        logger.exception("assist early-exit ignore note failed")
     result: dict[str, Any] = {
         "ok": True,
         "paper_only": True,
