@@ -531,7 +531,7 @@ def _submit_request(
     now_ms: int,
 ) -> dict[str, Any]:
     kind = _KIND_CODE[code]
-    # Non-money rules first (closed / pending / close clock / convert month) so a
+    # Non-money rules first (closed / pending / close clock) so a
     # closed partner still gets "ปิดพอร์ตแล้ว" even when V is unreadable.
     early = partner_rules.block(conn, row, kind, nav=None, now_ms=now_ms)
     if early is not None:
@@ -560,9 +560,6 @@ def _submit_request(
         if reason == "request_pending":
             answer("มีคำขอค้างอยู่ รอแอดมิน")
             return {"ok": False, "reason": "request_pending"}
-        if reason == "convert_month":
-            answer(partner_rules.convert_month_block(now_ms).toast)
-            return {"ok": False, "reason": "convert_month"}
         answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
         return {"ok": False, "reason": reason}
     rid = str(created["request_id"])

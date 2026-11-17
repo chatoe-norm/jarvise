@@ -1,8 +1,8 @@
 """Partner portal request rules (PR-A). SELECT-only; no writes; no Binance.
 
-Binds the partner portal only. Admin ``p cv/wd/close`` and ``pa:*`` stay free,
-and an admin ``p cv`` does not count toward the partner's monthly portal convert.
-Must not import partner_audit or partner_portal.
+Binds the partner portal only. Admin ``p cv/wd/close`` and ``pa:*`` stay free.
+A portal convert has no per-month limit; only the profit min and the
+one-pending-request rule apply. Must not import partner_audit or partner_portal.
 """
 
 from __future__ import annotations
@@ -19,11 +19,6 @@ from jarvise_assist.pause import BANGKOK
 MIN_CONVERT_PROFIT = Decimal("20")
 MIN_WITHDRAW_CASH = Decimal("20")
 CLOSE_MIN_DAYS = 30
-
-# Owner decision pending: does a convert whose request has source NULL (created
-# before migration 31) use up the monthly portal convert? False = it does not
-# lock (current behavior). Flip to True to treat NULL as 'portal'.
-NULL_SOURCE_LOCKS = False
 
 
 @dataclass(frozen=True)
@@ -56,57 +51,6 @@ def close_open_date(joined_ms: int) -> date:
     """Bangkok calendar date when ปิดพอร์ต becomes available (join date + CLOSE_MIN_DAYS)."""
     joined = datetime.fromtimestamp(int(joined_ms) / 1000.0, tz=BANGKOK).date()
     return joined + timedelta(days=int(CLOSE_MIN_DAYS))
-
-
-def next_month_start(now_ms: int) -> date:
-    local = datetime.fromtimestamp(int(now_ms) / 1000.0, tz=BANGKOK)
-    if local.month == 12:
-        return date(local.year + 1, 1, 1)
-    return date(local.year, local.month + 1, 1)
-
-
-def convert_used_this_month(conn: sqlite3.Connection, partner_id: str, now_ms: int) -> bool:
-    """True when a confirmed portal convert was REQUESTED in the current Bangkok month.
-
-    The month is taken from ``partner_request.created_at_ms``, not the confirm
-    (event) time: a request made 30/11 and confirmed 01/12 uses November, and
-    December stays free. Only confirmed converts (a convert event exists) count;
-    a still-pending request is covered by the one-pending rule instead.
-
-    Admin ``p cv`` converts (request source 'admin') do not use up the
-    partner's monthly portal convert. NULL source follows ``NULL_SOURCE_LOCKS``.
-    """
-    local = datetime.fromtimestamp(int(now_ms) / 1000.0, tz=BANGKOK)
-    month_start = datetime(local.year, local.month, 1, tzinfo=BANGKOK)
-    nxt = next_month_start(now_ms)
-    next_dt = datetime(nxt.year, nxt.month, nxt.day, tzinfo=BANGKOK)
-    lo = int(month_start.timestamp() * 1000)
-    hi = int(next_dt.timestamp() * 1000)
-    # The only NULL-source rule. NULL = request created before migration 31.
-    source_is_portal = (
-        "COALESCE(r.source, 'portal') = 'portal'" if NULL_SOURCE_LOCKS else "r.source = 'portal'"
-    )
-    row = conn.execute(
-        f"""
-        SELECT 1 FROM partner_event e
-        JOIN partner_request r ON r.id = e.request_id
-        WHERE e.partner_id = ? AND e.kind = 'convert' AND {source_is_portal}
-          AND r.created_at_ms >= ? AND r.created_at_ms < ?
-        LIMIT 1
-        """,
-        (str(partner_id), lo, hi),
-    ).fetchone()
-    return row is not None
-
-
-def convert_month_block(now_ms: int) -> Block:
-    nxt = next_month_start(now_ms)
-    nxt_ms = int(datetime(nxt.year, nxt.month, nxt.day, tzinfo=BANGKOK).timestamp() * 1000)
-    return Block(
-        code="convert_month",
-        toast=f"ทบกำไรได้เดือนละครั้ง · ครั้งถัดไป {fmt_date(nxt_ms)}",
-        label="🔒 ทบกำไร",
-    )
 
 
 def _pending(conn: sqlite3.Connection, partner_id: str, now_ms: int) -> bool:
@@ -175,9 +119,6 @@ def block(
                 label=f"🔒 ปิดพอร์ต · อีก {days_left} วัน",
             )
         return None
-
-    if kind == "convert" and convert_used_this_month(conn, pid, now_ms):
-        return convert_month_block(now_ms)
 
     if nav is None:
         return None
