@@ -275,6 +275,10 @@ def list_due_payouts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def close_summary(conn: sqlite3.Connection, partner_id: str) -> dict[str, Any]:
     """Join date, close date, close cash, and every due or paid payout.
 
+    ``close_payout_state`` is the payout state of the confirmed close request
+    only (due, paid, none, or None when there is no such request). A paid
+    profit withdrawal does not change it.
+
     Read-only. Used by the closed partner card and ``p closed``. Does not
     read the futures wallet, so it still works when account value cannot be read.
     """
@@ -334,6 +338,20 @@ def close_summary(conn: sqlite3.Connection, partner_id: str) -> dict[str, Any]:
         }
         for item in paid_rows
     ]
+    close_req = conn.execute(
+        """
+        SELECT payout_state FROM partner_request
+        WHERE partner_id = ? AND kind = 'close' AND status = 'confirmed'
+        ORDER BY decided_at_ms DESC, id DESC
+        LIMIT 1
+        """,
+        (pid,),
+    ).fetchone()
+    close_payout_state = (
+        str(close_req["payout_state"])
+        if close_req is not None and close_req["payout_state"] is not None
+        else None
+    )
     return {
         "ok": True,
         "partner_id": pid,
@@ -342,6 +360,7 @@ def close_summary(conn: sqlite3.Connection, partner_id: str) -> dict[str, Any]:
         "joined_at_ms": joined_at,
         "closed_at_ms": closed_at,
         "close_cash": close_cash,
+        "close_payout_state": close_payout_state,
         "dues": dues,
         "paid": paid,
     }
