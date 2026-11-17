@@ -42,6 +42,7 @@ REQUEST_TTL_MS = 86_400_000
 INVITE_TTL_MS = 86_400_000
 MIN_DEPOSIT_USDT = Decimal("50")
 _REQUEST_KINDS = frozenset({"deposit", "convert", "withdraw_profit", "close"})
+_REQUEST_SOURCES = frozenset({"admin", "portal"})
 _CANCEL_ON_CONFIRM = frozenset({"no_profit", "below_min"})
 
 
@@ -983,15 +984,19 @@ def create_request(
     kind: str,
     now_ms: int,
     amount: Decimal | None = None,
+    source: str = "admin",
 ) -> dict[str, Any]:
     """Create a pending partner_request.
 
     For kind ``deposit``, ``quote_gross_micro`` holds the amount the partner
-    states; all other quote_* columns stay NULL in this phase.
+    states; all other quote_* columns stay NULL in this phase. ``source`` is
+    ``portal`` when the partner submitted it, ``admin`` for owner commands.
     """
     with transaction(conn):
         if kind not in _REQUEST_KINDS:
             return {"ok": False, "reason": "bad_kind"}
+        if source not in _REQUEST_SOURCES:
+            return {"ok": False, "reason": "bad_args"}
         quote_gross: int | None = None
         if kind == "deposit":
             if amount is None:
@@ -1038,10 +1043,10 @@ def create_request(
             """
             INSERT INTO partner_request (
                 id, partner_id, kind, status, payout_state,
-                quote_gross_micro, created_at_ms, expires_at_ms
-            ) VALUES (?, ?, ?, 'pending', 'none', ?, ?, ?)
+                quote_gross_micro, created_at_ms, expires_at_ms, source
+            ) VALUES (?, ?, ?, 'pending', 'none', ?, ?, ?, ?)
             """,
-            (rid, partner_id, kind, quote_gross, ts, expires),
+            (rid, partner_id, kind, quote_gross, ts, expires, source),
         )
         return {"ok": True, "request_id": rid, "expires_at_ms": expires}
 

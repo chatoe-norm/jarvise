@@ -374,7 +374,7 @@ def _handle_deposit_text(
     if amount is None or amount < _MIN_DEP:
         send_to_partner(send, row, "จำนวนไม่ถูกต้อง (ขั้นต่ำ 50 USDT)")
         return {"ok": False, "reason": "bad_amount"}
-    created = ps.create_request(conn, str(row["id"]), "deposit", now_ms, amount=amount)
+    created = ps.create_request(conn, str(row["id"]), "deposit", now_ms, amount=amount, source="portal")
     if not created.get("ok"):
         reason = str(created.get("reason") or "")
         if reason == "request_pending":
@@ -558,7 +558,7 @@ def _submit_request(
             return {"ok": False, "reason": blocked.code}
     # close: money mins do not apply; unreadable V keeps today's create_request path
 
-    created = ps.create_request(conn, str(row["id"]), kind, now_ms)
+    created = ps.create_request(conn, str(row["id"]), kind, now_ms, source="portal")
     if not created.get("ok"):
         reason = str(created.get("reason") or "")
         if reason == "request_pending":

@@ -1,6 +1,7 @@
 """Partner portal request rules (PR-A). SELECT-only; no writes; no Binance.
 
-Binds the partner portal only. Admin ``p cv/wd/close`` and ``pa:*`` stay free.
+Binds the partner portal only. Admin ``p cv/wd/close`` and ``pa:*`` stay free,
+and an admin ``p cv`` does not count toward the partner's monthly portal convert.
 Must not import partner_audit or partner_portal.
 """
 
@@ -60,7 +61,11 @@ def next_month_start(now_ms: int) -> date:
 
 
 def convert_used_this_month(conn: sqlite3.Connection, partner_id: str, now_ms: int) -> bool:
-    """True when a confirmed convert event exists in the current Bangkok calendar month."""
+    """True when a portal-submitted convert was confirmed in the current Bangkok month.
+
+    Admin ``p cv`` converts (request source 'admin' or pre-column NULL) do not
+    use up the partner's monthly portal convert.
+    """
     local = datetime.fromtimestamp(int(now_ms) / 1000.0, tz=BANGKOK)
     month_start = datetime(local.year, local.month, 1, tzinfo=BANGKOK)
     nxt = next_month_start(now_ms)
@@ -69,9 +74,10 @@ def convert_used_this_month(conn: sqlite3.Connection, partner_id: str, now_ms: i
     hi = int(next_dt.timestamp() * 1000)
     row = conn.execute(
         """
-        SELECT 1 FROM partner_event
-        WHERE partner_id = ? AND kind = 'convert'
-          AND created_at_ms >= ? AND created_at_ms < ?
+        SELECT 1 FROM partner_event e
+        JOIN partner_request r ON r.id = e.request_id
+        WHERE e.partner_id = ? AND e.kind = 'convert' AND r.source = 'portal'
+          AND e.created_at_ms >= ? AND e.created_at_ms < ?
         LIMIT 1
         """,
         (str(partner_id), lo, hi),

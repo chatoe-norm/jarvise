@@ -881,6 +881,9 @@ def _migrate_partner_ledger(conn: sqlite3.Connection) -> None:
         ON partner_request (partner_id) WHERE status = 'pending'
         """
     )
+    # 'portal' = partner tapped in the portal; 'admin' = owner `p cv/wd/close`.
+    # NULL = written before this column existed. Only 'portal' converts lock the month.
+    _add_column_if_missing(conn, "partner_request", "source", "TEXT")
 
 
 def _migrate_assist_journal(conn: sqlite3.Connection) -> None:

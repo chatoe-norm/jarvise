@@ -663,7 +663,8 @@ CREATE TABLE IF NOT EXISTS partner_request (
     created_at_ms INTEGER NOT NULL,
     expires_at_ms INTEGER NOT NULL,
     decided_at_ms INTEGER,
-    paid_at_ms INTEGER
+    paid_at_ms INTEGER,
+    source TEXT  -- 'portal' | 'admin'; NULL = pre-column row (added by migration 30 repair)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_partner_request_one_pending
     ON partner_request (partner_id) WHERE status = 'pending';

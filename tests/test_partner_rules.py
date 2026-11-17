@@ -403,6 +403,89 @@ def test_convert_profit_min(tmp_path: Path, monkeypatch: Any, env_chat: None) ->
     conn.close()
 
 
+def _pending_rid(conn: Any, pid: str) -> str:
+    return str(
+        conn.execute(
+            "SELECT id FROM partner_request WHERE partner_id=? AND status='pending'",
+            (pid,),
+        ).fetchone()["id"]
+    )
+
+
+def _admin_confirm(conn: Any, rid: str, *, monkeypatch: Any, wallet: str, now_ms: int) -> None:
+    cli = FakeValueClient(wallet=wallet)
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    pa.handle_partner_callback(
+        conn,
+        f"pa:ry:{rid}",
+        callback=_owner_cb(data=f"pa:ry:{rid}"),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=cli,
+        now_ms=now_ms,
+    )
+
+
+def test_admin_p_cv_does_not_use_portal_convert_month(
+    tmp_path: Path, monkeypatch: Any, env_chat: None
+) -> None:
+    conn = open_db(tmp_path / "cvadmin.db")
+    join_ms = _ms(2026, 9, 1)
+    _init_pool(conn, monkeypatch, now_ms=join_ms - 10)
+    pid = _bind(conn, now_ms=join_ms - 5)
+    _deposit(conn, pid, D("200"), D("1200"), join_ms)
+    t = _ms(2026, 11, 10)
+    cli = FakeValueClient(wallet="1400")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    pa.handle_partner_text(
+        conn,
+        "p cv B",
+        message=_owner_msg("p cv B"),
+        send=_send_capture()[1],
+        futures=cli,
+        now_ms=t,
+    )
+    rid = _pending_rid(conn, pid)
+    assert (
+        conn.execute("SELECT source FROM partner_request WHERE id=?", (rid,)).fetchone()["source"] == "admin"
+    )
+    _admin_confirm(conn, rid, monkeypatch=monkeypatch, wallet="1400", now_ms=t + 100)
+    ev = conn.execute(
+        "SELECT COUNT(*) AS n FROM partner_event WHERE partner_id=? AND kind='convert' AND request_id=?",
+        (pid, rid),
+    ).fetchone()
+    assert ev["n"] == 1
+    assert partner_rules.convert_used_this_month(conn, pid, t + 200) is False
+    row = ps.get_partner(conn, pid)
+    assert row is not None
+    b = partner_rules.block(conn, row, "convert", nav=D("2"), now_ms=t + 200)
+    assert b is None or b.code != "convert_month"
+    # Partner can still submit a portal convert this month (profit back above 20 at V=1600).
+    _, _, _, sub = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1600", now_ms=t + 300)
+    assert sub["ok"] is True, sub
+    conn.close()
+
+
+def test_legacy_null_source_convert_does_not_lock(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "cvlegacy.db")
+    join_ms = _ms(2026, 9, 1)
+    _init_pool(conn, monkeypatch, now_ms=join_ms - 10)
+    pid = _bind(conn, now_ms=join_ms - 5)
+    _deposit(conn, pid, D("200"), D("1200"), join_ms)
+    t = _ms(2026, 11, 10)
+    _, _, _, sub = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=t)
+    assert sub["ok"] is True
+    rid = _pending_rid(conn, pid)
+    _admin_confirm(conn, rid, monkeypatch=monkeypatch, wallet="1400", now_ms=t + 100)
+    assert partner_rules.convert_used_this_month(conn, pid, t + 200) is True
+    conn.execute("UPDATE partner_request SET source = NULL WHERE id = ?", (rid,))
+    assert partner_rules.convert_used_this_month(conn, pid, t + 200) is False
+    conn.close()
+
+
 def test_convert_month_boundary_and_non_confirmed(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "cvmonth.db")
     join_ms = _ms(2026, 9, 1)
@@ -428,31 +511,17 @@ def test_convert_month_boundary_and_non_confirmed(tmp_path: Path, monkeypatch: A
             (rid, pid, status, t, t + 1, t + 1),
         )
     assert partner_rules.convert_used_this_month(conn, pid, nov_end) is False
-    # admin confirmed convert counts
-    cli = FakeValueClient(wallet="1400")
-    _patch_read(monkeypatch, cli)
-    portal.reset_value_cache()
-    pa.handle_partner_text(
-        conn,
-        "p cv B",
-        message=_owner_msg("p cv B"),
-        send=_send_capture()[1],
-        futures=cli,
-        now_ms=nov_end - 500,
+    # partner portal submit, admin confirms → counts
+    _, _, _, sub = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=nov_end - 500)
+    assert sub["ok"] is True
+    rid = _pending_rid(conn, pid)
+    assert (
+        conn.execute("SELECT source FROM partner_request WHERE id=?", (rid,)).fetchone()["source"] == "portal"
     )
-    rid = conn.execute(
-        "SELECT id FROM partner_request WHERE partner_id=? AND status='pending'",
-        (pid,),
-    ).fetchone()["id"]
-    pa.handle_partner_callback(
-        conn,
-        f"pa:ry:{rid}",
-        callback=_owner_cb(data=f"pa:ry:{rid}"),
-        send=_send_capture()[1],
-        answer=_answer_capture()[1],
-        edit=_edit_capture()[1],
-        futures=cli,
-        now_ms=nov_end - 400,
+    _admin_confirm(conn, rid, monkeypatch=monkeypatch, wallet="1400", now_ms=nov_end - 400)
+    assert (
+        conn.execute("SELECT status FROM partner_request WHERE id=?", (rid,)).fetchone()["status"]
+        == "confirmed"
     )
     assert partner_rules.convert_used_this_month(conn, pid, nov_end) is True
     row = ps.get_partner(conn, pid)
