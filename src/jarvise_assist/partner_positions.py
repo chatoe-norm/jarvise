@@ -31,7 +31,7 @@ def reset_positions_cache() -> None:
     _cache = None
 
 
-def _stamp(when) -> str:
+def _stamp(when: int) -> str:
     dt = datetime.fromtimestamp(when / 1000, tz=BANGKOK)
     return dt.strftime("%d/%m %H:%M")
 
@@ -112,7 +112,7 @@ def _side_label(pos: Any) -> str:
     return "LONG" if pos.side == "long" else "SHORT"
 
 
-def _render_body(conn: sqlite3.Connection, client: Any, positions: list[Any], *, now_ms) -> str:
+def _render_body(conn: sqlite3.Connection, client: Any, positions: list[Any], *, now_ms: int) -> str:
     ordered = sorted(positions, key=lambda p: (str(p.symbol).upper(), str(p.position_side).upper()))
     shown = ordered[:_MAX_ROWS]
     extra = len(ordered) - len(shown)
@@ -134,7 +134,7 @@ def _render_body(conn: sqlite3.Connection, client: Any, positions: list[Any], *,
     return "\n".join(lines)
 
 
-def render_partner_positions(conn: sqlite3.Connection, client: Any, *, now_ms) -> str:
+def render_partner_positions(conn: sqlite3.Connection, client: Any, *, now_ms: int) -> str:
     """Render the partner open-positions card (shared cache across partners)."""
     global _cache
     t = int(now_ms)

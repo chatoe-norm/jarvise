@@ -153,6 +153,7 @@ def _cb(
     from_id: int | None = None,
     chat_type: str = "private",
     mid: int = 7,
+    text: str = "card",
 ) -> dict[str, Any]:
     fid = from_id if from_id is not None else chat
     return {
@@ -162,7 +163,7 @@ def _cb(
         "message": {
             "message_id": mid,
             "chat": {"id": chat, "type": chat_type},
-            "text": "card",
+            "text": text,
         },
     }
 
@@ -467,6 +468,54 @@ def test_callback_edit_passes_partner_chat_id(tmp_path: Path, monkeypatch: Any, 
     assert len(answers) == 1
     assert edited
     assert edited[0]["chat_id"] == "501"
+    conn.close()
+
+
+def test_pp_v_unchanged_no_duplicate(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ppv.db")
+    _init_abc(conn, monkeypatch)
+    _invite_bind(conn, "B", "501", now_ms=NOW + 50)
+    cli = FakeValueClient(wallet="2160")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    t0 = NOW + 70
+
+    edited1, edit1 = _edit_capture()
+    sent1, send1 = _send_capture()
+    answers1, answer1 = _answer_capture()
+    out1 = portal.handle_portal_callback(
+        conn,
+        "pp:v",
+        callback=_cb("pp:v", chat=501),
+        send=send1,
+        answer=answer1,
+        edit=edit1,
+        futures=cli,
+        now_ms=t0,
+    )
+    assert out1 == {"ok": True, "cmd": "refresh"}
+    assert len(edited1) == 1
+    assert sent1 == []
+    first_text = edited1[0]["text"]
+
+    edited2, edit2 = _edit_capture()
+    sent2, send2 = _send_capture()
+    answers2, answer2 = _answer_capture()
+    out2 = portal.handle_portal_callback(
+        conn,
+        "pp:v",
+        callback=_cb("pp:v", chat=501, text=first_text),
+        send=send2,
+        answer=answer2,
+        edit=edit2,
+        futures=cli,
+        now_ms=t0,
+    )
+    assert out2.get("unchanged") is True
+    assert out2 == {"ok": True, "cmd": "refresh", "unchanged": True}
+    assert edited2 == []
+    assert sent2 == []
+    assert len(answers2) == 1
     conn.close()
 
 

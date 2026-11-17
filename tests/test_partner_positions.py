@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import re
-import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -136,6 +135,7 @@ def _cb(
     from_id: int | None = None,
     chat_type: str = "private",
     mid: int = 7,
+    text: str = "card",
 ) -> dict[str, Any]:
     fid = from_id if from_id is not None else chat
     return {
@@ -145,7 +145,7 @@ def _cb(
         "message": {
             "message_id": mid,
             "chat": {"id": chat, "type": chat_type},
-            "text": "card",
+            "text": text,
         },
     }
 
@@ -317,13 +317,7 @@ def test_b_long_btc_render_and_edit_chat(tmp_path: Path) -> None:
     kb = edited[0]["reply_markup"]["inline_keyboard"][0]
     assert [b["callback_data"] for b in kb] == ["pp:pos", "pp:v"]
     assert sent == []
-    # keep for report
-    global RENDERED_B  # noqa: PLW0603
-    RENDERED_B = text
     conn.close()
-
-
-RENDERED_B = ""
 
 
 # --- c. SHORT sign -----------------------------------------------------------
@@ -639,31 +633,111 @@ def test_m_static_guard_partner_positions() -> None:
         "new_order",
         "post(",
         "delete(",
-        "ms:",
-        "xx:",
-        "ey:",
-        "ec:",
-        "en:",
-        "mn:",
     ):
         assert bad not in low, bad
 
-    tree = ast.parse(src)
-    allowed_roots = {"__future__", "jarvise_assist.futures"}
-    stdlib = set(sys.stdlib_module_names)
+    prefix_re = re.compile(r"""["'](ms|xx|ey|ec|en|mn):""", re.IGNORECASE)
+    assert prefix_re.search(src) is None
+    assert prefix_re.search('"ms:x"') is not None
+    assert prefix_re.search("'xx:'") is not None
+    assert prefix_re.search('f"ey:{a}"') is not None
+    assert prefix_re.search("now_ms: int") is None
+    assert prefix_re.search("when: int") is None
 
-    for node in tree.body:
+    tree = ast.parse(src)
+    allowed = {"__future__", "sqlite3", "datetime", "decimal", "typing"}
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                top = alias.name.split(".")[0]
-                assert (
-                    top in stdlib
-                    or alias.name in allowed_roots
-                    or alias.name.startswith("jarvise_assist.futures")
-                ), alias.name
+                assert alias.name.split(".")[0] in allowed, alias.name
         elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, node.module
             mod = node.module or ""
-            if mod == "__future__" or mod.startswith("jarvise_assist.futures"):
-                continue
-            top = mod.split(".")[0]
-            assert top in stdlib, mod
+            assert mod.split(".")[0] in allowed, mod
+
+
+def test_n_refresh_unchanged_no_duplicate(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "n.db")
+    _bind_partner(conn, "B", PARTNER_TG, now_ms=NOW)
+    _insert_watch(conn)
+    client = FakePosClient([_pos()])
+    t0 = NOW + 100
+    out1, edited1, sent1, answers1 = _run_pos(conn, client, now_ms=t0)
+    assert out1 == {"ok": True, "cmd": "positions"}
+    assert len(edited1) == 1
+    assert sent1 == []
+    assert len(answers1) == 1
+    first_text = edited1[0]["text"]
+
+    edited2, edit2 = _edit_capture()
+    sent2, send2 = _send_capture()
+    answers2, answer2 = _answer_capture()
+    out2 = portal.handle_portal_callback(
+        conn,
+        "pp:pos",
+        callback=_cb("pp:pos", chat=501, text=first_text),
+        send=send2,
+        answer=answer2,
+        edit=edit2,
+        futures=client,
+        now_ms=t0 + 5_000,
+    )
+    assert out2.get("unchanged") is True
+    assert out2 == {"ok": True, "cmd": "positions", "unchanged": True}
+    assert edited2 == []
+    assert sent2 == []
+    assert len(answers2) == 1
+    assert client.risk_calls == 1
+    conn.close()
+
+
+def test_o_client_build_failure_shows_error(tmp_path: Path, monkeypatch: Any) -> None:
+    conn = open_db(tmp_path / "o.db")
+    _bind_partner(conn, "B", PARTNER_TG, now_ms=NOW)
+
+    def boom() -> Any:
+        raise FileNotFoundError("/opt/jarvise/secrets/x.pem")
+
+    monkeypatch.setattr("jarvise_assist.partner_portal.build_futures_client", boom)
+
+    edited_pos, edit_pos = _edit_capture()
+    sent_pos, send_pos = _send_capture()
+    answers_pos, answer_pos = _answer_capture()
+    out_pos = portal.handle_portal_callback(
+        conn,
+        "pp:pos",
+        callback=_cb("pp:pos", chat=501),
+        send=send_pos,
+        answer=answer_pos,
+        edit=edit_pos,
+        futures=None,
+        now_ms=NOW + 100,
+    )
+    assert out_pos == {"ok": True, "cmd": "positions"}
+    assert edited_pos
+    assert edited_pos[0]["text"] == "อ่านไม้ไม่ได้ตอนนี้ ลองใหม่อีกครั้ง"
+    assert sent_pos == []
+
+    portal.reset_value_cache()
+    edited_v, edit_v = _edit_capture()
+    sent_v, send_v = _send_capture()
+    answers_v, answer_v = _answer_capture()
+    out_v = portal.handle_portal_callback(
+        conn,
+        "pp:v",
+        callback=_cb("pp:v", chat=501),
+        send=send_v,
+        answer=answer_v,
+        edit=edit_v,
+        futures=None,
+        now_ms=NOW + 200,
+    )
+    assert out_v["ok"] is True
+    assert edited_v
+    assert "อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง" in edited_v[0]["text"]
+    assert sent_v == []
+
+    leak_haystack = " ".join(str(e.get("text", "")) for e in edited_pos + edited_v + sent_pos + sent_v)
+    assert ".pem" not in leak_haystack
+    assert "secrets" not in leak_haystack
+    conn.close()
