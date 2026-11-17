@@ -560,6 +560,9 @@ def _submit_request(
         if reason == "request_pending":
             answer("มีคำขอค้างอยู่ รอแอดมิน")
             return {"ok": False, "reason": "request_pending"}
+        if reason == "convert_month":
+            answer(partner_rules.convert_month_block(now_ms).toast)
+            return {"ok": False, "reason": "convert_month"}
         answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
         return {"ok": False, "reason": reason}
     rid = str(created["request_id"])

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -466,6 +466,12 @@ def test_admin_p_cv_does_not_use_portal_convert_month(
     # Partner can still submit a portal convert this month (profit back above 20 at V=1600).
     _, _, _, sub = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1600", now_ms=t + 300)
     assert sub["ok"] is True, sub
+    # admin_then_portal_same_month: once that portal convert is confirmed, the month is used.
+    _admin_confirm(conn, str(sub["request_id"]), monkeypatch=monkeypatch, wallet="1600", now_ms=t + 400)
+    assert partner_rules.convert_used_this_month(conn, pid, t + 500) is True
+    a2, _, _, sub2 = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1800", now_ms=t + 500)
+    assert sub2 == {"ok": False, "reason": "convert_month"}
+    assert a2 == [("cq1", partner_rules.convert_month_block(t + 500).toast)]
     conn.close()
 
 
@@ -529,23 +535,43 @@ def test_convert_month_boundary_and_non_confirmed(tmp_path: Path, monkeypatch: A
     _deposit(conn, pid, D("200"), D("1200"), join_ms)
     nov_end = _ms(2026, 11, 30, 23, 59)
     dec_start = _ms(2026, 12, 1, 0, 0)
-    # rejected / expired / cancelled convert requests do not count
-    for status, t in (
-        ("rejected", nov_end - 3000),
-        ("expired", nov_end - 2000),
-        ("cancelled", nov_end - 1000),
-    ):
-        rid = f"r-{status}"
+    # Real portal convert requests in November that end rejected / expired /
+    # cancelled (no_profit at confirm) write no convert event and do not use up
+    # the month: each next portal convert still gets through create_request.
+    t_rej = _ms(2026, 11, 2)
+    _, _, _, s1 = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=t_rej)
+    assert s1["ok"] is True, s1
+    r_rej = str(s1["request_id"])
+    assert ps.reject_request(conn, r_rej, t_rej + 10)["ok"] is True
+
+    t_exp = _ms(2026, 11, 3)
+    _, _, _, s2 = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=t_exp)
+    assert s2["ok"] is True, s2
+    r_exp = str(s2["request_id"])
+    assert ps.expire_requests(conn, t_exp + ps.REQUEST_TTL_MS) == 1
+
+    t_can = _ms(2026, 11, 6)
+    _, _, _, s3 = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=t_can)
+    assert s3["ok"] is True, s3
+    r_can = str(s3["request_id"])
+    # V fell back to the deposit level before the admin confirmed → no_profit → cancelled.
+    res = ps.confirm_request(conn, r_can, D("1200"), t_can + 10)
+    assert res["ok"] is False and res["reason"] == "no_profit"
+
+    for rid_x, status in ((r_rej, "rejected"), (r_exp, "expired"), (r_can, "cancelled")):
+        req = conn.execute("SELECT status, source FROM partner_request WHERE id=?", (rid_x,)).fetchone()
+        assert (req["status"], req["source"]) == (status, "portal")
+    assert (
         conn.execute(
-            """
-            INSERT INTO partner_request (
-                id, partner_id, kind, status, payout_state,
-                created_at_ms, expires_at_ms, decided_at_ms
-            ) VALUES (?, ?, 'convert', ?, 'none', ?, ?, ?)
-            """,
-            (rid, pid, status, t, t + 1, t + 1),
-        )
+            "SELECT COUNT(*) AS n FROM partner_event WHERE partner_id=? AND kind='convert'", (pid,)
+        ).fetchone()["n"]
+        == 0
+    )
     assert partner_rules.convert_used_this_month(conn, pid, nov_end) is False
+    row0 = ps.get_partner(conn, pid)
+    assert row0 is not None
+    b0 = partner_rules.block(conn, row0, "convert", nav=D("1.2"), now_ms=nov_end)
+    assert b0 is None or b0.code != "convert_month"
     # partner portal submit, admin confirms → counts
     _, _, _, sub = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=nov_end - 500)
     assert sub["ok"] is True
@@ -861,3 +887,264 @@ def test_partner_rules_import_guard() -> None:
             assert banned.isdisjoint(parts), mod
             for alias in node.names:
                 assert alias.name not in banned, alias.name
+
+
+# --- PR-A follow-up 2: create-time month check, boundaries, mins ---------------------------------
+
+
+def _setup_partner(
+    tmp_path: Path,
+    name: str,
+    monkeypatch: Any,
+    *,
+    join_ms: int,
+    amount: str = "200",
+    v: str = "1200",
+) -> tuple[Any, str]:
+    conn = open_db(tmp_path / name)
+    _init_pool(conn, monkeypatch, now_ms=join_ms - 1000)
+    pid = _bind(conn, now_ms=join_ms - 500)
+    _deposit(conn, pid, D(amount), D(v), join_ms)
+    return conn, pid
+
+
+def _portal_cv_confirmed(
+    conn: Any, pid: str, monkeypatch: Any, *, submit_ms: int, confirm_ms: int, wallet: str = "1400"
+) -> str:
+    _, _, _, sub = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet=wallet, now_ms=submit_ms)
+    assert sub["ok"] is True, sub
+    rid = str(sub["request_id"])
+    _admin_confirm(conn, rid, monkeypatch=monkeypatch, wallet=wallet, now_ms=confirm_ms)
+    req = conn.execute("SELECT status, source FROM partner_request WHERE id=?", (rid,)).fetchone()
+    assert (req["status"], req["source"]) == ("confirmed", "portal")
+    ev = conn.execute(
+        "SELECT created_at_ms FROM partner_event WHERE request_id=? AND kind='convert'", (rid,)
+    ).fetchone()
+    assert int(ev["created_at_ms"]) == confirm_ms
+    return rid
+
+
+def _pending_count(conn: Any, pid: str) -> int:
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM partner_request WHERE partner_id=? AND status='pending'", (pid,)
+        ).fetchone()["n"]
+    )
+
+
+@pytest.mark.parametrize("confirm_offset", [-1, 0])
+def test_month_boundary_utc_ms_exact(
+    tmp_path: Path, monkeypatch: Any, env_chat: None, confirm_offset: int
+) -> None:
+    """Bangkok month starts at 17:00:00.000 UTC the day before; the window is [lo, hi)."""
+    dec_start = _ms(2026, 12, 1, 0, 0)
+    assert dec_start == int(datetime(2026, 11, 30, 17, 0, tzinfo=UTC).timestamp() * 1000)
+    conn, pid = _setup_partner(tmp_path, f"edge{confirm_offset}.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    confirm_ms = dec_start + confirm_offset
+    _portal_cv_confirmed(conn, pid, monkeypatch, submit_ms=dec_start - 1000, confirm_ms=confirm_ms)
+    in_nov = confirm_offset < 0
+    assert partner_rules.convert_used_this_month(conn, pid, dec_start - 1) is in_nov
+    assert partner_rules.convert_used_this_month(conn, pid, dec_start) is (not in_nov)
+    assert partner_rules.convert_used_this_month(conn, pid, _ms(2026, 12, 31, 23, 59)) is (not in_nov)
+    conn.close()
+
+
+def test_portal_then_admin_same_month(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn, pid = _setup_partner(tmp_path, "p_then_a.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    t = _ms(2026, 11, 10)
+    _portal_cv_confirmed(conn, pid, monkeypatch, submit_ms=t, confirm_ms=t + 100)
+    assert partner_rules.convert_used_this_month(conn, pid, t + 200) is True
+    # Admin p cv is not bound by the portal month rule.
+    cli = FakeValueClient(wallet="1600")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    out = pa.handle_partner_text(
+        conn, "p cv B", message=_owner_msg("p cv B"), send=_send_capture()[1], futures=cli, now_ms=t + 200
+    )
+    assert out.get("ok") is True, out
+    rid = _pending_rid(conn, pid)
+    _admin_confirm(conn, rid, monkeypatch=monkeypatch, wallet="1600", now_ms=t + 300)
+    assert (
+        conn.execute("SELECT status FROM partner_request WHERE id=?", (rid,)).fetchone()["status"]
+        == "confirmed"
+    )
+    n_cv = conn.execute(
+        "SELECT COUNT(*) AS n FROM partner_event WHERE partner_id=? AND kind='convert'", (pid,)
+    ).fetchone()["n"]
+    assert n_cv == 2
+    # Portal stays locked for the rest of the month.
+    a, s, e, o = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1800", now_ms=t + 400)
+    assert o == {"ok": False, "reason": "convert_month"}
+    assert a == [("cq1", partner_rules.convert_month_block(t + 400).toast)]
+    assert s == [] and e == []
+    conn.close()
+
+
+def test_second_portal_convert_blocked_at_create(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    """Race regression: tap-time block() passed on a stale read; create_request must still refuse."""
+    conn, pid = _setup_partner(tmp_path, "race.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    t = _ms(2026, 11, 10)
+    _portal_cv_confirmed(conn, pid, monkeypatch, submit_ms=t, confirm_ms=t + 100)
+    before = _counts(conn)
+
+    # Store level, inside BEGIN IMMEDIATE.
+    direct = ps.create_request(conn, pid, "convert", t + 200, source="portal")
+    assert direct == {"ok": False, "reason": "convert_month"}
+    assert _counts(conn) == before
+
+    # Portal level: block() read before the first convert was confirmed and let the tap through.
+    monkeypatch.setattr(partner_rules, "block", lambda *a, **k: None)
+    a, s, e, o = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1800", now_ms=t + 300)
+    assert o == {"ok": False, "reason": "convert_month"}
+    assert a == [("cq1", partner_rules.convert_month_block(t + 300).toast)]
+    assert "ครั้งถัดไป 01/12/2026" in str(a[0][1])
+    assert s == [] and e == []
+    assert _counts(conn) == before
+
+    # Only portal converts are re-checked: admin convert and portal withdraw still create.
+    adm = ps.create_request(conn, pid, "convert", t + 400, source="admin")
+    assert adm["ok"] is True
+    assert ps.reject_request(conn, str(adm["request_id"]), t + 401)["ok"] is True
+    wd = ps.create_request(conn, pid, "withdraw_profit", t + 500, source="portal")
+    assert wd["ok"] is True
+    conn.close()
+
+
+def test_double_go_single_request(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    conn, pid = _setup_partner(tmp_path, "dbl.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    for second in ("pp:go:cv", "pp:go:wd"):
+        _, _, _, first = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=NOW)
+        assert first["ok"] is True, first
+        a, s, e, o = _tap(conn, second, monkeypatch=monkeypatch, wallet="1400", now_ms=NOW + 1)
+        assert o == {"ok": False, "reason": "pending"}
+        assert a == [("cq1", "มีคำขอค้างอยู่ รอแอดมิน")]
+        assert s == [] and e == []
+        assert _pending_count(conn, pid) == 1
+        assert ps.reject_request(conn, str(first["request_id"]), NOW + 2)["ok"] is True
+
+    # Same with the tap-time check bypassed: create_request alone keeps a single pending row.
+    monkeypatch.setattr(partner_rules, "block", lambda *a, **k: None)
+    for second in ("pp:go:cv", "pp:go:wd"):
+        _, _, _, first = _tap(conn, "pp:go:cv", monkeypatch=monkeypatch, wallet="1400", now_ms=NOW + 10)
+        assert first["ok"] is True, first
+        a, s, e, o = _tap(conn, second, monkeypatch=monkeypatch, wallet="1400", now_ms=NOW + 11)
+        assert o == {"ok": False, "reason": "request_pending"}
+        assert a == [("cq1", "มีคำขอค้างอยู่ รอแอดมิน")]
+        assert _pending_count(conn, pid) == 1
+        assert ps.reject_request(conn, str(first["request_id"]), NOW + 12)["ok"] is True
+    conn.close()
+
+
+def test_close_join_bkk_vs_utc_date(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    """Join 01/10 00:30 BKK is still 30/09 in UTC; the 30-day clock uses the Bangkok date."""
+    join_ms = _ms(2026, 10, 1, 0, 30)
+    assert datetime.fromtimestamp(join_ms / 1000, tz=UTC).day == 30
+    conn, pid = _setup_partner(tmp_path, "bkkjoin.db", monkeypatch, join_ms=join_ms, amount="100", v="1100")
+    assert partner_rules.joined_at_ms(conn, pid) == join_ms
+    row = ps.get_partner(conn, pid)
+    assert row is not None
+    last_locked = int(datetime(2026, 10, 30, 23, 59, 59, 999000, tzinfo=BANGKOK).timestamp() * 1000)
+    first_open = _ms(2026, 10, 31, 0, 0)
+    assert first_open - last_locked == 1
+    b = partner_rules.block(conn, row, "close", nav=None, now_ms=last_locked)
+    assert b is not None and b.code == "close_too_soon"
+    assert b.label == "🔒 ปิดพอร์ต · อีก 1 วัน"
+    assert "ตั้งแต่ 31/10/2026" in b.toast
+    assert partner_rules.block(conn, row, "close", nav=None, now_ms=first_open) is None
+    conn.close()
+
+
+def test_join_ignores_pending_and_uses_first_confirm(
+    tmp_path: Path, monkeypatch: Any, env_chat: None
+) -> None:
+    conn = open_db(tmp_path / "joinfirst.db")
+    t1 = _ms(2026, 9, 1, 20, 0)
+    _init_pool(conn, monkeypatch, now_ms=t1 - 1000)
+    pid = _bind(conn, now_ms=t1 - 500)
+    req1 = ps.create_request(conn, pid, "deposit", t1, amount=D("100"), source="portal")
+    assert req1["ok"] is True
+    # Pending deposit request is not a join.
+    assert partner_rules.joined_at_ms(conn, pid) is None
+
+    t2 = _ms(2026, 9, 2, 9, 0)  # next Bangkok day, inside the 24h TTL
+    assert ps.confirm_request(conn, str(req1["request_id"]), D("1100"), t2, amount_received=D("100"))["ok"]
+    assert partner_rules.joined_at_ms(conn, pid) == t2  # confirm time, not request time
+
+    t3 = _ms(2026, 9, 5)
+    req2 = ps.create_request(conn, pid, "deposit", t3, amount=D("100"), source="portal")
+    assert req2["ok"] is True
+    assert ps.confirm_request(conn, str(req2["request_id"]), D("1200"), t3 + 10, amount_received=D("100"))[
+        "ok"
+    ]
+    assert partner_rules.joined_at_ms(conn, pid) == t2  # first confirm stays
+
+    row = ps.get_partner(conn, pid)
+    assert row is not None
+    assert partner_rules.close_open_date(t2).strftime("%d/%m/%Y") == "02/10/2026"
+    locked = partner_rules.block(conn, row, "close", nav=None, now_ms=_ms(2026, 10, 1, 23, 59))
+    assert locked is not None and locked.code == "close_too_soon"
+    assert partner_rules.block(conn, row, "close", nav=None, now_ms=_ms(2026, 10, 2, 0, 0)) is None
+    conn.close()
+
+
+def test_withdraw_min_exact_20_and_rounding(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    from jarvise_assist import partner_ledger as pl
+
+    conn, pid = _setup_partner(
+        tmp_path, "wd20.db", monkeypatch, join_ms=_ms(2026, 9, 1), amount="100", v="1100"
+    )
+    row = ps.get_partner(conn, pid)
+    assert row is not None
+    assert ps.units_from_e8(int(row["units_e8"])) == D("100")
+    assert ps.usdt_from_micro(int(row["cost_micro"])) == D("100")
+    assert int(row["fee_rate_bps"]) == 5000
+
+    def cash(r: Any, nav: str) -> Decimal:
+        plan = pl.plan_withdraw_profit(
+            units=ps.units_from_e8(int(r["units_e8"])),
+            cost=ps.usdt_from_micro(int(r["cost_micro"])),
+            fee_rate=ps._fee_rate_from_bps(int(r["fee_rate_bps"])),
+            nav=D(nav),
+        )
+        assert not isinstance(plan, pl.Refusal)
+        return plan.cash
+
+    # 50%: profit 40.00 → 20.00 ok; profit 39.99 → 19.995 → floor 19.99 blocked.
+    assert cash(row, "1.40") == D("20.00")
+    assert partner_rules.block(conn, row, "withdraw_profit", nav=D("1.40"), now_ms=NOW) is None
+    assert cash(row, "1.3999") == D("19.99")
+    b = partner_rules.block(conn, row, "withdraw_profit", nav=D("1.3999"), now_ms=NOW)
+    assert b is not None and b.code == "withdraw_min"
+
+    # fee_rate_bps=3333: share = floor_micro(profit * 0.6667), cash = floor_cent(share).
+    conn.execute("UPDATE partner SET fee_rate_bps = 3333 WHERE id = ?", (pid,))
+    row = ps.get_partner(conn, pid)
+    assert row is not None
+    # profit 29.9985 → 19.99999995 → 19.999999 → 19.99 (half-up would say 20.00): blocked
+    assert cash(row, "1.299985") == D("19.99")
+    b2 = partner_rules.block(conn, row, "withdraw_profit", nav=D("1.299985"), now_ms=NOW)
+    assert b2 is not None and b2.code == "withdraw_min"
+    # profit 29.9986 → 20.00006662 → 20.00: ok
+    assert cash(row, "1.299986") == D("20.00")
+    assert partner_rules.block(conn, row, "withdraw_profit", nav=D("1.299986"), now_ms=NOW) is None
+    conn.close()
+
+
+def test_cross_month_confirm_attribution(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    """Documents current behavior (P1-4, owner undecided): a convert counts in the month it is
+    CONFIRMED, not the month it was requested."""
+    conn, pid = _setup_partner(tmp_path, "xmonth.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    submit = _ms(2026, 11, 30, 23, 0)
+    confirm = _ms(2026, 12, 1, 0, 30)
+    rid = _portal_cv_confirmed(conn, pid, monkeypatch, submit_ms=submit, confirm_ms=confirm)
+    created = int(conn.execute("SELECT created_at_ms FROM partner_request WHERE id=?", (rid,)).fetchone()[0])
+    assert created == submit
+    assert partner_rules.convert_used_this_month(conn, pid, _ms(2026, 11, 30, 23, 59)) is False
+    assert partner_rules.convert_used_this_month(conn, pid, confirm + 1) is True
+    # December's portal convert is used; another one is refused at create.
+    assert ps.create_request(conn, pid, "convert", confirm + 100, source="portal") == {
+        "ok": False,
+        "reason": "convert_month",
+    }
+    assert partner_rules.convert_used_this_month(conn, pid, _ms(2027, 1, 1, 0, 0)) is False
+    conn.close()

@@ -1039,6 +1039,15 @@ def create_request(
         if pending is not None:
             return {"ok": False, "reason": "request_pending"}
 
+        if kind == "convert" and source == "portal":
+            # Re-check the monthly portal convert inside BEGIN IMMEDIATE; the
+            # tap-time partner_rules.block() check runs outside it. Local import:
+            # partner_rules imports this module.
+            from jarvise_assist import partner_rules
+
+            if partner_rules.convert_used_this_month(conn, partner_id, ts):
+                return {"ok": False, "reason": "convert_month"}
+
         rid = _new_request_id()
         expires = ts + REQUEST_TTL_MS
         conn.execute(

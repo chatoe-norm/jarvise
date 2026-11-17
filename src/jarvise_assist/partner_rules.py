@@ -94,6 +94,16 @@ def convert_used_this_month(conn: sqlite3.Connection, partner_id: str, now_ms: i
     return row is not None
 
 
+def convert_month_block(now_ms: int) -> Block:
+    nxt = next_month_start(now_ms)
+    nxt_ms = int(datetime(nxt.year, nxt.month, nxt.day, tzinfo=BANGKOK).timestamp() * 1000)
+    return Block(
+        code="convert_month",
+        toast=f"ทบกำไรได้เดือนละครั้ง · ครั้งถัดไป {fmt_date(nxt_ms)}",
+        label="🔒 ทบกำไร",
+    )
+
+
 def _pending(conn: sqlite3.Connection, partner_id: str, now_ms: int) -> bool:
     row = conn.execute(
         """
@@ -162,13 +172,7 @@ def block(
         return None
 
     if kind == "convert" and convert_used_this_month(conn, pid, now_ms):
-        nxt = next_month_start(now_ms)
-        nxt_ms = int(datetime(nxt.year, nxt.month, nxt.day, tzinfo=BANGKOK).timestamp() * 1000)
-        return Block(
-            code="convert_month",
-            toast=f"ทบกำไรได้เดือนละครั้ง · ครั้งถัดไป {fmt_date(nxt_ms)}",
-            label="🔒 ทบกำไร",
-        )
+        return convert_month_block(now_ms)
 
     if nav is None:
         return None
