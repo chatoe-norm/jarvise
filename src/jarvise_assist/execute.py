@@ -31,6 +31,7 @@ from jarvise_assist.exec_outcome import (
 from jarvise_assist.exec_outcome import (
     query_fill_after_unknown as _query_fill_tri,
 )
+from jarvise_assist.exit_log import log_card, record_intent_action
 from jarvise_assist.futures import (
     FAPI_BASE,
     FuturesPosition,
@@ -2361,7 +2362,8 @@ def run_entry_sequence(
                         entry_time_ms=excluded.entry_time_ms,
                         no_stop_latched=0,
                         last_seen_ms=excluded.last_seen_ms,
-                        closed_at_ms=NULL
+                        closed_at_ms=NULL,
+                        atr_at_entry=NULL
                     """,
                     (
                         symbol,
@@ -2459,6 +2461,7 @@ def _send_fresh_move_stop_advice(
     tick: Decimal,
     now_ms_value: int,
     send: Callable[..., Any] | None,
+    entry_time_ms: int | None = None,
 ) -> str | None:
     """Insert a new move_stop intent and send advice. Returns new intent id or None."""
     expires_at = int(now_ms_value) + MOVE_STOP_TTL_MS
@@ -2473,6 +2476,7 @@ def _send_fresh_move_stop_advice(
         initial_stop=initial_stop,
         expires_at_ms=expires_at,
         tick=tick,
+        source=source,
     )
     new_id = insert_exec_intent(
         conn,
@@ -2496,6 +2500,32 @@ def _send_fresh_move_stop_advice(
         )
         if mid is not None:
             set_exec_intent_message_id(conn, new_id, int(mid))
+        if mid:
+            # watch imports this module at load. Import here so `import watch` can finish first.
+            from jarvise_assist.watch import approx_r_multiple
+
+            r_now = approx_r_multiple(side=side, entry=pos.entry_price, initial_stop=initial_stop, mark=mark)
+            log_card(
+                conn,
+                symbol=symbol,
+                position_side=pos.position_side,
+                side=side,
+                kind="move_stop",
+                source=source,
+                shown_at_ms=int(now_ms_value),
+                mark=mark,
+                entry=pos.entry_price,
+                initial_stop=initial_stop,
+                qty=pos.qty,
+                suggested_stop=new_stop,
+                r_now=r_now,
+                exchange_stop=protective,
+                had_button=True,
+                delivered=True,
+                intent_id=new_id,
+                entry_time_ms=entry_time_ms,
+                entry_bar=False,
+            )
     return new_id
 
 
@@ -2564,6 +2594,7 @@ def run_move_stop_sequence(
             tick=tick,
             now_ms_value=ts,
             send=send,
+            entry_time_ms=int(watch["entry_time_ms"]) if watch.get("entry_time_ms") else None,
         )
         return f"stop แนะนำเปลี่ยนเป็น {_fmt_price_tick(fresh_stop, tick)}"
 
@@ -3156,6 +3187,8 @@ def handle_exec_callback(
                 text = str(intent.get("result_text") or "ทำไปแล้ว")
                 send(text)
                 return {"ok": True, "replay": True, "text": text}
+        if declined:
+            record_intent_action(conn, intent or {}, action="ignore", action_at_ms=ts)
         answer("ไม่เลื่อน")
         advice_body = None
         if intent is not None:
@@ -3219,6 +3252,8 @@ def handle_exec_callback(
             answer()
             if not wrote:
                 return {"ok": False, "reason": "lost_write"}
+            if prefix == "ms:":
+                record_intent_action(conn, intent, action="ignore", action_at_ms=ts)
             advice_body = None
             preview = intent.get("preview") or {}
             if isinstance(preview, dict):
@@ -3261,107 +3296,180 @@ def handle_exec_callback(
             return {"ok": False, "reason": "race"}
 
         answer()
-        auth_reason: str | None = None
-        client: BinanceTradeClient | None
-        if trade is not None:
-            client = trade
-        else:
-            client, auth_reason = build_trade_client()
-        if client is None:
-            text = trade_auth_reason_th(auth_reason)
-            finish_exec_intent(conn, intent_id, status="failed", result_text=text, expect_status="confirmed")
-            send(text)
-            return {"ok": False, "reason": auth_reason or "no_key"}
         try:
-            client.assert_trade_key_safe()
-            client.assert_account_modes()
-        except TradeClientError as exc:
-            text = (
-                str(exc)
-                if str(exc)
-                in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_ACCOUNT_MODE_UNREADABLE, MSG_MODE_UNREADABLE}
-                else MSG_KEY_REFUSED
-            )
-            finish_exec_intent(conn, intent_id, status="failed", result_text=text, expect_status="confirmed")
-            send(text)
-            return {"ok": False, "reason": "key"}
-        except (httpx.HTTPError, ProviderError) as exc:
-            logger.warning("exec pre-order network error %s", type(exc).__name__)
-            text = _preorder_fail_text(prefix)
-            finish_exec_intent(conn, intent_id, status="failed", result_text=text, expect_status="confirmed")
-            if mid is not None and prefix == "ey:":
-                edit(int(mid), text, reply_markup={"inline_keyboard": []})
-            send(text)
-            return {"ok": False, "reason": "binance_unreachable"}
+            auth_reason: str | None = None
+            client: BinanceTradeClient | None
+            if trade is not None:
+                client = trade
+            else:
+                client, auth_reason = build_trade_client()
+            if client is None:
+                text = trade_auth_reason_th(auth_reason)
+                finish_exec_intent(
+                    conn, intent_id, status="failed", result_text=text, expect_status="confirmed"
+                )
+                send(text)
+                return {"ok": False, "reason": auth_reason or "no_key"}
+            try:
+                client.assert_trade_key_safe()
+                client.assert_account_modes()
+            except TradeClientError as exc:
+                text = (
+                    str(exc)
+                    if str(exc)
+                    in {MSG_ONE_WAY, MSG_MULTI_ASSETS, MSG_ACCOUNT_MODE_UNREADABLE, MSG_MODE_UNREADABLE}
+                    else MSG_KEY_REFUSED
+                )
+                finish_exec_intent(
+                    conn, intent_id, status="failed", result_text=text, expect_status="confirmed"
+                )
+                send(text)
+                return {"ok": False, "reason": "key"}
+            except (httpx.HTTPError, ProviderError) as exc:
+                logger.warning("exec pre-order network error %s", type(exc).__name__)
+                text = _preorder_fail_text(prefix)
+                finish_exec_intent(
+                    conn, intent_id, status="failed", result_text=text, expect_status="confirmed"
+                )
+                if mid is not None and prefix == "ey:":
+                    edit(int(mid), text, reply_markup={"inline_keyboard": []})
+                send(text)
+                return {"ok": False, "reason": "binance_unreachable"}
 
-        def _strip_ms_buttons(*, position_gone: bool = False) -> None:
-            if mid is None or prefix != "ms:":
-                return
-            preview = intent.get("preview") or {}
-            body = preview.get("advice_text") if isinstance(preview, dict) else None
-            keep: dict[str, Any] | None = None
-            if body and isinstance(preview, dict) and preview.get("via") == "progress":
-                keep = None if position_gone else _progress_close_keyboard(conn, intent)
-                body = progress_alert_after_tap(str(body), keep_close_line=keep is not None)
-            edit(
-                int(mid),
-                str(body) if body else MSG_CANCELLED,
-                reply_markup=keep if keep is not None else {"inline_keyboard": []},
-            )
+            def _strip_ms_buttons(*, position_gone: bool = False) -> None:
+                if mid is None or prefix != "ms:":
+                    return
+                preview = intent.get("preview") or {}
+                body = preview.get("advice_text") if isinstance(preview, dict) else None
+                keep: dict[str, Any] | None = None
+                if body and isinstance(preview, dict) and preview.get("via") == "progress":
+                    keep = None if position_gone else _progress_close_keyboard(conn, intent)
+                    body = progress_alert_after_tap(str(body), keep_close_line=keep is not None)
+                edit(
+                    int(mid),
+                    str(body) if body else MSG_CANCELLED,
+                    reply_markup=keep if keep is not None else {"inline_keyboard": []},
+                )
 
-        def _finish_send(result: str, *, markup: dict[str, Any] | None = None) -> dict[str, Any]:
-            status = (
-                result.status
-                if isinstance(result, ExecResult)
-                else ("done" if result.startswith("✅") else "failed")
-            )
-            wrote = finish_exec_intent(
-                conn,
-                intent_id,
-                status=status,
-                result_text=str(result),
-                expect_status="confirmed",
-            )
-            if not wrote:
-                return {"ok": False, "reason": "lost_write", "status": status}
-            if prefix == "ms:":
-                position_gone = str(result) in {MSG_ALREADY_CLOSED, _reason_th("wrong_side")}
-                _strip_ms_buttons(position_gone=position_gone)
-                if markup is not None:
+            def _finish_send(result: str, *, markup: dict[str, Any] | None = None) -> dict[str, Any]:
+                status = (
+                    result.status
+                    if isinstance(result, ExecResult)
+                    else ("done" if result.startswith("✅") else "failed")
+                )
+                wrote = finish_exec_intent(
+                    conn,
+                    intent_id,
+                    status=status,
+                    result_text=str(result),
+                    expect_status="confirmed",
+                )
+                if not wrote:
+                    return {"ok": False, "reason": "lost_write", "status": status}
+                if prefix == "ms:":
+                    position_gone = str(result) in {MSG_ALREADY_CLOSED, _reason_th("wrong_side")}
+                    _strip_ms_buttons(position_gone=position_gone)
+                    if markup is not None:
+                        send(result, reply_markup=markup)
+                    else:
+                        send(result)
+                elif mid is not None and markup is None and prefix == "ey:":
+                    edit(int(mid), result, reply_markup={"inline_keyboard": []})
+                    # Telegram does not notify on edits — send a new message for non-success.
+                    if status != "done":
+                        send(result)
+                elif markup is not None:
                     send(result, reply_markup=markup)
                 else:
                     send(result)
-            elif mid is not None and markup is None and prefix == "ey:":
-                edit(int(mid), result, reply_markup={"inline_keyboard": []})
-                # Telegram does not notify on edits — send a new message for non-success.
-                if status != "done":
-                    send(result)
-            elif markup is not None:
-                send(result, reply_markup=markup)
-            else:
-                send(result)
-            return {"ok": status == "done", "result": result, "status": status}
+                return {"ok": status == "done", "result": result, "status": status}
 
-        try:
-            if prefix == "ey:":
-                try:
-                    stale = _stale_card_levels(conn, intent, client, now_ms_value=ts)
-                    if stale:
-                        text = _reason_th(stale)
+            try:
+                if prefix == "ey:":
+                    try:
+                        stale = _stale_card_levels(conn, intent, client, now_ms_value=ts)
+                        if stale:
+                            text = _reason_th(stale)
+                            finish_exec_intent(
+                                conn,
+                                intent_id,
+                                status="expired",
+                                result_text=text,
+                                expect_status="confirmed",
+                            )
+                            if mid is not None:
+                                edit(int(mid), text, reply_markup={"inline_keyboard": []})
+                            send(text)
+                            return {"ok": False, "reason": stale}
+                        guard = _confirm_guards_entry(conn, intent, client, now_ms_value=ts)
+                    except (httpx.HTTPError, ProviderError) as exc:
+                        logger.warning("confirm guards network error %s", type(exc).__name__)
+                        text = _preorder_fail_text(prefix)
                         finish_exec_intent(
                             conn,
                             intent_id,
-                            status="expired",
+                            status="failed",
                             result_text=text,
                             expect_status="confirmed",
                         )
                         if mid is not None:
                             edit(int(mid), text, reply_markup={"inline_keyboard": []})
                         send(text)
-                        return {"ok": False, "reason": stale}
-                    guard = _confirm_guards_entry(conn, intent, client, now_ms_value=ts)
-                except (httpx.HTTPError, ProviderError) as exc:
-                    logger.warning("confirm guards network error %s", type(exc).__name__)
+                        return {"ok": False, "reason": "binance_unreachable"}
+                    if guard:
+                        text = _reason_th(guard)
+                        status = "expired" if guard == "expired" else "failed"
+                        finish_exec_intent(
+                            conn,
+                            intent_id,
+                            status=status,
+                            result_text=text,
+                            expect_status="confirmed",
+                        )
+                        if mid is not None:
+                            edit(int(mid), text, reply_markup={"inline_keyboard": []})
+                            send(text)
+                        else:
+                            send(text)
+                        return {"ok": False, "reason": guard}
+                    result = run_entry_sequence(conn, intent_id, trade=client)
+                    return _finish_send(result)
+
+                if prefix == "ms:":
+                    result = run_move_stop_sequence(
+                        conn,
+                        intent_id,
+                        trade=client,
+                        send=send,
+                        now_ms_value=ts,
+                    )
+                    return _finish_send(result)
+
+                result = run_exit_sequence(conn, intent_id, trade=client)
+                return _finish_send(result)
+            except Exception:  # noqa: BLE001
+                logger.exception("exec callback failed after claim intent_id=%s", intent_id)
+                # If an order step was already logged, keep unknown — never MSG_HANDLER_ERROR (retry).
+                logged = conn.execute(
+                    """
+                    SELECT 1 FROM assist_exec_log
+                    WHERE intent_id=? AND step IN (
+                        'market', 'stop', 'exit_market', 'move_stop_place', 'tp'
+                    )
+                    LIMIT 1
+                    """,
+                    (intent_id,),
+                ).fetchone()
+                if logged is not None:
+                    text = MSG_OUTCOME_UNKNOWN
+                    finish_exec_intent(
+                        conn,
+                        intent_id,
+                        status="unknown",
+                        result_text=text,
+                        expect_status="confirmed",
+                    )
+                else:
                     text = _preorder_fail_text(prefix)
                     finish_exec_intent(
                         conn,
@@ -3370,76 +3478,14 @@ def handle_exec_callback(
                         result_text=text,
                         expect_status="confirmed",
                     )
-                    if mid is not None:
-                        edit(int(mid), text, reply_markup={"inline_keyboard": []})
-                    send(text)
-                    return {"ok": False, "reason": "binance_unreachable"}
-                if guard:
-                    text = _reason_th(guard)
-                    status = "expired" if guard == "expired" else "failed"
-                    finish_exec_intent(
-                        conn,
-                        intent_id,
-                        status=status,
-                        result_text=text,
-                        expect_status="confirmed",
-                    )
-                    if mid is not None:
-                        edit(int(mid), text, reply_markup={"inline_keyboard": []})
-                        send(text)
-                    else:
-                        send(text)
-                    return {"ok": False, "reason": guard}
-                result = run_entry_sequence(conn, intent_id, trade=client)
-                return _finish_send(result)
-
-            if prefix == "ms:":
-                result = run_move_stop_sequence(
-                    conn,
-                    intent_id,
-                    trade=client,
-                    send=send,
-                    now_ms_value=ts,
-                )
-                return _finish_send(result)
-
-            result = run_exit_sequence(conn, intent_id, trade=client)
-            return _finish_send(result)
-        except Exception:  # noqa: BLE001
-            logger.exception("exec callback failed after claim intent_id=%s", intent_id)
-            # If an order step was already logged, keep unknown — never MSG_HANDLER_ERROR (retry).
-            logged = conn.execute(
-                """
-                SELECT 1 FROM assist_exec_log
-                WHERE intent_id=? AND step IN (
-                    'market', 'stop', 'exit_market', 'move_stop_place', 'tp'
-                )
-                LIMIT 1
-                """,
-                (intent_id,),
-            ).fetchone()
-            if logged is not None:
-                text = MSG_OUTCOME_UNKNOWN
-                finish_exec_intent(
-                    conn,
-                    intent_id,
-                    status="unknown",
-                    result_text=text,
-                    expect_status="confirmed",
-                )
-            else:
-                text = _preorder_fail_text(prefix)
-                finish_exec_intent(
-                    conn,
-                    intent_id,
-                    status="failed",
-                    result_text=text,
-                    expect_status="confirmed",
-                )
-            if prefix == "ms:":
-                _strip_ms_buttons()
-            send(text)
+                if prefix == "ms:":
+                    _strip_ms_buttons()
+                send(text)
             return {"ok": False, "reason": "handler_error"}
+        finally:
+            # After the order attempt, success or failure. A log error stays
+            # inside record_intent_action and cannot unwind the order.
+            record_intent_action(conn, intent, action="tap", action_at_ms=ts)
 
     return {"ok": False, "unhandled": data}
 

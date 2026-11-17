@@ -54,6 +54,20 @@ EXIT_LABELS: dict[str, str] = {
     "manual": "มือ",
     "unknown": "ไม่ทราบชนิด",
 }
+# Finer than exit_kind. Old rows with NULL exit_source keep the exit_kind label.
+EXIT_SOURCE_LABELS: dict[str, str] = {
+    "initial_stop": "initial stop",
+    "be_stop": "BE",
+    "trail_stop": "trail",
+    "moved_stop": "stop ที่เลื่อน",
+    "tp": "TP",
+    "manual": "มือ",
+    "manual_stop": "stop ที่ตั้งเอง",
+    "early_exit": "⚠️ ปิดก่อนแผน",
+    "owner_exit": "ปิดตามปุ่ม",
+    "emergency": "ปิดฉุกเฉิน",
+    "unknown": "ไม่ทราบชนิด",
+}
 PLAN_EXIT_KINDS = frozenset({"stop", "tp"})
 ADVICE_EXIT_KINDS = frozenset({"owner_exit", "emergency"})
 NOTE_MAX = 500
@@ -566,8 +580,8 @@ def _insert_missing(conn: Any, *, since_ms: int, now_ms: int) -> list[str]:
         """
         SELECT entry_order_id, intent_id, signal_id, symbol, side, entry_time_ms,
                entry_qty, entry_fill_avg, planned_stop, loss_at_stop, exit_time_ms,
-               exit_fill_avg, exit_kind, exit_order_ids, realized_pnl_usdt, commission_usdt,
-               funding_usdt, net_r_real, status
+               exit_fill_avg, exit_kind, exit_source, exit_order_ids, realized_pnl_usdt,
+               commission_usdt, funding_usdt, net_r_real, status
         FROM assist_real_trade
         WHERE entry_time_ms >= ? AND status = 'closed' AND side IN ('long', 'short')
         """,
@@ -925,7 +939,13 @@ def _exit_line(
     exit_label: str | None = None,
 ) -> str:
     kind = str(trade.get("exit_kind") or "")
-    label = exit_label if exit_label is not None else EXIT_LABELS.get(kind, kind or "ไม่ทราบชนิด")
+    source = str(trade.get("exit_source") or "")
+    if exit_label is not None:
+        label = exit_label
+    elif source:
+        label = EXIT_SOURCE_LABELS.get(source, source)
+    else:
+        label = EXIT_LABELS.get(kind, kind or "ไม่ทราบชนิด")
     advice = _last_advice(conn, trade)
     if advice is None:
         return f"ปิด: {label}"
@@ -1128,7 +1148,7 @@ def _trade_row(conn: Any, entry_order_id: str) -> dict[str, Any] | None:
         """
         SELECT entry_order_id, intent_id, signal_id, symbol, side, entry_time_ms,
                entry_qty, entry_fill_avg, planned_stop, loss_at_stop, exit_time_ms,
-               exit_fill_avg, exit_kind, realized_pnl_usdt, commission_usdt,
+               exit_fill_avg, exit_kind, exit_source, realized_pnl_usdt, commission_usdt,
                funding_usdt, net_r_real, status
         FROM assist_real_trade WHERE entry_order_id=?
         """,

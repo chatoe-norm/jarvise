@@ -370,8 +370,8 @@ def test_n_legacy_risk_above_max(tmp_path: Path) -> None:
 
 def test_n_migration_28(tmp_path: Path) -> None:
     fresh = open_db(tmp_path / "fresh.db")
-    assert SCHEMA_VERSION == 31
-    assert schema_version(fresh) == 31
+    assert SCHEMA_VERSION == 32
+    assert schema_version(fresh) == 32
     edge = get_edge(fresh)
     assert edge["week_risk_id"] is None
     assert edge["week_risk_pct"] is None
@@ -393,7 +393,7 @@ def test_n_migration_28(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 31
+    assert schema_version(conn) == 32
     row = conn.execute(
         """
         SELECT streak_anchor_ms, week_pause_id, day_pause_id, resume_alerted,

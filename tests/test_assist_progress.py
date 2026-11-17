@@ -32,10 +32,13 @@ from jarvise_assist.journal import _exit_line, _last_advice
 from jarvise_assist.keyboard import progress_keyboard
 from jarvise_assist.listen import process_update
 from jarvise_assist.messages import (
+    PROGRESS_RULE_LINE,
     _fmt_price_tick,
     _lock_at_stop,
+    approx_r_after_fees,
     format_progress_alert,
     progress_alert_after_tap,
+    stop_gap_r,
 )
 from jarvise_assist.store import insert_exec_intent, insert_watch_advice, write_settings
 from jarvise_assist.watch import run_assist_watch
@@ -46,7 +49,7 @@ INITIAL_STOP = Decimal("0.1748")
 TICK = Decimal("0.0001")
 QTY = Decimal("-100")
 SUGGESTED_BE = Decimal("0.1670")
-FOOTER = "แจ้งเพื่อทราบ · กติกาเดิม: เลื่อน BE เมื่อแท่ง 1h ปิดเกิน +0.5R · trail เมื่อเกิน +1R"
+FOOTER = PROGRESS_RULE_LINE
 
 
 def _r_mark(r: str) -> Decimal:
@@ -471,6 +474,7 @@ def test_progress_live_attaches_the_early_close_button(
         "entry": "0.1673",
         "source": "progress",
         "level": "0.5",
+        "early_close": True,
     }
     assert expires_at == day + 120_000
     assert alerts[0]["reply_markup"] == progress_keyboard(str(intent_id), early=True)
@@ -610,6 +614,20 @@ def test_progress_live_deduped_move_offers_move_and_early_close(
         initial_stop=INITIAL_STOP,
         new_stop=SUGGESTED_BE,
     )
+    after_fees = approx_r_after_fees(
+        side="short",
+        qty=Decimal("100"),
+        entry=ENTRY,
+        initial_stop=INITIAL_STOP,
+        new_stop=SUGGESTED_BE,
+    )
+    gap_r = stop_gap_r(
+        side="short",
+        entry=ENTRY,
+        initial_stop=INITIAL_STOP,
+        mark=_r_mark("0.5"),
+        new_stop=SUGGESTED_BE,
+    )
     expected = format_progress_alert(
         symbol="ADAUSDT",
         side="short",
@@ -624,6 +642,8 @@ def test_progress_live_deduped_move_offers_move_and_early_close(
         pending_stop=SUGGESTED_BE,
         pending_source="breakeven",
         pending_lock_r=lock_r,
+        pending_after_fees=after_fees,
+        pending_gap_r=gap_r,
         move_button=True,
         move_expires_at_ms=day + MOVE_STOP_TTL_MS,
         early_close=True,
@@ -644,6 +664,7 @@ def test_progress_live_deduped_move_offers_move_and_early_close(
         "entry": "0.1673",
         "source": "progress",
         "level": "0.5",
+        "early_close": True,
     }
     move_preview = json.loads(by_kind["move_stop"][2])
     assert move_preview == {

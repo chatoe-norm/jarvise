@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
+from jarvise_assist.exit_log import exit_source_for_close, lookup_atr_at_entry
 from jarvise_assist.futures import FAPI_HISTORY_WINDOW_MS, BinanceFuturesClient
 from jarvise_assist.quick_tags import quick_income_predicate
 from jarvise_assist.sizing import round_level_to_tick
@@ -990,6 +991,32 @@ def build_real_rows(
                     if d and "stop_detail" not in exit_meta:
                         exit_meta["stop_detail"] = d
 
+            stop_detail = entry.get("stop_detail")
+            if stop_detail is None:
+                for item in entry["exit_details"]:
+                    if item:
+                        stop_detail = item
+                        break
+            exit_source = None
+            if closed:
+                exit_source = exit_source_for_close(
+                    conn,
+                    exit_kind=exit_kind,
+                    stop_detail=str(stop_detail) if stop_detail else None,
+                    symbol=symbol,
+                    side=str(entry["side"]),
+                    entry_time_ms=entry.get("entry_time_ms"),
+                    exit_time_ms=exit_time,
+                    orders_by_id=orders_by_id,
+                    exit_order_ids=[str(oid) for oid in entry["exit_order_ids"]],
+                    move_stop_by_cid=move_stop_by_cid,
+                )
+            atr_at_entry = lookup_atr_at_entry(
+                conn,
+                symbol=symbol,
+                side=str(entry["side"]),
+                entry_time_ms=entry.get("entry_time_ms"),
+            )
             rows_out.append(
                 {
                     "intent_id": entry["intent_id"],
@@ -1023,6 +1050,8 @@ def build_real_rows(
                     "drift_signal_bps": drift,
                     "slip_stop_bps": slip_stop,
                     "income_status": income_status,
+                    "exit_source": exit_source,
+                    "atr_at_entry": atr_at_entry,
                     "status": "closed" if closed else "open",
                     "updated_at_ms": end,
                 }
@@ -1074,6 +1103,8 @@ def build_real_rows(
                     "drift_signal_bps": None,
                     "slip_stop_bps": None,
                     "income_status": None,
+                    "exit_source": None,
+                    "atr_at_entry": None,
                     "status": "unmatched",
                     "updated_at_ms": end,
                 }
@@ -1115,6 +1146,8 @@ _INSERT_COLS = (
     "drift_signal_bps",
     "slip_stop_bps",
     "income_status",
+    "exit_source",
+    "atr_at_entry",
     "status",
     "updated_at_ms",
 )
@@ -1131,6 +1164,21 @@ def sync_real_trades(
     start = int(since_ms)
     rows = build_real_rows(conn, client, since_ms=start, until_ms=until_ms)
     with transaction(conn):
+        # A stored ATR must survive the delete/insert. COALESCE(preserved, built).
+        preserved: dict[str, Any] = {}
+        prior = conn.execute(
+            """
+            SELECT entry_order_id, atr_at_entry FROM assist_real_trade
+            WHERE entry_time_ms >= ? AND atr_at_entry IS NOT NULL
+            """,
+            (start,),
+        )
+        for raw in prior:
+            item = dict(raw) if hasattr(raw, "keys") else None
+            if item is None:
+                preserved[str(raw[0])] = raw[1]
+            else:
+                preserved[str(item["entry_order_id"])] = item["atr_at_entry"]
         conn.execute(
             "DELETE FROM assist_real_trade WHERE entry_time_ms >= ?",
             (start,),
@@ -1138,6 +1186,11 @@ def sync_real_trades(
         placeholders = ",".join("?" for _ in _INSERT_COLS)
         col_sql = ",".join(_INSERT_COLS)
         for row in rows:
+            oid = str(row.get("entry_order_id") or "")
+            built = row.get("atr_at_entry")
+            stored_atr = preserved.get(oid)
+            # COALESCE(preserved, built): a non-NULL snapshot is never replaced.
+            row["atr_at_entry"] = stored_atr if stored_atr is not None else built
             conn.execute(
                 f"INSERT INTO assist_real_trade ({col_sql}) VALUES ({placeholders})",
                 [row.get(c) for c in _INSERT_COLS],
@@ -1833,7 +1886,13 @@ def _due_income_rows(conn: Any, now_ms: int) -> list[dict[str, Any]]:
 def _upsert_real_row(conn: Any, row: dict[str, Any]) -> None:
     placeholders = ",".join("?" for _ in _INSERT_COLS)
     col_sql = ",".join(_INSERT_COLS)
-    updates = ", ".join(f"{col}=excluded.{col}" for col in _INSERT_COLS if col != "entry_order_id")
+    updates = ", ".join(
+        "atr_at_entry=COALESCE(assist_real_trade.atr_at_entry, excluded.atr_at_entry)"
+        if col == "atr_at_entry"
+        else f"{col}=excluded.{col}"
+        for col in _INSERT_COLS
+        if col != "entry_order_id"
+    )
     conn.execute(
         f"INSERT INTO assist_real_trade ({col_sql}) VALUES ({placeholders}) "
         f"ON CONFLICT(entry_order_id) DO UPDATE SET {updates}",

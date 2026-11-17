@@ -891,6 +891,105 @@ def _migrate_partner_request_source(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "partner_request", "source", "TEXT DEFAULT NULL")
 
 
+def _migrate_assist_exit_telemetry(conn: sqlite3.Connection) -> None:
+    """Exit-card snapshots, tap/ignore, and exchange-stop history. Additive only.
+
+    Realised commission and funding stay on assist_real_trade (commission_usdt,
+    funding_usdt). exit_source and atr_at_entry are new nullable columns beside them.
+    Existing rows are not rewritten.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_exit_card (
+            id TEXT PRIMARY KEY,
+            advice_id TEXT,
+            intent_id TEXT,
+            symbol TEXT NOT NULL,
+            position_side TEXT NOT NULL,
+            side TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            source TEXT,
+            shown_at_ms INTEGER NOT NULL,
+            mark REAL,
+            wick REAL,
+            close_1h REAL,
+            r_now REAL,
+            suggested_stop REAL,
+            approx_r_after_fees REAL,
+            exchange_stop REAL,
+            had_button INTEGER NOT NULL DEFAULT 0,
+            delivered INTEGER NOT NULL DEFAULT 1,
+            atr_at_entry REAL,
+            gap_r REAL,
+            entry REAL,
+            initial_stop REAL,
+            qty REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_exit_card_pos
+        ON assist_exit_card (symbol, position_side, shown_at_ms)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_exit_response (
+            id TEXT PRIMARY KEY,
+            card_id TEXT,
+            intent_id TEXT,
+            symbol TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            action TEXT NOT NULL,
+            shown_at_ms INTEGER,
+            action_at_ms INTEGER NOT NULL,
+            latency_ms INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_assist_exit_response_intent_action
+        ON assist_exit_response (intent_id, action)
+        WHERE intent_id IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_assist_exit_response_card_action
+        ON assist_exit_response (card_id, action)
+        WHERE card_id IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_exchange_stop (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            position_side TEXT NOT NULL,
+            observed_at_ms INTEGER NOT NULL,
+            stop_price REAL,
+            covered_qty REAL,
+            position_qty REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_exchange_stop_pos
+        ON assist_exchange_stop (symbol, position_side, observed_at_ms)
+        """
+    )
+    _add_column_if_missing(conn, "assist_exit_card", "gap_r", "REAL")
+    _add_column_if_missing(conn, "assist_exit_card", "entry", "REAL")
+    _add_column_if_missing(conn, "assist_exit_card", "initial_stop", "REAL")
+    _add_column_if_missing(conn, "assist_exit_card", "qty", "REAL")
+    _add_column_if_missing(conn, "assist_real_trade", "exit_source", "TEXT")
+    _add_column_if_missing(conn, "assist_real_trade", "atr_at_entry", "REAL")
+    _add_column_if_missing(conn, "assist_watch_position", "atr_at_entry", "REAL")
+
+
 def _migrate_assist_journal(conn: sqlite3.Connection) -> None:
     """Owner grade card per closed assist trade. Never copies fills or places orders."""
     conn.execute(
@@ -1306,6 +1405,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (29, "assist_pause_reason", _migrate_assist_pause_reason, True),
     (30, "partner_ledger", _migrate_partner_ledger, True),
     (31, "partner_request_source", _migrate_partner_request_source, True),
+    (32, "assist_exit_telemetry", _migrate_assist_exit_telemetry, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
