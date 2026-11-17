@@ -398,13 +398,19 @@ def _fmt_r_level(level: Decimal) -> str:
     return text or "0"
 
 
-def progress_alert_after_tap(text: str) -> str:
-    """Drop stale move/press lines from a progress alert after an ms: tap or expiry."""
-    kept = [
-        line
-        for line in str(text).splitlines()
-        if not (line.startswith("📌 ยังไม่ได้เลื่อน") or line.startswith("กด "))
-    ]
+def progress_alert_after_tap(text: str, *, keep_close_line: bool = False) -> str:
+    """Drop stale move/press lines from a progress alert after an ms: tap or expiry.
+
+    With keep_close_line=False (default), output is byte-identical to the pre-keep-xx
+    strip: every "กด " line goes. With True, the close explanation line stays.
+    """
+    kept: list[str] = []
+    for line in str(text).splitlines():
+        if line.startswith("📌 ยังไม่ได้เลื่อน") or line.startswith("กด 🛡"):
+            continue
+        if line.startswith("กด ") and not keep_close_line:
+            continue
+        kept.append(line)
     return "\n".join(kept)
 
 

@@ -627,6 +627,8 @@ def _process_universe_position(
                             "tick": str(tick),
                             "via": "progress",
                             "level": str(top_level),
+                            "exit_intent_id": exit_id,
+                            "early_close": not exit_active,
                         },
                         created_at_ms=now_ms,
                         expires_at_ms=move_expires,

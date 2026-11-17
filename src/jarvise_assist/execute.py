@@ -40,7 +40,7 @@ from jarvise_assist.futures import (
     order_stop_price,
     protective_stop_coverage,
 )
-from jarvise_assist.keyboard import entry_confirm_keyboard, move_stop_keyboard
+from jarvise_assist.keyboard import entry_confirm_keyboard, move_stop_keyboard, progress_keyboard
 from jarvise_assist.messages import (
     _fmt_price_tick,
     fmt_price,
@@ -3019,6 +3019,30 @@ def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> tuple
     return cancelled, all_ok
 
 
+def _progress_close_keyboard(conn: Any, move_intent: dict[str, Any]) -> dict[str, Any] | None:
+    """Rebuild the progress xx: row when the paired exit intent is still live.
+
+    Live means kind exit, same symbol/side, status preview — exit TTL is ignored
+    (xx: has no button expiry). Does not write the exit intent.
+    """
+    preview = move_intent.get("preview") or {}
+    if not isinstance(preview, dict) or preview.get("via") != "progress":
+        return None
+    exit_id = preview.get("exit_intent_id")
+    if not exit_id:
+        return None
+    exit_intent = get_exec_intent(conn, str(exit_id))
+    if exit_intent is None or exit_intent.get("kind") != "exit":
+        return None
+    if exit_intent.get("symbol") != move_intent.get("symbol"):
+        return None
+    if exit_intent.get("side") != move_intent.get("side"):
+        return None
+    if exit_intent.get("status") != "preview":
+        return None
+    return progress_keyboard(str(exit_id), early=bool(preview.get("early_close", True)))
+
+
 def handle_exec_callback(
     conn: Any,
     data: str,
@@ -3200,15 +3224,21 @@ def handle_exec_callback(
             if isinstance(preview, dict):
                 advice_body = preview.get("advice_text")
             edit_body = str(advice_body) if (prefix == "ms:" and advice_body) else MSG_EXPIRED
+            keep: dict[str, Any] | None = None
             if (
                 prefix == "ms:"
                 and advice_body
                 and isinstance(preview, dict)
                 and preview.get("via") == "progress"
             ):
-                edit_body = progress_alert_after_tap(edit_body)
+                keep = _progress_close_keyboard(conn, intent)
+                edit_body = progress_alert_after_tap(edit_body, keep_close_line=keep is not None)
             if mid is not None:
-                edit(int(mid), edit_body, reply_markup={"inline_keyboard": []})
+                edit(
+                    int(mid),
+                    edit_body,
+                    reply_markup=keep if keep is not None else {"inline_keyboard": []},
+                )
             send(expired_text)
             return {"ok": False, "reason": "expired"}
         if prefix == "ey:" and symbol_has_in_flight_exec(conn, str(intent["symbol"]), exclude_id=intent_id):
@@ -3264,14 +3294,20 @@ def handle_exec_callback(
             send(text)
             return {"ok": False, "reason": "binance_unreachable"}
 
-        def _strip_ms_buttons() -> None:
+        def _strip_ms_buttons(*, position_gone: bool = False) -> None:
             if mid is None or prefix != "ms:":
                 return
             preview = intent.get("preview") or {}
             body = preview.get("advice_text") if isinstance(preview, dict) else None
+            keep: dict[str, Any] | None = None
             if body and isinstance(preview, dict) and preview.get("via") == "progress":
-                body = progress_alert_after_tap(str(body))
-            edit(int(mid), str(body) if body else MSG_CANCELLED, reply_markup={"inline_keyboard": []})
+                keep = None if position_gone else _progress_close_keyboard(conn, intent)
+                body = progress_alert_after_tap(str(body), keep_close_line=keep is not None)
+            edit(
+                int(mid),
+                str(body) if body else MSG_CANCELLED,
+                reply_markup=keep if keep is not None else {"inline_keyboard": []},
+            )
 
         def _finish_send(result: str, *, markup: dict[str, Any] | None = None) -> dict[str, Any]:
             status = (
@@ -3289,7 +3325,8 @@ def handle_exec_callback(
             if not wrote:
                 return {"ok": False, "reason": "lost_write", "status": status}
             if prefix == "ms:":
-                _strip_ms_buttons()
+                position_gone = str(result) in {MSG_ALREADY_CLOSED, _reason_th("wrong_side")}
+                _strip_ms_buttons(position_gone=position_gone)
                 if markup is not None:
                     send(result, reply_markup=markup)
                 else:
