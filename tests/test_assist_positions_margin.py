@@ -1,4 +1,4 @@
-"""Owner open-positions margin line (เงินที่วางจริง)."""
+"""Owner open-positions margin line."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ def test_render_isolated_margin(tmp_path: Path) -> None:
         steps={"BTCUSDT": D("0.001")},
     )
     text = render_open_positions(conn, futures=fake, now_ms=1)
-    assert "• LONG · qty 0.05 · เงินที่วางจริง (margin) 2,280.86 USDT" in text
+    assert "• LONG · qty 0.05 · margin 2,280.86 USDT" in text
     conn.close()
 
 
@@ -139,7 +139,7 @@ def test_render_isolated_rounds_half_up(tmp_path: Path) -> None:
         steps={"BTCUSDT": D("0.001")},
     )
     text = render_open_positions(conn, futures=fake, now_ms=1)
-    assert "เงินที่วางจริง (margin) 1,234.57 USDT" in text
+    assert "margin 1,234.57 USDT" in text
     conn.close()
 
 
@@ -157,7 +157,7 @@ def test_render_cross_margin(tmp_path: Path) -> None:
         steps={"BTCUSDT": D("0.001")},
     )
     text = render_open_positions(conn, futures=fake, now_ms=1)
-    assert "เงินที่วางจริง (margin) ≈ 1,045.20 USDT (cross)" in text
+    assert "margin ≈ 1,045.20 USDT (cross)" in text
     conn.close()
 
 
@@ -169,7 +169,7 @@ def test_render_missing_margin(tmp_path: Path) -> None:
         steps={"BTCUSDT": D("0.001")},
     )
     text = render_open_positions(conn, futures=fake, now_ms=1)
-    assert "เงินที่วางจริง (margin) —" in text
+    assert "margin —" in text
     conn.close()
 
 
@@ -181,7 +181,7 @@ def test_render_non_universe_margin(tmp_path: Path) -> None:
         steps={"PEPEUSDT": D("1")},
     )
     text = render_open_positions(conn, futures=fake, now_ms=1)
-    assert "• LONG · qty 1000 · เงินที่วางจริง (margin) — · no data, no advice" in text
+    assert "• LONG · qty 1000 · margin — · no data, no advice" in text
     conn.close()
 
 
@@ -205,8 +205,8 @@ def test_render_hedge_long_short_own_wallets(tmp_path: Path) -> None:
         steps={"BTCUSDT": D("0.001")},
     )
     text = render_open_positions(conn, futures=fake, now_ms=1)
-    assert "• LONG · qty 0.05 · เงินที่วางจริง (margin) 2,280.86 USDT" in text
-    assert "• SHORT · qty 0.02 · เงินที่วางจริง (margin) 900.50 USDT" in text
+    assert "• LONG · qty 0.05 · margin 2,280.86 USDT" in text
+    assert "• SHORT · qty 0.02 · margin 900.50 USDT" in text
     conn.close()
 
 
@@ -218,7 +218,7 @@ def test_render_margin_asset_usdc(tmp_path: Path) -> None:
         steps={"BTCUSDT": D("0.001")},
     )
     text = render_open_positions(conn, futures=fake, now_ms=1)
-    assert "เงินที่วางจริง (margin) 100.25 USDC" in text
+    assert "margin 100.25 USDC" in text
     conn.close()
 
 
@@ -269,7 +269,7 @@ def test_partner_view_hides_margin(tmp_path: Path) -> None:
 
     text = render_partner_positions(conn, FakePosClient(), now_ms=1)
     # Symbol may end in USDT; forbid the margin label and amount/unit copy.
-    assert "เงินที่วางจริง" not in text
+    assert "margin" not in text.lower()
     assert " USDT" not in text
     assert "2,280" not in text
     conn.close()
