@@ -521,7 +521,7 @@ def _pa_cb(
 def test_cb_pa_ry_warn_blocks_confirm(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "ry_warn.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     t_xfer = NOW + 11
@@ -550,7 +550,7 @@ def test_cb_pa_ry_warn_blocks_confirm(tmp_path: Path, monkeypatch: Any, env_chat
 def test_cb_pa_rf_within_900_confirms(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "rf_ok.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     rid = str(created["request_id"])
     t_xfer = NOW + 11
     client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_rf")])
@@ -580,7 +580,7 @@ def test_cb_pa_rf_within_900_confirms(tmp_path: Path, monkeypatch: Any, env_chat
 def test_cb_pa_rf_after_901_reruns_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "rf_old.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     rid = str(created["request_id"])
     t_xfer = NOW + 11
     client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_old")])
@@ -623,7 +623,7 @@ def test_cb_malformed_force(tmp_path: Path, monkeypatch: Any, env_chat: None, da
 def test_cb_clean_pa_ry_first_tap(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "ry_clean.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     rid = str(created["request_id"])
     # Match Bob's recorded deposit so the convert confirm is clean
     client = FakeClient([_xfer(time_ms=NOW + 2, amount="600", tran_id="bob_dep_clean")])
@@ -640,7 +640,7 @@ def test_cb_clean_pa_ry_first_tap(tmp_path: Path, monkeypatch: Any, env_chat: No
 def test_cb_double_tap_pa_ry_settled(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "ry_dbl.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     rid = str(created["request_id"])
     client = FakeClient([_xfer(time_ms=NOW + 2, amount="600", tran_id="bob_dep_dbl")])
     client.wallet = _PROFIT_V
@@ -661,7 +661,7 @@ def test_cb_pa_dy_matching_inflow_confirms(tmp_path: Path, monkeypatch: Any, env
     conn = open_db(tmp_path / "dy_ok.db")
     _init_ledger(conn)
     bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
-    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"))
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"), source="admin")
     rid = str(created["request_id"])
     t_xfer = NOW + 3
     client = FakeClient([_xfer(time_ms=t_xfer, amount="100", tran_id="dep_match")])
@@ -683,7 +683,7 @@ def test_cb_pa_dy_no_inflow_warns_no_event(tmp_path: Path, monkeypatch: Any, env
     _init_ledger(conn)
     bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
     n_ev = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
-    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"))
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"), source="admin")
     rid = str(created["request_id"])
     client = FakeClient()
     client.wallet = "1100"
@@ -698,7 +698,7 @@ def test_cb_pa_dy_no_inflow_warns_no_event(tmp_path: Path, monkeypatch: Any, env
 def test_cb_guard_raising_warns_type_only(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "raise.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     rid = str(created["request_id"])
     client = FakeClient()
     client.wallet = _PROFIT_V
@@ -720,7 +720,7 @@ def test_cb_guard_raising_warns_type_only(tmp_path: Path, monkeypatch: Any, env_
 def test_cb_second_warning_replaces_marker_once(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "repl.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     rid = str(created["request_id"])
     t_xfer = NOW + 11
     client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_rep")])
@@ -793,7 +793,7 @@ def test_cb_pa_dy_warn_then_df_override(tmp_path: Path, monkeypatch: Any, env_ch
     bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
     bob_id = str(bob["partner_id"])
     _bind_partner(conn, bob_id, tg="501", now_ms=NOW + 2)
-    created = ps.create_request(conn, bob_id, "deposit", NOW + 4, amount=D("100"))
+    created = ps.create_request(conn, bob_id, "deposit", NOW + 4, amount=D("100"), source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     client = FakeClient()
@@ -842,7 +842,7 @@ def test_cb_pa_dy_warn_then_df_override(tmp_path: Path, monkeypatch: Any, env_ch
 def test_cb_force_future_stamp_reruns_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "rf_future.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     t_xfer = NOW + 11
@@ -867,7 +867,7 @@ def test_cb_ry_warn_bound_partner_gets_nothing(tmp_path: Path, monkeypatch: Any,
     conn = open_db(tmp_path / "ry_bound.db")
     bob_id = _setup_bob_with_profit(conn)
     _bind_partner(conn, bob_id, tg="501", now_ms=NOW + 3)
-    created = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10)
+    created = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10, source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     t_xfer = NOW + 11
@@ -911,7 +911,7 @@ def test_cb_refusal_expired_before_guard(tmp_path: Path, monkeypatch: Any, env_c
     conn = open_db(tmp_path / "ref_exp.db")
     _init_ledger(conn)
     bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
-    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"))
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"), source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     expires = int(created["expires_at_ms"])
@@ -942,11 +942,13 @@ def test_cb_refusal_expired_before_guard(tmp_path: Path, monkeypatch: Any, env_c
 def test_cb_refusal_dy_payout_due_before_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "ref_dy_due.db")
     bob_id = _setup_bob_with_profit(conn)
-    wd = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10)
+    wd = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10, source="admin")
     assert wd.get("ok")
     assert ps.confirm_request(conn, str(wd["request_id"]), D(_PROFIT_V), NOW + 20).get("ok")
     carol = ps.create_partner(conn, name="Carol", now_ms=NOW + 25)
-    created = ps.create_request(conn, carol["partner_id"], "deposit", NOW + 30, amount=D("100"))
+    created = ps.create_request(
+        conn, carol["partner_id"], "deposit", NOW + 30, amount=D("100"), source="admin"
+    )
     assert created.get("ok")
     rid = str(created["request_id"])
     client = FakeClient()
@@ -966,12 +968,12 @@ def test_cb_refusal_dy_payout_due_before_guard(tmp_path: Path, monkeypatch: Any,
 def test_cb_refusal_payout_due_before_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "ref_due.db")
     bob_id = _setup_bob_with_profit(conn)
-    wd = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10)
+    wd = ps.create_request(conn, bob_id, "withdraw_profit", NOW + 10, source="admin")
     assert wd.get("ok")
     conf = ps.confirm_request(conn, str(wd["request_id"]), D(_PROFIT_V), NOW + 20)
     assert conf.get("ok")
     assert str(ps.get_request(conn, str(wd["request_id"]))["payout_state"]) == "due"
-    created = ps.create_request(conn, bob_id, "convert", NOW + 30)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 30, source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     client = FakeClient()
@@ -998,7 +1000,7 @@ def test_cb_refusal_not_this_kind_before_guard(tmp_path: Path, monkeypatch: Any,
     conn = open_db(tmp_path / "ref_kind.db")
     _init_ledger(conn)
     bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
-    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"))
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"), source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     client = FakeClient()
@@ -1029,7 +1031,7 @@ def test_cb_read_failure_shows_last_ok(tmp_path: Path, monkeypatch: Any, env_cha
     db = tmp_path / "read_fail.db"
     conn = open_db(db)
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     state = Path(str(db)).with_name("partner_audit_state.json")
@@ -1060,7 +1062,7 @@ def test_cb_read_failure_shows_last_ok(tmp_path: Path, monkeypatch: Any, env_cha
 def test_cb_edit_fails_sends_one_card(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "edit_fail.db")
     bob_id = _setup_bob_with_profit(conn)
-    created = ps.create_request(conn, bob_id, "convert", NOW + 10)
+    created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
     assert created.get("ok")
     rid = str(created["request_id"])
     t_xfer = NOW + 11

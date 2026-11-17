@@ -469,7 +469,16 @@ def test_admin_p_cv_does_not_use_portal_convert_month(
     conn.close()
 
 
-def test_legacy_null_source_convert_does_not_lock(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+def test_null_source_default_does_not_lock() -> None:
+    # Owner has not decided; flipping this constant must be a deliberate change.
+    assert partner_rules.NULL_SOURCE_LOCKS is False
+
+
+@pytest.mark.parametrize("null_locks", [False, True])
+def test_convert_source_lock_matrix(
+    tmp_path: Path, monkeypatch: Any, env_chat: None, null_locks: bool
+) -> None:
+    monkeypatch.setattr(partner_rules, "NULL_SOURCE_LOCKS", null_locks)
     conn = open_db(tmp_path / "cvlegacy.db")
     join_ms = _ms(2026, 9, 1)
     _init_pool(conn, monkeypatch, now_ms=join_ms - 10)
@@ -480,9 +489,35 @@ def test_legacy_null_source_convert_does_not_lock(tmp_path: Path, monkeypatch: A
     assert sub["ok"] is True
     rid = _pending_rid(conn, pid)
     _admin_confirm(conn, rid, monkeypatch=monkeypatch, wallet="1400", now_ms=t + 100)
+    # portal locks either way
     assert partner_rules.convert_used_this_month(conn, pid, t + 200) is True
-    conn.execute("UPDATE partner_request SET source = NULL WHERE id = ?", (rid,))
+    # admin never locks either way
+    conn.execute("UPDATE partner_request SET source = 'admin' WHERE id = ?", (rid,))
     assert partner_rules.convert_used_this_month(conn, pid, t + 200) is False
+    # NULL (pre-migration-31 row) follows the constant
+    conn.execute("UPDATE partner_request SET source = NULL WHERE id = ?", (rid,))
+    assert partner_rules.convert_used_this_month(conn, pid, t + 200) is null_locks
+    conn.close()
+
+
+def test_min_toasts_use_constants(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    monkeypatch.setattr(partner_rules, "MIN_CONVERT_PROFIT", D("1000"))
+    monkeypatch.setattr(partner_rules, "MIN_WITHDRAW_CASH", D("1000"))
+    monkeypatch.setattr(partner_rules, "CLOSE_MIN_DAYS", 45)
+    conn = open_db(tmp_path / "toasts.db")
+    join_ms = _ms(2026, 9, 1)
+    _init_pool(conn, monkeypatch, now_ms=join_ms - 10)
+    pid = _bind(conn, now_ms=join_ms - 5)
+    _deposit(conn, pid, D("200"), D("1200"), join_ms)
+    row = ps.get_partner(conn, pid)
+    assert row is not None
+    t = _ms(2026, 9, 10)
+    cv = partner_rules.block(conn, row, "convert", nav=D("1.4"), now_ms=t)
+    assert cv is not None and cv.code == "convert_min" and "1000 USDT" in cv.toast
+    wd = partner_rules.block(conn, row, "withdraw_profit", nav=D("1.4"), now_ms=t)
+    assert wd is not None and wd.code == "withdraw_min" and "1000 USDT" in wd.toast
+    cl = partner_rules.block(conn, row, "close", nav=None, now_ms=t)
+    assert cl is not None and cl.code == "close_too_soon" and "ครบ 45 วัน" in cl.toast
     conn.close()
 
 

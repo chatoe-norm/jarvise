@@ -717,7 +717,7 @@ def _handle_dep(
         send(thai_reason(plan.reason))
         return {"ok": False, "reason": plan.reason}
 
-    created = ps.create_request(conn, partner_id, "deposit", now_ms, amount=amount)
+    created = ps.create_request(conn, partner_id, "deposit", now_ms, amount=amount, source="admin")
     if not created.get("ok"):
         reason = str(created.get("reason") or "")
         if reason == "request_pending":
@@ -859,7 +859,7 @@ def _admin_request_message(
     if isinstance(av, AccountValueError):
         send(thai_reason(av.reason, detail=av.detail))
         return {"ok": False, "reason": av.reason}
-    created = ps.create_request(conn, str(row["id"]), kind, now_ms)
+    created = ps.create_request(conn, str(row["id"]), kind, now_ms, source="admin")
     if not created.get("ok"):
         send(thai_reason(str(created.get("reason") or "")))
         return {"ok": False, "reason": created.get("reason")}

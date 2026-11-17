@@ -429,7 +429,7 @@ def test_full_abc_sequence(tmp_path: Path, monkeypatch: Any, env_chat: None) -> 
     assert close_note
 
     # While due: new confirm refused, V not read
-    ps.create_request(conn, str(c["id"]), "deposit", NOW + 70, amount=D("50"))
+    ps.create_request(conn, str(c["id"]), "deposit", NOW + 70, amount=D("50"), source="admin")
     rid_block = conn.execute(
         "SELECT id FROM partner_request WHERE partner_id=? AND status='pending'", (str(c["id"]),)
     ).fetchone()["id"]
@@ -457,7 +457,7 @@ def test_full_abc_sequence(tmp_path: Path, monkeypatch: Any, env_chat: None) -> 
 
     # Also pa:ry blocked
     ps.reject_request(conn, rid_block, NOW + 72)
-    ps.create_request(conn, str(c["id"]), "convert", NOW + 73)
+    ps.create_request(conn, str(c["id"]), "convert", NOW + 73, source="admin")
     rid_ry = conn.execute(
         "SELECT id FROM partner_request WHERE partner_id=? AND status='pending'", (str(c["id"]),)
     ).fetchone()["id"]
@@ -716,7 +716,7 @@ def test_pa_ry_v_error_and_deposit_pending(tmp_path: Path, monkeypatch: Any, env
 
     # deposit pending blocks convert confirm
     b_id = str(conn.execute("SELECT id FROM partner WHERE name='B'").fetchone()["id"])
-    ps.create_request(conn, b_id, "deposit", NOW + 12, amount=D("50"))
+    ps.create_request(conn, b_id, "deposit", NOW + 12, amount=D("50"), source="admin")
     _patch_read(monkeypatch, cli)
     answers, answer = _answer_capture()
     pa.handle_partner_callback(

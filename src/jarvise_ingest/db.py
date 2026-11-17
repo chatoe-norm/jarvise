@@ -881,9 +881,14 @@ def _migrate_partner_ledger(conn: sqlite3.Connection) -> None:
         ON partner_request (partner_id) WHERE status = 'pending'
         """
     )
-    # 'portal' = partner tapped in the portal; 'admin' = owner `p cv/wd/close`.
-    # NULL = written before this column existed. Only 'portal' converts lock the month.
-    _add_column_if_missing(conn, "partner_request", "source", "TEXT")
+
+
+def _migrate_partner_request_source(conn: sqlite3.Connection) -> None:
+    """Who created a partner_request: 'portal' (partner tapped) or 'admin' (owner command).
+
+    Nullable. Existing rows are not rewritten, so a request created before migration 31 keeps NULL.
+    """
+    _add_column_if_missing(conn, "partner_request", "source", "TEXT DEFAULT NULL")
 
 
 def _migrate_assist_journal(conn: sqlite3.Connection) -> None:
@@ -1300,6 +1305,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (28, "assist_week_risk", _migrate_assist_week_risk, True),
     (29, "assist_pause_reason", _migrate_assist_pause_reason, True),
     (30, "partner_ledger", _migrate_partner_ledger, True),
+    (31, "partner_request_source", _migrate_partner_request_source, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

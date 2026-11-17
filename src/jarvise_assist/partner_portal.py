@@ -215,10 +215,6 @@ def _admin_request_buttons(request_id: str) -> dict[str, Any]:
     }
 
 
-def _fee_rate(row: sqlite3.Row) -> Decimal:
-    return Decimal(int(row["fee_rate_bps"])) / Decimal("10000")
-
-
 def _estimate(
     conn: sqlite3.Connection, row: sqlite3.Row, kind: str, av: AccountValue
 ) -> tuple[Decimal, Decimal, Decimal] | str:
@@ -230,7 +226,7 @@ def _estimate(
         return n.reason
     units = ps.units_from_e8(int(row["units_e8"]))
     cost = ps.usdt_from_micro(int(row["cost_micro"]))
-    fee_rate = _fee_rate(row)
+    fee_rate = ps._fee_rate_from_bps(int(row["fee_rate_bps"]))
     if kind == "convert":
         cv = pl.plan_convert(units=units, cost=cost, fee_rate=fee_rate, nav=n)
         if isinstance(cv, pl.Refusal):

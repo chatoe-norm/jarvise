@@ -797,7 +797,7 @@ def test_dep_confirm_convert_refused(tmp_path: Path, monkeypatch: Any, env_chat:
     _do_init(conn, monkeypatch)
     admin = ps.admin_partner(conn)
     assert admin is not None
-    req = ps.create_request(conn, str(admin["id"]), "convert", NOW + 10)
+    req = ps.create_request(conn, str(admin["id"]), "convert", NOW + 10, source="admin")
     assert req["ok"]
     rid = req["request_id"]
     client = FakeValueClient(wallet="1000")
@@ -1230,7 +1230,7 @@ def test_pa_dn_on_convert_refused(tmp_path: Path, monkeypatch: Any, env_chat: No
     _do_init(conn, monkeypatch)
     admin = ps.admin_partner(conn)
     assert admin is not None
-    req = ps.create_request(conn, str(admin["id"]), "convert", NOW + 10)
+    req = ps.create_request(conn, str(admin["id"]), "convert", NOW + 10, source="admin")
     rid = req["request_id"]
     answers, answer = _answer_capture()
     edited, edit = _edit_capture()
@@ -1307,7 +1307,7 @@ def test_handle_dep_pending_non_deposit(tmp_path: Path, monkeypatch: Any, env_ch
         conn, "p add B", message=_owner_msg(text="p add B"), send=send, futures=client, now_ms=NOW + 1
     )
     b = conn.execute("SELECT id FROM partner WHERE name='B'").fetchone()
-    ps.create_request(conn, str(b["id"]), "convert", NOW + 2)
+    ps.create_request(conn, str(b["id"]), "convert", NOW + 2, source="admin")
     sent2, send2 = _send_capture()
     pa.handle_partner_text(
         conn,

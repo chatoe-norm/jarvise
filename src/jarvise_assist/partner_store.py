@@ -984,19 +984,21 @@ def create_request(
     kind: str,
     now_ms: int,
     amount: Decimal | None = None,
-    source: str = "admin",
+    *,
+    source: str,
 ) -> dict[str, Any]:
     """Create a pending partner_request.
 
     For kind ``deposit``, ``quote_gross_micro`` holds the amount the partner
     states; all other quote_* columns stay NULL in this phase. ``source`` is
-    ``portal`` when the partner submitted it, ``admin`` for owner commands.
+    required: ``portal`` when the partner submitted it, ``admin`` for owner
+    commands. Unknown values return ``bad_source``.
     """
     with transaction(conn):
         if kind not in _REQUEST_KINDS:
             return {"ok": False, "reason": "bad_kind"}
         if source not in _REQUEST_SOURCES:
-            return {"ok": False, "reason": "bad_args"}
+            return {"ok": False, "reason": "bad_source"}
         quote_gross: int | None = None
         if kind == "deposit":
             if amount is None:

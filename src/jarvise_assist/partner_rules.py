@@ -20,6 +20,11 @@ MIN_CONVERT_PROFIT = Decimal("20")
 MIN_WITHDRAW_CASH = Decimal("20")
 CLOSE_MIN_DAYS = 30
 
+# Owner decision pending: does a convert whose request has source NULL (created
+# before migration 31) use up the monthly portal convert? False = it does not
+# lock (current behavior). Flip to True to treat NULL as 'portal'.
+NULL_SOURCE_LOCKS = False
+
 
 @dataclass(frozen=True)
 class Block:
@@ -63,8 +68,8 @@ def next_month_start(now_ms: int) -> date:
 def convert_used_this_month(conn: sqlite3.Connection, partner_id: str, now_ms: int) -> bool:
     """True when a portal-submitted convert was confirmed in the current Bangkok month.
 
-    Admin ``p cv`` converts (request source 'admin' or pre-column NULL) do not
-    use up the partner's monthly portal convert.
+    Admin ``p cv`` converts (request source 'admin') do not use up the
+    partner's monthly portal convert. NULL source follows ``NULL_SOURCE_LOCKS``.
     """
     local = datetime.fromtimestamp(int(now_ms) / 1000.0, tz=BANGKOK)
     month_start = datetime(local.year, local.month, 1, tzinfo=BANGKOK)
@@ -72,11 +77,15 @@ def convert_used_this_month(conn: sqlite3.Connection, partner_id: str, now_ms: i
     next_dt = datetime(nxt.year, nxt.month, nxt.day, tzinfo=BANGKOK)
     lo = int(month_start.timestamp() * 1000)
     hi = int(next_dt.timestamp() * 1000)
+    # The only NULL-source rule. NULL = request created before migration 31.
+    source_is_portal = (
+        "COALESCE(r.source, 'portal') = 'portal'" if NULL_SOURCE_LOCKS else "r.source = 'portal'"
+    )
     row = conn.execute(
-        """
+        f"""
         SELECT 1 FROM partner_event e
         JOIN partner_request r ON r.id = e.request_id
-        WHERE e.partner_id = ? AND e.kind = 'convert' AND r.source = 'portal'
+        WHERE e.partner_id = ? AND e.kind = 'convert' AND {source_is_portal}
           AND e.created_at_ms >= ? AND e.created_at_ms < ?
         LIMIT 1
         """,
@@ -95,10 +104,6 @@ def _pending(conn: sqlite3.Connection, partner_id: str, now_ms: int) -> bool:
         (str(partner_id), int(now_ms)),
     ).fetchone()
     return row is not None
-
-
-def _fee_rate(row: sqlite3.Row) -> Decimal:
-    return Decimal(int(row["fee_rate_bps"])) / Decimal("10000")
 
 
 def block(
@@ -151,7 +156,7 @@ def block(
         if days_left > 0:
             return Block(
                 code="close_too_soon",
-                toast=(f"ปิดพอร์ตได้เมื่อเข้าร่วมครบ 30 วัน · ตั้งแต่ {open_d.strftime('%d/%m/%Y')}"),
+                toast=(f"ปิดพอร์ตได้เมื่อเข้าร่วมครบ {CLOSE_MIN_DAYS} วัน · ตั้งแต่ {open_d.strftime('%d/%m/%Y')}"),
                 label=f"🔒 ปิดพอร์ต · อีก {days_left} วัน",
             )
         return None
@@ -170,7 +175,7 @@ def block(
 
     units = ps.units_from_e8(int(row["units_e8"]))
     cost = ps.usdt_from_micro(int(row["cost_micro"]))
-    fee_rate = _fee_rate(row)
+    fee_rate = ps._fee_rate_from_bps(int(row["fee_rate_bps"]))
     n = Decimal(nav)
 
     if kind == "convert":
@@ -184,7 +189,7 @@ def block(
         if plan.profit < MIN_CONVERT_PROFIT:
             return Block(
                 code="convert_min",
-                toast="ทบกำไรได้เมื่อกำไรก่อนหักค่าธรรมเนียมถึง 20 USDT",
+                toast=f"ทบกำไรได้เมื่อกำไรก่อนหักค่าธรรมเนียมถึง {MIN_CONVERT_PROFIT} USDT",
                 label="🔒 ทบกำไร",
             )
         return None
@@ -200,13 +205,13 @@ def block(
             )
         return Block(
             code="withdraw_min",
-            toast="ถอนกำไรได้เมื่อยอดถอนถึง 20 USDT",
+            toast=f"ถอนกำไรได้เมื่อยอดถอนถึง {MIN_WITHDRAW_CASH} USDT",
             label="🔒 ถอนกำไร",
         )
     if plan_w.cash < MIN_WITHDRAW_CASH:
         return Block(
             code="withdraw_min",
-            toast="ถอนกำไรได้เมื่อยอดถอนถึง 20 USDT",
+            toast=f"ถอนกำไรได้เมื่อยอดถอนถึง {MIN_WITHDRAW_CASH} USDT",
             label="🔒 ถอนกำไร",
         )
     return None
