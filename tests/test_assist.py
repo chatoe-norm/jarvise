@@ -1136,6 +1136,82 @@ def test_older_higher_pct_position_binds_cap(tmp_path: Path) -> None:
     assert not any(s.get("symbol") == "ADAUSDT" and s.get("reason") == "risk_cap" for s in at_3["skipped"])
 
 
+def test_morning_admits_second_idea_at_3pct_cap(tmp_path: Path) -> None:
+    """08:20 admit: open 2.5% position; held ADA expires at 2% (cap 4), sends at 3% (cap 6)."""
+    # qty=0.25, entry=100, stop=90 → risk 2.5 USDT = 2.5% of 100
+    btc = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.25"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        update_time_ms=1,
+    )
+    stop_order = {
+        "symbol": "BTCUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "90",
+        "quantity": "0.25",
+    }
+
+    def _run(risk: float) -> tuple[dict[str, Any], list[str], Any]:
+        conn = open_db(tmp_path / f"morning_cap_{risk}.db")
+        write_settings(conn, risk_pct=risk)
+        night = _ms_bangkok(2026, 10, 26, 23, 45)
+        _seed_analysis(
+            conn,
+            symbol="ADAUSDT",
+            action="short",
+            confidence=0.80,
+            invalidation=0.42,
+            ts=night - 60_000,
+        )
+        fake = FakeFutures(
+            balance=Decimal("100"),
+            marks={"ADAUSDT": Decimal("0.40")},
+            steps={"ADAUSDT": Decimal("1")},
+        )
+        night_payload = run_assist_signals(conn, futures=fake, now_ms_value=night, send=lambda _t: True)
+        assert night_payload["night_hold"] is True
+        held = list_held_signals(conn)
+        assert len(held) == 1
+        held_id = held[0]["id"]
+
+        morning = _ms_bangkok(2026, 10, 27, 8, 20)
+        _seed_analysis(
+            conn,
+            symbol="ADAUSDT",
+            action="short",
+            confidence=0.80,
+            invalidation=0.42,
+            ts=morning - 60_000,
+        )
+        fake.positions = [btc]
+        fake.orders = [stop_order]
+        fake.marks["BTCUSDT"] = Decimal("100")
+        fake.steps["BTCUSDT"] = Decimal("0.001")
+        sent_texts: list[str] = []
+        payload = run_assist_morning(
+            conn,
+            futures=fake,
+            now_ms_value=morning,
+            send=lambda t: sent_texts.append(t) or True,
+        )
+        conn.close()
+        return payload, sent_texts, held_id
+
+    at_2, _, held_2 = _run(2.0)
+    assert at_2["sent"] == []
+    assert held_2 in at_2["expired"]
+
+    at_3, texts_3, _ = _run(3.0)
+    assert len(at_3["sent"]) == 1
+    assert any("ADAUSDT" in t for t in texts_3)
+
+
 def test_below_min_notional_does_not_raise_qty(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "min.db")
     day = _ms_bangkok(2026, 10, 27, 12, 25)
