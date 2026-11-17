@@ -871,7 +871,7 @@ def test_portal_convert_twice_same_month(tmp_path: Path, monkeypatch: Any, env_c
     nav_low = pl.nav(w_low - due, u_total)
     assert not isinstance(nav_low, pl.Refusal)
     plan = pl.plan_convert(
-        units=units, cost=cost, fee_rate=ps._fee_rate_from_bps(int(row["fee_rate_bps"])), nav=nav_low
+        units=units, cost=cost, fee_rate=ps.fee_rate_from_bps(int(row["fee_rate_bps"])), nav=nav_low
     )
     assert not isinstance(plan, pl.Refusal)
     assert D("0") < plan.profit < partner_rules.MIN_CONVERT_PROFIT
@@ -977,7 +977,7 @@ def test_withdraw_min_exact_20_and_rounding(tmp_path: Path, monkeypatch: Any, en
         plan = pl.plan_withdraw_profit(
             units=ps.units_from_e8(int(r["units_e8"])),
             cost=ps.usdt_from_micro(int(r["cost_micro"])),
-            fee_rate=ps._fee_rate_from_bps(int(r["fee_rate_bps"])),
+            fee_rate=ps.fee_rate_from_bps(int(r["fee_rate_bps"])),
             nav=D(nav),
         )
         assert not isinstance(plan, pl.Refusal)
@@ -1001,4 +1001,96 @@ def test_withdraw_min_exact_20_and_rounding(tmp_path: Path, monkeypatch: Any, en
     # profit 29.9986 → 20.00006662 → 20.00: ok
     assert cash(row, "1.299986") == D("20.00")
     assert partner_rules.block(conn, row, "withdraw_profit", nav=D("1.299986"), now_ms=NOW) is None
+    conn.close()
+
+
+def _partner_msg(text: str) -> dict[str, Any]:
+    return {
+        "message_id": 1,
+        "chat": {"id": PARTNER_TG, "type": "private"},
+        "from": {"id": PARTNER_TG},
+        "text": text,
+    }
+
+
+def _source_of_rid(conn: Any, rid: str) -> str | None:
+    row = conn.execute("SELECT source FROM partner_request WHERE id=?", (rid,)).fetchone()
+    assert row is not None
+    return row["source"]
+
+
+def test_direct_apply_wd_close_records_admin_source(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    from jarvise_ingest.db import SCHEMA_VERSION
+
+    assert SCHEMA_VERSION >= 31
+    conn, pid = _setup_partner(tmp_path, "directsrc.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    wd = ps.apply_withdraw_profit(conn, pid, D("1600"), NOW)
+    assert wd["ok"] is True, wd
+    cl = ps.apply_close(conn, pid, D("1600"), NOW + 1000)
+    assert cl["ok"] is True, cl
+    rows = conn.execute(
+        "SELECT id, kind, status, source FROM partner_request WHERE partner_id=? ORDER BY created_at_ms",
+        (pid,),
+    ).fetchall()
+    got = [(str(r["id"]), str(r["kind"]), str(r["status"]), r["source"]) for r in rows]
+    assert got == [
+        (str(wd["request_id"]), "withdraw_profit", "confirmed", "admin"),
+        (str(cl["request_id"]), "close", "confirmed", "admin"),
+    ]
+    conn.close()
+
+
+def _drive_portal_dep_text(conn: Any, monkeypatch: Any, now_ms: int) -> dict[str, Any]:
+    cli = FakeValueClient(wallet="1600")
+    _patch_read(monkeypatch, cli)
+    portal.reset_value_cache()
+    return portal.handle_portal_text(
+        conn, _partner_msg("ฝาก 100"), send=_send_capture()[1], futures=cli, now_ms=now_ms
+    )
+
+
+def _drive_portal_go(code: str) -> Any:
+    def drive(conn: Any, monkeypatch: Any, now_ms: int) -> dict[str, Any]:
+        return _tap(conn, f"pp:go:{code}", monkeypatch=monkeypatch, wallet="1600", now_ms=now_ms)[3]
+
+    return drive
+
+
+def _drive_admin(text: str, wallet: str = "1600") -> Any:
+    def drive(conn: Any, monkeypatch: Any, now_ms: int) -> dict[str, Any]:
+        cli = FakeValueClient(wallet=wallet)
+        _patch_read(monkeypatch, cli)
+        portal.reset_value_cache()
+        return pa.handle_partner_text(
+            conn, text, message=_owner_msg(text), send=_send_capture()[1], futures=cli, now_ms=now_ms
+        )
+
+    return drive
+
+
+@pytest.mark.parametrize(
+    ("drive", "kind", "source"),
+    [
+        pytest.param(_drive_portal_dep_text, "deposit", "portal", id="portal-dep-text"),
+        pytest.param(_drive_portal_go("wd"), "withdraw_profit", "portal", id="portal-go-wd"),
+        pytest.param(_drive_portal_go("cl"), "close", "portal", id="portal-go-close"),
+        pytest.param(_drive_admin("p dep B 100", wallet="1700"), "deposit", "admin", id="admin-p-dep"),
+        pytest.param(_drive_admin("p wd B"), "withdraw_profit", "admin", id="admin-p-wd"),
+        pytest.param(_drive_admin("p close B"), "close", "admin", id="admin-p-close"),
+    ],
+)
+def test_handlers_record_request_source(
+    tmp_path: Path, monkeypatch: Any, env_chat: None, drive: Any, kind: str, source: str
+) -> None:
+    conn, pid = _setup_partner(tmp_path, "handlersrc.db", monkeypatch, join_ms=_ms(2026, 9, 1))
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM partner_request WHERE partner_id=?", (pid,)).fetchone()["n"]
+        == 0
+    )
+    out = drive(conn, monkeypatch, NOW)
+    assert out.get("ok") is True, out
+    rows = conn.execute(
+        "SELECT kind, status, source FROM partner_request WHERE partner_id=?", (pid,)
+    ).fetchall()
+    assert [(str(r["kind"]), str(r["status"]), r["source"]) for r in rows] == [(kind, "pending", source)]
     conn.close()

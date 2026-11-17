@@ -125,7 +125,7 @@ def block(
 
     units = ps.units_from_e8(int(row["units_e8"]))
     cost = ps.usdt_from_micro(int(row["cost_micro"]))
-    fee_rate = ps._fee_rate_from_bps(int(row["fee_rate_bps"]))
+    fee_rate = ps.fee_rate_from_bps(int(row["fee_rate_bps"]))
     n = Decimal(nav)
 
     if kind == "convert":

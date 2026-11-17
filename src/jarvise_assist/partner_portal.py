@@ -41,7 +41,7 @@ _CACHE_TTL_MS = 30_000
 _START_RE = re.compile(r"^/start(@[A-Za-z0-9_]+)?\s+([A-Za-z0-9_-]{20,64})$")
 _DEP_TEXT_RE = re.compile(r"^ฝาก\s+(\S+)$")
 _KIND_CODE = {"cv": "convert", "wd": "withdraw_profit", "cl": "close"}
-_MIN_DEP = Decimal("50")
+_BAD_DEP_TEXT = f"จำนวนไม่ถูกต้อง (ขั้นต่ำ {ps.MIN_DEPOSIT_USDT} USDT)"
 
 # Portal-only V cache: (AccountValue, read_at_ms, due_total, total_units) or None
 _value_cache: tuple[AccountValue, int, Decimal, Decimal] | None = None
@@ -226,7 +226,7 @@ def _estimate(
         return n.reason
     units = ps.units_from_e8(int(row["units_e8"]))
     cost = ps.usdt_from_micro(int(row["cost_micro"]))
-    fee_rate = ps._fee_rate_from_bps(int(row["fee_rate_bps"]))
+    fee_rate = ps.fee_rate_from_bps(int(row["fee_rate_bps"]))
     if kind == "convert":
         cv = pl.plan_convert(units=units, cost=cost, fee_rate=fee_rate, nav=n)
         if isinstance(cv, pl.Refusal):
@@ -367,8 +367,8 @@ def _handle_deposit_text(
         send_to_partner(send, row, "ปิดพอร์ตแล้ว")
         return {"ok": False, "reason": "closed"}
     amount = parse_amount(amount_raw, allow_zero=False)
-    if amount is None or amount < _MIN_DEP:
-        send_to_partner(send, row, "จำนวนไม่ถูกต้อง (ขั้นต่ำ 50 USDT)")
+    if amount is None or amount < ps.MIN_DEPOSIT_USDT:
+        send_to_partner(send, row, _BAD_DEP_TEXT)
         return {"ok": False, "reason": "bad_amount"}
     created = ps.create_request(conn, str(row["id"]), "deposit", now_ms, amount=amount, source="portal")
     if not created.get("ok"):
@@ -376,7 +376,7 @@ def _handle_deposit_text(
         if reason == "request_pending":
             send_to_partner(send, row, "มีคำขอค้างอยู่ รอแอดมิน")
             return {"ok": False, "reason": "request_pending"}
-        send_to_partner(send, row, "จำนวนไม่ถูกต้อง (ขั้นต่ำ 50 USDT)")
+        send_to_partner(send, row, _BAD_DEP_TEXT)
         return {"ok": False, "reason": reason}
     rid = str(created["request_id"])
     send_to_partner(send, row, f"แจ้งฝาก {fmt_usdt(amount)} USDT แล้ว รอแอดมินยืนยัน")
@@ -650,7 +650,7 @@ def handle_portal_callback(
         _answer()
         tip = (
             "โอนเงินให้แอดมินตามที่ตกลงกัน แล้วพิมพ์ ฝาก <จำนวน> เช่น ฝาก 500\n"
-            "ขั้นต่ำ 50 USDT · แอดมินจะบันทึกหลังเงินเข้าพอร์ตแล้ว"
+            f"ขั้นต่ำ {ps.MIN_DEPOSIT_USDT} USDT · แอดมินจะบันทึกหลังเงินเข้าพอร์ตแล้ว"
         )
         send_to_partner(send, row, tip)
         return {"ok": True, "cmd": "dep_help"}
