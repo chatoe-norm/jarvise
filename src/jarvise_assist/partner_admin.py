@@ -665,18 +665,22 @@ def _handle_add(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: int) 
         return {"ok": False, "reason": "not_init"}
     existing = _find_partner_by_name(conn, name)
     if existing is not None:
-        send(_name_taken_text(name, closed=str(existing["status"]) == "closed"))
+        send(_name_taken_text(str(existing["name"]), closed=str(existing["status"]) == "closed"))
         return {"ok": False, "reason": "duplicate_name"}
     try:
         created = ps.create_partner(conn, name=name, fee_rate_bps=5000, now_ms=now_ms)
     except sqlite3.IntegrityError:
-        send(_name_taken_text(name, closed=False))
+        again = _find_partner_by_name(conn, name)
+        label = str(again["name"]) if again is not None else name
+        closed = again is not None and str(again["status"]) == "closed"
+        send(_name_taken_text(label, closed=closed))
         return {"ok": False, "reason": "duplicate_name"}
     if not created.get("ok"):
         again = _find_partner_by_name(conn, name)
         closed = again is not None and str(again["status"]) == "closed"
         reason = str(created.get("reason") or "duplicate_name")
-        send(_name_taken_text(name, closed=closed) if reason == "duplicate_name" else thai_reason(reason))
+        label = str(again["name"]) if again is not None else name
+        send(_name_taken_text(label, closed=closed) if reason == "duplicate_name" else thai_reason(reason))
         return {"ok": False, "reason": reason}
     send(f"เพิ่ม {name} แล้ว · ค่าธรรมเนียม 50% · ยังไม่มีเงิน")
     return {"ok": True, "cmd": "add", "name": name}
@@ -835,10 +839,14 @@ def _handle_invite(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: in
         return {"ok": False, "reason": "not_found"}
     if str(row["status"]) == "closed":
         # Never reopen. A new account is p add with a new name; a due payout stays due.
+        stored = str(row["name"])
         if _due_for(conn, str(row["id"])):
-            send(f"{name} ปิดแล้วและยังรอโอน — ออกลิงก์ใหม่ไม่ได้\nโอนให้ครบก่อน แล้วเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)")
+            send(
+                f"{stored} ปิดแล้วและยังรอโอน — ออกลิงก์ให้บัญชีเดิมไม่ได้\n"
+                f"โอนให้ครบก่อน แล้วเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)"
+            )
             return {"ok": False, "reason": "payout_due"}
-        send(f"{name} ปิดแล้ว — ออกลิงก์ให้บัญชีเดิมไม่ได้\nเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)")
+        send(f"{stored} ปิดแล้ว — ออกลิงก์ให้บัญชีเดิมไม่ได้\nเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)")
         return {"ok": False, "reason": "closed"}
     if int(row["is_admin"]) == 1:
         send("แอดมินไม่ใช้ลิงก์เชิญ")
@@ -1313,6 +1321,10 @@ def handle_partner_callback(
                 admin_id = str(admin["id"])
             else:
                 created = ps.create_partner(conn, name="admin", is_admin=True, now_ms=now_ms)
+                if not created.get("ok"):
+                    reason = str(created.get("reason") or "")
+                    _answer(thai_reason(reason))
+                    return {"ok": False, "reason": reason}
                 admin_id = str(created["partner_id"])
             result = ps.apply_deposit(conn, admin_id, av.value, av.value, now_ms)
             if not result.get("ok"):

@@ -1456,7 +1456,32 @@ def test_create_partner_rejects_case_and_space_variants(tmp_path: Path) -> None:
     assert ps.create_partner(conn, name="dee", now_ms=NOW + 8) == {"ok": False, "reason": "duplicate_name"}
     assert ps.get_partner(conn, first["partner_id"])["status"] == "closed"
     assert ps.get_partner(conn, fresh["partner_id"])["name"] == "Cara"
+    composed = "\u0e04\u0e33"
+    decomposed = "\u0e04\u0e4d\u0e32"
+    thai = ps.create_partner(conn, name=composed, now_ms=NOW + 9)
+    assert thai["ok"] is True
+    assert ps.get_partner(conn, thai["partner_id"])["name"] == composed
+    assert ps.create_partner(conn, name=decomposed, now_ms=NOW + 10) == {
+        "ok": False,
+        "reason": "duplicate_name",
+    }
     conn.close()
+
+
+def test_create_partner_duplicate_is_visible_to_a_second_connection(tmp_path: Path) -> None:
+    path = tmp_path / "two-conn.db"
+    conn_a = open_db(path)
+    conn_b = open_db(path)
+    try:
+        assert ps.create_partner(conn_a, name="Bob", now_ms=NOW)["ok"] is True
+        assert ps.create_partner(conn_b, name="bob", now_ms=NOW + 1) == {
+            "ok": False,
+            "reason": "duplicate_name",
+        }
+        assert [str(row["name"]) for row in ps.list_partners(conn_b)] == ["Bob"]
+    finally:
+        conn_b.close()
+        conn_a.close()
 
 
 def test_p_add_and_invite_refuse_a_closed_partner(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
@@ -1484,7 +1509,7 @@ def test_p_add_and_invite_refuse_a_closed_partner(tmp_path: Path, monkeypatch: A
         now_ms=NOW + 7,
     )
     assert added == {"ok": False, "reason": "duplicate_name"}
-    assert "ปิดแล้ว" in sent_add[0]["text"]
+    assert "Bob ปิดแล้ว" in sent_add[0]["text"]
     assert "ชื่อใหม่" in sent_add[0]["text"]
     assert sum(1 for row in ps.list_partners(conn) if not row["is_admin"]) == 1
 
@@ -1498,8 +1523,8 @@ def test_p_add_and_invite_refuse_a_closed_partner(tmp_path: Path, monkeypatch: A
         now_ms=NOW + 8,
     )
     assert invited == {"ok": False, "reason": "payout_due"}
-    assert "ยังรอโอน" in sent_inv[0]["text"]
-    assert "ออกลิงก์ใหม่ไม่ได้" in sent_inv[0]["text"]
+    assert "Bob ปิดแล้วและยังรอโอน" in sent_inv[0]["text"]
+    assert "ออกลิงก์ให้บัญชีเดิมไม่ได้" in sent_inv[0]["text"]
     after = ps.get_partner(conn, bob)
     assert after is not None
     assert after["status"] == "closed"

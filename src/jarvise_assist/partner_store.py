@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
+import unicodedata
 import uuid
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
@@ -89,12 +90,8 @@ def _q_usdt(value: Decimal) -> Decimal:
 
 
 def name_key(name: str) -> str:
-    """Trimmed, case-insensitive identity of a partner name.
-
-    Closed partners stay in the comparison. A return is a new account with a
-    new name; reusing a closed name would make ``p`` commands ambiguous.
-    """
-    return str(name).strip().casefold()
+    """NFKC, trimmed, case-folded identity of a partner name."""
+    return unicodedata.normalize("NFKC", str(name)).strip().casefold()
 
 
 def create_partner(
@@ -111,13 +108,13 @@ def create_partner(
     raises ``IntegrityError`` from the single-admin index.
     """
     stored = str(name).strip()
-    key = stored.casefold()
+    key = name_key(stored)
+    if not key:
+        return {"ok": False, "reason": "bad_name"}
     pid = _new_partner_id()
     fee = 0 if is_admin else int(fee_rate_bps)
     ts = int(now_ms)
     with transaction(conn):
-        if not key:
-            return {"ok": False, "reason": "bad_name"}
         taken = conn.execute("SELECT name FROM partner").fetchall()
         if any(name_key(str(row["name"])) == key for row in taken):
             return {"ok": False, "reason": "duplicate_name"}

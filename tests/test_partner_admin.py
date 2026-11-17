@@ -500,7 +500,7 @@ def test_add_before_and_after_init(tmp_path: Path, monkeypatch: Any, env_chat: N
     assert int(row["fee_rate_bps"]) == 5000
 
     sent3, send3 = _send_capture()
-    pa.handle_partner_text(
+    out3 = pa.handle_partner_text(
         conn,
         "p add b",
         message=_owner_msg(text="p add b"),
@@ -508,10 +508,9 @@ def test_add_before_and_after_init(tmp_path: Path, monkeypatch: Any, env_chat: N
         futures=FakeValueClient(wallet="1000"),
         now_ms=NOW + 20,
     )
+    assert out3 == {"ok": False, "reason": "duplicate_name"}
+    assert "อยู่แล้ว" in sent3[0]["text"]
     assert _n_partners(conn) == 2  # admin + B
-    assert "b" not in {r["name"] for r in ps.list_partners(conn)} or any(
-        "มีอยู่" in sent3[0]["text"] or "ซ้ำ" in sent3[0]["text"] or "แล้ว" in sent3[0]["text"] for _ in [0]
-    )
     # only one non-admin
     assert sum(1 for r in ps.list_partners(conn) if not r["is_admin"]) == 1
     conn.close()
