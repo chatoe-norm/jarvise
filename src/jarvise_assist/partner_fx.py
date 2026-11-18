@@ -12,7 +12,7 @@ import re
 import secrets
 import sqlite3
 import uuid
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from jarvise_ingest.db import transaction
@@ -28,7 +28,9 @@ REASON_MIN_CHARS = 10
 DRAFT_TTL_MS = 15 * 60 * 1000
 _SATANG_DIVISOR = 100_000_000
 _RATE_QUANT = Decimal("0.0001")
-_SCALED_RE = re.compile(r"^\d+(\.\d+)?$")
+_SCALED_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+_PARSE_MAX_CHARS = 24
+_REASON_EDGES = " \t\r\n"
 _REF_OK = "ok"
 _REF_STATUSES = frozenset({_REF_OK, "unavailable", "off"})
 
@@ -53,10 +55,15 @@ def _as_int(value: object) -> int | None:
     return value
 
 
-def _reason_ok(reason: str | None) -> bool:
+def _clean_reason(reason: str | None) -> str | None:
     if reason is None:
-        return False
-    return len(str(reason).strip()) >= REASON_MIN_CHARS
+        return None
+    return str(reason).strip(_REASON_EDGES)
+
+
+def _reason_ok(reason: str | None) -> bool:
+    cleaned = _clean_reason(reason)
+    return cleaned is not None and len(cleaned) >= REASON_MIN_CHARS
 
 
 def _rate_e4(rate: Decimal) -> int | None:
@@ -74,9 +81,12 @@ def _rate_e4(rate: Decimal) -> int | None:
 
 def _parse_scaled(text: str, places: int, scale: int) -> int | None:
     raw = str(text).strip()
-    if not _SCALED_RE.fullmatch(raw):
+    if len(raw) > _PARSE_MAX_CHARS or not _SCALED_RE.fullmatch(raw):
         return None
-    value = Decimal(raw)
+    try:
+        value = Decimal(raw)
+    except InvalidOperation:
+        return None
     quantum = Decimal(1).scaleb(-places)
     if value != value.quantize(quantum):
         return None
@@ -117,32 +127,53 @@ def compute(
 ) -> dict[str, Any]:
     """Pure figures for one payout. Refusals are codes; inputs are not rounded."""
     refusals: list[str] = []
-    rate_e4 = _rate_e4(Decimal(rate))
+    payout = _as_int(usdt_payout_micro)
+    carry = _as_int(carry_in_micro)
+    chain = _as_int(chain_fee_micro)
+    sold = _as_int(usdt_sold_micro)
+    trade = _as_int(trade_fee_satang)
+    wd = _as_int(thb_wd_fee_satang)
+    bank = _as_int(bank_fee_satang)
+    net = _as_int(net_satang)
+    if (
+        None in (payout, carry, chain, sold, trade, wd, bank, net)
+        or not isinstance(rate, Decimal)
+        or (ref_rate is not None and not isinstance(ref_rate, Decimal))
+    ):
+        return {
+            "gross_satang": None,
+            "leftover_micro": None,
+            "residual_satang": None,
+            "deviation_bps": None,
+            "effective_rate": None,
+            "rate_e4": None,
+            "refusals": ["bad_input"],
+        }
+    assert payout is not None and carry is not None and chain is not None and sold is not None
+    assert trade is not None and wd is not None and bank is not None and net is not None
+    rate_e4 = _rate_e4(rate)
     if rate_e4 is None:
         refusals.append("too_many_decimals")
     elif rate_e4 < RATE_MIN_E4 or rate_e4 > RATE_MAX_E4:
         refusals.append("rate_out_of_bounds")
-    leftover = int(usdt_payout_micro) + int(carry_in_micro) - int(chain_fee_micro) - int(usdt_sold_micro)
+    leftover = payout + carry - chain - sold
     if leftover < 0:
         refusals.append("sold_exceeds_available")
-    if int(usdt_sold_micro) % SELL_STEP_MICRO != 0:
+    if sold % SELL_STEP_MICRO != 0:
         refusals.append("sold_not_step")
     gross: int | None = None
     residual: int | None = None
-    if rate_e4 is not None and rate_e4 > 0 and int(usdt_sold_micro) > 0:
-        gross = (int(usdt_sold_micro) * rate_e4) // _SATANG_DIVISOR
-        residual = (
-            gross - int(trade_fee_satang) - int(thb_wd_fee_satang) - int(bank_fee_satang) - int(net_satang)
-        )
+    if rate_e4 is not None and rate_e4 > 0 and sold > 0:
+        gross = (sold * rate_e4) // _SATANG_DIVISOR
+        residual = gross - trade - wd - bank - net
     deviation: int | None = None
     if ref_rate is not None and rate_e4 is not None:
-        ref = Decimal(ref_rate)
-        ref_e4 = _rate_e4(ref)
+        ref_e4 = _rate_e4(ref_rate)
         if ref_e4 is None:
             if "too_many_decimals" not in refusals:
                 refusals.append("too_many_decimals")
         elif ref_e4 > 0:
-            raw = (Decimal(rate) - ref) / ref * Decimal(10_000)
+            raw = (rate - ref_rate) / ref_rate * Decimal(10_000)
             deviation = int(raw.quantize(Decimal(1), rounding=ROUND_HALF_UP))
     if (
         correction
@@ -150,10 +181,10 @@ def compute(
         or (deviation is not None and abs(deviation) > DEVIATION_THRESHOLD_BPS)
     ):
         refusals.append("reason_required")
-    denom = int(usdt_payout_micro) + int(carry_in_micro) - leftover
+    denom = payout + carry - leftover
     effective: Decimal | None = None
     if denom > 0:
-        effective = (Decimal(int(net_satang)) * Decimal(10_000) / Decimal(denom)).quantize(
+        effective = (Decimal(net) * Decimal(10_000) / Decimal(denom)).quantize(
             _RATE_QUANT, rounding=ROUND_DOWN
         )
     return {
@@ -470,6 +501,92 @@ def _figures_or_reason(
     return figured, ref
 
 
+def _busy(conn: sqlite3.Connection, request_id: str | None, partner_id: str | None) -> dict[str, Any] | None:
+    if conn.in_transaction:
+        return _fail(request_id, partner_id, "caller_transaction")
+    return None
+
+
+def _kyc_gate(conn: sqlite3.Connection, partner_id: str, paid_kyc_id: str | None) -> str | None:
+    """Refuse a missing id when this partner has KYC, and an id that is not theirs."""
+    has_kyc = conn.execute(
+        "SELECT 1 FROM partner_kyc WHERE partner_id = ? LIMIT 1",
+        (partner_id,),
+    ).fetchone()
+    if paid_kyc_id is None:
+        return "kyc_required" if has_kyc is not None else None
+    row = conn.execute(
+        "SELECT partner_id FROM partner_kyc WHERE id = ?",
+        (str(paid_kyc_id),),
+    ).fetchone()
+    if row is None or str(row["partner_id"]) != partner_id:
+        return "kyc_mismatch"
+    return None
+
+
+def _live_carry_rows(conn: sqlite3.Connection, request_id: str) -> list[sqlite3.Row]:
+    """Unreversed apply/leftover rows for the request, newest first."""
+    return list(
+        conn.execute(
+            """
+            SELECT c.*
+            FROM partner_usdt_carry AS c
+            JOIN partner_payout_fx AS f ON f.id = c.fx_id
+            WHERE f.request_id = ?
+              AND c.kind IN ('apply', 'leftover')
+              AND NOT EXISTS (
+                  SELECT 1 FROM partner_usdt_carry AS r WHERE r.reverses_id = c.id
+              )
+            ORDER BY c.seq DESC
+            """,
+            (request_id,),
+        ).fetchall()
+    )
+
+
+def _later_activity(conn: sqlite3.Connection, partner_id: str, request_id: str) -> bool:
+    """True when a later payout, or a later carry row, already followed this request."""
+    first = conn.execute(
+        """
+        SELECT rowid AS r FROM partner_payout_fx
+        WHERE request_id = ? AND version = 1
+        """,
+        (request_id,),
+    ).fetchone()
+    if first is not None:
+        other = conn.execute(
+            """
+            SELECT 1 FROM partner_payout_fx
+            WHERE partner_id = ? AND request_id != ? AND version = 1 AND rowid > ?
+            LIMIT 1
+            """,
+            (partner_id, request_id, int(first["r"])),
+        ).fetchone()
+        if other is not None:
+            return True
+    last = conn.execute(
+        """
+        SELECT MAX(c.seq) AS s
+        FROM partner_usdt_carry AS c
+        JOIN partner_payout_fx AS f ON f.id = c.fx_id
+        WHERE f.request_id = ?
+        """,
+        (request_id,),
+    ).fetchone()
+    if last is not None and last["s"] is not None:
+        later = conn.execute(
+            """
+            SELECT 1 FROM partner_usdt_carry
+            WHERE partner_id = ? AND seq > ?
+            LIMIT 1
+            """,
+            (partner_id, int(last["s"])),
+        ).fetchone()
+        if later is not None:
+            return True
+    return False
+
+
 def record_payout_fx(
     conn: sqlite3.Connection,
     *,
@@ -498,7 +615,29 @@ def record_payout_fx(
 
     ``carry_in_micro`` must equal the partner's carry balance. The whole
     balance is applied, then any new leftover is posted.
+
+    Opens its own transaction. A caller that already holds one gets
+    ``caller_transaction`` and its work is left uncommitted. PR-2's one-step
+    due-to-paid plus this insert needs an inner variant, not this function.
     """
+    if _busy(conn, request_id, None) is not None:
+        return _fail(request_id, None, "caller_transaction")
+    reason = _clean_reason(reason)
+    payout_in = _as_int(carry_in_micro)
+    chain = _as_int(chain_fee_micro)
+    sold = _as_int(usdt_sold_micro)
+    trade = _as_int(trade_fee_satang)
+    wd = _as_int(thb_wd_fee_satang)
+    bank = _as_int(bank_fee_satang)
+    net = _as_int(net_satang)
+    now = _as_int(now_ms)
+    fetched = None if ref_fetched_at_ms is None else _as_int(ref_fetched_at_ms)
+    if None in (payout_in, chain, sold, trade, wd, bank, net, now) or (
+        ref_fetched_at_ms is not None and fetched is None
+    ):
+        return _fail(request_id, None, "bad_input")
+    assert payout_in is not None and chain is not None and sold is not None
+    assert trade is not None and wd is not None and bank is not None and net is not None and now is not None
     try:
         with transaction(conn):
             req = conn.execute(
@@ -515,25 +654,34 @@ def record_payout_fx(
             payout = req["payout_micro"]
             if payout is None or int(payout) <= 0:
                 return _fail(request_id, partner_id, "bad_kind")
+            taken = conn.execute(
+                "SELECT 1 FROM partner_payout_fx WHERE request_id = ? LIMIT 1",
+                (str(request_id),),
+            ).fetchone()
+            if taken is not None:
+                return _fail(request_id, partner_id, "already_recorded")
+            kyc_reason = _kyc_gate(conn, partner_id, None if paid_kyc_id is None else str(paid_kyc_id))
+            if kyc_reason is not None:
+                return _fail(request_id, partner_id, kyc_reason)
             balance = carry_balance(conn, partner_id)
-            if int(carry_in_micro) != balance:
+            if payout_in != balance:
                 return _fail(request_id, partner_id, "carry_mismatch")
             prepared = _figures_or_reason(
                 request_id=str(request_id),
                 partner_id=partner_id,
                 usdt_payout_micro=int(payout),
-                carry_in_micro=int(carry_in_micro),
-                chain_fee_micro=int(chain_fee_micro),
-                usdt_sold_micro=int(usdt_sold_micro),
+                carry_in_micro=payout_in,
+                chain_fee_micro=chain,
+                usdt_sold_micro=sold,
                 rate=rate,
-                trade_fee_satang=int(trade_fee_satang),
-                thb_wd_fee_satang=int(thb_wd_fee_satang),
-                bank_fee_satang=int(bank_fee_satang),
-                net_satang=int(net_satang),
+                trade_fee_satang=trade,
+                thb_wd_fee_satang=wd,
+                bank_fee_satang=bank,
+                net_satang=net,
                 ref_status=ref_status,
                 ref_rate=ref_rate,
                 ref_source=ref_source,
-                ref_fetched_at_ms=ref_fetched_at_ms,
+                ref_fetched_at_ms=fetched,
                 reason=reason,
                 correction=False,
             )
@@ -548,30 +696,30 @@ def record_payout_fx(
                 supersedes_id=None,
                 paid_kyc_id=paid_kyc_id,
                 usdt_payout_micro=int(payout),
-                carry_in_micro=int(carry_in_micro),
-                chain_fee_micro=int(chain_fee_micro),
-                usdt_sold_micro=int(usdt_sold_micro),
+                carry_in_micro=payout_in,
+                chain_fee_micro=chain,
+                usdt_sold_micro=sold,
                 usdt_leftover_micro=int(figured["leftover_micro"]),
                 rate_e4=int(figured["rate_e4"]),
                 gross_satang=int(figured["gross_satang"]),
-                trade_fee_satang=int(trade_fee_satang),
-                thb_wd_fee_satang=int(thb_wd_fee_satang),
-                bank_fee_satang=int(bank_fee_satang),
+                trade_fee_satang=trade,
+                thb_wd_fee_satang=wd,
+                bank_fee_satang=bank,
                 residual_satang=int(figured["residual_satang"]),
-                net_satang=int(net_satang),
+                net_satang=net,
                 ref=ref,
                 ref_error=ref_error,
                 reason=reason,
                 slip_ref=slip_ref,
                 sale_ref=sale_ref,
                 entered_by=entered_by,
-                now_ms=now_ms,
+                now_ms=now,
             )
             carry_after = _post_apply_and_leftover(
                 conn,
                 partner_id=partner_id,
                 fx_id=fx_id,
-                carry_in_micro=int(carry_in_micro),
+                carry_in_micro=payout_in,
                 leftover_micro=int(figured["leftover_micro"]),
                 entered_by=entered_by,
                 now_ms=now_ms,
@@ -587,19 +735,6 @@ def record_payout_fx(
         return _fail(request_id, None, exc.reason)
     except sqlite3.IntegrityError:
         return _fail(request_id, None, "db_constraint")
-
-
-def _base_carry_rows(conn: sqlite3.Connection, fx_id: str) -> list[sqlite3.Row]:
-    return list(
-        conn.execute(
-            """
-            SELECT * FROM partner_usdt_carry
-            WHERE fx_id = ? AND kind IN ('apply', 'leftover')
-            ORDER BY seq DESC
-            """,
-            (fx_id,),
-        ).fetchall()
-    )
 
 
 def record_correction(
@@ -626,14 +761,34 @@ def record_correction(
     entered_by: str,
     now_ms: int,
 ) -> dict[str, Any]:
-    """Append version n+1. Reverse the base row's carry, then post the new one.
+    """Append version n+1 and reverse the request's live carry rows.
 
-    A later payout that already used this leftover blocks the correction
-    (``carry_consumed``) unless carry_in and leftover stay the same. In that
-    case the carry ledger is left as it is: appending a reverse after the
-    later payout would drive the running balance negative, and the net
-    carry effect of an unchanged pair is zero.
+    ``carry_in_micro`` is fixed at the first recording. A later payout blocks
+    a leftover change (``carry_consumed``). An unchanged leftover still writes
+    the new version and leaves the carry ledger alone, because a reverse after
+    that later payout would drive the running balance negative.
+
+    Opens its own transaction. A caller that already holds one gets
+    ``caller_transaction``. PR-2's combined confirm needs an inner variant.
     """
+    if _busy(conn, None, None) is not None:
+        return _fail(None, None, "caller_transaction")
+    reason = _clean_reason(reason)
+    carry_in = _as_int(carry_in_micro)
+    chain = _as_int(chain_fee_micro)
+    sold = _as_int(usdt_sold_micro)
+    trade = _as_int(trade_fee_satang)
+    wd = _as_int(thb_wd_fee_satang)
+    bank = _as_int(bank_fee_satang)
+    net = _as_int(net_satang)
+    now = _as_int(now_ms)
+    fetched = None if ref_fetched_at_ms is None else _as_int(ref_fetched_at_ms)
+    if None in (carry_in, chain, sold, trade, wd, bank, net, now) or (
+        ref_fetched_at_ms is not None and fetched is None
+    ):
+        return _fail(None, None, "bad_input")
+    assert carry_in is not None and chain is not None and sold is not None
+    assert trade is not None and wd is not None and bank is not None and net is not None and now is not None
     try:
         with transaction(conn):
             base = conn.execute(
@@ -650,22 +805,28 @@ def record_correction(
             ).fetchone()
             if current is None or int(current["v"]) != int(base["version"]):
                 return _fail(request_id, partner_id, "not_current")
+            if carry_in != int(base["carry_in_micro"]):
+                return _fail(request_id, partner_id, "carry_mismatch")
+            effective_kyc = paid_kyc_id if paid_kyc_id is not None else base["paid_kyc_id"]
+            kyc_reason = _kyc_gate(conn, partner_id, None if effective_kyc is None else str(effective_kyc))
+            if kyc_reason is not None:
+                return _fail(request_id, partner_id, kyc_reason)
             prepared = _figures_or_reason(
                 request_id=request_id,
                 partner_id=partner_id,
                 usdt_payout_micro=int(base["usdt_payout_micro"]),
-                carry_in_micro=int(carry_in_micro),
-                chain_fee_micro=int(chain_fee_micro),
-                usdt_sold_micro=int(usdt_sold_micro),
+                carry_in_micro=carry_in,
+                chain_fee_micro=chain,
+                usdt_sold_micro=sold,
                 rate=rate,
-                trade_fee_satang=int(trade_fee_satang),
-                thb_wd_fee_satang=int(thb_wd_fee_satang),
-                bank_fee_satang=int(bank_fee_satang),
-                net_satang=int(net_satang),
+                trade_fee_satang=trade,
+                thb_wd_fee_satang=wd,
+                bank_fee_satang=bank,
+                net_satang=net,
                 ref_status=ref_status,
                 ref_rate=ref_rate,
                 ref_source=ref_source,
-                ref_fetched_at_ms=ref_fetched_at_ms,
+                ref_fetched_at_ms=fetched,
                 reason=reason,
                 correction=True,
             )
@@ -673,26 +834,9 @@ def record_correction(
                 return prepared
             figured, ref = prepared
             new_leftover = int(figured["leftover_micro"])
-            last = conn.execute(
-                "SELECT MAX(seq) AS s FROM partner_usdt_carry WHERE fx_id = ?",
-                (str(base_fx_id),),
-            ).fetchone()
-            last_seq = None if last is None or last["s"] is None else int(last["s"])
-            later = False
-            if last_seq is not None:
-                later_row = conn.execute(
-                    """
-                    SELECT 1 FROM partner_usdt_carry
-                    WHERE partner_id = ? AND seq > ?
-                    LIMIT 1
-                    """,
-                    (partner_id, last_seq),
-                ).fetchone()
-                later = later_row is not None
-            same_carry = int(carry_in_micro) == int(base["carry_in_micro"]) and new_leftover == int(
-                base["usdt_leftover_micro"]
-            )
-            if later and not same_carry:
+            later = _later_activity(conn, partner_id, request_id)
+            same_leftover = new_leftover == int(base["usdt_leftover_micro"])
+            if later and not same_leftover:
                 return _fail(request_id, partner_id, "carry_consumed")
             version = int(base["version"]) + 1
             fx_id = _insert_fx(
@@ -701,29 +845,29 @@ def record_correction(
                 partner_id=partner_id,
                 version=version,
                 supersedes_id=str(base["id"]),
-                paid_kyc_id=paid_kyc_id if paid_kyc_id is not None else base["paid_kyc_id"],
+                paid_kyc_id=None if effective_kyc is None else str(effective_kyc),
                 usdt_payout_micro=int(base["usdt_payout_micro"]),
-                carry_in_micro=int(carry_in_micro),
-                chain_fee_micro=int(chain_fee_micro),
-                usdt_sold_micro=int(usdt_sold_micro),
+                carry_in_micro=carry_in,
+                chain_fee_micro=chain,
+                usdt_sold_micro=sold,
                 usdt_leftover_micro=new_leftover,
                 rate_e4=int(figured["rate_e4"]),
                 gross_satang=int(figured["gross_satang"]),
-                trade_fee_satang=int(trade_fee_satang),
-                thb_wd_fee_satang=int(thb_wd_fee_satang),
-                bank_fee_satang=int(bank_fee_satang),
+                trade_fee_satang=trade,
+                thb_wd_fee_satang=wd,
+                bank_fee_satang=bank,
                 residual_satang=int(figured["residual_satang"]),
-                net_satang=int(net_satang),
+                net_satang=net,
                 ref=ref,
                 ref_error=ref_error,
                 reason=reason,
                 slip_ref=slip_ref,
                 sale_ref=sale_ref,
                 entered_by=entered_by,
-                now_ms=now_ms,
+                now_ms=now,
             )
-            if not (later and same_carry):
-                for entry in _base_carry_rows(conn, str(base["id"])):
+            if not (later and same_leftover):
+                for entry in _live_carry_rows(conn, request_id):
                     _post_carry(
                         conn,
                         partner_id=partner_id,
@@ -733,16 +877,16 @@ def record_correction(
                         reverses_id=str(entry["id"]),
                         reason=None,
                         entered_by=entered_by,
-                        now_ms=now_ms,
+                        now_ms=now,
                     )
                 carry_after = _post_apply_and_leftover(
                     conn,
                     partner_id=partner_id,
                     fx_id=fx_id,
-                    carry_in_micro=int(carry_in_micro),
+                    carry_in_micro=carry_in,
                     leftover_micro=new_leftover,
                     entered_by=entered_by,
-                    now_ms=now_ms,
+                    now_ms=now,
                 )
             else:
                 carry_after = carry_balance(conn, partner_id)
@@ -767,13 +911,23 @@ def settle_carry(
     entered_by: str,
     now_ms: int,
 ) -> dict[str, Any]:
-    """Owner settlement of a remaining leftover. ``amount_micro`` is positive."""
+    """Owner settlement of a remaining leftover. ``amount_micro`` is positive.
+
+    Opens its own transaction. A caller that already holds one gets
+    ``caller_transaction``. PR-2's combined confirm needs an inner variant.
+    """
+    if _busy(conn, None, partner_id) is not None:
+        return _fail(None, partner_id, "caller_transaction")
+    now = _as_int(now_ms)
+    if now is None:
+        return _fail(None, partner_id, "bad_input")
+    cleaned = _clean_reason(reason)
     try:
         with transaction(conn):
             amount = _as_int(amount_micro)
             if amount is None or amount <= 0:
                 return _fail(None, partner_id, "bad_amount")
-            if not _reason_ok(reason):
+            if not _reason_ok(cleaned):
                 return _fail(None, partner_id, "reason_required")
             balance = carry_balance(conn, partner_id)
             if amount > balance:
@@ -785,9 +939,9 @@ def settle_carry(
                 amount_micro=-amount,
                 fx_id=None,
                 reverses_id=None,
-                reason=str(reason).strip(),
+                reason=cleaned,
                 entered_by=entered_by,
-                now_ms=now_ms,
+                now_ms=now,
             )
             logger.info("partner fx settled partner_id=%s reason=settle", partner_id)
             return {"ok": True, "carry_after": after}

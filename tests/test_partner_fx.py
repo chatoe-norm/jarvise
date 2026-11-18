@@ -79,6 +79,9 @@ def _net(gross: int, trade: int, wd: int, bank: int, residual: int = 0) -> int:
     return gross - trade - wd - bank - residual
 
 
+_AUTO_KYC = object()
+
+
 def _record(
     conn: sqlite3.Connection,
     request_id: str,
@@ -97,8 +100,22 @@ def _record(
     ref_fetched_at_ms: int | None = None,
     reason: str | None = None,
     slip_ref: str | None = None,
+    paid_kyc_id: Any = _AUTO_KYC,
     now_ms: int = NOW,
 ) -> dict[str, Any]:
+    if paid_kyc_id is _AUTO_KYC:
+        row = conn.execute(
+            """
+            SELECT k.id
+            FROM partner_kyc AS k
+            JOIN partner_request AS r ON r.partner_id = k.partner_id
+            WHERE r.id = ?
+            ORDER BY k.version DESC
+            LIMIT 1
+            """,
+            (request_id,),
+        ).fetchone()
+        paid_kyc_id = None if row is None else str(row["id"])
     return fx.record_payout_fx(
         conn,
         request_id=request_id,
@@ -116,6 +133,7 @@ def _record(
         ref_fetched_at_ms=ref_fetched_at_ms,
         reason=reason,
         slip_ref=slip_ref,
+        paid_kyc_id=paid_kyc_id,
         entered_by="42",
         now_ms=now_ms,
     )
@@ -243,8 +261,10 @@ def test_migration_34_is_additive_and_repair_writes_nothing(tmp_path: Path) -> N
     assert draft is not None
     assert draft["confirm_message_id"] is None
     touched = conn.total_changes
+    cookie = conn.execute("PRAGMA schema_version").fetchone()[0]
     assert migrate(conn) == []
     assert conn.total_changes == touched
+    assert conn.execute("PRAGMA schema_version").fetchone()[0] == cookie
     conn.close()
 
 
@@ -359,6 +379,85 @@ def test_check_math_floor_net_conservation_and_caps(tmp_path: Path) -> None:
         )
     with pytest.raises(sqlite3.IntegrityError):
         _insert_raw(conn, _request(conn, bob), bob, rate_e4=1_000_001)
+    sold_cap = 1_000_000_000_000
+    cap_gross = (sold_cap * 1_000_000) // 100_000_000
+    assert cap_gross == 10_000_000_000
+    capped = _request(conn, bob, payout_micro=sold_cap)
+    _insert_raw(
+        conn,
+        capped,
+        bob,
+        usdt_payout_micro=sold_cap,
+        chain_fee_micro=0,
+        usdt_sold_micro=sold_cap,
+        rate_e4=1_000_000,
+        trade_fee_satang=0,
+        thb_wd_fee_satang=0,
+        bank_fee_satang=0,
+        gross_satang=cap_gross,
+    )
+    conn.commit()
+    stored = conn.execute(
+        "SELECT gross_satang FROM partner_payout_fx WHERE request_id = ?",
+        (capped,),
+    ).fetchone()
+    assert stored is not None
+    assert stored["gross_satang"] == cap_gross
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_raw(
+            conn,
+            _request(conn, bob, payout_micro=sold_cap + 1),
+            bob,
+            usdt_payout_micro=sold_cap + 1,
+            chain_fee_micro=0,
+            usdt_sold_micro=sold_cap + 1,
+            rate_e4=1_000_000,
+            trade_fee_satang=0,
+            thb_wd_fee_satang=0,
+            bank_fee_satang=0,
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_raw(conn, _request(conn, bob), bob, rate_e4=338_800.5)
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_raw(conn, _request(conn, bob), bob, net_satang=float(NET) + 0.5)
+    text_fee = _request(conn, bob, payout_micro=sold_cap)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO partner_payout_fx (
+                id, request_id, partner_id, version, supersedes_id, paid_kyc_id,
+                usdt_payout_micro, carry_in_micro, chain_fee_micro, usdt_sold_micro,
+                usdt_leftover_micro, rate_e4, gross_satang, trade_fee_satang,
+                thb_wd_fee_satang, bank_fee_satang, residual_satang, residual_tol_satang,
+                net_satang, ref_status, ref_rate_e4, ref_source, ref_fetched_at_ms,
+                ref_error, deviation_bps, threshold_bps, reason, slip_ref, sale_ref,
+                entered_by, entered_at_ms
+            )
+            SELECT ?, ?, partner_id, version, supersedes_id, paid_kyc_id,
+                usdt_payout_micro, carry_in_micro, chain_fee_micro, usdt_sold_micro,
+                usdt_leftover_micro, rate_e4, gross_satang, 'x',
+                thb_wd_fee_satang, bank_fee_satang, residual_satang, residual_tol_satang,
+                net_satang, ref_status, ref_rate_e4, ref_source, ref_fetched_at_ms,
+                ref_error, deviation_bps, threshold_bps, reason, slip_ref, sale_ref,
+                entered_by, entered_at_ms
+            FROM partner_payout_fx WHERE request_id = ?
+            """,
+            (f"px_{uuid.uuid4().hex[:16]}", text_fee, capped),
+        )
+    fx_id = conn.execute(
+        "SELECT id FROM partner_payout_fx WHERE request_id = ?",
+        (capped,),
+    ).fetchone()["id"]
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO partner_usdt_carry (
+                id, partner_id, seq, kind, amount_micro, balance_after_micro,
+                fx_id, reverses_id, reason, entered_by, created_at_ms
+            ) VALUES (?, ?, 1, 'leftover', 'x', 1, ?, NULL, NULL, '42', ?)
+            """,
+            (f"pc_{uuid.uuid4().hex[:16]}", bob, fx_id, NOW),
+        )
     conn.close()
 
 
@@ -409,6 +508,8 @@ def test_reason_required_null_does_not_pass(tmp_path: Path) -> None:
         )
     with pytest.raises(sqlite3.IntegrityError):
         attempt(residual_satang=101, reason="          ")
+    with pytest.raises(sqlite3.IntegrityError):
+        attempt(residual_satang=101, reason="\t\t\t\n")
     with pytest.raises(sqlite3.IntegrityError):
         attempt(residual_satang=101, reason=None)
     first = _request(conn, bob)
@@ -604,6 +705,7 @@ def test_carry_ledger_applies_the_whole_balance(tmp_path: Path) -> None:
                 NOW,
             ),
         )
+    conn.rollback()
     short = fx.settle_carry(conn, ada, 1, "short", "42", NOW + 6)
     assert short["reason"] == "reason_required"
     too_much = fx.carry_balance(conn, ada) + 1
@@ -937,6 +1039,44 @@ def test_compute_and_parsers_refuse_extra_decimals() -> None:
     expected = (D(NET) * D(10_000) / D(denom)).quantize(D("0.0001"), rounding=ROUND_DOWN)
     assert shown["effective_rate"] == expected
     assert shown["effective_rate"].as_tuple().exponent >= -4
+    truncated = fx.compute(
+        usdt_payout_micro=PAYOUT,
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=D("42.27"),
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+    )
+    fractional_sold = fx.compute(
+        usdt_payout_micro=PAYOUT,
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=4_227.9,
+        rate=RATE,
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+    )
+    flagged = fx.compute(
+        usdt_payout_micro=PAYOUT,
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=True,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+    )
+    assert truncated["refusals"] == ["bad_input"]
+    assert truncated["gross_satang"] is None
+    assert fractional_sold["refusals"] == ["bad_input"]
+    assert fractional_sold["gross_satang"] is None
+    assert flagged["refusals"] == ["bad_input"]
 
 
 def parse_matches() -> bool:
@@ -948,6 +1088,9 @@ def parse_matches() -> bool:
     assert fx.parse_usdt("0.01") == CHAIN
     assert fx.parse_usdt("499.99") == 499_990_000
     assert fx.parse_usdt("1.1234567") is None
+    assert fx.parse_thb("๑๐๐") is None
+    assert fx.parse_thb("１００") is None
+    assert fx.parse_usdt("1" * 30) is None
     return True
 
 
@@ -976,6 +1119,199 @@ def test_draft_round_trip_and_slip_is_not_logged(tmp_path: Path, caplog: pytest.
     assert fx.delete_fx_draft(conn, rid) is True
     assert fx.load_fx_draft(conn, rid, str(staged["token"]), NOW + 2) is None
     conn.close()
+
+
+def _correct(conn: sqlite3.Connection, request_id: str, **over: Any) -> dict[str, Any]:
+    base = fx.current_fx(conn, request_id)
+    assert base is not None
+    fields: dict[str, Any] = {
+        "base_fx_id": str(base["id"]),
+        "carry_in_micro": int(base["carry_in_micro"]),
+        "chain_fee_micro": int(base["chain_fee_micro"]),
+        "usdt_sold_micro": int(base["usdt_sold_micro"]),
+        "rate": RATE,
+        "trade_fee_satang": int(base["trade_fee_satang"]),
+        "thb_wd_fee_satang": int(base["thb_wd_fee_satang"]),
+        "bank_fee_satang": int(base["bank_fee_satang"]),
+        "net_satang": int(base["net_satang"]),
+        "ref_status": "off",
+        "reason": REASON,
+        "entered_by": "42",
+        "now_ms": NOW + 20 + int(base["version"]),
+    }
+    fields.update(over)
+    return fx.record_correction(conn, **fields)
+
+
+def test_repeated_correction_does_not_repost_a_used_leftover(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "repost.db")
+    bob = _partner(conn, "Bob")
+    first = _request(conn, bob)
+    assert _record(conn, first)["ok"] is True
+    assert fx.carry_balance(conn, bob) == LEFTOVER
+    second = _request(conn, bob, payout_micro=300_000_000, now_ms=NOW + 1)
+    gross2 = (300_000_000 * RATE_E4) // 100_000_000
+    assert gross2 == 1_016_400
+    assert _record(
+        conn,
+        second,
+        carry_in=LEFTOVER,
+        sold=300_000_000,
+        trade=2_541,
+        net=_net(gross2, 2_541, WD, 0),
+        now_ms=NOW + 2,
+    )["ok"]
+    assert fx.carry_balance(conn, bob) == 980_000
+    bank_net = _net(GROSS, TRADE, WD, 1_000)
+    for version in (2, 3, 4):
+        again = _correct(
+            conn,
+            first,
+            bank_fee_satang=1_000,
+            net_satang=bank_net,
+            now_ms=NOW + version,
+        )
+        assert again["ok"] is True
+        assert again["version"] == version
+        assert fx.carry_balance(conn, bob) == 980_000
+    consumed = _correct(
+        conn,
+        first,
+        usdt_sold_micro=498_000_000,
+        bank_fee_satang=1_000,
+        net_satang=_net((498_000_000 * RATE_E4) // 100_000_000, TRADE, WD, 1_000),
+        now_ms=NOW + 8,
+    )
+    assert consumed["reason"] == "carry_consumed"
+    assert fx.carry_balance(conn, bob) == 980_000
+    mismatch = _correct(
+        conn,
+        second,
+        carry_in_micro=0,
+        usdt_sold_micro=299_000_000,
+        net_satang=_net((299_000_000 * RATE_E4) // 100_000_000, 2_541, WD, 0),
+        now_ms=NOW + 9,
+    )
+    assert mismatch["reason"] == "carry_mismatch"
+    assert fx.carry_balance(conn, bob) == 980_000
+    for bank in (1_000, 2_000):
+        latest = _correct(
+            conn,
+            second,
+            bank_fee_satang=bank,
+            net_satang=_net(gross2, 2_541, WD, bank),
+            now_ms=NOW + 10 + bank,
+        )
+        assert latest["ok"] is True
+        assert fx.carry_balance(conn, bob) == 980_000
+    sold_new = 299_000_000
+    leftover_new = 300_000_000 + LEFTOVER - CHAIN - sold_new
+    moved = _correct(
+        conn,
+        second,
+        usdt_sold_micro=sold_new,
+        trade_fee_satang=2_541,
+        bank_fee_satang=2_000,
+        net_satang=_net((sold_new * RATE_E4) // 100_000_000, 2_541, WD, 2_000),
+        now_ms=NOW + 14,
+    )
+    assert moved["ok"] is True
+    assert fx.carry_balance(conn, bob) == leftover_new
+    conn.close()
+
+
+def test_zero_carry_base_cannot_grow_a_leftover_after_a_later_payout(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "zero.db")
+    bob = _partner(conn, "Bob")
+    payout = 500_010_000
+    sold = 500_000_000
+    gross = (sold * RATE_E4) // 100_000_000
+    first = _request(conn, bob, payout_micro=payout)
+    assert _record(
+        conn,
+        first,
+        chain=CHAIN,
+        sold=sold,
+        trade=0,
+        wd=0,
+        bank=0,
+        net=gross,
+    )["ok"]
+    assert fx.carry_balance(conn, bob) == 0
+    later = _request(conn, bob, payout_micro=PAYOUT, now_ms=NOW + 1)
+    assert _record(conn, later, now_ms=NOW + 2)["ok"] is True
+    blocked = _correct(
+        conn,
+        first,
+        usdt_sold_micro=499_000_000,
+        trade_fee_satang=0,
+        thb_wd_fee_satang=0,
+        bank_fee_satang=0,
+        net_satang=(499_000_000 * RATE_E4) // 100_000_000,
+        now_ms=NOW + 3,
+    )
+    assert blocked["reason"] == "carry_consumed"
+    assert fx.carry_balance(conn, bob) == LEFTOVER
+    conn.close()
+
+
+def test_kyc_gate_and_open_transaction_and_second_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = open_db(tmp_path / "gate.db")
+    bob = _partner(conn, "Bob")
+    cara = _partner(conn, "Cara", now_ms=NOW + 1)
+    rid = _request(conn, bob)
+    missing = _record(conn, rid, paid_kyc_id=None)
+    assert missing["reason"] == "kyc_required"
+    cara_kyc = conn.execute(
+        "SELECT id FROM partner_kyc WHERE partner_id = ?",
+        (cara,),
+    ).fetchone()
+    assert cara_kyc is not None
+    foreign = _record(conn, rid, paid_kyc_id=str(cara_kyc["id"]))
+    assert foreign["reason"] == "kyc_mismatch"
+    with pytest.raises(sqlite3.IntegrityError, match="partner_payout_fx link"):
+        _insert_raw(conn, rid, bob, paid_kyc_id=str(cara_kyc["id"]))
+    conn.rollback()
+    saved = _record(conn, rid, reason=f" \t{REASON}\n")
+    assert saved["ok"] is True
+    stored = fx.current_fx(conn, rid)
+    assert stored is not None
+    assert stored["reason"] == REASON
+    wrong_kyc = _correct(conn, rid, paid_kyc_id=str(cara_kyc["id"]))
+    assert wrong_kyc["reason"] == "kyc_mismatch"
+    assert fx.carry_balance(conn, bob) == LEFTOVER
+    again = _record(conn, rid)
+    assert again["reason"] == "already_recorded"
+    dusty = _record(conn, _request(conn, bob, now_ms=NOW + 2), trade=D("42.27"))  # type: ignore[arg-type]
+    assert dusty["reason"] == "bad_input"
+    extra = _request(conn, bob, now_ms=NOW + 3)
+    conn.execute("BEGIN")
+    busy = _record(conn, extra)
+    assert busy["reason"] == "caller_transaction"
+    assert conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) AS n FROM partner_payout_fx").fetchone()["n"] == 1
+    correcting = _correct(conn, rid, bank_fee_satang=1_000, net_satang=_net(GROSS, TRADE, WD, 1_000))
+    assert correcting["reason"] == "caller_transaction"
+    settling = fx.settle_carry(conn, bob, 1, REASON, "42", NOW + 4)
+    assert settling["reason"] == "caller_transaction"
+    assert conn.execute("SELECT COUNT(*) AS n FROM partner_usdt_carry").fetchone()["n"] == 1
+    conn.rollback()
+    assert conn.in_transaction is False
+    conn.close()
+
+    monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
+    legacy = open_db(tmp_path / "legacy.db")
+    old = _partner(legacy, "Old")
+    old_req = _request(legacy, old)
+    assert legacy.execute("SELECT COUNT(*) AS n FROM partner_kyc").fetchone()["n"] == 0
+    accepted = _record(legacy, old_req, paid_kyc_id=None)
+    assert accepted["ok"] is True
+    row = fx.current_fx(legacy, old_req)
+    assert row is not None
+    assert row["paid_kyc_id"] is None
+    legacy.close()
 
 
 def test_partner_fx_does_not_import_telegram_or_kyc_secrets() -> None:

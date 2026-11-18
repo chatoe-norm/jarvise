@@ -999,7 +999,11 @@ def _migrate_partner_payout_fx(conn: sqlite3.Connection) -> None:
     Rollback: this step only adds tables, indexes, triggers, and one nullable
     column. Reverting the code leaves those objects unused. Dropping them is a
     manual owner step and is not done here. A repair re-run writes nothing
-    when the objects already exist.
+    when the objects already exist. If the code is rolled back to schema 33
+    while this database is at user_version 34, jarvise commands that check
+    ``user_version != SCHEMA_VERSION`` (``src/jarvise/cli.py`` around lines
+    573 and 646) exit with "schema mismatch", the same way a rollback of
+    migration 33 does.
     """
     conn.execute(
         """
@@ -1045,8 +1049,9 @@ def _migrate_partner_payout_fx(conn: sqlite3.Connection) -> None:
                 AND usdt_leftover_micro
                     = usdt_payout_micro + carry_in_micro - chain_fee_micro - usdt_sold_micro
             ),
-            CHECK (usdt_sold_micro IS NOT NULL AND usdt_sold_micro <= 10000000000000),
-            CHECK (rate_e4 IS NOT NULL AND rate_e4 <= 1000000),
+            CHECK (typeof(usdt_sold_micro) = 'integer' AND usdt_sold_micro <= 1000000000000),
+            CHECK (typeof(usdt_sold_micro * rate_e4) = 'integer'),
+            CHECK (typeof(rate_e4) = 'integer' AND rate_e4 <= 1000000),
             CHECK (
                 usdt_sold_micro IS NOT NULL
                 AND rate_e4 IS NOT NULL
@@ -1096,9 +1101,28 @@ def _migrate_partner_payout_fx(conn: sqlite3.Connection) -> None:
                         OR abs(residual_satang) > residual_tol_satang
                         OR version > 1
                     )
-                    THEN length(trim(coalesce(reason, ''))) >= 10
+                    THEN length(trim(coalesce(reason, ''), char(32, 9, 10, 13))) >= 10
                     ELSE 1
                 END
+            ),
+            CHECK (
+                typeof(version) = 'integer'
+                AND typeof(usdt_payout_micro) = 'integer'
+                AND typeof(carry_in_micro) = 'integer'
+                AND typeof(chain_fee_micro) = 'integer'
+                AND typeof(usdt_leftover_micro) = 'integer'
+                AND typeof(gross_satang) = 'integer'
+                AND typeof(trade_fee_satang) = 'integer'
+                AND typeof(thb_wd_fee_satang) = 'integer'
+                AND typeof(bank_fee_satang) = 'integer'
+                AND typeof(residual_satang) = 'integer'
+                AND typeof(residual_tol_satang) = 'integer'
+                AND typeof(net_satang) = 'integer'
+                AND typeof(threshold_bps) = 'integer'
+                AND typeof(entered_at_ms) = 'integer'
+                AND (ref_rate_e4 IS NULL OR typeof(ref_rate_e4) = 'integer')
+                AND (ref_fetched_at_ms IS NULL OR typeof(ref_fetched_at_ms) = 'integer')
+                AND (deviation_bps IS NULL OR typeof(deviation_bps) = 'integer')
             )
         )
         """
@@ -1142,6 +1166,14 @@ def _migrate_partner_payout_fx(conn: sqlite3.Connection) -> None:
                   AND payout_state = 'paid'
                   AND payout_micro IS NOT NULL
                   AND payout_micro = NEW.usdt_payout_micro
+            )
+            OR NOT (
+                NEW.paid_kyc_id IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM partner_kyc
+                    WHERE id = NEW.paid_kyc_id
+                      AND partner_id = NEW.partner_id
+                )
             );
         END
         """
@@ -1205,8 +1237,14 @@ def _migrate_partner_payout_fx(conn: sqlite3.Connection) -> None:
                     kind = 'settle'
                     AND fx_id IS NULL
                     AND reverses_id IS NULL
-                    AND length(trim(coalesce(reason, ''))) >= 10
+                    AND length(trim(coalesce(reason, ''), char(32, 9, 10, 13))) >= 10
                 )
+            ),
+            CHECK (
+                typeof(seq) = 'integer'
+                AND typeof(amount_micro) = 'integer'
+                AND typeof(balance_after_micro) = 'integer'
+                AND typeof(created_at_ms) = 'integer'
             )
         )
         """
