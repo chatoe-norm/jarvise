@@ -986,6 +986,296 @@ def _migrate_partner_kyc(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "partner_request", "payout_kyc_id", "TEXT DEFAULT NULL")
 
 
+def _migrate_partner_payout_fx(conn: sqlite3.Connection) -> None:
+    """THB payout record and USDT leftover carry (migration 34). Additive only.
+
+    ``partner_payout_fx`` is one append-only version per cash payout.
+    ``partner_usdt_carry`` is the admin-held leftover outside the pool ledger.
+    ``partner_payout_fx_draft`` is the replaceable 15-minute confirm step.
+    Nothing here rewrites partner, partner_event, or partner_request.
+
+    Rollback: this step only adds tables, indexes, and triggers. Reverting the
+    code leaves those objects unused. Dropping them is a manual owner step and
+    is not done here. A repair re-run writes nothing when the objects already
+    exist.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS partner_payout_fx (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL REFERENCES partner_request (id),
+            partner_id TEXT NOT NULL REFERENCES partner (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            supersedes_id TEXT REFERENCES partner_payout_fx (id),
+            paid_kyc_id TEXT REFERENCES partner_kyc (id),
+            usdt_payout_micro INTEGER NOT NULL CHECK (usdt_payout_micro > 0),
+            carry_in_micro INTEGER NOT NULL DEFAULT 0 CHECK (carry_in_micro >= 0),
+            chain_fee_micro INTEGER NOT NULL DEFAULT 0 CHECK (chain_fee_micro >= 0),
+            usdt_sold_micro INTEGER NOT NULL CHECK (usdt_sold_micro > 0),
+            usdt_leftover_micro INTEGER NOT NULL CHECK (usdt_leftover_micro >= 0),
+            rate_e4 INTEGER NOT NULL CHECK (rate_e4 > 0),
+            gross_satang INTEGER NOT NULL CHECK (gross_satang > 0),
+            trade_fee_satang INTEGER NOT NULL DEFAULT 0 CHECK (trade_fee_satang >= 0),
+            thb_wd_fee_satang INTEGER NOT NULL DEFAULT 0 CHECK (thb_wd_fee_satang >= 0),
+            bank_fee_satang INTEGER NOT NULL DEFAULT 0 CHECK (bank_fee_satang >= 0),
+            residual_satang INTEGER NOT NULL DEFAULT 0,
+            residual_tol_satang INTEGER NOT NULL CHECK (residual_tol_satang >= 0),
+            net_satang INTEGER NOT NULL CHECK (net_satang > 0),
+            ref_status TEXT NOT NULL CHECK (ref_status IN ('ok', 'unavailable', 'off')),
+            ref_rate_e4 INTEGER CHECK (ref_rate_e4 IS NULL OR ref_rate_e4 > 0),
+            ref_source TEXT,
+            ref_fetched_at_ms INTEGER,
+            ref_error TEXT,
+            deviation_bps INTEGER,
+            threshold_bps INTEGER NOT NULL CHECK (threshold_bps > 0),
+            reason TEXT,
+            slip_ref TEXT CHECK (slip_ref IS NULL OR length(slip_ref) <= 40),
+            sale_ref TEXT CHECK (sale_ref IS NULL OR length(sale_ref) <= 40),
+            entered_by TEXT NOT NULL,
+            entered_at_ms INTEGER NOT NULL,
+            UNIQUE (request_id, version),
+            CHECK (
+                usdt_payout_micro IS NOT NULL
+                AND carry_in_micro IS NOT NULL
+                AND chain_fee_micro IS NOT NULL
+                AND usdt_sold_micro IS NOT NULL
+                AND usdt_leftover_micro IS NOT NULL
+                AND usdt_leftover_micro
+                    = usdt_payout_micro + carry_in_micro - chain_fee_micro - usdt_sold_micro
+            ),
+            CHECK (usdt_sold_micro IS NOT NULL AND usdt_sold_micro <= 10000000000000),
+            CHECK (rate_e4 IS NOT NULL AND rate_e4 <= 1000000),
+            CHECK (
+                usdt_sold_micro IS NOT NULL
+                AND rate_e4 IS NOT NULL
+                AND gross_satang IS NOT NULL
+                AND gross_satang = (usdt_sold_micro * rate_e4) / 100000000
+            ),
+            CHECK (
+                net_satang IS NOT NULL
+                AND gross_satang IS NOT NULL
+                AND trade_fee_satang IS NOT NULL
+                AND thb_wd_fee_satang IS NOT NULL
+                AND bank_fee_satang IS NOT NULL
+                AND residual_satang IS NOT NULL
+                AND net_satang = gross_satang - trade_fee_satang - thb_wd_fee_satang
+                    - bank_fee_satang - residual_satang
+            ),
+            CHECK (
+                version IS NOT NULL
+                AND (
+                    (version = 1 AND supersedes_id IS NULL)
+                    OR (version > 1 AND supersedes_id IS NOT NULL)
+                )
+            ),
+            CHECK (
+                (
+                    ref_status = 'ok'
+                    AND ref_rate_e4 IS NOT NULL
+                    AND ref_source IS NOT NULL
+                    AND ref_fetched_at_ms IS NOT NULL
+                    AND deviation_bps IS NOT NULL
+                )
+                OR (
+                    ref_status <> 'ok'
+                    AND ref_rate_e4 IS NULL
+                    AND deviation_bps IS NULL
+                )
+            ),
+            CHECK (
+                CASE
+                    WHEN version IS NULL
+                        OR residual_satang IS NULL
+                        OR residual_tol_satang IS NULL
+                        OR threshold_bps IS NULL
+                    THEN 0
+                    WHEN (
+                        (deviation_bps IS NOT NULL AND abs(deviation_bps) > threshold_bps)
+                        OR abs(residual_satang) > residual_tol_satang
+                        OR version > 1
+                    )
+                    THEN length(trim(coalesce(reason, ''))) >= 10
+                    ELSE 1
+                END
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_partner_payout_fx_partner
+        ON partner_payout_fx (partner_id, entered_at_ms)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_payout_fx_no_update
+        BEFORE UPDATE ON partner_payout_fx
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_payout_fx immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_payout_fx_no_delete
+        BEFORE DELETE ON partner_payout_fx
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_payout_fx immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_payout_fx_link
+        BEFORE INSERT ON partner_payout_fx
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_payout_fx link')
+            WHERE NOT EXISTS (
+                SELECT 1 FROM partner_request
+                WHERE id = NEW.request_id
+                  AND partner_id = NEW.partner_id
+                  AND kind IN ('withdraw_profit', 'close')
+                  AND status = 'confirmed'
+                  AND payout_state = 'paid'
+                  AND payout_micro IS NOT NULL
+                  AND payout_micro = NEW.usdt_payout_micro
+            );
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_payout_fx_chain
+        BEFORE INSERT ON partner_payout_fx
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_payout_fx chain')
+            WHERE (
+                NEW.version > 1
+                AND NOT EXISTS (
+                    SELECT 1 FROM partner_payout_fx
+                    WHERE id = NEW.supersedes_id
+                      AND request_id = NEW.request_id
+                      AND version = NEW.version - 1
+                )
+            )
+            OR (
+                NEW.version = 1
+                AND EXISTS (
+                    SELECT 1 FROM partner_payout_fx
+                    WHERE request_id = NEW.request_id
+                )
+            );
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS partner_usdt_carry (
+            id TEXT PRIMARY KEY,
+            partner_id TEXT NOT NULL REFERENCES partner (id),
+            seq INTEGER NOT NULL CHECK (seq >= 1),
+            kind TEXT NOT NULL CHECK (kind IN ('leftover', 'apply', 'reverse', 'settle')),
+            amount_micro INTEGER NOT NULL CHECK (amount_micro <> 0),
+            balance_after_micro INTEGER NOT NULL CHECK (balance_after_micro >= 0),
+            fx_id TEXT REFERENCES partner_payout_fx (id),
+            reverses_id TEXT REFERENCES partner_usdt_carry (id),
+            reason TEXT,
+            entered_by TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            UNIQUE (partner_id, seq),
+            UNIQUE (reverses_id),
+            CHECK (
+                kind IS NOT NULL
+                AND amount_micro IS NOT NULL
+                AND (
+                    (kind = 'leftover' AND amount_micro > 0)
+                    OR (kind = 'apply' AND amount_micro < 0)
+                    OR (kind = 'settle' AND amount_micro < 0)
+                    OR kind = 'reverse'
+                )
+            ),
+            CHECK (
+                (kind = 'leftover' AND fx_id IS NOT NULL AND reverses_id IS NULL)
+                OR (kind = 'apply' AND fx_id IS NOT NULL AND reverses_id IS NULL)
+                OR (kind = 'reverse' AND fx_id IS NOT NULL AND reverses_id IS NOT NULL)
+                OR (
+                    kind = 'settle'
+                    AND fx_id IS NULL
+                    AND reverses_id IS NULL
+                    AND length(trim(coalesce(reason, ''))) >= 10
+                )
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_usdt_carry_no_update
+        BEFORE UPDATE ON partner_usdt_carry
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_usdt_carry immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_usdt_carry_no_delete
+        BEFORE DELETE ON partner_usdt_carry
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_usdt_carry immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_usdt_carry_balance
+        BEFORE INSERT ON partner_usdt_carry
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_usdt_carry balance')
+            WHERE NEW.seq IS NOT (
+                SELECT coalesce(max(seq), 0) + 1
+                FROM partner_usdt_carry
+                WHERE partner_id = NEW.partner_id
+            )
+            OR NEW.balance_after_micro IS NOT (
+                SELECT coalesce((
+                    SELECT balance_after_micro
+                    FROM partner_usdt_carry
+                    WHERE partner_id = NEW.partner_id
+                    ORDER BY seq DESC
+                    LIMIT 1
+                ), 0) + NEW.amount_micro
+            )
+            OR (
+                NEW.kind = 'reverse'
+                AND NOT EXISTS (
+                    SELECT 1 FROM partner_usdt_carry AS prev
+                    WHERE prev.id = NEW.reverses_id
+                      AND prev.partner_id = NEW.partner_id
+                      AND NEW.amount_micro = -prev.amount_micro
+                )
+            );
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS partner_payout_fx_draft (
+            request_id TEXT PRIMARY KEY REFERENCES partner_request (id),
+            token TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK (mode IN ('paid', 'fix')),
+            base_fx_id TEXT REFERENCES partner_payout_fx (id),
+            payload_json TEXT NOT NULL,
+            admin_message_id INTEGER,
+            created_by TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+
+
 def _migrate_assist_exit_telemetry(conn: sqlite3.Connection) -> None:
     """Exit-card snapshots, tap/ignore, and exchange-stop history. Additive only.
 
@@ -1502,6 +1792,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (31, "partner_request_source", _migrate_partner_request_source, True),
     (32, "assist_exit_telemetry", _migrate_assist_exit_telemetry, True),
     (33, "partner_kyc", _migrate_partner_kyc, True),
+    (34, "partner_payout_fx", _migrate_partner_payout_fx, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

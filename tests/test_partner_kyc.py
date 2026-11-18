@@ -74,8 +74,8 @@ def test_migration_32_to_33_is_additive_and_idempotent(
     _no_seed(monkeypatch)
     path = tmp_path / "k.db"
     conn = open_db(path)
-    assert SCHEMA_VERSION == 33
-    assert schema_version(conn) == 33
+    assert SCHEMA_VERSION == 34
+    assert schema_version(conn) == 34
     conn.execute("DROP TABLE partner_kyc_draft")
     conn.execute("DROP TABLE partner_kyc")
     conn.execute("PRAGMA user_version = 32")
@@ -83,7 +83,7 @@ def test_migration_32_to_33_is_additive_and_idempotent(
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 33
+    assert schema_version(conn) == 34
     assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='partner_kyc'").fetchone()
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(partner_request)")}
     assert "payout_kyc_id" in cols
