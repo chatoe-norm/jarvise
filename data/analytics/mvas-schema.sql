@@ -667,10 +667,69 @@ CREATE TABLE IF NOT EXISTS partner_request (
     expires_at_ms INTEGER NOT NULL,
     decided_at_ms INTEGER,
     paid_at_ms INTEGER,
-    source TEXT DEFAULT NULL  -- migration 31: 'portal' | 'admin'; NULL = row created before migration 31
+    source TEXT DEFAULT NULL,  -- migration 31: 'portal' | 'admin'; NULL = row created before migration 31
+    payout_kyc_id TEXT DEFAULT NULL  -- migration 33: KYC row a cash payout was confirmed against
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_partner_request_one_pending
     ON partner_request (partner_id) WHERE status = 'pending';
+
+-- Partner payout KYC (migration 33). History is append-only. Drafts may be replaced.
+CREATE TABLE IF NOT EXISTS partner_kyc (
+    id TEXT PRIMARY KEY,
+    partner_id TEXT NOT NULL REFERENCES partner (id),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    source TEXT NOT NULL CHECK (source IN ('portal', 'admin')),
+    key_id TEXT NOT NULL,
+    real_name_enc BLOB NOT NULL,
+    phone_enc BLOB NOT NULL,
+    account_no_enc BLOB NOT NULL,
+    holder_name_enc BLOB NOT NULL,
+    bank_code TEXT NOT NULL,
+    account_last4 TEXT NOT NULL CHECK (length(account_last4) = 4),
+    phone_last4 TEXT NOT NULL CHECK (length(phone_last4) = 4),
+    real_name_mask TEXT NOT NULL,
+    holder_name_mask TEXT NOT NULL,
+    holder_matches INTEGER NOT NULL CHECK (holder_matches IN (0, 1)),
+    account_fp TEXT NOT NULL,
+    phone_fp TEXT NOT NULL,
+    change_reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE (partner_id, version)
+);
+CREATE INDEX IF NOT EXISTS ix_partner_kyc_account_fp
+    ON partner_kyc (account_fp);
+CREATE INDEX IF NOT EXISTS ix_partner_kyc_phone_fp
+    ON partner_kyc (phone_fp);
+CREATE TRIGGER IF NOT EXISTS partner_kyc_no_delete
+BEFORE DELETE ON partner_kyc
+BEGIN
+    SELECT RAISE(ABORT, 'partner_kyc immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS partner_kyc_no_update
+BEFORE UPDATE ON partner_kyc
+BEGIN
+    SELECT RAISE(ABORT, 'partner_kyc immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS partner_kyc_draft (
+    partner_id TEXT PRIMARY KEY REFERENCES partner (id),
+    token TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    real_name_enc BLOB NOT NULL,
+    phone_enc BLOB NOT NULL,
+    account_no_enc BLOB NOT NULL,
+    holder_name_enc BLOB NOT NULL,
+    bank_code TEXT NOT NULL,
+    account_last4 TEXT NOT NULL,
+    phone_last4 TEXT NOT NULL,
+    real_name_mask TEXT NOT NULL,
+    holder_name_mask TEXT NOT NULL,
+    holder_matches INTEGER NOT NULL CHECK (holder_matches IN (0, 1)),
+    account_fp TEXT NOT NULL,
+    phone_fp TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL
+);
 
 -- Exit telemetry (migration 32). Advice snapshots, tap/ignore, exchange stop history.
 -- Realised commission_usdt and funding_usdt stay on assist_real_trade.

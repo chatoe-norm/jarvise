@@ -271,9 +271,12 @@ def _build_card(
     joined = partner_rules.joined_at_ms(conn, pid)
     kyc_saved = pk.kyc_state(conn, pid) == "saved"
 
-    def _with_kyc(lines: list[str]) -> list[str]:
+    def _with_kyc(lines: list[str], *, closed: bool = False) -> list[str]:
         lines.append(pk.card_kyc_line(conn, pid))
-        if not kyc_saved and joined is not None:
+        if closed:
+            if not kyc_saved:
+                lines.append("แก้ไขข้อมูลรับเงิน: ติดต่อแอดมิน")
+        elif not kyc_saved and joined is not None:
             lines.append(_KYC_LEGACY)
         return lines
 
@@ -317,7 +320,7 @@ def _build_card(
             lines.append(f"ยอดปิด {fmt_usdt(close_cash)} USDT")
             for due in summary.get("dues") or []:
                 lines.append(f"รอโอน {fmt_usdt(Decimal(due['cash']))} USDT")
-        return "\n".join(_with_kyc(lines)), None
+        return "\n".join(_with_kyc(lines, closed=True)), None
 
     nav: Decimal | None = None
     if isinstance(av, AccountValue):
@@ -948,7 +951,7 @@ def handle_portal_callback(
         _answer()
         pid = str(row["id"])
         if action == "re":
-            pk.discard_draft(conn, pid)
+            pk.discard_draft(conn, pid, token)
             body = _kyc_template_text()
             if mid is not None:
                 try:
@@ -964,22 +967,31 @@ def handle_portal_callback(
             logger.warning("partner kyc key unavailable partner_id=%s", pid)
             send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
             return {"ok": False, "reason": "kyc_key"}
+        except pk.KycCryptoError:
+            logger.warning("partner kyc decrypt failed partner_id=%s", pid)
+            send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+            return {"ok": False, "reason": "kyc_crypto"}
         if not result.get("ok"):
             reason = str(result.get("reason") or "")
             if reason == "kyc_draft_expired":
                 send_to_partner(send, row, "ฟอร์มหมดอายุ ส่งข้อมูลรับเงินอีกครั้ง")
             elif reason == "kyc_locked":
                 send_to_partner(send, row, _KYC_LOCKED)
+            elif reason == "closed":
+                send_to_partner(send, row, "ปิดพอร์ตแล้ว — ติดต่อแอดมิน")
             else:
                 send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
             return {"ok": False, "reason": reason}
         saved = _kyc_saved_text(result)
+        edited_ok = False
         if mid is not None:
             try:
-                edit(int(mid), saved, reply_markup={"inline_keyboard": []}, chat_id=partner_chat)
+                edited_ok = bool(
+                    edit(int(mid), saved, reply_markup={"inline_keyboard": []}, chat_id=partner_chat)
+                )
             except Exception:  # noqa: BLE001
-                send_to_partner(send, row, saved)
-        else:
+                edited_ok = False
+        if not edited_ok:
             send_to_partner(send, row, saved)
         _notify_admin_kyc(conn, row, result, send)
         return {"ok": True, "cmd": "kyc_saved", "kyc_id": result.get("kyc_id")}

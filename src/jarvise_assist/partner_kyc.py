@@ -16,6 +16,7 @@ import re
 import secrets
 import sqlite3
 import unicodedata
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -65,9 +66,13 @@ _MISSING_TH = {
     "account_no": "ขาดเลขบัญชี",
     "holder_name": "ขาดชื่อบัญชี",
 }
-_TITLES = ("นางสาว", "น.ส.", "ด.ช.", "ด.ญ.", "นาย", "นาง", "miss", "mrs", "mr", "ms")
-_NAME_RE = re.compile(r"^[A-Za-z\u0E00-\u0E7F .'\-]{3,80}$")
-_PHONE_RE = re.compile(r"^0[689]\d{8}$")
+_THAI_TITLES = ("นางสาว", "น.ส.", "ด.ช.", "ด.ญ.", "นาย", "นาง")
+_EN_TITLES = ("miss", "mrs", "mr", "ms")
+# Thai letters and marks only. Digits (๐-๙) and ฿ sit outside these ranges.
+_NAME_RE = re.compile(r"^[A-Za-z\u0E01-\u0E3A\u0E40-\u0E4E .'\-]{3,80}$")
+_PHONE_RE = re.compile(r"^0[689][0-9]{8}$")
+_ACCOUNT_RE = re.compile(r"^[0-9]{10,12}$")
+_THAI_DIGIT_TRANS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 
 # Closed set. Codes and Thai aliases, matched case-insensitively. No PromptPay.
 BANKS: dict[str, tuple[str, ...]] = {
@@ -187,22 +192,35 @@ def mask_account(bank_code: str, last4: str) -> str:
     return f"{bank_code} ••••{last4}"
 
 
+def _consume_title(text: str, title: str, *, boundary: bool) -> str | None:
+    if not text.casefold().startswith(title.casefold()):
+        return None
+    rest = text[len(title) :]
+    # English titles stop at a letter, so "Mrinal" stays intact. Thai titles keep
+    # the older prefix strip, including "นาง" inside "นางนวล".
+    if boundary and rest and rest[0] not in ". \t":
+        return None
+    if rest.startswith("."):
+        rest = rest[1:]
+    return rest.lstrip()
+
+
 def _strip_titles(name: str) -> str:
     text = clean_name(name)
     while text:
-        folded = text.casefold()
-        matched = False
-        for title in _TITLES:
-            t = title.casefold()
-            if folded.startswith(t):
-                rest = text[len(title) :]
-                if rest.startswith("."):
-                    rest = rest[1:]
-                text = rest.lstrip()
-                matched = True
+        nxt: str | None = None
+        for title in _THAI_TITLES:
+            nxt = _consume_title(text, title, boundary=False)
+            if nxt is not None:
                 break
-        if not matched:
+        if nxt is None:
+            for title in _EN_TITLES:
+                nxt = _consume_title(text, title, boundary=True)
+                if nxt is not None:
+                    break
+        if nxt is None:
             break
+        text = nxt
     return text
 
 
@@ -210,8 +228,14 @@ def names_match(left: str, right: str) -> bool:
     return _strip_titles(left).casefold() == _strip_titles(right).casefold()
 
 
+def _ascii_digits(text: str) -> str:
+    """Map Thai digits ๐-๙ to ASCII. Any other Unicode digit stays and then fails."""
+    return text.translate(_THAI_DIGIT_TRANS)
+
+
 def normalize_phone(raw: str) -> str | None:
     text = _strip_cf(unicodedata.normalize("NFKC", str(raw))).strip()
+    text = _ascii_digits(text)
     text = re.sub(r"[ \-.()]", "", text)
     if text.startswith("+66"):
         text = "0" + text[3:]
@@ -224,8 +248,9 @@ def normalize_phone(raw: str) -> str | None:
 
 def normalize_account(raw: str) -> str | None:
     text = _strip_cf(unicodedata.normalize("NFKC", str(raw)))
+    text = _ascii_digits(text)
     text = text.replace(" ", "").replace("-", "")
-    if re.fullmatch(r"\d{10,12}", text):
+    if _ACCOUNT_RE.fullmatch(text):
         return text
     return None
 
@@ -543,6 +568,16 @@ def commit_draft(conn: sqlite3.Connection, partner_id: str, token: str, now_ms: 
     tok = str(token)
     with transaction(conn):
         _purge(conn, now_ms)
+        row = _partner_row(conn, pid)
+        if row is None:
+            logger.info("partner kyc refused partner_id=%s reason=not_found", pid)
+            return {"ok": False, "reason": "not_found"}
+        if int(row["is_admin"] or 0) == 1:
+            logger.info("partner kyc refused partner_id=%s reason=admin_exempt", pid)
+            return {"ok": False, "reason": "admin_exempt"}
+        if str(row["status"]) == "closed":
+            logger.info("partner kyc refused partner_id=%s reason=closed", pid)
+            return {"ok": False, "reason": "closed"}
         if kyc_state(conn, pid) == "saved":
             logger.info("partner kyc refused partner_id=%s reason=kyc_locked", pid)
             return {"ok": False, "reason": "kyc_locked"}
@@ -604,10 +639,20 @@ def commit_draft(conn: sqlite3.Connection, partner_id: str, token: str, now_ms: 
         }
 
 
-def discard_draft(conn: sqlite3.Connection, partner_id: str) -> dict[str, Any]:
+def discard_draft(conn: sqlite3.Connection, partner_id: str, token: str | None = None) -> dict[str, Any]:
+    """Delete the draft. A token deletes only that row, so a stale button cannot drop a newer one."""
     with transaction(conn):
-        conn.execute("DELETE FROM partner_kyc_draft WHERE partner_id = ?", (str(partner_id),))
-    return {"ok": True}
+        if token is None:
+            cur = conn.execute(
+                "DELETE FROM partner_kyc_draft WHERE partner_id = ?",
+                (str(partner_id),),
+            )
+        else:
+            cur = conn.execute(
+                "DELETE FROM partner_kyc_draft WHERE partner_id = ? AND token = ?",
+                (str(partner_id), str(token)),
+            )
+    return {"ok": True, "deleted": int(cur.rowcount)}
 
 
 def admin_set_kyc(
@@ -760,6 +805,10 @@ def payout_account_line(
 ) -> str:
     """Masked account snapshotted on the payout, plus a warning when it is no longer current."""
     if not payout_kyc_id:
+        current = current_kyc(conn, partner_id)
+        if current is not None:
+            masked = mask_account(str(current["bank_code"]), str(current["account_last4"]))
+            return f"⚠️ ไม่มีข้อมูลรับเงินตอนยืนยัน — ปัจจุบัน: {masked} ตรวจ p kyc {partner_name} ก่อนโอน"
         return "⚠️ ไม่มีข้อมูลรับเงิน"
     row = conn.execute(
         """
@@ -776,6 +825,28 @@ def payout_account_line(
     if current is None or str(current["id"]) != str(row["id"]):
         line += f"\n⚠️ บัญชีรับเงินเปลี่ยนหลังยืนยัน — ตรวจ p kyc {partner_name} ก่อนโอน"
     return line
+
+
+def partner_payout_line(
+    conn: sqlite3.Connection,
+    *,
+    payout_kyc_id: str | None,
+    cash: Decimal,
+) -> str:
+    """Partner-facing mask. Empty when there is no snapshot or the cash is not positive."""
+    if cash <= 0 or not payout_kyc_id:
+        return ""
+    row = conn.execute(
+        """
+        SELECT bank_code, account_last4, holder_name_mask
+        FROM partner_kyc WHERE id = ?
+        """,
+        (str(payout_kyc_id),),
+    ).fetchone()
+    if row is None:
+        return ""
+    account = mask_account(str(row["bank_code"]), str(row["account_last4"]))
+    return f"โอนเข้า: {account} ({row['holder_name_mask']})"
 
 
 def card_kyc_line(conn: sqlite3.Connection, partner_id: str) -> str:

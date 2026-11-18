@@ -718,6 +718,10 @@ def _handle_add(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: int) 
     return {"ok": True, "cmd": "add", "name": name}
 
 
+def _kyc_set_hint(name: str) -> str:
+    return f"ให้พาร์ทเนอร์ส่งข้อมูลรับเงิน หรือ p kyc {name} set <เหตุผล>\nแล้วขึ้นบรรทัดใหม่ใส่ฟอร์ม"
+
+
 def _handle_dep(
     conn: sqlite3.Connection,
     name: str,
@@ -740,7 +744,7 @@ def _handle_dep(
     partner_id = str(row["id"])
     if ps.deposit_kyc_required(conn, row):
         stored = str(row["name"])
-        send(f"ยังไม่มีข้อมูลรับเงิน\nให้พาร์ทเนอร์ส่งข้อมูลรับเงิน หรือ p kyc {stored} set")
+        send("ยังไม่มีข้อมูลรับเงิน\n" + _kyc_set_hint(stored))
         return {"ok": False, "reason": "kyc_required"}
     pending = _pending_request(conn, partner_id, now_ms=now_ms)
     if pending is not None:
@@ -951,8 +955,6 @@ def _closing_note(conn: sqlite3.Connection, partner_id: str, *, cash: Decimal, f
     if summary.get("ok"):
         for due in summary.get("dues") or []:
             lines.append(f"รอโอน {fmt_usdt(Decimal(due['cash']))} USDT")
-    partner = ps.get_partner(conn, partner_id)
-    pname = str(partner["name"]) if partner is not None else "?"
     snap = conn.execute(
         """
         SELECT payout_kyc_id FROM partner_request
@@ -963,9 +965,9 @@ def _closing_note(conn: sqlite3.Connection, partner_id: str, *, cash: Decimal, f
         (partner_id,),
     ).fetchone()
     kyc_id = None if snap is None else snap["payout_kyc_id"]
-    lines.append(
-        pk.payout_account_line(conn, partner_id=partner_id, payout_kyc_id=kyc_id, partner_name=pname)
-    )
+    account = pk.partner_payout_line(conn, payout_kyc_id=kyc_id, cash=cash)
+    if account:
+        lines.append(account)
     return "\n".join(lines)
 
 
@@ -1289,6 +1291,10 @@ def _handle_kyc_show(conn: sqlite3.Connection, name: str, *, send: Any) -> dict[
         logger.warning("partner kyc key unavailable partner_id=%s", row["id"])
         send(thai_reason("kyc_key"))
         return {"ok": False, "reason": "kyc_key"}
+    except pk.KycCryptoError:
+        logger.warning("partner kyc decrypt failed partner_id=%s", row["id"])
+        send("อ่านข้อมูลรับเงินไม่ได้ตอนนี้")
+        return {"ok": False, "reason": "kyc_crypto"}
     if not revealed.get("ok"):
         send(f"{row['name']} · ยังไม่กรอก")
         return {"ok": True, "cmd": "kyc_show", "state": "none"}
@@ -1609,7 +1615,7 @@ def handle_partner_callback(
             dep_partner = ps.get_partner(conn, str(req["partner_id"]))
             if dep_partner is not None and ps.deposit_kyc_required(conn, dep_partner):
                 _answer("ยังไม่มีข้อมูลรับเงิน")
-                send(f"ให้พาร์ทเนอร์ส่งข้อมูลรับเงิน หรือ p kyc {dep_partner['name']} set")
+                send(_kyc_set_hint(str(dep_partner["name"])))
                 return {"ok": False, "reason": "kyc_required"}
             due_total = ps.payouts_due_total(conn)
             if due_total > 0:
@@ -1875,12 +1881,13 @@ def handle_partner_callback(
                 warnings = []
                 if partner is not None:
                     note = f"💸 แอดมินแจ้งว่าโอน {fmt_usdt(amount)} USDT ให้คุณแล้ว"
-                    note += "\n" + pk.payout_account_line(
+                    account = pk.partner_payout_line(
                         conn,
-                        partner_id=str(req["partner_id"]) if req is not None else "",
                         payout_kyc_id=req["payout_kyc_id"] if req is not None else None,
-                        partner_name=pname,
+                        cash=amount,
                     )
+                    if account:
+                        note += "\n" + account
                     # mark_paid already cleared this row. Unbind only when it was
                     # the last due payout and the partner actually received the note.
                     if str(partner["status"]) == "closed" and not _due_for(conn, str(partner["id"])):
