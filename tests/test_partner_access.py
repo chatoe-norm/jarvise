@@ -378,7 +378,7 @@ def test_closed_card_lists_every_due_when_value_unreadable(
     text, buttons = portal._build_card(
         conn, row, AccountValueError(reason="read_failed"), now_ms=join_ms + 30
     )
-    assert buttons is None
+    assert buttons == {"inline_keyboard": [[{"text": "👤 โปรไฟล์", "callback_data": "pp:pf"}]]}
     assert "ปิดพอร์ตแล้ว" in text
     assert partner_rules.fmt_date(join_ms) in text
     assert partner_rules.fmt_date(join_ms + 20) in text
@@ -392,7 +392,9 @@ def test_closed_card_lists_every_due_when_value_unreadable(
     sent, send = _send_capture()
     out = portal.handle_portal_text(conn, _pmsg("ยอด"), send=send, futures=object(), now_ms=join_ms + 40)
     assert out["ok"] is True
-    assert sent and sent[0]["reply_markup"] is None
+    assert sent and sent[0]["reply_markup"] == {
+        "inline_keyboard": [[{"text": "👤 โปรไฟล์", "callback_data": "pp:pf"}]]
+    }
     body = sent[0]["text"]
     assert "เข้าร่วม" in body and "ปิดเมื่อ" in body and "ยอดปิด" in body
     assert body.count("รอโอน") == 2

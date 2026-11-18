@@ -383,6 +383,20 @@ def kyc_state(conn: sqlite3.Connection, partner_id: str) -> str:
     return "none"
 
 
+def masked_profile(conn: sqlite3.Connection, partner_id: str) -> dict[str, str] | None:
+    """Mask columns of the current saved KYC. Does not read ciphertext or decrypt."""
+    row = current_kyc(conn, partner_id)
+    if row is None:
+        return None
+    return {
+        "real_name_mask": str(row["real_name_mask"]),
+        "bank_code": str(row["bank_code"]),
+        "account_last4": str(row["account_last4"]),
+        "holder_name_mask": str(row["holder_name_mask"]),
+        "phone_last4": str(row["phone_last4"]),
+    }
+
+
 def current_kyc(conn: sqlite3.Connection, partner_id: str) -> sqlite3.Row | None:
     """Newest version, mask columns only. Does not decrypt."""
     return conn.execute(
@@ -847,6 +861,9 @@ def partner_payout_line(
         return ""
     account = mask_account(str(row["bank_code"]), str(row["account_last4"]))
     return f"โอนเข้า: {account} ({row['holder_name_mask']})"
+
+
+_KYC_LEGACY = "⚠️ ยังไม่ได้กรอกข้อมูลรับเงิน — ส่งฟอร์มเมื่อสะดวก"
 
 
 def card_kyc_line(conn: sqlite3.Connection, partner_id: str) -> str:
