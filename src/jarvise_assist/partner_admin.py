@@ -2016,8 +2016,7 @@ def handle_partner_callback(
                     facts = _close_fact_lines(conn, str(partner["id"]))
                     if facts:
                         note += "\n" + "\n".join(facts)
-                    if fx.carry_balance(conn, str(partner["id"])) <= 0:
-                        note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
+                    note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
                     release_warnings = _release_closed_binding(
                         conn, partner, send=send, note=note, now_ms=now_ms
                     )

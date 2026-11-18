@@ -811,7 +811,9 @@ def test_p_carry_settle_amount_mismatch_refused(tmp_path: Path, env_chat: None) 
 
 def test_p_carry_settle_needs_reason(tmp_path: Path, env_chat: None) -> None:
     conn = open_db(tmp_path / "creason.db")
-    _partner(conn, "nok")
+    pid = _partner(conn, "nok")
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW, pid))
+    conn.commit()
     sent, send = _send_capture()
     text = "p carry nok settle 0.98 33.10"
     out = pa.handle_partner_text(conn, text, message=_msg(text), send=send, now_ms=NOW + 1)
@@ -1627,6 +1629,11 @@ def test_carry_retap_shows_fc_with_and_without_anchor_fx(tmp_path: Path, env_cha
     assert "ชำระเศษแล้ว" in edited[-1]["text"]
     assert _button(edited[-1]).startswith("pa:fc:")
     assert "pa:fs:" not in _button(edited[-1])
+    bare_cancel = retap(f"pa:fn:{bare}:{token2}", NOW + 13)
+    assert bare_cancel["reason"] == "already"
+    assert "ชำระเศษแล้ว" in edited[-1]["text"]
+    assert _button(edited[-1]).startswith("pa:fc:")
+    assert "pa:fs:" not in _button(edited[-1])
     conn.close()
 
 
@@ -1857,6 +1864,8 @@ def test_closed_without_telegram_shows_warning_and_resend(tmp_path: Path, env_ch
         now_ms=NOW + 5,
     )
     assert again["notified"] is False
+    assert "ℹ️ พาร์ทเนอร์ไม่ได้ผูกแชทแล้ว — ไม่ต้องส่งซ้ำ" in edited[-1]["text"]
+    assert "⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ" not in edited[-1]["text"]
     assert edited[-1]["reply_markup"] == {"inline_keyboard": []}
     conn.close()
 
@@ -1960,4 +1969,168 @@ def test_replaced_fix_and_carry_preview_says_replaced(tmp_path: Path, env_chat: 
     before = len(edited)
     pa.handle_partner_text(conn, text, message=_msg(text), send=send, edit=edit, now_ms=NOW + 9)
     assert any(item["text"] == "ถูกแทนด้วยรายการใหม่" for item in edited[before:])
+    conn.close()
+
+
+def test_earlier_withdraw_keeps_carry_forward_after_close(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "w1w2.db")
+    pid = _partner(conn, "nok")
+    _bind(conn, pid)
+    first = "pr_0000000000000a11"
+    second = "pr_0000000000000a12"
+    _paid_request(conn, pid, rid=first, micro=1_310_000)
+    _record_simple(conn, pid, first, payout=1_310_000, sold=1_000_000, now_ms=NOW + 2)
+    assert fx.carry_balance(conn, pid) == 300_000
+    _paid_request(conn, pid, rid=second, micro=710_000, paid_at=NOW + 3)
+    _record_simple(conn, pid, second, payout=710_000, sold=1_000_000, carry=300_000, now_ms=NOW + 4)
+    assert fx.carry_balance(conn, pid) == 0
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW + 5, pid))
+    conn.commit()
+    sent, send = _send_capture()
+    cmd = "p fix #000a11 rate=34.00 net=34.00\nปรับเรทตามสลิปที่ได้รับ"
+    preview = pa.handle_partner_text(conn, cmd, message=_msg(cmd), send=send, now_ms=NOW + 6)
+    assert preview["ok"] is True, preview
+    saved = pa.handle_partner_callback(
+        conn,
+        f"pa:fy:{first}:{preview['token']}",
+        callback=_cb(f"pa:fy:{first}:{preview['token']}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=_edit_capture()[1],
+        now_ms=NOW + 7,
+    )
+    assert saved["ok"] is True, saved
+    note = next(item["text"] for item in sent if item["chat_id"] == TG)
+    assert "ยกไปรวมกับการถอนครั้งถัดไป" in note
+    assert "แยกต่างหาก" not in note
+    conn.close()
+
+
+def test_fix_cancel_on_non_anchor_is_not_a_carry_card(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "nonanchor.db")
+    pid = _partner(conn, "nok")
+    _bind(conn, pid)
+    withdraw = "pr_0000000000000b11"
+    _paid_request(conn, pid, rid=withdraw, micro=1_990_000)
+    _record_simple(conn, pid, withdraw, payout=1_990_000, sold=1_000_000, now_ms=NOW + 2)
+    close = "pr_0000000000000b12"
+    _paid_request(conn, pid, rid=close, kind="close", micro=500_000, paid_at=NOW + 3)
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW + 4, pid))
+    conn.commit()
+    sent, send = _send_capture()
+    edited, edit = _edit_capture()
+    text = "p carry nok settle 0.98 33.10\nโอนเศษเป็นเงินบาทตามสลิป"
+    preview = pa.handle_partner_text(conn, text, message=_msg(text), send=send, now_ms=NOW + 5)
+    assert preview["request_id"] == close
+    pa.handle_partner_callback(
+        conn,
+        f"pa:fy:{close}:{preview['token']}",
+        callback=_cb(f"pa:fy:{close}:{preview['token']}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=edit,
+        now_ms=NOW + 6,
+    )
+    fix = "p fix #000b11 rate=33.20 net=33.20\nปรับเรทตามสลิปที่ได้รับ"
+    fixed = pa.handle_partner_text(conn, fix, message=_msg(fix), send=send, edit=edit, now_ms=NOW + 7)
+    assert fixed["ok"] is True, fixed
+    token = str(fixed["token"])
+    first = pa.handle_partner_callback(
+        conn,
+        f"pa:fn:{withdraw}:{token}",
+        callback=_cb(f"pa:fn:{withdraw}:{token}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=edit,
+        now_ms=NOW + 8,
+    )
+    assert first["cmd"] == "fx_cancel"
+    assert "ชำระเศษแล้ว" not in edited[-1]["text"]
+    second = pa.handle_partner_callback(
+        conn,
+        f"pa:fn:{withdraw}:{token}",
+        callback=_cb(f"pa:fn:{withdraw}:{token}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=edit,
+        now_ms=NOW + 9,
+    )
+    assert second["reason"] == "already"
+    assert "ชำระเศษแล้ว" not in edited[-1]["text"]
+    assert edited[-1]["text"].startswith("💸 บันทึกโอนเงินบาทแล้ว")
+    assert _button(edited[-1]).startswith("pa:fs:")
+    conn.close()
+
+
+def test_p_carry_on_active_partner_says_not_closed(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "active.db")
+    _partner(conn, "nok")
+    sent, send = _send_capture()
+    text = "p carry nok settle 0.98 33.10\nโอนเศษเป็นเงินบาทตามสลิป"
+    out = pa.handle_partner_text(conn, text, message=_msg(text), send=send, now_ms=NOW + 1)
+    assert out["reason"] == "not_closed"
+    assert "nok ยังไม่ได้ปิดพอร์ต — p carry ใช้กับพาร์ทเนอร์ที่ปิดแล้ว" in sent[-1]["text"]
+    conn.close()
+
+
+def test_fix_sold_change_line_uses_whole_usdt(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "soldfix.db")
+    pid = _partner(conn)
+    _bind(conn, pid)
+    _paid_request(conn, pid)
+    sent, send = _send_capture()
+    preview = pa.handle_partner_text(conn, _paid_cmd(), message=_msg("x"), send=send, now_ms=RECORDED_AT)
+    pa.handle_partner_callback(
+        conn,
+        f"pa:fy:{RID}:{preview['token']}",
+        callback=_cb(f"pa:fy:{RID}:{preview['token']}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=_edit_capture()[1],
+        now_ms=RECORDED_AT,
+    )
+    cmd = "p fix #a1b2c3 sold=498 net=16819.91\nปรับจำนวนขายตามสลิปจริง"
+    fixed = pa.handle_partner_text(conn, cmd, message=_msg(cmd), send=send, now_ms=RECORDED_AT + 1)
+    assert fixed["ok"] is True, fixed
+    assert "จำนวนขาย: เดิม 499 → ใหม่ 498 USDT" in sent[-1]["text"]
+    saved = pa.handle_partner_callback(
+        conn,
+        f"pa:fy:{RID}:{fixed['token']}",
+        callback=_cb(f"pa:fy:{RID}:{fixed['token']}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=_edit_capture()[1],
+        now_ms=RECORDED_AT + 2,
+    )
+    assert saved["ok"] is True, saved
+    note = next(item["text"] for item in reversed(sent) if item["chat_id"] == TG)
+    assert "จำนวนขาย: เดิม 499 → ใหม่ 498 USDT" in note
+    conn.close()
+
+
+def test_settle_reason_with_embedded_at_keeps_thb(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "embed.db")
+    pid = _partner(conn, "nok")
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW, pid))
+    conn.commit()
+    rid = "pr_a0c10ce0000000e9"
+    _paid_request(conn, pid, rid=rid, kind="close", micro=1_990_000)
+    _record_simple(conn, pid, rid, payout=1_990_000, sold=1_000_000, now_ms=NOW + 2)
+    sent, send = _send_capture()
+    text = "p carry nok settle 0.98 33.10\nโอน @12 · ตามสลิป"
+    preview = pa.handle_partner_text(conn, text, message=_msg(text), send=send, now_ms=NOW + 3)
+    assert preview["ok"] is True, preview
+    saved = pa.handle_partner_callback(
+        conn,
+        f"pa:fy:{preview['request_id']}:{preview['token']}",
+        callback=_cb(f"pa:fy:{preview['request_id']}:{preview['token']}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=_edit_capture()[1],
+        now_ms=NOW + 4,
+    )
+    assert saved["ok"] is True, saved
+    note = thb.carry_notice_from_db(conn, pid)
+    assert note.splitlines()[0] == "💸 ชำระเศษ 0.98 USDT เป็นเงินบาท 32.44 บาท"
+    assert note.splitlines()[1] == "โอน @12 · ตามสลิป"
     conn.close()

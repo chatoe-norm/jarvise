@@ -619,7 +619,10 @@ def partner_notice(conn: Any, request_id: str) -> str:
         f"(เฉลี่ย {fmt_effective(int(row['net_satang']), denom)} บาท/USDT)"
     )
     if int(row["usdt_leftover_micro"]) > 0:
-        if kind == "close" or closed:
+        separate = kind == "close" or (
+            closed and req is not None and not _later_v1_fx(conn, str(req["partner_id"]), request_id)
+        )
+        if separate:
             lines.append(
                 f"เศษ {_usdt_2(int(row['usdt_leftover_micro']))} USDT แอดมินจะแจ้งการชำระเศษนี้แยกต่างหาก"
             )
@@ -644,6 +647,26 @@ def partner_notice(conn: Any, request_id: str) -> str:
     else:
         lines.append(f"บันทึก {stamp}")
     return "\n".join(lines)
+
+
+def _later_v1_fx(conn: Any, partner_id: str, request_id: str) -> bool:
+    """True when another request has a version-1 fx row inserted after this one."""
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM partner_payout_fx AS other
+        WHERE other.partner_id = ?
+          AND other.version = 1
+          AND other.request_id != ?
+          AND other.rowid > (
+              SELECT rowid FROM partner_payout_fx
+              WHERE request_id = ? AND version = 1
+          )
+        LIMIT 1
+        """,
+        (str(partner_id), str(request_id), str(request_id)),
+    ).fetchone()
+    return row is not None
 
 
 def correction_notice(conn: Any, request_id: str, previous: dict[str, Any]) -> str:
@@ -1014,11 +1037,14 @@ def _carry_card_text(name: str, amount_micro: int, reason: str) -> str:
 
 
 def _carry_settled_line(conn: Any, rid: str) -> str | None:
-    """Carry card when the newest carry row is a settle at least as new as this anchor's fx."""
+    """Carry card only on the anchor, when its newest carry row is a new enough settle."""
     req = ps.get_request(conn, rid)
     if req is None:
         return None
-    row = _newest_carry(conn, str(req["partner_id"]))
+    partner_id = str(req["partner_id"])
+    if str(rid) != str(_carry_anchor(conn, partner_id) or ""):
+        return None
+    row = _newest_carry(conn, partner_id)
     if row is None or str(row["kind"]) != "settle":
         return None
     current = fx.current_fx(conn, rid)
@@ -1105,13 +1131,12 @@ def _after_commit(
     if sent_ok:
         card = head + "\n✅ แจ้งพาร์ทเนอร์แล้ว"
         markup: dict[str, Any] = {"inline_keyboard": []}
+    elif _resend_finished(conn, partner, already_toasted=already_toasted):
+        card = head + "\nℹ️ พาร์ทเนอร์ไม่ได้ผูกแชทแล้ว — ไม่ต้องส่งซ้ำ"
+        markup = {"inline_keyboard": []}
     else:
         card = head + "\n⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ — บันทึกแล้ว"
-        # A repeat tap after the partner is already gone must not offer another 📨.
-        if _resend_finished(conn, partner, already_toasted=already_toasted):
-            markup = {"inline_keyboard": []}
-        else:
-            markup = resend_button(rid, carry=op == "carry")
+        markup = resend_button(rid, carry=op == "carry")
     edited = False
     if mid is not None:
         try:
@@ -1495,14 +1520,14 @@ def handle_carry_text(
     if int(rate) < fx.RATE_MIN_E4 or int(rate) > fx.RATE_MAX_E4:
         send(_with_unsaved(code_th("rate_out_of_bounds")))
         return {"ok": False, "reason": "rate_out_of_bounds"}
+    if str(partner["status"]) != "closed":
+        send(_with_unsaved(_CARRY_NOT_CLOSED.format(name=str(partner["name"]))))
+        return {"ok": False, "reason": "not_closed"}
     reason = rest.strip()
     if len(reason) < 10:
         send(_REASON_NEED)
         return {"ok": False, "reason": "reason_required"}
     pid = str(partner["id"])
-    if str(partner["status"]) != "closed":
-        send(_with_unsaved(_CARRY_NOT_CLOSED.format(name=str(partner["name"]))))
-        return {"ok": False, "reason": "not_closed"}
     open_rows = fx.open_settlements(conn, pid)
     if any(row.get("stage") != "carry_closed" for row in open_rows):
         send(_with_unsaved(_CARRY_OPEN.format(name=str(partner["name"]))))
