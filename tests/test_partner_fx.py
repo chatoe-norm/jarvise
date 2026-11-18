@@ -530,7 +530,7 @@ def test_reason_required_null_does_not_pass(tmp_path: Path) -> None:
         (f"pc_{uuid.uuid4().hex[:16]}", bob, base, NOW),
     )
     conn.commit()
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
         conn.execute(
             """
             INSERT INTO partner_usdt_carry (
@@ -540,6 +540,17 @@ def test_reason_required_null_does_not_pass(tmp_path: Path) -> None:
             """,
             (f"pc_{uuid.uuid4().hex[:16]}", bob, "\t" * 12, NOW),
         )
+    conn.rollback()
+    conn.execute(
+        """
+        INSERT INTO partner_usdt_carry (
+            id, partner_id, seq, kind, amount_micro, balance_after_micro,
+            fx_id, reverses_id, reason, entered_by, created_at_ms
+        ) VALUES (?, ?, 2, 'settle', -100, 900, NULL, NULL, ?, '42', ?)
+        """,
+        (f"pc_{uuid.uuid4().hex[:16]}", bob, "ก" * 10, NOW),
+    )
+    conn.commit()
     conn.close()
 
 

@@ -984,6 +984,9 @@ def settle_carry(
     *,
     draft_token: str | None = None,
     draft_request_id: str | None = None,
+    thb_satang: int | None = None,
+    rate_e4: int | None = None,
+    expect_balance_micro: int | None = None,
 ) -> dict[str, Any]:
     """Owner settlement of a remaining leftover. ``amount_micro`` is positive.
 
@@ -1009,8 +1012,11 @@ def settle_carry(
             if not _reason_ok(cleaned):
                 return _fail(None, partner_id, "reason_required")
             balance = carry_balance(conn, partner_id)
+            if expect_balance_micro is not None and balance != int(expect_balance_micro):
+                return _fail(None, partner_id, "carry_mismatch")
             if amount > balance:
                 return _fail(None, partner_id, "settle_exceeds")
+            stored_reason = _settle_reason(cleaned, thb_satang=thb_satang, rate_e4=rate_e4)
             after = _post_carry(
                 conn,
                 partner_id=str(partner_id),
@@ -1018,7 +1024,7 @@ def settle_carry(
                 amount_micro=-amount,
                 fx_id=None,
                 reverses_id=None,
-                reason=cleaned,
+                reason=stored_reason,
                 entered_by=entered_by,
                 now_ms=now,
             )
@@ -1219,6 +1225,34 @@ def carry_locked(conn: sqlite3.Connection, request_id: str) -> bool:
     return _later_activity(conn, str(row["partner_id"]), str(request_id))
 
 
+def unsellable(conn: sqlite3.Connection, req: sqlite3.Row | dict[str, Any]) -> bool:
+    """True when a 0.01 USDT chain fee leaves less than one USDT to sell."""
+    payout = int(req["payout_micro"] or 0)
+    carry = carry_balance(conn, str(req["partner_id"]))
+    return payout + carry - 10_000 < SELL_STEP_MICRO
+
+
+def _fmt_thb_text(satang: int) -> str:
+    sign = "−" if int(satang) < 0 else ""
+    body = f"{(Decimal(abs(int(satang))) / Decimal(100)):,.2f}"
+    return f"{sign}{body}"
+
+
+def _fmt_rate_text(rate_e4: int) -> str:
+    text = f"{Decimal(int(rate_e4)) / Decimal(10_000):.4f}"
+    whole, frac = text.split(".")
+    frac = frac.rstrip("0")
+    if len(frac) < 2:
+        frac = frac.ljust(2, "0")
+    return f"{whole}.{frac}"
+
+
+def _settle_reason(admin_reason: str | None, *, thb_satang: int | None, rate_e4: int | None) -> str | None:
+    if thb_satang is None or rate_e4 is None:
+        return admin_reason
+    return f"THB {_fmt_thb_text(int(thb_satang))} @{_fmt_rate_text(int(rate_e4))} · {admin_reason}"
+
+
 def awaiting_thb(conn: sqlite3.Connection, partner_id: str | None = None) -> list[dict[str, Any]]:
     """Paid cash payouts with no THB record yet. Read-only; opens no transaction."""
     sql = """
@@ -1240,7 +1274,7 @@ def awaiting_thb(conn: sqlite3.Connection, partner_id: str | None = None) -> lis
         sql += " AND r.partner_id = ?"
         params.append(str(partner_id))
     sql += " ORDER BY r.paid_at_ms, r.id"
-    return _dicts(list(conn.execute(sql, params).fetchall()))
+    return [row for row in _dicts(list(conn.execute(sql, params).fetchall())) if not unsellable(conn, row)]
 
 
 def open_settlements(conn: sqlite3.Connection, partner_id: str | None = None) -> list[dict[str, Any]]:
@@ -1256,7 +1290,6 @@ def open_settlements(conn: sqlite3.Connection, partner_id: str | None = None) ->
           AND r.payout_state = 'due'
           AND r.kind IN ('withdraw_profit', 'close')
           AND r.payout_micro > 0
-          AND p.is_admin = 0
     """
     params: list[Any] = []
     if partner_id is not None:

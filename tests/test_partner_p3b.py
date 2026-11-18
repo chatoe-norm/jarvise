@@ -495,10 +495,13 @@ def test_full_abc_sequence(tmp_path: Path, monkeypatch: Any, env_chat: None) -> 
     assert any(s.get("chat_id") == "501" and "โอน" in s["text"] for s in sent)
     assert ps.partner_by_telegram_id(conn, "501") is not None
     portal.reset_value_cache()
+    card_sent, card_send = _send_capture()
     out = portal.handle_portal_text(
-        conn, _pmsg("hi", chat=501), send=_send_capture()[1], futures=cli_cl, now_ms=NOW + 81
+        conn, _pmsg("hi", chat=501), send=card_send, futures=cli_cl, now_ms=NOW + 81
     )
-    assert out.get("ignored") != "foreign_chat"
+    assert out == {"ok": True, "cmd": "card"}
+    assert any("ปิดพอร์ตแล้ว" in item["text"] for item in card_sent)
+    assert any("กำลังแปลงเป็นเงินบาท" in item["text"] for item in card_sent)
 
     # At V 1300, C card shows 287.50 red
     cli_n = FakeValueClient(wallet="1300")

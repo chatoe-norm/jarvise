@@ -519,15 +519,21 @@ def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, An
             return body, _paid_button(rid)
         if payout_state == "paid":
             x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
+            is_admin = partner is not None and int(partner["is_admin"] or 0) == 1
             recorded = fx.current_fx(conn, rid)
-            if recorded is not None:
+            paid_at = req["paid_at_ms"]
+            cash_out = str(kind) in ("withdraw_profit", "close") and int(req["payout_micro"] or 0) > 0
+            if not is_admin and recorded is not None:
                 return (
                     f"💸 บันทึกโอนเงินบาทแล้ว · {pname} · "
                     f"{thb.fmt_thb(int(recorded['net_satang']))} บาท (#{thb.short_id(rid)})"
                 ), empty
-            paid_at = req["paid_at_ms"]
-            cash_out = str(kind) in ("withdraw_profit", "close") and int(req["payout_micro"] or 0) > 0
-            if cash_out and paid_at is not None and int(paid_at) >= int(fx.THB_FLOW_SINCE_MS):
+            if (
+                not is_admin
+                and cash_out
+                and paid_at is not None
+                and int(paid_at) >= int(fx.THB_FLOW_SINCE_MS)
+            ):
                 return (
                     f"📤 USDT ออกจากพอร์ตแล้ว · {pname} · {fmt_usdt(x)} USDT · "
                     f"รอบันทึกเงินบาท (p paid #{thb.short_id(rid)} …)"
@@ -1044,9 +1050,17 @@ def _handle_unbind(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: in
     if row is None:
         send(thai_reason("not_found"))
         return {"ok": False, "reason": "not_found"}
-    if str(row["status"]) == "closed" and _due_for(conn, str(row["id"])):
-        send(f"{name} ปิดแล้วและยังรอบันทึกเงินบาท — ยกเลิกการผูกไม่ได้")
-        return {"ok": False, "reason": "payout_due"}
+    if str(row["status"]) == "closed":
+        open_rows = fx.open_settlements(conn, str(row["id"]))
+        if any(item.get("stage") == "due" for item in open_rows):
+            send(f"{name} ปิดแล้วและยังมียอดรอโอน — ยกเลิกการผูกไม่ได้")
+            return {"ok": False, "reason": "payout_due"}
+        if any(item.get("stage") == "awaiting_thb" for item in open_rows):
+            send(f"{name} ปิดแล้วและยังรอบันทึกเงินบาท — ยกเลิกการผูกไม่ได้")
+            return {"ok": False, "reason": "payout_due"}
+        if any(item.get("stage") == "carry_closed" for item in open_rows):
+            send(f"{name} ปิดแล้วและยังมีเศษค้าง — ใช้ p carry ก่อน")
+            return {"ok": False, "reason": "payout_due"}
     ps.unbind_partner(conn, str(row["id"]), now_ms=now_ms)
     send(f"ยกเลิกการผูก {name} แล้ว")
     return {"ok": True, "cmd": "unbind"}
@@ -1163,7 +1177,7 @@ def _handle_due(conn: sqlite3.Connection, *, send: Any, now_ms: int) -> dict[str
     remaining = len(units) - len(shown)
     for kind, item in shown:
         if kind == "due":
-            send(thb._due_line(conn, item, now_ms), reply_markup=_paid_button(str(item["id"])))
+            send(thb.due_line(conn, item, now_ms), reply_markup=_paid_button(str(item["id"])))
         elif kind == "awaiting":
             send(_awaiting_due_text(conn, item, now_ms))
         elif kind == "carry":
@@ -1181,7 +1195,9 @@ def _handle_due(conn: sqlite3.Connection, *, send: Any, now_ms: int) -> dict[str
 
 
 def _awaiting_due_text(conn: sqlite3.Connection, rows: list[dict[str, Any]], now_ms: int) -> str:
-    lines = [f"รอบันทึกเงินบาท ({len(rows)})"]
+    header = f"รอบันทึกเงินบาท ({len(rows)})"
+    footer = "บันทึก: p paid #รหัส sold= rate= trade= net="
+    bits: list[str] = []
     seen: set[str] = set()
     for row in rows:
         bit = (
@@ -1195,9 +1211,24 @@ def _awaiting_due_text(conn: sqlite3.Connection, rows: list[dict[str, Any]], now
             if carry > 0:
                 bit += f" · เศษยกมา {fmt_usdt(ps.usdt_from_micro(carry))}"
             seen.add(pid)
-        lines.append(bit)
-    lines.append("บันทึก: p paid #รหัส sold= rate= trade= net=")
-    return "\n".join(lines)
+        bits.append(bit)
+
+    def pack(shown: list[str], omitted: int) -> str:
+        lines = [header, *shown]
+        if omitted:
+            lines.append(f"… อีก {omitted} รายการ")
+        lines.append(footer)
+        return "\n".join(lines)
+
+    if len(pack(bits, 0)) <= 3500:
+        return pack(bits, 0)
+    shown: list[str] = []
+    for index, bit in enumerate(bits):
+        trial = pack(shown + [bit], len(bits) - index - 1)
+        if len(trial) > 3500:
+            break
+        shown.append(bit)
+    return pack(shown, len(bits) - len(shown))
 
 
 def _send_pending(conn: sqlite3.Connection, req: sqlite3.Row, *, send: Any) -> None:
@@ -1533,6 +1564,7 @@ def handle_partner_text(
                 conn,
                 str(parsed.get("raw") or ""),
                 send=send,
+                edit=edit or (lambda *_a, **_k: False),
                 entered_by="admin",
                 now_ms=now_ms,
             )
@@ -1976,11 +2008,27 @@ def handle_partner_callback(
             if paid.get("ok"):
                 partner = ps.get_partner(conn, str(req["partner_id"])) if req is not None else None
                 _answer()
-                # Step 1 only moves USDT out of the pool. The partner stays bound
-                # until the THB notice, including a closed partner.
-                if partner is not None:
-                    send_to_partner(send, partner, thb.step1_partner(conn, rid))
-                _show_admin(thb.step1_admin(conn, rid), [], mid=mid, edit=edit, send=send)
+                note = thb.step1_partner(conn, rid)
+                card_warnings: list[str] = []
+                if partner is not None and thb.step1_releases(conn, rid):
+                    facts = _close_fact_lines(conn, str(partner["id"]))
+                    if facts:
+                        note += "\n" + "\n".join(facts)
+                    if fx.carry_balance(conn, str(partner["id"])) <= 0:
+                        note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
+                    release_warnings = _release_closed_binding(
+                        conn, partner, send=send, note=note, now_ms=now_ms
+                    )
+                    if release_warnings:
+                        card_warnings.append("⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ")
+                elif partner is not None:
+                    sent_ok = send_to_partner(send, partner, note)
+                    if not sent_ok and partner["telegram_user_id"] is not None:
+                        card_warnings.append("⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ")
+                body = thb.step1_admin(conn, rid)
+                if card_warnings:
+                    body += "\n" + "\n".join(card_warnings)
+                _show_admin(body, card_warnings, mid=mid, edit=edit, send=send)
                 return {"ok": True, "cmd": "paid"}
             _answer("รายการนี้ปิดไปแล้ว")
             if mid is not None:
@@ -1988,7 +2036,7 @@ def handle_partner_callback(
                 edit(int(mid), body, reply_markup=markup)
             return {"ok": False, "reason": "not_due"}
 
-        if data.startswith(("pa:fy:", "pa:fn:", "pa:fs:")):
+        if data.startswith(("pa:fy:", "pa:fn:", "pa:fs:", "pa:fc:")):
             return thb.confirm_callback(
                 conn,
                 data,

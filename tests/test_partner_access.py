@@ -791,7 +791,7 @@ def test_unbind_refuses_closed_partner_with_payout_due(
         now_ms=NOW + 7,
     )
     assert out == {"ok": False, "reason": "payout_due"}
-    assert "ปิดแล้วและยังรอบันทึกเงินบาท" in sent[0]["text"]
+    assert "ปิดแล้วและยังมียอดรอโอน" in sent[0]["text"]
     assert "ยกเลิกการผูกไม่ได้" in sent[0]["text"]
     assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
     rid = next(str(d["id"]) for d in ps.list_due_payouts(conn) if str(d["partner_id"]) == b_id)
@@ -1145,6 +1145,7 @@ def test_paid_last_due_send_none_keeps_binding(tmp_path: Path, monkeypatch: Any,
     assert out == {"ok": True, "cmd": "paid"}
     assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
     assert "USDT ออกจากพอร์ตแล้ว" in edited[0]["text"]
+    assert "⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ" in edited[0]["text"]
     assert "ยังไม่ตัดการผูก" not in edited[0]["text"]
     conn.close()
 
@@ -1209,6 +1210,7 @@ def test_send_fail_with_other_due_omits_unbind_hint(tmp_path: Path, monkeypatch:
     assert out == {"ok": True, "cmd": "paid"}
     text = edited[0]["text"]
     assert "USDT ออกจากพอร์ตแล้ว" in text
+    assert "⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ" in text
     assert "ยังไม่ตัดการผูก" not in text
     assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
     conn.close()
