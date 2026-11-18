@@ -1225,11 +1225,9 @@ def carry_locked(conn: sqlite3.Connection, request_id: str) -> bool:
     return _later_activity(conn, str(row["partner_id"]), str(request_id))
 
 
-def unsellable(conn: sqlite3.Connection, req: sqlite3.Row | dict[str, Any]) -> bool:
-    """True when a 0.01 USDT chain fee leaves less than one USDT to sell."""
-    payout = int(req["payout_micro"] or 0)
-    carry = carry_balance(conn, str(req["partner_id"]))
-    return payout + carry - 10_000 < SELL_STEP_MICRO
+def unsellable(_conn: sqlite3.Connection, req: sqlite3.Row | dict[str, Any]) -> bool:
+    """Depends only on the payout, so a row never moves in or out of awaiting_thb."""
+    return int(req["payout_micro"] or 0) - 10_000 < SELL_STEP_MICRO
 
 
 def _fmt_thb_text(satang: int) -> str:

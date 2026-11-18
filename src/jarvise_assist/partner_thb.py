@@ -42,8 +42,10 @@ _SOLD_MIN = "จำนวนขายต้องไม่น้อยกว่�
 _SETTLE_EXCEEDS = "ชำระเกินยอดเศษที่มี"
 _UNSELLABLE = "⚠️ ยอดน้อยกว่า 1 USDT หลังหักค่าเครือข่าย ขายเป็นเงินบาทไม่ได้ — โอนเป็น USDT/นอกระบบ แล้วจบที่ขั้นนี้"
 _CARRY_OPEN = "{name} ยังมีรายการเปิดอยู่ — บันทึก p paid ให้ครบก่อน"
+_CARRY_NOT_CLOSED = "{name} ยังไม่ได้ปิดพอร์ต — p carry ใช้กับพาร์ทเนอร์ที่ปิดแล้ว"
+_UNSELLABLE_PAID = "รายการนี้จบที่ขั้น 📤 แล้ว (ยอดน้อยกว่า 1 USDT) — ไม่ต้องบันทึกเงินบาท"
 _SLIP_LONG = "อ้างอิงยาวเกิน 40 ตัวอักษร"
-_SETTLE_REASON_RE = re.compile(r"^THB (.+) @([0-9]+(?:\.[0-9]+)?) · (.*)$", re.DOTALL)
+_SETTLE_REASON_RE = re.compile(r"^THB ([0-9][0-9,]*\.[0-9]{2}) @([0-9]+(?:\.[0-9]+)?) · (.*)$", re.DOTALL)
 _BUG = "ทำไม่สำเร็จ — ยังไม่บันทึกอะไร"
 _DB = "บันทึกไม่ได้ — ยังไม่บันทึกอะไร"
 _NOTHING_CHANGED = "ไม่มีอะไรเปลี่ยน ไม่บันทึก"
@@ -271,6 +273,8 @@ def _classify_request(conn: Any, req: dict[str, Any]) -> dict[str, Any]:
         return {"refusal": _with_unsaved(_LEGACY)}
     if fx.current_fx(conn, str(req["id"])) is not None:
         return {"refusal": _with_unsaved(_RECORDED.format(short=short_id(str(req["id"]))))}
+    if fx.unsellable(conn, req):
+        return {"refusal": _with_unsaved(_UNSELLABLE_PAID)}
     return {"request": req, "partner": partner}
 
 
@@ -587,6 +591,8 @@ def partner_notice(conn: Any, request_id: str) -> str:
         return ""
     req = ps.get_request(conn, request_id)
     kind = str(req["kind"]) if req is not None else "withdraw_profit"
+    partner = ps.get_partner(conn, str(req["partner_id"])) if req is not None else None
+    closed = partner is not None and str(partner["status"]) == "closed"
     lines = [f"💸 โอนเงินบาทเข้าบัญชีของคุณแล้ว · {_kind(kind)}"]
     lines.append(f"ยอดถอน {_usdt_2(int(row['usdt_payout_micro']))} USDT")
     if int(row["carry_in_micro"]) > 0:
@@ -613,7 +619,7 @@ def partner_notice(conn: Any, request_id: str) -> str:
         f"(เฉลี่ย {fmt_effective(int(row['net_satang']), denom)} บาท/USDT)"
     )
     if int(row["usdt_leftover_micro"]) > 0:
-        if kind == "close":
+        if kind == "close" or closed:
             lines.append(
                 f"เศษ {_usdt_2(int(row['usdt_leftover_micro']))} USDT แอดมินจะแจ้งการชำระเศษนี้แยกต่างหาก"
             )
@@ -652,7 +658,7 @@ def correction_notice(conn: Any, request_id: str, previous: dict[str, Any]) -> s
     ]
     labels = (
         ("chain_fee_micro", "ค่าธรรมเนียมเครือข่าย", "usdt"),
-        ("usdt_sold_micro", "จำนวนขาย", "usdt"),
+        ("usdt_sold_micro", "จำนวนขาย", "sold"),
         ("rate_e4", "เรท", "rate"),
         ("trade_fee_satang", "ค่าซื้อขาย", "thb"),
         ("thb_wd_fee_satang", "ค่าถอนบาท", "thb"),
@@ -677,6 +683,8 @@ def correction_notice(conn: Any, request_id: str, previous: dict[str, Any]) -> s
 
 
 def _plain_field(value: int, kind: str) -> str:
+    if kind == "sold":
+        return _sold_usdt(value)
     if kind == "usdt":
         return _usdt_2(value)
     if kind == "rate":
@@ -685,7 +693,7 @@ def _plain_field(value: int, kind: str) -> str:
 
 
 def _change_line(label: str, old: int, new: int, kind: str) -> str:
-    unit = {"usdt": " USDT", "thb": " บาท"}.get(kind, "")
+    unit = {"usdt": " USDT", "sold": " USDT", "thb": " บาท"}.get(kind, "")
     return f"{label}: เดิม {_plain_field(old, kind)} → ใหม่ {_plain_field(new, kind)}{unit}"
 
 
@@ -698,25 +706,25 @@ def step1_admin(conn: Any, request_id: str) -> str:
     payout = int(req["payout_micro"] or 0)
     if partner is not None and int(partner["is_admin"] or 0) == 1:
         return f"💸 โอนแล้ว {_usdt_2(payout)} USDT ให้ {name}"
-    carry = fx.carry_balance(conn, str(req["partner_id"]))
-    chain = 10_000
-    available = payout + carry - chain
-    sold = (available // 1_000_000) * 1_000_000
     kyc = kyc_bits(conn, str(req["partner_id"]))
     account = kyc["line"] if kyc["id"] else "⚠️ ยังไม่มีข้อมูลรับเงิน"
     lines = [
         f"📤 USDT ออกจากพอร์ตแล้ว · {name} · {_kind(str(req['kind']))} {_usdt_2(payout)} USDT",
-        (
-            f"ถ้าค่าเครือข่าย 0.01: มีให้ขาย {_usdt_2(available)} USDT "
-            f"(เศษยกมา {_usdt_2(carry)}) → ขายได้ {_sold_usdt(sold)} USDT"
-        ),
-        f"บัญชีรับเงิน: {account}",
     ]
     if fx.unsellable(conn, req):
-        lines.append(_UNSELLABLE)
+        lines.extend([f"บัญชีรับเงิน: {account}", _UNSELLABLE])
     else:
+        carry = fx.carry_balance(conn, str(req["partner_id"]))
+        chain = 10_000
+        available = payout + carry - chain
+        sold = (available // 1_000_000) * 1_000_000
         lines.extend(
             [
+                (
+                    f"ถ้าค่าเครือข่าย 0.01: มีให้ขาย {_usdt_2(available)} USDT "
+                    f"(เศษยกมา {_usdt_2(carry)}) → ขายได้ {_sold_usdt(sold)} USDT"
+                ),
+                f"บัญชีรับเงิน: {account}",
                 "ขายแล้วบันทึกด้วย:",
                 f"p paid #{short_id(request_id)} sold= rate= trade= net=",
             ]
@@ -845,8 +853,8 @@ def confirm_callback(
     if op == "carry":
         if fx.carry_balance(conn, partner_id) != int(payload["amount_micro"]):
             fx.delete_fx_draft(conn, rid, token=token)
-            answer(_CARRY_CHANGED)
-            _edit_or_send(edit, send, mid, _with_unsaved(_CARRY_CHANGED), {"inline_keyboard": []})
+            answer(_CARRY_CHANGED_SETTLE)
+            _edit_or_send(edit, send, mid, _with_unsaved(_CARRY_CHANGED_SETTLE), {"inline_keyboard": []})
             return {"ok": False, "reason": "carry_mismatch"}
         result = fx.settle_carry(
             conn,
@@ -918,7 +926,6 @@ def confirm_callback(
             partner_id,
             op=op,
             previous=payload.get("previous"),
-            carry_note=None,
             answer=answer,
             edit=edit,
             send=send,
@@ -962,6 +969,12 @@ def _missing_draft(
         answer("มีรายการใหม่แทนแล้ว")
         _edit_or_send(edit, send, mid, "มีรายการใหม่แทนแล้ว", {"inline_keyboard": []})
         return {"ok": False, "reason": "replaced"}
+    if row is None:
+        carry_line = _carry_settled_line(conn, rid)
+        if carry_line is not None:
+            answer("บันทึกไปแล้ว")
+            _edit_or_send(edit, send, mid, carry_line, resend_button(rid, carry=True))
+            return {"ok": False, "reason": "already"}
     if row is None and current is not None:
         answer("บันทึกไปแล้ว")
         _edit_or_send(edit, send, mid, _settled_line(conn, rid), resend_button(rid))
@@ -979,6 +992,41 @@ def _settled_line(conn: Any, rid: str) -> str:
     if row is None:
         return "บันทึกไปแล้ว"
     return f"💸 บันทึกโอนเงินบาทแล้ว · {name} · {fmt_thb(int(row['net_satang']))} บาท (#{short_id(rid)})"
+
+
+def _newest_carry(conn: Any, partner_id: str) -> Any:
+    return conn.execute(
+        """
+        SELECT kind, amount_micro, reason, created_at_ms
+        FROM partner_usdt_carry
+        WHERE partner_id = ?
+        ORDER BY seq DESC
+        LIMIT 1
+        """,
+        (str(partner_id),),
+    ).fetchone()
+
+
+def _carry_card_text(name: str, amount_micro: int, reason: str) -> str:
+    matched = _SETTLE_REASON_RE.match(reason)
+    thb = matched.group(1) if matched is not None else "—"
+    return f"💸 ชำระเศษแล้ว · {name} · {_usdt_2(abs(int(amount_micro)))} USDT = {thb} บาท"
+
+
+def _carry_settled_line(conn: Any, rid: str) -> str | None:
+    """Carry card when the newest carry row is a settle at least as new as this anchor's fx."""
+    req = ps.get_request(conn, rid)
+    if req is None:
+        return None
+    row = _newest_carry(conn, str(req["partner_id"]))
+    if row is None or str(row["kind"]) != "settle":
+        return None
+    current = fx.current_fx(conn, rid)
+    if current is not None and int(row["created_at_ms"]) < int(current["entered_at_ms"]):
+        return None
+    partner = ps.get_partner(conn, str(req["partner_id"]))
+    name = str(partner["name"]) if partner is not None else "?"
+    return _carry_card_text(name, int(row["amount_micro"]), str(row["reason"] or ""))
 
 
 def carry_notice_from_db(conn: Any, partner_id: str) -> str:
@@ -1021,13 +1069,13 @@ def _after_commit(
     mid: Any,
     now_ms: int,
     already_toasted: bool,
-    carry_note: str | None = None,
 ) -> dict[str, Any]:
     if not already_toasted:
         answer("บันทึกแล้ว")
     partner = ps.get_partner(conn, partner_id)
+    carry_head = _carry_settled_line(conn, rid) if op == "carry" else None
     if op == "carry":
-        note = carry_note or carry_notice_from_db(conn, partner_id)
+        note = carry_notice_from_db(conn, partner_id)
     elif op == "fix" and isinstance(previous, dict):
         note = correction_notice(conn, rid, previous)
     else:
@@ -1053,12 +1101,17 @@ def _after_commit(
             sent_ok = not warnings
     elif partner is not None and not no_chat:
         sent_ok = bool(notify(partner, note))
+    head = carry_head or _settled_line(conn, rid)
     if sent_ok:
-        card = _settled_line(conn, rid) + "\n✅ แจ้งพาร์ทเนอร์แล้ว"
+        card = head + "\n✅ แจ้งพาร์ทเนอร์แล้ว"
         markup: dict[str, Any] = {"inline_keyboard": []}
     else:
-        card = _settled_line(conn, rid) + "\n⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ — บันทึกแล้ว"
-        markup = resend_button(rid, carry=op == "carry")
+        card = head + "\n⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ — บันทึกแล้ว"
+        # A repeat tap after the partner is already gone must not offer another 📨.
+        if _resend_finished(conn, partner, already_toasted=already_toasted):
+            markup = {"inline_keyboard": []}
+        else:
+            markup = resend_button(rid, carry=op == "carry")
     edited = False
     if mid is not None:
         try:
@@ -1068,6 +1121,15 @@ def _after_commit(
     if not edited:
         send(card, reply_markup=markup)
     return {"ok": True, "cmd": "fx_saved", "request_id": rid, "notified": sent_ok}
+
+
+def _resend_finished(conn: Any, partner: Any, *, already_toasted: bool) -> bool:
+    """True when a later 📨 tap has nobody left to tell and nothing left open."""
+    if already_toasted or partner is None:
+        return False
+    if partner["telegram_user_id"] is not None or str(partner["status"]) != "closed":
+        return False
+    return not fx.open_settlements(conn, str(partner["id"]))
 
 
 def _notify_send(notify: Any, partner: Any) -> Any:
@@ -1292,7 +1354,7 @@ def handle_fix_text(
 def _fix_change_lines(current: dict[str, Any], parsed: dict[str, Any], figured: dict[str, Any]) -> list[str]:
     pairs = (
         ("chain_fee_micro", int(parsed["chain"]), "ค่าธรรมเนียมเครือข่าย", "usdt"),
-        ("usdt_sold_micro", int(parsed["sold"]), "จำนวนขาย", "usdt"),
+        ("usdt_sold_micro", int(parsed["sold"]), "จำนวนขาย", "sold"),
         ("rate_e4", int(figured["rate_e4"]), "เรท", "rate"),
         ("trade_fee_satang", int(parsed["trade"]), "ค่าซื้อขาย", "thb"),
         ("thb_wd_fee_satang", int(parsed["wd"]), "ค่าถอนบาท", "thb"),
@@ -1438,8 +1500,11 @@ def handle_carry_text(
         send(_REASON_NEED)
         return {"ok": False, "reason": "reason_required"}
     pid = str(partner["id"])
+    if str(partner["status"]) != "closed":
+        send(_with_unsaved(_CARRY_NOT_CLOSED.format(name=str(partner["name"]))))
+        return {"ok": False, "reason": "not_closed"}
     open_rows = fx.open_settlements(conn, pid)
-    if str(partner["status"]) != "closed" or any(row.get("stage") != "carry_closed" for row in open_rows):
+    if any(row.get("stage") != "carry_closed" for row in open_rows):
         send(_with_unsaved(_CARRY_OPEN.format(name=str(partner["name"]))))
         return {"ok": False, "reason": "open_settlement"}
     balance = fx.carry_balance(conn, pid)

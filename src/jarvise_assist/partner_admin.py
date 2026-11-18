@@ -528,6 +528,8 @@ def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, An
                     f"💸 บันทึกโอนเงินบาทแล้ว · {pname} · "
                     f"{thb.fmt_thb(int(recorded['net_satang']))} บาท (#{thb.short_id(rid)})"
                 ), empty
+            if not is_admin and fx.unsellable(conn, req):
+                return f"💸 โอนแล้ว {fmt_usdt(x)} USDT ให้ {pname}", empty
             if (
                 not is_admin
                 and cash_out
@@ -2019,8 +2021,7 @@ def handle_partner_callback(
                     release_warnings = _release_closed_binding(
                         conn, partner, send=send, note=note, now_ms=now_ms
                     )
-                    if release_warnings:
-                        card_warnings.append("⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ")
+                    card_warnings.extend(release_warnings)
                 elif partner is not None:
                     sent_ok = send_to_partner(send, partner, note)
                     if not sent_ok and partner["telegram_user_id"] is not None:
