@@ -480,6 +480,56 @@ def _kyc_template_text() -> str:
     return pk.KYC_WARNING + "\n" + _KYC_TEMPLATE
 
 
+def _delete_incoming_form(message: dict[str, Any], delete: Any, partner_id: str) -> None:
+    """Best-effort delete of the partner's typed form. Never logs the text."""
+    raw_chat = message.get("chat")
+    chat: dict[str, Any] = raw_chat if isinstance(raw_chat, dict) else {}
+    if delete is None or message.get("message_id") is None:
+        return
+    try:
+        delete(str(chat.get("id")), int(message["message_id"]))
+    except Exception:  # noqa: BLE001
+        logger.warning("partner kyc delete failed partner_id=%s", partner_id)
+
+
+def _retire_kyc_confirm(
+    *,
+    mid: Any,
+    partner_chat: str,
+    text: str,
+    edit: Any,
+    delete: Any,
+) -> bool:
+    """Replace the confirm message. On a failed edit, delete it and report False.
+
+    Callers send ``text`` only when this returns False, so the full form is not left behind
+    and is never copied into a new message.
+    """
+    if mid is None:
+        return False
+    try:
+        if edit(int(mid), text, reply_markup={"inline_keyboard": []}, chat_id=partner_chat):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if delete is not None:
+        try:
+            delete(partner_chat, int(mid))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("partner kyc confirm delete failed err=%s", type(exc).__name__)
+    return False
+
+
+def _kyc_ok_failure_text(reason: str) -> str:
+    if reason == "kyc_draft_expired":
+        return "ฟอร์มหมดอายุ ส่งข้อมูลรับเงินอีกครั้ง"
+    if reason == "kyc_locked":
+        return _KYC_LOCKED
+    if reason == "closed":
+        return "ปิดพอร์ตแล้ว — ติดต่อแอดมิน"
+    return "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้"
+
+
 def _notify_admin_kyc(conn: sqlite3.Connection, row: sqlite3.Row, result: dict[str, Any], send: Any) -> None:
     account = pk.mask_account(str(result["bank_code"]), str(result["account_last4"]))
     lines = [
@@ -516,12 +566,14 @@ def _handle_kyc_text(
     pid = str(row["id"])
     if pk.kyc_state(conn, pid) == "saved":
         send_to_partner(send, row, _KYC_LOCKED)
+        _delete_incoming_form(message, delete, pid)
         return {"ok": False, "reason": "kyc_locked"}
     try:
         staged = pk.stage_draft(conn, pid, text, now_ms)
     except pk.KycKeyError:
         logger.warning("partner kyc key unavailable partner_id=%s", pid)
         send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+        _delete_incoming_form(message, delete, pid)
         return {"ok": False, "reason": "kyc_key"}
     if not staged.get("ok"):
         reason = str(staged.get("reason") or "")
@@ -535,14 +587,9 @@ def _handle_kyc_text(
             send_to_partner(send, row, "แอดมินไม่ต้องกรอก")
         else:
             send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+        _delete_incoming_form(message, delete, pid)
         return {"ok": False, "reason": reason}
-    raw_chat = message.get("chat")
-    chat: dict[str, Any] = raw_chat if isinstance(raw_chat, dict) else {}
-    if delete is not None and message.get("message_id") is not None:
-        try:
-            delete(str(chat.get("id")), int(message["message_id"]))
-        except Exception:  # noqa: BLE001
-            logger.warning("partner kyc delete failed partner_id=%s", pid)
+    _delete_incoming_form(message, delete, pid)
     send_to_partner(send, row, _kyc_confirm_text(staged), reply_markup=_kyc_buttons(str(staged["token"])))
     return {"ok": True, "cmd": "kyc_confirm", "token": staged["token"]}
 
@@ -793,6 +840,7 @@ def handle_portal_callback(
     edit: Any,
     futures: Any = None,
     now_ms: int,
+    delete: Any = None,
 ) -> dict[str, Any]:
     raw_msg = callback.get("message")
     msg: dict[str, Any] = raw_msg if isinstance(raw_msg, dict) else {}
@@ -953,45 +1001,39 @@ def handle_portal_callback(
         if action == "re":
             pk.discard_draft(conn, pid, token)
             body = _kyc_template_text()
-            if mid is not None:
-                try:
-                    if edit(int(mid), body, reply_markup={"inline_keyboard": []}, chat_id=partner_chat):
-                        return {"ok": True, "cmd": "kyc_redo"}
-                except Exception:  # noqa: BLE001
-                    pass
-            send_to_partner(send, row, body)
+            if not _retire_kyc_confirm(
+                mid=mid, partner_chat=partner_chat, text=body, edit=edit, delete=delete
+            ):
+                send_to_partner(send, row, body)
             return {"ok": True, "cmd": "kyc_redo"}
         try:
             result = pk.commit_draft(conn, pid, token, now_ms)
         except pk.KycKeyError:
             logger.warning("partner kyc key unavailable partner_id=%s", pid)
-            send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+            fail = _kyc_ok_failure_text("kyc_key")
+            if not _retire_kyc_confirm(
+                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete
+            ):
+                send_to_partner(send, row, fail)
             return {"ok": False, "reason": "kyc_key"}
         except pk.KycCryptoError:
             logger.warning("partner kyc decrypt failed partner_id=%s", pid)
-            send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+            fail = _kyc_ok_failure_text("kyc_crypto")
+            if not _retire_kyc_confirm(
+                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete
+            ):
+                send_to_partner(send, row, fail)
             return {"ok": False, "reason": "kyc_crypto"}
         if not result.get("ok"):
             reason = str(result.get("reason") or "")
-            if reason == "kyc_draft_expired":
-                send_to_partner(send, row, "ฟอร์มหมดอายุ ส่งข้อมูลรับเงินอีกครั้ง")
-            elif reason == "kyc_locked":
-                send_to_partner(send, row, _KYC_LOCKED)
-            elif reason == "closed":
-                send_to_partner(send, row, "ปิดพอร์ตแล้ว — ติดต่อแอดมิน")
-            else:
-                send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+            fail = _kyc_ok_failure_text(reason)
+            if not _retire_kyc_confirm(
+                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete
+            ):
+                send_to_partner(send, row, fail)
             return {"ok": False, "reason": reason}
         saved = _kyc_saved_text(result)
-        edited_ok = False
-        if mid is not None:
-            try:
-                edited_ok = bool(
-                    edit(int(mid), saved, reply_markup={"inline_keyboard": []}, chat_id=partner_chat)
-                )
-            except Exception:  # noqa: BLE001
-                edited_ok = False
-        if not edited_ok:
+        if not _retire_kyc_confirm(mid=mid, partner_chat=partner_chat, text=saved, edit=edit, delete=delete):
             send_to_partner(send, row, saved)
         _notify_admin_kyc(conn, row, result, send)
         return {"ok": True, "cmd": "kyc_saved", "kyc_id": result.get("kyc_id")}
