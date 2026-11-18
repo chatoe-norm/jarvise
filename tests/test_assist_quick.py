@@ -100,8 +100,8 @@ def _income(
 
 def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     fresh = open_db(tmp_path / "fresh.db")
-    assert SCHEMA_VERSION == 33
-    assert schema_version(fresh) == 33
+    assert SCHEMA_VERSION == 34
+    assert schema_version(fresh) == 34
     for table in (
         "assist_quick_settings",
         "assist_quick_registration",
@@ -145,7 +145,7 @@ def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path26)
-    assert schema_version(conn) == 33
+    assert schema_version(conn) == 34
     row = conn.execute("SELECT qty FROM assist_signal WHERE id='old'").fetchone()
     assert row["qty"] == 2
     qs = get_quick_settings(conn)

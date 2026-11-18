@@ -866,6 +866,40 @@ def partner_payout_line(
 _KYC_LEGACY = "⚠️ ยังไม่ได้กรอกข้อมูลรับเงิน — ส่งฟอร์มเมื่อสะดวก"
 
 
+def set_draft_confirm_message_id(
+    conn: sqlite3.Connection, partner_id: str, token: str, message_id: int
+) -> bool:
+    """Store the confirm message id on the matching draft only."""
+    with transaction(conn):
+        cur = conn.execute(
+            """
+            UPDATE partner_kyc_draft
+            SET confirm_message_id = ?
+            WHERE partner_id = ? AND token = ?
+            """,
+            (int(message_id), str(partner_id), str(token)),
+        )
+        updated = int(cur.rowcount) == 1
+    if not updated:
+        logger.info("partner kyc refused partner_id=%s reason=draft_missing", partner_id)
+    return updated
+
+
+def draft_confirm_message_id(conn: sqlite3.Connection, partner_id: str) -> int | None:
+    """The stored confirm message id, or None when there is no draft or no id."""
+    row = conn.execute(
+        """
+        SELECT confirm_message_id
+        FROM partner_kyc_draft
+        WHERE partner_id = ?
+        """,
+        (str(partner_id),),
+    ).fetchone()
+    if row is None or row["confirm_message_id"] is None:
+        return None
+    return int(row["confirm_message_id"])
+
+
 def card_kyc_line(conn: sqlite3.Connection, partner_id: str) -> str:
     row = current_kyc(conn, partner_id)
     if row is None:
