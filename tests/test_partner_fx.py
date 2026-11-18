@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from jarvise_assist import partner_fx as fx
+from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_store as ps
 from jarvise_assist.partner_ledger import nav
 from jarvise_ingest.db import SCHEMA_VERSION, migrate, open_db, schema_version
@@ -184,8 +185,11 @@ def test_migration_34_is_additive_and_repair_writes_nothing(tmp_path: Path) -> N
     assert schema_version(conn) == 34
     for name in ("partner_payout_fx_draft", "partner_usdt_carry", "partner_payout_fx"):
         conn.execute(f"DROP TABLE {name}")
+    conn.execute("ALTER TABLE partner_kyc_draft DROP COLUMN confirm_message_id")
     conn.execute("PRAGMA user_version = 33")
     conn.commit()
+    draft_cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(partner_kyc_draft)")}
+    assert "confirm_message_id" not in draft_cols
     admin = _partner(conn, "Admin", admin=True)
     bob = _partner(conn, "Bob", now_ms=NOW + 1)
     cara = _partner(conn, "Cara", now_ms=NOW + 2)
@@ -198,6 +202,18 @@ def test_migration_34_is_additive_and_repair_writes_nothing(tmp_path: Path) -> N
         "partner_event": _dump(conn, "partner_event"),
     }
     assert before["partner_kyc"]
+    conn.execute(
+        """
+        INSERT INTO partner_kyc_draft (
+            partner_id, token, key_id,
+            real_name_enc, phone_enc, account_no_enc, holder_name_enc,
+            bank_code, account_last4, phone_last4, real_name_mask, holder_name_mask,
+            holder_matches, account_fp, phone_fp, created_at_ms, expires_at_ms
+        ) VALUES (?, 'abcd1234', 'k', ?, ?, ?, ?, 'KBANK', '0000', '0000', 'x***', 'x***', 1, 'fp', 'fp', ?, ?)
+        """,
+        (bob, b"\x01", b"\x02", b"\x03", b"\x04", NOW, NOW + 1),
+    )
+    conn.commit()
     conn.close()
 
     conn = open_db(path)
@@ -223,9 +239,45 @@ def test_migration_34_is_additive_and_repair_writes_nothing(tmp_path: Path) -> N
         assert name in names
     assert cara
     assert rid
+    draft = conn.execute("SELECT confirm_message_id FROM partner_kyc_draft").fetchone()
+    assert draft is not None
+    assert draft["confirm_message_id"] is None
     touched = conn.total_changes
     assert migrate(conn) == []
     assert conn.total_changes == touched
+    conn.close()
+
+
+def _draft(conn: sqlite3.Connection, partner_id: str, token: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO partner_kyc_draft (
+            partner_id, token, key_id,
+            real_name_enc, phone_enc, account_no_enc, holder_name_enc,
+            bank_code, account_last4, phone_last4, real_name_mask, holder_name_mask,
+            holder_matches, account_fp, phone_fp, created_at_ms, expires_at_ms
+        ) VALUES (?, ?, 'k', ?, ?, ?, ?, 'KBANK', '0000', '0000', 'x***', 'x***', 1, 'fp', 'fp', ?, ?)
+        """,
+        (partner_id, token, b"\x01", b"\x02", b"\x03", b"\x04", NOW, NOW + 1),
+    )
+    conn.commit()
+
+
+def test_draft_confirm_message_id_matches_partner_and_token(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "mid.db")
+    bob = _partner(conn, "Bob")
+    cara = _partner(conn, "Cara", now_ms=NOW + 1)
+    _draft(conn, bob, "tok-bob")
+    _draft(conn, cara, "tok-cara")
+    assert pk.draft_confirm_message_id(conn, bob) is None
+    assert pk.draft_confirm_message_id(conn, "pt_missing") is None
+    assert pk.set_draft_confirm_message_id(conn, bob, "other", 11) is False
+    assert pk.draft_confirm_message_id(conn, bob) is None
+    assert pk.set_draft_confirm_message_id(conn, bob, "tok-bob", 77) is True
+    assert pk.draft_confirm_message_id(conn, bob) == 77
+    assert pk.draft_confirm_message_id(conn, cara) is None
+    assert migrate(conn) == []
+    assert pk.draft_confirm_message_id(conn, bob) == 77
     conn.close()
 
 

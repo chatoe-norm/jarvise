@@ -992,12 +992,14 @@ def _migrate_partner_payout_fx(conn: sqlite3.Connection) -> None:
     ``partner_payout_fx`` is one append-only version per cash payout.
     ``partner_usdt_carry`` is the admin-held leftover outside the pool ledger.
     ``partner_payout_fx_draft`` is the replaceable 15-minute confirm step.
+    ``partner_kyc_draft.confirm_message_id`` is the confirm message to delete
+    later. Existing drafts stay NULL.
     Nothing here rewrites partner, partner_event, or partner_request.
 
-    Rollback: this step only adds tables, indexes, and triggers. Reverting the
-    code leaves those objects unused. Dropping them is a manual owner step and
-    is not done here. A repair re-run writes nothing when the objects already
-    exist.
+    Rollback: this step only adds tables, indexes, triggers, and one nullable
+    column. Reverting the code leaves those objects unused. Dropping them is a
+    manual owner step and is not done here. A repair re-run writes nothing
+    when the objects already exist.
     """
     conn.execute(
         """
@@ -1274,6 +1276,7 @@ def _migrate_partner_payout_fx(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _add_column_if_missing(conn, "partner_kyc_draft", "confirm_message_id", "INTEGER DEFAULT NULL")
 
 
 def _migrate_assist_exit_telemetry(conn: sqlite3.Connection) -> None:
