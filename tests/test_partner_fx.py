@@ -509,7 +509,7 @@ def test_reason_required_null_does_not_pass(tmp_path: Path) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         attempt(residual_satang=101, reason="          ")
     with pytest.raises(sqlite3.IntegrityError):
-        attempt(residual_satang=101, reason="\t\t\t\n")
+        attempt(residual_satang=101, reason="\t" * 12)
     with pytest.raises(sqlite3.IntegrityError):
         attempt(residual_satang=101, reason=None)
     first = _request(conn, bob)
@@ -520,6 +520,26 @@ def test_reason_required_null_does_not_pass(tmp_path: Path) -> None:
         _insert_raw(conn, first, bob, version=2, supersedes_id=base, reason=None)
     _insert_raw(conn, first, bob, version=2, supersedes_id=base, reason="ก" * 10)
     conn.commit()
+    conn.execute(
+        """
+        INSERT INTO partner_usdt_carry (
+            id, partner_id, seq, kind, amount_micro, balance_after_micro,
+            fx_id, reverses_id, reason, entered_by, created_at_ms
+        ) VALUES (?, ?, 1, 'leftover', 1000, 1000, ?, NULL, NULL, '42', ?)
+        """,
+        (f"pc_{uuid.uuid4().hex[:16]}", bob, base, NOW),
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO partner_usdt_carry (
+                id, partner_id, seq, kind, amount_micro, balance_after_micro,
+                fx_id, reverses_id, reason, entered_by, created_at_ms
+            ) VALUES (?, ?, 2, 'settle', -100, 900, NULL, NULL, ?, '42', ?)
+            """,
+            (f"pc_{uuid.uuid4().hex[:16]}", bob, "\t" * 12, NOW),
+        )
     conn.close()
 
 
@@ -1077,6 +1097,18 @@ def test_compute_and_parsers_refuse_extra_decimals() -> None:
     assert fractional_sold["refusals"] == ["bad_input"]
     assert fractional_sold["gross_satang"] is None
     assert flagged["refusals"] == ["bad_input"]
+    huge = fx.compute(
+        usdt_payout_micro=PAYOUT,
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=D("1E+30"),
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+    )
+    assert "too_many_decimals" in huge["refusals"]
 
 
 def parse_matches() -> bool:
@@ -1091,6 +1123,10 @@ def parse_matches() -> bool:
     assert fx.parse_thb("๑๐๐") is None
     assert fx.parse_thb("１００") is None
     assert fx.parse_usdt("1" * 30) is None
+    assert fx.parse_usdt("1" * 23) is None
+    assert fx.parse_usdt("9" * 24) is None
+    assert fx.parse_usdt("1" * 17) is None
+    assert fx.parse_usdt("999999999999") == 999_999_999_999 * 1_000_000
     return True
 
 
@@ -1226,16 +1262,18 @@ def test_zero_carry_base_cannot_grow_a_leftover_after_a_later_payout(tmp_path: P
     payout = 500_010_000
     sold = 500_000_000
     gross = (sold * RATE_E4) // 100_000_000
+    assert gross == 1_694_000
+    trade = 4_235
     first = _request(conn, bob, payout_micro=payout)
     assert _record(
         conn,
         first,
         chain=CHAIN,
         sold=sold,
-        trade=0,
-        wd=0,
+        trade=trade,
+        wd=WD,
         bank=0,
-        net=gross,
+        net=_net(gross, trade, WD, 0),
     )["ok"]
     assert fx.carry_balance(conn, bob) == 0
     later = _request(conn, bob, payout_micro=PAYOUT, now_ms=NOW + 1)
@@ -1244,14 +1282,79 @@ def test_zero_carry_base_cannot_grow_a_leftover_after_a_later_payout(tmp_path: P
         conn,
         first,
         usdt_sold_micro=499_000_000,
-        trade_fee_satang=0,
-        thb_wd_fee_satang=0,
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
         bank_fee_satang=0,
-        net_satang=(499_000_000 * RATE_E4) // 100_000_000,
+        net_satang=NET,
         now_ms=NOW + 3,
     )
     assert blocked["reason"] == "carry_consumed"
     assert fx.carry_balance(conn, bob) == LEFTOVER
+    conn.close()
+
+
+def test_trade_fee_above_int64_is_bad_input(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "wide.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    assert _record(conn, rid)["ok"] is True
+    fx_n = conn.execute("SELECT COUNT(*) AS n FROM partner_payout_fx").fetchone()["n"]
+    carry_n = conn.execute("SELECT COUNT(*) AS n FROM partner_usdt_carry").fetchone()["n"]
+    other = _request(conn, bob, now_ms=NOW + 1)
+    kyc = conn.execute("SELECT id FROM partner_kyc WHERE partner_id = ?", (bob,)).fetchone()
+    assert kyc is not None
+    refused = fx.record_payout_fx(
+        conn,
+        request_id=other,
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=10**19,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+        ref_status="off",
+        reason=REASON,
+        paid_kyc_id=str(kyc["id"]),
+        entered_by="42",
+        now_ms=NOW + 2,
+    )
+    assert refused["reason"] == "bad_input"
+    assert conn.execute("SELECT COUNT(*) AS n FROM partner_payout_fx").fetchone()["n"] == fx_n
+    assert conn.execute("SELECT COUNT(*) AS n FROM partner_usdt_carry").fetchone()["n"] == carry_n
+    conn.close()
+
+
+def test_typeof_alone_rejects_non_integers(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "typeof.db")
+    bob = _partner(conn, "Bob")
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        _insert_raw(conn, _request(conn, bob), bob, entered_at_ms="x")
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        _insert_raw(conn, _request(conn, bob, now_ms=NOW + 1), bob, threshold_bps=100.5)
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        _insert_raw(
+            conn,
+            _request(conn, bob, now_ms=NOW + 2),
+            bob,
+            ref_status="off",
+            ref_fetched_at_ms=1.5,
+        )
+    kept = _request(conn, bob, now_ms=NOW + 3)
+    _insert_raw(conn, kept, bob)
+    conn.commit()
+    fx_id = conn.execute("SELECT id FROM partner_payout_fx WHERE request_id = ?", (kept,)).fetchone()["id"]
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        conn.execute(
+            """
+            INSERT INTO partner_usdt_carry (
+                id, partner_id, seq, kind, amount_micro, balance_after_micro,
+                fx_id, reverses_id, reason, entered_by, created_at_ms
+            ) VALUES (?, ?, 1, 'leftover', 1000, 1000, ?, NULL, NULL, '42', 'x')
+            """,
+            (f"pc_{uuid.uuid4().hex[:16]}", bob, fx_id),
+        )
     conn.close()
 
 

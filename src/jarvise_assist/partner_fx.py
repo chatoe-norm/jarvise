@@ -30,6 +30,8 @@ _SATANG_DIVISOR = 100_000_000
 _RATE_QUANT = Decimal("0.0001")
 _SCALED_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 _PARSE_MAX_CHARS = 24
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 _REASON_EDGES = " \t\r\n"
 _REF_OK = "ok"
 _REF_STATUSES = frozenset({_REF_OK, "unavailable", "off"})
@@ -52,6 +54,8 @@ def _new_carry_id() -> str:
 def _as_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
+    if value < _INT64_MIN or value > _INT64_MAX:
+        return None
     return value
 
 
@@ -68,15 +72,21 @@ def _reason_ok(reason: str | None) -> bool:
 
 def _rate_e4(rate: Decimal) -> int | None:
     """e4 when ``rate`` has at most 4 decimal places. Never rounds."""
-    value = Decimal(rate)
-    if not value.is_finite():
+    try:
+        value = Decimal(rate)
+        if not value.is_finite():
+            return None
+        if value != value.quantize(_RATE_QUANT):
+            return None
+        scaled = value * Decimal(10_000)
+        if scaled != scaled.to_integral_value():
+            return None
+        whole = int(scaled)
+    except InvalidOperation:
         return None
-    if value != value.quantize(_RATE_QUANT):
+    if whole < _INT64_MIN or whole > _INT64_MAX:
         return None
-    scaled = value * Decimal(10_000)
-    if scaled != scaled.to_integral_value():
-        return None
-    return int(scaled)
+    return whole
 
 
 def _parse_scaled(text: str, places: int, scale: int) -> int | None:
@@ -85,15 +95,18 @@ def _parse_scaled(text: str, places: int, scale: int) -> int | None:
         return None
     try:
         value = Decimal(raw)
+        quantum = Decimal(1).scaleb(-places)
+        if value != value.quantize(quantum):
+            return None
+        scaled = value * Decimal(scale)
+        if scaled != scaled.to_integral_value():
+            return None
+        whole = int(scaled)
     except InvalidOperation:
         return None
-    quantum = Decimal(1).scaleb(-places)
-    if value != value.quantize(quantum):
+    if whole < 0 or whole > _INT64_MAX:
         return None
-    scaled = value * Decimal(scale)
-    if scaled != scaled.to_integral_value():
-        return None
-    return int(scaled)
+    return whole
 
 
 def parse_thb(text: str) -> int | None:
@@ -501,10 +514,8 @@ def _figures_or_reason(
     return figured, ref
 
 
-def _busy(conn: sqlite3.Connection, request_id: str | None, partner_id: str | None) -> dict[str, Any] | None:
-    if conn.in_transaction:
-        return _fail(request_id, partner_id, "caller_transaction")
-    return None
+def _busy(conn: sqlite3.Connection) -> bool:
+    return conn.in_transaction
 
 
 def _kyc_gate(conn: sqlite3.Connection, partner_id: str, paid_kyc_id: str | None) -> str | None:
@@ -546,6 +557,7 @@ def _live_carry_rows(conn: sqlite3.Connection, request_id: str) -> list[sqlite3.
 
 def _later_activity(conn: sqlite3.Connection, partner_id: str, request_id: str) -> bool:
     """True when a later payout, or a later carry row, already followed this request."""
+    # Relative rowid order is recording order: no DELETE is possible, and VACUUM keeps relative order.
     first = conn.execute(
         """
         SELECT rowid AS r FROM partner_payout_fx
@@ -620,7 +632,7 @@ def record_payout_fx(
     ``caller_transaction`` and its work is left uncommitted. PR-2's one-step
     due-to-paid plus this insert needs an inner variant, not this function.
     """
-    if _busy(conn, request_id, None) is not None:
+    if _busy(conn):
         return _fail(request_id, None, "caller_transaction")
     reason = _clean_reason(reason)
     payout_in = _as_int(carry_in_micro)
@@ -722,7 +734,7 @@ def record_payout_fx(
                 carry_in_micro=payout_in,
                 leftover_micro=int(figured["leftover_micro"]),
                 entered_by=entered_by,
-                now_ms=now_ms,
+                now_ms=now,
             )
             logger.info(
                 "partner fx recorded request_id=%s partner_id=%s version=%s",
@@ -735,6 +747,8 @@ def record_payout_fx(
         return _fail(request_id, None, exc.reason)
     except sqlite3.IntegrityError:
         return _fail(request_id, None, "db_constraint")
+    except OverflowError:
+        return _fail(request_id, None, "bad_input")
 
 
 def record_correction(
@@ -771,7 +785,7 @@ def record_correction(
     Opens its own transaction. A caller that already holds one gets
     ``caller_transaction``. PR-2's combined confirm needs an inner variant.
     """
-    if _busy(conn, None, None) is not None:
+    if _busy(conn):
         return _fail(None, None, "caller_transaction")
     reason = _clean_reason(reason)
     carry_in = _as_int(carry_in_micro)
@@ -789,6 +803,8 @@ def record_correction(
         return _fail(None, None, "bad_input")
     assert carry_in is not None and chain is not None and sold is not None
     assert trade is not None and wd is not None and bank is not None and net is not None and now is not None
+    request_id: str | None = None
+    partner_id: str | None = None
     try:
         with transaction(conn):
             base = conn.execute(
@@ -898,9 +914,11 @@ def record_correction(
             )
             return {"ok": True, "fx_id": fx_id, "version": version, "carry_after": carry_after}
     except _FxAbort as exc:
-        return _fail(None, None, exc.reason)
+        return _fail(request_id, partner_id, exc.reason)
     except sqlite3.IntegrityError:
-        return _fail(None, None, "db_constraint")
+        return _fail(request_id, partner_id, "db_constraint")
+    except OverflowError:
+        return _fail(request_id, partner_id, "bad_input")
 
 
 def settle_carry(
@@ -916,7 +934,7 @@ def settle_carry(
     Opens its own transaction. A caller that already holds one gets
     ``caller_transaction``. PR-2's combined confirm needs an inner variant.
     """
-    if _busy(conn, None, partner_id) is not None:
+    if _busy(conn):
         return _fail(None, partner_id, "caller_transaction")
     now = _as_int(now_ms)
     if now is None:
@@ -949,6 +967,8 @@ def settle_carry(
         return _fail(None, partner_id, exc.reason)
     except sqlite3.IntegrityError:
         return _fail(None, partner_id, "db_constraint")
+    except OverflowError:
+        return _fail(None, partner_id, "bad_input")
 
 
 def _dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
