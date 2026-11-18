@@ -14,10 +14,12 @@ from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from jarvise_assist import partner_fx as fx
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_ledger as pl
 from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
+from jarvise_assist import partner_thb as thb
 from jarvise_assist.futures import build_futures_client
 from jarvise_assist.partner_value import (
     AccountValue,
@@ -64,6 +66,8 @@ HELP_TEXT = (
     "p close <ชื่อ> — สร้างคำขอปิดพอร์ต\n"
     "p closed — พาร์ทเนอร์ที่ปิดแล้ว\n"
     "p due — รายการค้างจ่ายและคำขอค้าง\n"
+    "p paid <เป้าหมาย> sold= rate= trade= net= — บันทึกโอนเงินบาท (ยืนยันก่อน)\n"
+    "p fix <#รหัส> — แก้ไขรายการเงินบาทที่บันทึกแล้ว (ยืนยันก่อน)\n"
     "p kyc — สถานะข้อมูลรับเงิน\n"
     "p kyc <ชื่อ> — ดูข้อมูลรับเงินเต็ม\n"
     "p kyc <ชื่อ> set <เหตุผล> — แก้ข้อมูลรับเงิน (บรรทัดถัดไปเป็นฟอร์ม)\n"
@@ -94,7 +98,7 @@ _STORE_TH: dict[str, str] = {
     "no_profit": "ยังไม่มีกำไร",
     "below_min": "กำไรน้อยเกินไป",
     "not_due": "รายการนี้ปิดไปแล้ว",
-    "payout_due": "มียอดค้างจ่าย — โอนแล้วกด โอนแล้ว ก่อน",
+    "payout_due": "มียอดค้างจ่าย — โอน USDT ออกแล้วกด 📤 ก่อน (p due)",
     "kyc_required": "ยังไม่มีข้อมูลรับเงิน",
     "kyc_locked": "บันทึกข้อมูลรับเงินแล้ว แก้ไขเองไม่ได้",
     "kyc_draft_expired": "ฟอร์มหมดอายุ — ให้ส่งใหม่",
@@ -240,6 +244,8 @@ def parse_partner_command(text: str) -> dict[str, Any] | None:
     first_parts = first.strip().split()
     if len(first_parts) >= 2 and first_parts[1].lower() == "kyc":
         return _parse_kyc_command(first_parts, rest)
+    if len(first_parts) >= 2 and first_parts[1].lower() in ("paid", "fix", "carry"):
+        return {"cmd": first_parts[1].lower(), "raw": raw}
     parts = raw.strip().split()
     if not parts:
         return None
@@ -395,7 +401,7 @@ def _guard_request_buttons(rid: str, ts_s: int) -> dict[str, Any]:
 
 
 def _paid_button(request_id: str) -> dict[str, Any]:
-    return {"inline_keyboard": [[{"text": "💸 โอนแล้ว", "callback_data": f"pa:pd:{request_id}"}]]}
+    return {"inline_keyboard": [[{"text": "📤 USDT ออกจากพอร์ตแล้ว", "callback_data": f"pa:pd:{request_id}"}]]}
 
 
 def _transfer_guard(
@@ -502,7 +508,7 @@ def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, An
         if payout_state == "due":
             x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
             body = (
-                f"✅ ยืนยันแล้ว · ค้างจ่าย {fmt_usdt(x)} USDT ให้ {pname}\nโอนออกจาก futures wallet แล้วค่อยกด โอนแล้ว"
+                f"✅ ยืนยันแล้ว · ค้างจ่าย {fmt_usdt(x)} USDT ให้ {pname}\nโอน USDT ออกจาก futures wallet แล้วกด 📤"
             )
             body += "\n" + pk.payout_account_line(
                 conn,
@@ -513,6 +519,27 @@ def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, An
             return body, _paid_button(rid)
         if payout_state == "paid":
             x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
+            is_admin = partner is not None and int(partner["is_admin"] or 0) == 1
+            recorded = fx.current_fx(conn, rid)
+            paid_at = req["paid_at_ms"]
+            cash_out = str(kind) in ("withdraw_profit", "close") and int(req["payout_micro"] or 0) > 0
+            if not is_admin and recorded is not None:
+                return (
+                    f"💸 บันทึกโอนเงินบาทแล้ว · {pname} · "
+                    f"{thb.fmt_thb(int(recorded['net_satang']))} บาท (#{thb.short_id(rid)})"
+                ), empty
+            if not is_admin and fx.unsellable(conn, req):
+                return f"💸 โอนแล้ว {fmt_usdt(x)} USDT ให้ {pname}", empty
+            if (
+                not is_admin
+                and cash_out
+                and paid_at is not None
+                and int(paid_at) >= int(fx.THB_FLOW_SINCE_MS)
+            ):
+                return (
+                    f"📤 USDT ออกจากพอร์ตแล้ว · {pname} · {fmt_usdt(x)} USDT · "
+                    f"รอบันทึกเงินบาท (p paid #{thb.short_id(rid)} …)"
+                ), empty
             return f"💸 โอนแล้ว {fmt_usdt(x)} USDT ให้ {pname}", empty
         if kind == "deposit":
             x = ps.usdt_from_micro(int(req["quote_gross_micro"] or 0))
@@ -588,7 +615,7 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
         due = ps.payouts_due_total(conn)
         lines.append(f"ค้างจ่าย {fmt_usdt(due)}")
         if due > 0:
-            lines.append(f"⚠️ ค้างจ่าย {fmt_usdt(due)} — ถ้าโอนแล้วให้กด โอนแล้ว (p due)")
+            lines.append(f"⚠️ ค้างจ่าย {fmt_usdt(due)} — ถ้าโอน USDT ออกแล้วให้กด 📤 (p due)")
         u_total = ps.total_units(conn)
         pool = av.value - due
         n = pl.nav(pool, u_total)
@@ -596,6 +623,10 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
             lines.append(thai_reason(n.reason))
         else:
             lines.append(f"NAV {fmt_nav(n)} · หน่วยรวม {fmt_units(u_total)}")
+
+    waiting = fx.awaiting_thb(conn)
+    if waiting:
+        lines.append(f"รอบันทึกเงินบาท {len(waiting)} รายการ (p due)")
 
     partners = [p for p in ps.list_partners(conn) if str(p["status"]) == "active"]
     closed_n = sum(1 for p in ps.list_partners(conn) if str(p["status"]) == "closed")
@@ -881,11 +912,18 @@ def _handle_invite(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: in
     if str(row["status"]) == "closed":
         # Never reopen. A new account is p add with a new name; a due payout stays due.
         stored = str(row["name"])
-        if _due_for(conn, str(row["id"])):
-            send(
-                f"{stored} ปิดแล้วและยังรอโอน — ออกลิงก์ให้บัญชีเดิมไม่ได้\n"
-                f"โอนให้ครบก่อน แล้วเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)"
-            )
+        open_rows = _due_for(conn, str(row["id"]))
+        if open_rows:
+            if any(item.get("stage") == "due" for item in open_rows):
+                send(
+                    f"{stored} ปิดแล้วและยังรอโอน — ออกลิงก์ให้บัญชีเดิมไม่ได้\n"
+                    f"โอนให้ครบก่อน แล้วเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)"
+                )
+            else:
+                send(
+                    f"{stored} ปิดแล้วและยังรอบันทึกเงินบาท — ออกลิงก์ให้บัญชีเดิมไม่ได้\n"
+                    f"บันทึกให้ครบก่อน แล้วเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)"
+                )
             return {"ok": False, "reason": "payout_due"}
         send(f"{stored} ปิดแล้ว — ออกลิงก์ให้บัญชีเดิมไม่ได้\nเปิดบัญชีใหม่ด้วยชื่อใหม่ (p add <ชื่อใหม่>)")
         return {"ok": False, "reason": "closed"}
@@ -910,9 +948,9 @@ def _handle_invite(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: in
     return {"ok": True, "cmd": "invite"}
 
 
-def _due_for(conn: sqlite3.Connection, partner_id: str) -> list[sqlite3.Row]:
-    pid = str(partner_id)
-    return [row for row in ps.list_due_payouts(conn) if str(row["partner_id"]) == pid]
+def _due_for(conn: sqlite3.Connection, partner_id: str) -> list[dict[str, Any]]:
+    """Due USDT, awaiting THB, and leftover carry. Read-only."""
+    return fx.open_settlements(conn, str(partner_id))
 
 
 def _warn_send_fail(name: str) -> str:
@@ -1014,9 +1052,17 @@ def _handle_unbind(conn: sqlite3.Connection, name: str, *, send: Any, now_ms: in
     if row is None:
         send(thai_reason("not_found"))
         return {"ok": False, "reason": "not_found"}
-    if str(row["status"]) == "closed" and _due_for(conn, str(row["id"])):
-        send(f"{name} ปิดแล้วและยังมียอดรอโอน — ยกเลิกการผูกไม่ได้")
-        return {"ok": False, "reason": "payout_due"}
+    if str(row["status"]) == "closed":
+        open_rows = fx.open_settlements(conn, str(row["id"]))
+        if any(item.get("stage") == "due" for item in open_rows):
+            send(f"{name} ปิดแล้วและยังมียอดรอโอน — ยกเลิกการผูกไม่ได้")
+            return {"ok": False, "reason": "payout_due"}
+        if any(item.get("stage") == "awaiting_thb" for item in open_rows):
+            send(f"{name} ปิดแล้วและยังรอบันทึกเงินบาท — ยกเลิกการผูกไม่ได้")
+            return {"ok": False, "reason": "payout_due"}
+        if any(item.get("stage") == "carry_closed" for item in open_rows):
+            send(f"{name} ปิดแล้วและยังมีเศษค้าง — ใช้ p carry ก่อน")
+            return {"ok": False, "reason": "payout_due"}
     ps.unbind_partner(conn, str(row["id"]), now_ms=now_ms)
     send(f"ยกเลิกการผูก {name} แล้ว")
     return {"ok": True, "cmd": "unbind"}
@@ -1115,54 +1161,93 @@ def _handle_cv_wd_close(
 def _handle_due(conn: sqlite3.Connection, *, send: Any, now_ms: int) -> dict[str, Any]:
     msgs = 0
     remaining = 0
-    due_rows = ps.list_due_payouts(conn)
+    settlements = fx.open_settlements(conn)
+    due_rows = [row for row in settlements if row.get("stage") == "due"]
+    awaiting = [row for row in settlements if row.get("stage") == "awaiting_thb"]
+    closed_carry = [row for row in settlements if row.get("stage") == "carry_closed"]
     pending_rows = ps.list_pending_requests(conn, now_ms=now_ms)
-    total = len(due_rows) + len(pending_rows)
-    if total == 0:
+    units: list[tuple[str, Any]] = [("due", row) for row in due_rows]
+    if awaiting:
+        units.append(("awaiting", awaiting))
+    if closed_carry:
+        units.append(("carry", closed_carry))
+    units.extend(("pending", row) for row in pending_rows)
+    if not units:
         send("ไม่มีรายการค้าง")
         return {"ok": True, "cmd": "due", "n": 0}
-    for req in due_rows:
-        if msgs >= 10:
-            remaining = total - msgs
-            break
-        partner = ps.get_partner(conn, str(req["partner_id"]))
-        pname = str(partner["name"]) if partner is not None else "?"
-        x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
-        decided = int(req["decided_at_ms"] or req["created_at_ms"] or now_ms)
-        account = pk.payout_account_line(
-            conn,
-            partner_id=str(req["partner_id"]),
-            payout_kyc_id=req["payout_kyc_id"],
-            partner_name=pname,
-        )
-        send(
-            f"{pname} · {kind_th(str(req['kind']))} · {fmt_usdt(x)} USDT · ยืนยัน {_bangkok_stamp(decided)}\n"
-            f"{account}",
-            reply_markup=_paid_button(str(req["id"])),
-        )
-        msgs += 1
-    for req in pending_rows:
-        if msgs >= 10:
-            remaining = total - msgs
-            break
-        partner = ps.get_partner(conn, str(req["partner_id"]))
-        pname = str(partner["name"]) if partner is not None else "?"
-        kind = str(req["kind"])
-        if kind == "deposit":
-            amt = ps.usdt_from_micro(int(req["quote_gross_micro"] or 0))
-            send(
-                f"{pname} · ฝาก · {fmt_usdt(amt)} USDT · ค้างยืนยัน",
-                reply_markup=_deposit_buttons(str(req["id"])),
-            )
+    shown = units[:10]
+    remaining = len(units) - len(shown)
+    for kind, item in shown:
+        if kind == "due":
+            send(thb.due_line(conn, item, now_ms), reply_markup=_paid_button(str(item["id"])))
+        elif kind == "awaiting":
+            send(_awaiting_due_text(conn, item, now_ms))
+        elif kind == "carry":
+            lines = [
+                f"เศษค้าง (ปิดแล้ว): {row['partner_name']} {fmt_usdt(ps.usdt_from_micro(int(row['carry_micro'])))} USDT"
+                for row in item
+            ]
+            send("\n".join(lines))
         else:
-            send(
-                f"{pname} · {kind_th(kind)} · ค้างยืนยัน",
-                reply_markup=_request_buttons(str(req["id"])),
-            )
+            _send_pending(conn, item, send=send)
         msgs += 1
     if remaining > 0:
         send(f"อีก {remaining} รายการ")
     return {"ok": True, "cmd": "due", "n": msgs}
+
+
+def _awaiting_due_text(conn: sqlite3.Connection, rows: list[dict[str, Any]], now_ms: int) -> str:
+    header = f"รอบันทึกเงินบาท ({len(rows)})"
+    footer = "บันทึก: p paid #รหัส sold= rate= trade= net="
+    bits: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        bit = (
+            f"· #{thb.short_id(str(row['id']))} · {row.get('partner_name') or '?'} · "
+            f"{kind_th(str(row['kind']))} {fmt_usdt(ps.usdt_from_micro(int(row['payout_micro'])))} USDT · "
+            f"USDT ออก {_bangkok_stamp(int(row.get('paid_at_ms') or now_ms))}"
+        )
+        pid = str(row["partner_id"])
+        if pid not in seen:
+            carry = fx.carry_balance(conn, pid)
+            if carry > 0:
+                bit += f" · เศษยกมา {fmt_usdt(ps.usdt_from_micro(carry))}"
+            seen.add(pid)
+        bits.append(bit)
+
+    def pack(shown: list[str], omitted: int) -> str:
+        lines = [header, *shown]
+        if omitted:
+            lines.append(f"… อีก {omitted} รายการ")
+        lines.append(footer)
+        return "\n".join(lines)
+
+    if len(pack(bits, 0)) <= 3500:
+        return pack(bits, 0)
+    shown: list[str] = []
+    for index, bit in enumerate(bits):
+        trial = pack(shown + [bit], len(bits) - index - 1)
+        if len(trial) > 3500:
+            break
+        shown.append(bit)
+    return pack(shown, len(bits) - len(shown))
+
+
+def _send_pending(conn: sqlite3.Connection, req: sqlite3.Row, *, send: Any) -> None:
+    partner = ps.get_partner(conn, str(req["partner_id"]))
+    pname = str(partner["name"]) if partner is not None else "?"
+    kind = str(req["kind"])
+    if kind == "deposit":
+        amt = ps.usdt_from_micro(int(req["quote_gross_micro"] or 0))
+        send(
+            f"{pname} · ฝาก · {fmt_usdt(amt)} USDT · ค้างยืนยัน",
+            reply_markup=_deposit_buttons(str(req["id"])),
+        )
+        return
+    send(
+        f"{pname} · {kind_th(kind)} · ค้างยืนยัน",
+        reply_markup=_request_buttons(str(req["id"])),
+    )
 
 
 def _closed_sort_key(summary: dict[str, Any]) -> tuple[int, str]:
@@ -1187,6 +1272,8 @@ def _closed_status(summary: dict[str, Any]) -> str:
     if not isinstance(cash, Decimal):
         cash = _ZERO
     if state == "paid":
+        if summary.get("close_awaiting_thb"):
+            return "USDT ออกแล้ว · รอบันทึกเงินบาท"
         return "โอนแล้ว"
     if state == "due":
         return f"รอโอน {fmt_usdt(cash)} USDT"
@@ -1226,6 +1313,7 @@ def _handle_closed(conn: sqlite3.Connection, *, send: Any) -> dict[str, Any]:
             continue
         summary = ps.close_summary(conn, str(row["id"]))
         if summary.get("ok"):
+            summary["close_awaiting_thb"] = _close_awaiting_thb(conn, str(row["id"]))
             summaries.append(summary)
     summaries.sort(key=_closed_sort_key)
     if not summaries:
@@ -1234,6 +1322,24 @@ def _handle_closed(conn: sqlite3.Connection, *, send: Any) -> dict[str, Any]:
     text, shown = _render_closed(summaries)
     send(text)
     return {"ok": True, "cmd": "closed", "n": shown}
+
+
+def _close_awaiting_thb(conn: sqlite3.Connection, partner_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT id, paid_at_ms, payout_micro FROM partner_request
+        WHERE partner_id = ? AND kind = 'close' AND status = 'confirmed'
+        ORDER BY decided_at_ms DESC, id DESC
+        LIMIT 1
+        """,
+        (str(partner_id),),
+    ).fetchone()
+    if row is None or int(row["payout_micro"] or 0) <= 0:
+        return False
+    paid_at = row["paid_at_ms"]
+    if paid_at is None or int(paid_at) < int(fx.THB_FLOW_SINCE_MS):
+        return False
+    return fx.current_fx(conn, str(row["id"])) is None
 
 
 def _show_admin(
@@ -1370,6 +1476,7 @@ def handle_partner_text(
     send: Any,
     futures: Any = None,
     now_ms: int,
+    edit: Any = None,
 ) -> dict[str, Any]:
     try:
         chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
@@ -1436,6 +1543,33 @@ def handle_partner_text(
             return _handle_closed(conn, send=send)
         if cmd == "due":
             return _handle_due(conn, send=send, now_ms=now_ms)
+        if cmd == "paid":
+            return thb.handle_paid_text(
+                conn,
+                str(parsed.get("raw") or ""),
+                send=send,
+                edit=edit or (lambda *_a, **_k: False),
+                entered_by="admin",
+                now_ms=now_ms,
+            )
+        if cmd == "fix":
+            return thb.handle_fix_text(
+                conn,
+                str(parsed.get("raw") or ""),
+                send=send,
+                edit=edit or (lambda *_a, **_k: False),
+                entered_by="admin",
+                now_ms=now_ms,
+            )
+        if cmd == "carry":
+            return thb.handle_carry_text(
+                conn,
+                str(parsed.get("raw") or ""),
+                send=send,
+                edit=edit or (lambda *_a, **_k: False),
+                entered_by="admin",
+                now_ms=now_ms,
+            )
         if cmd == "kyc_list":
             return _handle_kyc_list(conn, send=send, now_ms=now_ms)
         if cmd == "kyc_show":
@@ -1619,7 +1753,7 @@ def handle_partner_callback(
                 return {"ok": False, "reason": "kyc_required"}
             due_total = ps.payouts_due_total(conn)
             if due_total > 0:
-                _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอนแล้วกด โอนแล้ว ก่อน (p due)")
+                _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอน USDT ออกแล้วกด 📤 ก่อน (p due)")
                 return {"ok": False, "reason": "payout_due"}
 
             client = _resolve_client(futures)
@@ -1715,7 +1849,7 @@ def handle_partner_callback(
                 return {"ok": False, "reason": "request_not_pending"}
             due_total = ps.payouts_due_total(conn)
             if due_total > 0:
-                _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอนแล้วกด โอนแล้ว ก่อน (p due)")
+                _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอน USDT ออกแล้วกด 📤 ก่อน (p due)")
                 return {"ok": False, "reason": "payout_due"}
 
             client = _resolve_client(futures)
@@ -1776,7 +1910,7 @@ def handle_partner_callback(
                     )
                     body = (
                         f"✅ ยืนยันแล้ว · ค้างจ่าย {fmt_usdt(cash)} USDT ให้ {pname}\n"
-                        f"โอนออกจาก futures wallet แล้วค่อยกด โอนแล้ว\n"
+                        f"โอน USDT ออกจาก futures wallet แล้วกด 📤\n"
                         f"{account}"
                     )
                     body += guard_suffix
@@ -1874,36 +2008,49 @@ def handle_partner_callback(
             req = conn.execute("SELECT * FROM partner_request WHERE id = ?", (rid,)).fetchone()
             paid = ps.mark_paid(conn, rid, now_ms)
             if paid.get("ok"):
-                amount = ps.usdt_from_micro(int((req["payout_micro"] if req else 0) or 0))
                 partner = ps.get_partner(conn, str(req["partner_id"])) if req is not None else None
-                pname = str(partner["name"]) if partner is not None else "?"
                 _answer()
-                warnings = []
-                if partner is not None:
-                    note = f"💸 แอดมินแจ้งว่าโอน {fmt_usdt(amount)} USDT ให้คุณแล้ว"
-                    account = pk.partner_payout_line(
-                        conn,
-                        payout_kyc_id=req["payout_kyc_id"] if req is not None else None,
-                        cash=amount,
-                    )
-                    if account:
-                        note += "\n" + account
-                    # mark_paid already cleared this row. Unbind only when it was
-                    # the last due payout and the partner actually received the note.
-                    if str(partner["status"]) == "closed" and not _due_for(conn, str(partner["id"])):
-                        facts = _close_fact_lines(conn, str(partner["id"]))
-                        if facts:
-                            note += "\n" + "\n".join(facts)
+                note = thb.step1_partner(conn, rid)
+                card_warnings: list[str] = []
+                if partner is not None and thb.step1_releases(conn, rid):
+                    facts = _close_fact_lines(conn, str(partner["id"]))
+                    if facts:
+                        note += "\n" + "\n".join(facts)
+                    if fx.carry_balance(conn, str(partner["id"])) <= 0:
                         note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
-                    warnings = _release_closed_binding(conn, partner, send=send, note=note, now_ms=now_ms)
-                body = _append_warnings(f"💸 โอนแล้ว {fmt_usdt(amount)} USDT ให้ {pname}", warnings)
-                _show_admin(body, warnings, mid=mid, edit=edit, send=send)
+                    release_warnings = _release_closed_binding(
+                        conn, partner, send=send, note=note, now_ms=now_ms
+                    )
+                    card_warnings.extend(release_warnings)
+                elif partner is not None:
+                    sent_ok = send_to_partner(send, partner, note)
+                    if not sent_ok and partner["telegram_user_id"] is not None:
+                        card_warnings.append("⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ")
+                body = thb.step1_admin(conn, rid)
+                if card_warnings:
+                    body += "\n" + "\n".join(card_warnings)
+                _show_admin(body, card_warnings, mid=mid, edit=edit, send=send)
                 return {"ok": True, "cmd": "paid"}
             _answer("รายการนี้ปิดไปแล้ว")
             if mid is not None:
                 body, markup = _settled_view(conn, rid)
                 edit(int(mid), body, reply_markup=markup)
             return {"ok": False, "reason": "not_due"}
+
+        if data.startswith(("pa:fy:", "pa:fn:", "pa:fs:", "pa:fc:")):
+            return thb.confirm_callback(
+                conn,
+                data,
+                now_ms=now_ms,
+                entered_by="admin",
+                answer=_answer,
+                edit=edit,
+                send=send,
+                notify=lambda partner, text: send_to_partner(send, partner, text),
+                release=_release_closed_binding,
+                close_facts=_close_fact_lines,
+                mid=mid,
+            )
 
         _answer()
         return {"ok": False, "reason": "unknown"}

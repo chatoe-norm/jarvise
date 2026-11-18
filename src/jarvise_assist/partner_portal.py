@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from jarvise_assist import partner_fx as fx
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_ledger as pl
 from jarvise_assist import partner_profile as profile
@@ -305,6 +306,9 @@ def _build_card(
             if str(d["partner_id"]) == pid:
                 x = ps.usdt_from_micro(int(d["payout_micro"] or 0))
                 lines.append(f"รอโอน {fmt_usdt(x)} USDT")
+        for waiting in fx.awaiting_thb(conn, pid):
+            x = ps.usdt_from_micro(int(waiting["payout_micro"] or 0))
+            lines.append(f"กำลังแปลงเป็นเงินบาท {fmt_usdt(x)} USDT")
 
     if str(row["status"]) == "closed":
         lines = [f"พอร์ตของ {name} · {stamp}", "ปิดพอร์ตแล้ว"]
@@ -324,6 +328,9 @@ def _build_card(
             lines.append(f"ยอดปิด {fmt_usdt(close_cash)} USDT")
             for due in summary.get("dues") or []:
                 lines.append(f"รอโอน {fmt_usdt(Decimal(due['cash']))} USDT")
+        for waiting in fx.awaiting_thb(conn, pid):
+            x = ps.usdt_from_micro(int(waiting["payout_micro"] or 0))
+            lines.append(f"กำลังแปลงเป็นเงินบาท {fmt_usdt(x)} USDT")
         dues = summary.get("dues") if summary.get("ok") else None
         markup = None
         if dues:

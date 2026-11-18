@@ -493,12 +493,15 @@ def test_full_abc_sequence(tmp_path: Path, monkeypatch: Any, env_chat: None) -> 
     all_sends.extend(sent)
     all_edits.extend(edited)
     assert any(s.get("chat_id") == "501" and "โอน" in s["text"] for s in sent)
-    assert ps.partner_by_telegram_id(conn, "501") is None
+    assert ps.partner_by_telegram_id(conn, "501") is not None
     portal.reset_value_cache()
+    card_sent, card_send = _send_capture()
     out = portal.handle_portal_text(
-        conn, _pmsg("hi", chat=501), send=_send_capture()[1], futures=cli_cl, now_ms=NOW + 81
+        conn, _pmsg("hi", chat=501), send=card_send, futures=cli_cl, now_ms=NOW + 81
     )
-    assert out == {"ignored": "foreign_chat"}
+    assert out == {"ok": True, "cmd": "card"}
+    assert any("ปิดพอร์ตแล้ว" in item["text"] for item in card_sent)
+    assert any("กำลังแปลงเป็นเงินบาท" in item["text"] for item in card_sent)
 
     # At V 1300, C card shows 287.50 red
     cli_n = FakeValueClient(wallet="1300")
@@ -1049,7 +1052,7 @@ def test_double_tap_pa_pd_keeps_paid_text(tmp_path: Path, monkeypatch: Any, env_
         futures=cli,
         now_ms=NOW + 12,
     )
-    assert "โอนแล้ว" in edited1[0]["text"]
+    assert "USDT ออกจากพอร์ตแล้ว" in edited1[0]["text"]
     assert (edited1[0]["reply_markup"] or {}).get("inline_keyboard") == []
 
     edited2, edit2 = _edit_capture()
@@ -1065,7 +1068,7 @@ def test_double_tap_pa_pd_keeps_paid_text(tmp_path: Path, monkeypatch: Any, env_
         now_ms=NOW + 13,
     )
     assert "ปิดไปแล้ว" in (answers2[0][1] or "")
-    assert "โอนแล้ว" in edited2[0]["text"]
+    assert "USDT ออกจากพอร์ตแล้ว" in edited2[0]["text"]
     assert "ค้างจ่าย" not in edited2[0]["text"]
     assert (edited2[0]["reply_markup"] or {}).get("inline_keyboard") == []
     assert (

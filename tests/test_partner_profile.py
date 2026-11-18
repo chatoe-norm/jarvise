@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from jarvise_assist import partner_fx as fx
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_portal as portal
 from jarvise_assist import partner_profile as profile
@@ -339,7 +340,32 @@ def test_rebound_telegram_shows_only_the_new_partner(tmp_path: Path, monkeypatch
     assert ps.apply_deposit(conn, bob, D("1000"), D("2000"), NOW + 2)["ok"] is True
     closed = ps.apply_close(conn, bob, D("2000"), NOW + 3)
     assert closed["ok"] is True
-    assert ps.mark_paid(conn, str(closed["request_id"]), NOW + 4)["ok"] is True
+    rid = str(closed["request_id"])
+    assert ps.mark_paid(conn, rid, NOW + 4)["ok"] is True
+    micro = int(ps.get_request(conn, rid)["payout_micro"])
+    assert micro % 1_000_000 == 0
+    sold = micro
+    gross = (sold * 200_000) // 100_000_000
+    kyc = pk.current_kyc(conn, bob)
+    assert kyc is not None
+    saved = fx.record_payout_fx(
+        conn,
+        request_id=rid,
+        carry_in_micro=0,
+        chain_fee_micro=0,
+        usdt_sold_micro=sold,
+        rate=D("20"),
+        trade_fee_satang=0,
+        thb_wd_fee_satang=0,
+        bank_fee_satang=0,
+        net_satang=gross,
+        ref_status="off",
+        paid_kyc_id=str(kyc["id"]),
+        entered_by="42",
+        now_ms=NOW + 4,
+    )
+    assert saved["ok"] is True, saved
+    assert fx.open_settlements(conn, bob) == []
     bob2 = _partner(conn, "Bob2", now_ms=NOW + 5)
     invited = ps.create_invite(conn, bob2, now_ms=NOW + 6)
     assert invited["ok"] is True

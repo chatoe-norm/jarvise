@@ -790,7 +790,8 @@ def test_admin_withdraw_without_kyc_and_partner_note_stays_masked(
     assert paid["ok"] is True
     notes = [row["text"] for row in sent if row["chat_id"] == "501"]
     assert notes
-    assert "โอนเข้า: KBANK ••••7890" in notes[-1]
+    assert "บัญชีที่จะรับเงิน: KBANK ••••7890" in notes[-1]
+    assert "โอนเข้า:" not in notes[-1]
     assert "p kyc" not in notes[-1]
 
     unsaved = _partner(conn, "Cara")

@@ -236,6 +236,7 @@ def process_update(
             text,
             message=message,
             send=send_fn,
+            edit=edit_fn,
             futures=futures,
             now_ms=ts,
         )

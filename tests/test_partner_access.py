@@ -565,9 +565,12 @@ def test_paid_button_unbinds_only_the_last_due(tmp_path: Path, monkeypatch: Any,
     assert out == {"ok": True, "cmd": "paid"}
     assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
     note = _partner_texts(sent)[0]
-    assert "โอน" in note
+    assert "ออกจากพอร์ตแล้ว" in note
+    assert "ให้คุณแล้ว" not in note
+    assert "โอนเข้า:" not in note
     assert "บอทจะไม่แสดงยอดอีก" not in note
-    assert "⚠️ ยังมียอดค้างจ่าย — ยังไม่ตัดการผูก (โอนให้ครบก่อน)" in edited[0]["text"]
+    assert "ยังไม่ตัดการผูก" not in edited[0]["text"]
+    assert "USDT ออกจากพอร์ตแล้ว" in edited[0]["text"]
 
     sent2, send2 = _send_capture()
     edited2, edit2 = _edit_capture()
@@ -582,9 +585,12 @@ def test_paid_button_unbinds_only_the_last_due(tmp_path: Path, monkeypatch: Any,
         now_ms=NOW + 9,
     )
     assert out2 == {"ok": True, "cmd": "paid"}
-    assert ps.get_partner(conn, b_id)["telegram_user_id"] is None
-    assert "บอทจะไม่แสดงยอดอีก" in _partner_texts(sent2)[0]
-    assert "ยังไม่ตัดการผูก" not in edited2[0]["text"]
+    assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
+    note2 = _partner_texts(sent2)[0]
+    assert "ออกจากพอร์ตแล้ว" in note2
+    assert "เข้าร่วม" not in note2
+    assert "บอทจะไม่แสดงยอดอีก" not in note2
+    assert "ให้คุณแล้ว" not in note2
     conn.close()
 
 
@@ -680,7 +686,7 @@ def test_start_while_due_keeps_invite_then_binds_after_paid(
         now_ms=NOW + 10,
     )
     assert paid["ok"] is True
-    assert ps.get_partner(conn, b_id)["telegram_user_id"] is None
+    assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
 
     portal.reset_value_cache()
     sent2, send2 = _send_capture()
@@ -691,11 +697,9 @@ def test_start_while_due_keeps_invite_then_binds_after_paid(
         futures=object(),
         now_ms=NOW + 11,
     )
-    assert bound["ok"] is True
-    assert bound["partner_id"] == b2
-    bound_row = ps.partner_by_telegram_id(conn, TG)
-    assert bound_row is not None and bound_row["id"] == b2
-    assert ps.get_partner(conn, b2)["invite_hash"] is None
+    assert bound == {"ok": False, "reason": "closed_payout_due"}
+    assert ps.get_partner(conn, b2)["invite_hash"] == hash_before
+    assert ps.partner_by_telegram_id(conn, TG)["id"] == b_id
     conn.close()
 
 
@@ -801,8 +805,9 @@ def test_unbind_refuses_closed_partner_with_payout_due(
         futures=object(),
         now_ms=NOW + 9,
     )
-    assert out2["ok"] is True
-    assert ps.get_partner(conn, b_id)["telegram_user_id"] is None
+    assert out2 == {"ok": False, "reason": "payout_due"}
+    assert "ยังรอบันทึกเงินบาท" in sent2[0]["text"]
+    assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
     conn.close()
 
 
@@ -844,7 +849,7 @@ def test_p_closed_cap_bangkok_dates_and_empty(tmp_path: Path, monkeypatch: Any, 
         futures=None,
         now_ms=join + 130_000,
     )
-    assert "· Dawn · ปิด 01/10/2026 · 100.00 USDT · โอนแล้ว" in sent_p[0]["text"]
+    assert "· Dawn · ปิด 01/10/2026 · 100.00 USDT · USDT ออกแล้ว · รอบันทึกเงินบาท" in sent_p[0]["text"]
     assert "รอโอน" not in sent_p[0]["text"]
 
     # 40 then 41. Dawn stays; the extra rows are zero-cash closes.
@@ -901,6 +906,32 @@ def test_rejoin_new_account_restarts_close_clock(tmp_path: Path, monkeypatch: An
         now_ms=join_old + 86_400_000 + 1,
     )
     assert paid["ok"] is True
+    assert ps.get_partner(conn, bob)["telegram_user_id"] == TG
+    micro = int(ps.get_request(conn, rid)["payout_micro"])
+    sold = micro // 1_000_000
+    gross = (sold * 1_000_000 * 200_000) // 100_000_000
+    net = f"{Decimal(gross) / Decimal(100):f}"
+    cmd = f"p paid #{rid[-6:]} sold={sold} rate=20 chain=0 trade=0 wd=0 bank=0 net={net}"
+    staged = pa.handle_partner_text(
+        conn,
+        cmd,
+        message=_owner_msg(cmd),
+        send=_send_capture()[1],
+        futures=object(),
+        now_ms=join_old + 86_400_000 + 2,
+    )
+    assert staged["ok"] is True, staged
+    done = pa.handle_partner_callback(
+        conn,
+        f"pa:fy:{rid}:{staged['token']}",
+        callback=_owner_cb(data=f"pa:fy:{rid}:{staged['token']}"),
+        send=_send_capture()[1],
+        answer=_answer_capture()[1],
+        edit=_edit_capture()[1],
+        futures=object(),
+        now_ms=join_old + 86_400_000 + 3,
+    )
+    assert done["ok"] is True, done
     assert ps.get_partner(conn, bob)["telegram_user_id"] is None
 
     added = pa.handle_partner_text(
@@ -1113,7 +1144,9 @@ def test_paid_last_due_send_none_keeps_binding(tmp_path: Path, monkeypatch: Any,
     )
     assert out == {"ok": True, "cmd": "paid"}
     assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
-    assert "⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ — ยังไม่ตัดการผูก (p unbind B)" in edited[0]["text"]
+    assert "USDT ออกจากพอร์ตแล้ว" in edited[0]["text"]
+    assert "⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ" in edited[0]["text"]
+    assert "ยังไม่ตัดการผูก" not in edited[0]["text"]
     conn.close()
 
 
@@ -1176,9 +1209,9 @@ def test_send_fail_with_other_due_omits_unbind_hint(tmp_path: Path, monkeypatch:
     )
     assert out == {"ok": True, "cmd": "paid"}
     text = edited[0]["text"]
-    assert "⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ — ยังไม่ตัดการผูก" in text
-    assert "p unbind" not in text
-    assert "⚠️ ยังมียอดค้างจ่าย — ยังไม่ตัดการผูก (โอนให้ครบก่อน)" in text
+    assert "USDT ออกจากพอร์ตแล้ว" in text
+    assert "⚠️ แจ้งพาร์ทเนอร์ไม่สำเร็จ" in text
+    assert "ยังไม่ตัดการผูก" not in text
     assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
     conn.close()
 
@@ -1319,12 +1352,13 @@ def test_close_summary_is_in_the_cash_out_and_final_paid_notes(
     )
     assert paid == {"ok": True, "cmd": "paid"}
     final = _partner_texts(sent2)[0]
-    assert "โอน" in final
-    assert "เข้าร่วม 01/10/2026" in final
-    assert "ปิดเมื่อ 01/10/2026" in final
-    assert "ยอดปิด" in final
+    assert "ออกจากพอร์ตแล้ว" in final
+    assert "เข้าร่วม" not in final
+    assert "ปิดเมื่อ" not in final
+    assert "บอทจะไม่แสดงยอดอีก" not in final
+    assert "ให้คุณแล้ว" not in final
     assert ps.close_summary(conn, b_id)["close_payout_state"] == "paid"
-    assert ps.get_partner(conn, b_id)["telegram_user_id"] is None
+    assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
     conn.close()
 
 
@@ -1421,15 +1455,17 @@ def test_close_payout_paid_flips_label_and_sends_the_summary(tmp_path: Path, env
     assert paid_cl == {"ok": True, "cmd": "paid"}
     assert ps.close_summary(conn, b_id)["close_payout_state"] == "paid"
     final = _partner_texts(sent_cl)[0]
-    assert "เข้าร่วม 01/10/2026" in final
-    assert "ปิดเมื่อ 01/10/2026" in final
-    assert f"ยอดปิด {close_cash} USDT" in final
-    assert f"โอน {close_cash} USDT" in final
+    assert "เข้าร่วม" not in final
+    assert "ปิดเมื่อ" not in final
+    assert "บอทจะไม่แสดงยอดอีก" not in final
+    assert f"โอน {close_cash} USDT" not in final
+    assert "ออกจากพอร์ตแล้ว" in final
+    assert ps.get_partner(conn, b_id)["telegram_user_id"] == TG
     sent_done, send_done = _send_capture()
     pa.handle_partner_text(
         conn, "p closed", message=_owner_msg("p closed"), send=send_done, futures=None, now_ms=join + 170_000
     )
-    assert "โอนแล้ว" in sent_done[0]["text"]
+    assert "USDT ออกแล้ว · รอบันทึกเงินบาท" in sent_done[0]["text"]
     assert "รอโอน" not in sent_done[0]["text"]
     conn.close()
 
