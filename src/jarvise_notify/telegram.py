@@ -28,6 +28,7 @@ def send_message(
     reply_markup: dict[str, Any] | None = None,
     client: httpx.Client | None = None,
     chat_id: str | None = None,
+    protect_content: bool = False,
 ) -> int | None:
     """POST sendMessage. Returns message_id on success, None on soft-fail."""
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
@@ -40,6 +41,8 @@ def send_message(
         "text": text,
         "disable_web_page_preview": True,
     }
+    if protect_content:
+        body["protect_content"] = True
     if reply_markup is not None:
         body["reply_markup"] = reply_markup
     own = client is None

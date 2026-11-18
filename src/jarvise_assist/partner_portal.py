@@ -16,6 +16,7 @@ from typing import Any
 
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_ledger as pl
+from jarvise_assist import partner_profile as profile
 from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
 from jarvise_assist.futures import build_futures_client
@@ -146,7 +147,10 @@ def _card_buttons(locks: dict[str, Block] | None = None, *, kyc_saved: bool = Fa
     cv = locks.get("cv")
     wd = locks.get("wd")
     cl = locks.get("cl")
-    kyc_label = "แก้ไขข้อมูล: ติดต่อแอดมิน" if kyc_saved else "ข้อมูลรับเงิน"
+    if kyc_saved:
+        last = [{"text": "👤 โปรไฟล์", "callback_data": "pp:pf"}]
+    else:
+        last = [{"text": "ข้อมูลรับเงิน", "callback_data": "pp:kyc"}]
     return {
         "inline_keyboard": [
             [
@@ -164,7 +168,7 @@ def _card_buttons(locks: dict[str, Block] | None = None, *, kyc_saved: bool = Fa
                 }
             ],
             [{"text": "📊 ไม้ที่เปิดอยู่", "callback_data": "pp:pos"}],
-            [{"text": kyc_label, "callback_data": "pp:kyc"}],
+            last,
         ]
     }
 
@@ -320,7 +324,11 @@ def _build_card(
             lines.append(f"ยอดปิด {fmt_usdt(close_cash)} USDT")
             for due in summary.get("dues") or []:
                 lines.append(f"รอโอน {fmt_usdt(Decimal(due['cash']))} USDT")
-        return "\n".join(_with_kyc(lines, closed=True)), None
+        dues = summary.get("dues") if summary.get("ok") else None
+        markup = None
+        if dues:
+            markup = {"inline_keyboard": [[{"text": "👤 โปรไฟล์", "callback_data": "pp:pf"}]]}
+        return "\n".join(_with_kyc(lines, closed=True)), markup
 
     nav: Decimal | None = None
     if isinstance(av, AccountValue):
@@ -650,7 +658,7 @@ def handle_portal_text(
         if reason == "closed_payout_due":
             refusal = "บัญชีเดิมยังมียอดรอโอน — ผูกบัญชีใหม่ไม่ได้จนกว่าแอดมินจะโอนครบ"
             try:
-                send(refusal, chat_id=str(chat.get("id")))
+                send(refusal, chat_id=str(chat.get("id")), protect_content=True)
             except Exception:  # noqa: BLE001
                 logger.warning("portal closed-rebind refusal failed: %s", "Exception")
             return {"ok": False, "reason": "closed_payout_due"}
@@ -661,6 +669,7 @@ def handle_portal_text(
             send(
                 "ลิงก์เชิญไม่ถูกต้องหรือหมดอายุ — ขอลิงก์ใหม่จากแอดมิน",
                 chat_id=str(chat.get("id")),
+                protect_content=True,
             )
         except Exception:  # noqa: BLE001
             logger.warning("portal invalid-invite send failed: %s", "Exception")
@@ -995,6 +1004,26 @@ def handle_portal_callback(
             send=send,
             row=row,
             cmd="positions",
+        )
+
+    if data == "pp:pf":
+        _answer()
+        av = _read_v_cached(conn, futures, now_ms=now_ms)
+        account_value = av.value if isinstance(av, AccountValue) else None
+        text = profile.render_profile(
+            profile.profile_data(conn, str(row["id"]), now_ms, account_value=account_value)
+        )
+        markup = {"inline_keyboard": [[{"text": "⬅️ กลับ", "callback_data": "pp:v"}]]}
+        return _edit_or_unchanged(
+            msg=msg,
+            text=text,
+            markup=markup,
+            mid=mid,
+            partner_chat=partner_chat,
+            edit=edit,
+            send=send,
+            row=row,
+            cmd="profile",
         )
 
     if data == "pp:kyc":

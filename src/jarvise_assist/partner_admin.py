@@ -214,7 +214,7 @@ def send_to_partner(
                     data = str(btn.get("callback_data") or "")
                     if not data.startswith("pp:"):
                         return False
-        result = send(text, reply_markup=reply_markup, chat_id=str(tg))
+        result = send(text, reply_markup=reply_markup, chat_id=str(tg), protect_content=True)
         return result is not None and result is not False
     except Exception as exc:  # noqa: BLE001
         logger.warning("partner send failed: %s", type(exc).__name__)
