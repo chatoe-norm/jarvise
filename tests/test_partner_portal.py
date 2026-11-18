@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -371,6 +372,7 @@ def test_cards_at_v_2160_privacy(tmp_path: Path, monkeypatch: Any, env_chat: Non
     for bad in ("NAV", "หน่วย", "wallet", "ยังไม่ปิด", "2,160", "admin"):
         assert bad not in card_c
     assert "พอร์ตของ B" not in card_c
+    assert not re.search(r"(?<![A-Za-z])B(?![A-Za-z])", card_c)
 
     portal.reset_value_cache()
     sent_b, send_b = _send_capture()
@@ -381,6 +383,7 @@ def test_cards_at_v_2160_privacy(tmp_path: Path, monkeypatch: Any, env_chat: Non
     for bad in ("NAV", "หน่วย", "wallet", "ยังไม่ปิด", "2,160", "admin"):
         assert bad not in card_b
     assert "พอร์ตของ C" not in card_b
+    assert not re.search(r"(?<![A-Za-z])C(?![A-Za-z])", card_b)
     assert ps.verify_ledger(conn)["ok"] is True
     conn.close()
 
