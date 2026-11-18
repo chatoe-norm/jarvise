@@ -619,17 +619,19 @@ def partner_notice(conn: Any, request_id: str) -> str:
         f"(เฉลี่ย {fmt_effective(int(row['net_satang']), denom)} บาท/USDT)"
     )
     if int(row["usdt_leftover_micro"]) > 0:
-        separate = kind == "close" or (
-            closed and req is not None and not _later_v1_fx(conn, str(req["partner_id"]), request_id)
-        )
+        partner_id = "" if req is None else str(req["partner_id"])
+        later = req is not None and _later_v1_fx(conn, partner_id, request_id)
+        rolls_in = req is not None and _open_takes_carry(conn, partner_id)
+        separate = kind == "close" or (closed and req is not None and not later and not rolls_in)
         if separate:
             lines.append(
                 f"เศษ {_usdt_2(int(row['usdt_leftover_micro']))} USDT แอดมินจะแจ้งการชำระเศษนี้แยกต่างหาก"
             )
         else:
+            into_close = req is not None and not later and _open_close_takes_carry(conn, partner_id)
+            tail = "ยกไปรวมกับยอดปิดพอร์ต" if into_close else "ยกไปรวมกับการถอนครั้งถัดไป"
             lines.append(
-                f"เศษ {_usdt_2(int(row['usdt_leftover_micro']))} USDT ยังไม่ได้ขาย "
-                f"(ขายได้ขั้นละ 1 USDT) — ยกไปรวมกับการถอนครั้งถัดไป"
+                f"เศษ {_usdt_2(int(row['usdt_leftover_micro']))} USDT ยังไม่ได้ขาย (ขายได้ขั้นละ 1 USDT) — {tail}"
             )
     kyc_id = row["paid_kyc_id"]
     if kyc_id:
@@ -647,6 +649,27 @@ def partner_notice(conn: Any, request_id: str) -> str:
     else:
         lines.append(f"บันทึก {stamp}")
     return "\n".join(lines)
+
+
+def _open_takes_carry(conn: Any, partner_id: str) -> bool:
+    """True when a later payout can still absorb this leftover."""
+    for row in fx.open_settlements(conn, partner_id):
+        stage = str(row.get("stage") or "")
+        if stage == "awaiting_thb":
+            return True
+        if stage == "due" and not fx.unsellable(conn, row):
+            return True
+    return False
+
+
+def _open_close_takes_carry(conn: Any, partner_id: str) -> bool:
+    for row in fx.open_settlements(conn, partner_id):
+        if str(row.get("kind") or "") != "close":
+            continue
+        stage = str(row.get("stage") or "")
+        if stage == "awaiting_thb" or (stage == "due" and not fx.unsellable(conn, row)):
+            return True
+    return False
 
 
 def _later_v1_fx(conn: Any, partner_id: str, request_id: str) -> bool:
@@ -1116,8 +1139,7 @@ def _after_commit(
         facts = close_facts(conn, partner_id)
         if facts:
             note += "\n" + "\n".join(facts)
-        if fx.carry_balance(conn, partner_id) <= 0:
-            note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
+        note += "\nปิดพอร์ตเรียบร้อย บอทจะไม่แสดงยอดอีก"
         if no_chat:
             sent_ok = False
         else:

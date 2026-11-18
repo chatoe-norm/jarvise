@@ -2134,3 +2134,105 @@ def test_settle_reason_with_embedded_at_keeps_thb(tmp_path: Path, env_chat: None
     assert note.splitlines()[0] == "💸 ชำระเศษ 0.98 USDT เป็นเงินบาท 32.44 บาท"
     assert note.splitlines()[1] == "โอน @12 · ตามสลิป"
     conn.close()
+
+
+def _due_close(conn: Any, pid: str, rid: str, micro: int, when: int) -> None:
+    conn.execute(
+        """
+        INSERT INTO partner_request (
+            id, partner_id, kind, status, payout_state, payout_micro,
+            created_at_ms, expires_at_ms, decided_at_ms, source
+        ) VALUES (?, ?, 'close', 'confirmed', 'due', ?, ?, ?, ?, 'admin')
+        """,
+        (rid, pid, micro, when, when + 1, when),
+    )
+    conn.commit()
+
+
+def _fix_w2_and_notes(conn: Any, pid: str, wid: str) -> tuple[list[dict[str, Any]], Any]:
+    sent, send = _send_capture()
+    cmd = f"p fix #{wid[-6:]} rate=34.00 net=34.00\nปรับเรทตามสลิปที่ได้รับ"
+    preview = pa.handle_partner_text(conn, cmd, message=_msg(cmd), send=send, now_ms=NOW + 6)
+    assert preview["ok"] is True, preview
+    saved = pa.handle_partner_callback(
+        conn,
+        f"pa:fy:{wid}:{preview['token']}",
+        callback=_cb(f"pa:fy:{wid}:{preview['token']}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=_edit_capture()[1],
+        now_ms=NOW + 7,
+    )
+    assert saved["ok"] is True, saved
+    resent = pa.handle_partner_callback(
+        conn,
+        f"pa:fs:{wid}",
+        callback=_cb(f"pa:fs:{wid}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=_edit_capture()[1],
+        now_ms=NOW + 8,
+    )
+    assert resent["ok"] is True, resent
+    return sent, send
+
+
+def test_withdraw_leftover_rolls_into_open_close(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "rollclose.db")
+    pid = _partner(conn, "nok")
+    _bind(conn, pid)
+    wid = "pr_0000000000000d21"
+    close = "pr_0000000000000d22"
+    _paid_request(conn, pid, rid=wid, micro=1_310_000)
+    _record_simple(conn, pid, wid, payout=1_310_000, sold=1_000_000, now_ms=NOW + 2)
+    assert fx.carry_balance(conn, pid) == 300_000
+    _due_close(conn, pid, close, 2_000_000, NOW + 3)
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW + 4, pid))
+    conn.commit()
+    sent, send = _fix_w2_and_notes(conn, pid, wid)
+    notes = [item["text"] for item in sent if item["chat_id"] == TG]
+    assert len(notes) >= 2
+    for note in notes[-2:]:
+        assert "แยกต่างหาก" not in note
+        assert "ยกไปรวมกับยอดปิดพอร์ต" in note
+    assert ps.mark_paid(conn, close, NOW + 9)["ok"] is True
+    assert [row["id"] for row in fx.awaiting_thb(conn, pid)] == [close]
+    resent = pa.handle_partner_callback(
+        conn,
+        f"pa:fs:{wid}",
+        callback=_cb(f"pa:fs:{wid}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=_edit_capture()[1],
+        now_ms=NOW + 10,
+    )
+    assert resent["ok"] is True, resent
+    again = next(item["text"] for item in reversed(sent) if item["chat_id"] == TG)
+    assert "แยกต่างหาก" not in again
+    assert "ยกไปรวมกับยอดปิดพอร์ต" in again
+    conn.close()
+
+
+def test_withdraw_leftover_separate_when_close_unsellable(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "tinyroll.db")
+    pid = _partner(conn, "nok")
+    _bind(conn, pid)
+    wid = "pr_0000000000000d31"
+    close = "pr_0000000000000d32"
+    _paid_request(conn, pid, rid=wid, micro=1_310_000)
+    _record_simple(conn, pid, wid, payout=1_310_000, sold=1_000_000, now_ms=NOW + 2)
+    _due_close(conn, pid, close, 500_000, NOW + 3)
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW + 4, pid))
+    conn.commit()
+    sent, _send = _fix_w2_and_notes(conn, pid, wid)
+    notes = [item["text"] for item in sent if item["chat_id"] == TG]
+    assert notes
+    for note in notes:
+        assert "แยกต่างหาก" in note
+        assert "ยกไปรวมกับยอดปิดพอร์ต" not in note
+    assert ps.mark_paid(conn, close, NOW + 9)["ok"] is True
+    assert fx.awaiting_thb(conn, pid) == []
+    kept = thb.partner_notice(conn, wid)
+    assert "แยกต่างหาก" in kept
+    assert "ยกไปรวมกับยอดปิดพอร์ต" not in kept
+    conn.close()
