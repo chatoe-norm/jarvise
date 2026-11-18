@@ -891,6 +891,101 @@ def _migrate_partner_request_source(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "partner_request", "source", "TEXT DEFAULT NULL")
 
 
+def _migrate_partner_kyc(conn: sqlite3.Connection) -> None:
+    """Partner payout KYC (migration 33). Additive and append-only.
+
+    ``partner_kyc`` is history: one row per version, no UPDATE and no DELETE.
+    ``partner_kyc_draft`` is the 15-minute confirm step and may be replaced.
+    ``partner_request.payout_kyc_id`` records the KYC row a cash payout was
+    confirmed against. Existing rows stay NULL.
+
+    Rollback: this step only adds tables, indexes, triggers, and one nullable
+    column. Reverting the code leaves those objects unused. Dropping them is a
+    manual owner step and is not done here. A repair re-run writes nothing
+    when the objects already exist.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS partner_kyc (
+            id TEXT PRIMARY KEY,
+            partner_id TEXT NOT NULL REFERENCES partner (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            source TEXT NOT NULL CHECK (source IN ('portal', 'admin')),
+            key_id TEXT NOT NULL,
+            real_name_enc BLOB NOT NULL,
+            phone_enc BLOB NOT NULL,
+            account_no_enc BLOB NOT NULL,
+            holder_name_enc BLOB NOT NULL,
+            bank_code TEXT NOT NULL,
+            account_last4 TEXT NOT NULL CHECK (length(account_last4) = 4),
+            phone_last4 TEXT NOT NULL CHECK (length(phone_last4) = 4),
+            real_name_mask TEXT NOT NULL,
+            holder_name_mask TEXT NOT NULL,
+            holder_matches INTEGER NOT NULL CHECK (holder_matches IN (0, 1)),
+            account_fp TEXT NOT NULL,
+            phone_fp TEXT NOT NULL,
+            change_reason TEXT,
+            created_at_ms INTEGER NOT NULL,
+            UNIQUE (partner_id, version)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_partner_kyc_account_fp
+        ON partner_kyc (account_fp)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_partner_kyc_phone_fp
+        ON partner_kyc (phone_fp)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_kyc_no_delete
+        BEFORE DELETE ON partner_kyc
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_kyc immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_kyc_no_update
+        BEFORE UPDATE ON partner_kyc
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_kyc immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS partner_kyc_draft (
+            partner_id TEXT PRIMARY KEY REFERENCES partner (id),
+            token TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            real_name_enc BLOB NOT NULL,
+            phone_enc BLOB NOT NULL,
+            account_no_enc BLOB NOT NULL,
+            holder_name_enc BLOB NOT NULL,
+            bank_code TEXT NOT NULL,
+            account_last4 TEXT NOT NULL,
+            phone_last4 TEXT NOT NULL,
+            real_name_mask TEXT NOT NULL,
+            holder_name_mask TEXT NOT NULL,
+            holder_matches INTEGER NOT NULL CHECK (holder_matches IN (0, 1)),
+            account_fp TEXT NOT NULL,
+            phone_fp TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    _add_column_if_missing(conn, "partner_request", "payout_kyc_id", "TEXT DEFAULT NULL")
+
+
 def _migrate_assist_exit_telemetry(conn: sqlite3.Connection) -> None:
     """Exit-card snapshots, tap/ignore, and exchange-stop history. Additive only.
 
@@ -1406,6 +1501,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (30, "partner_ledger", _migrate_partner_ledger, True),
     (31, "partner_request_source", _migrate_partner_request_source, True),
     (32, "assist_exit_telemetry", _migrate_assist_exit_telemetry, True),
+    (33, "partner_kyc", _migrate_partner_kyc, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
