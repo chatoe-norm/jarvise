@@ -500,4 +500,6 @@ def test_confirm_delete_failure_logs_no_plaintext(
     assert PHONE not in caplog.text
     assert ACCOUNT not in caplog.text
     assert REAL_NAME not in caplog.text
+    assert "err=RuntimeError" in caplog.text
+    assert "partner kyc confirm delete failed partner_id=" in caplog.text
     conn.close()
