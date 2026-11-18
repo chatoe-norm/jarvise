@@ -117,6 +117,7 @@ def process_update(
                     edit=edit_fn,
                     futures=futures,
                     now_ms=ts,
+                    delete=delete_fn,
                 )
             return {"ignored": "foreign_chat"}
         if data.startswith("pa:"):

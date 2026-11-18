@@ -597,9 +597,13 @@ def _insert_confirmed_payout_request(
 ) -> str:
     rid = request_id if request_id is not None else _new_request_id()
     ts = int(now_ms)
+    payout_kyc_id: str | None = None
     if cash > 0:
         payout_state = "due"
         payout_micro: int | None = usdt_to_micro(cash)
+        current = pk.current_kyc(conn, partner_id)
+        if current is not None:
+            payout_kyc_id = str(current["id"])
     else:
         payout_state = "none"
         payout_micro = None
@@ -607,10 +611,10 @@ def _insert_confirmed_payout_request(
         """
         INSERT INTO partner_request (
             id, partner_id, kind, status, payout_state, payout_micro,
-            created_at_ms, expires_at_ms, decided_at_ms, source
-        ) VALUES (?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, 'admin')
+            created_at_ms, expires_at_ms, decided_at_ms, source, payout_kyc_id
+        ) VALUES (?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, 'admin', ?)
         """,
-        (rid, partner_id, kind, payout_state, payout_micro, ts, ts, ts),
+        (rid, partner_id, kind, payout_state, payout_micro, ts, ts, ts, payout_kyc_id),
     )
     return rid
 
