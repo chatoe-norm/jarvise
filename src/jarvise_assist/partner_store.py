@@ -18,6 +18,7 @@ import uuid
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
+from jarvise_assist import partner_fx as fx
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist.partner_ledger import (
     ClosePlan,
@@ -224,8 +225,7 @@ def bind_invite(
             if existing is not None:
                 if str(existing["id"]) == str(row["id"]) or str(existing["status"]) != "closed":
                     return {"ok": False, "reason": "tg_in_use"}
-                still_due = [d for d in list_due_payouts(conn) if str(d["partner_id"]) == str(existing["id"])]
-                if still_due:
+                if fx.open_settlements(conn, str(existing["id"])):
                     return {"ok": False, "reason": "closed_payout_due"}
                 conn.execute(
                     """

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from jarvise_assist import partner_fx as fx
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_store as ps
 
@@ -53,6 +54,12 @@ def _seed_partner_kyc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         return result
 
     monkeypatch.setattr(ps, "create_partner", _wrapped)
+
+
+@pytest.fixture(autouse=True)
+def _thb_flow_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR-2 tests see every paid payout as in the THB flow unless a test says otherwise."""
+    monkeypatch.setattr(fx, "THB_FLOW_SINCE_MS", 0)
 
 
 @pytest.fixture(autouse=True)

@@ -25,6 +25,8 @@ RATE_MIN_E4 = 200_000
 RATE_MAX_E4 = 600_000
 SELL_STEP_MICRO = 1_000_000
 REASON_MIN_CHARS = 10
+# payouts paid before this were settled in the old USDT flow
+THB_FLOW_SINCE_MS = 0
 DRAFT_TTL_MS = 15 * 60 * 1000
 _SATANG_DIVISOR = 100_000_000
 _RATE_QUANT = Decimal("0.0001")
@@ -164,11 +166,20 @@ def compute(
         }
     assert payout is not None and carry is not None and chain is not None and sold is not None
     assert trade is not None and wd is not None and bank is not None and net is not None
-    rate_e4 = _rate_e4(rate)
-    if rate_e4 is None:
+    rate_e4: int | None
+    if not rate.is_finite():
+        # NaN and infinity stay too_many_decimals, the same refusal as today.
         refusals.append("too_many_decimals")
-    elif rate_e4 < RATE_MIN_E4 or rate_e4 > RATE_MAX_E4:
+        rate_e4 = None
+    elif rate < Decimal(RATE_MIN_E4) / Decimal(10_000) or rate > Decimal(RATE_MAX_E4) / Decimal(10_000):
         refusals.append("rate_out_of_bounds")
+        rate_e4 = _rate_e4(rate)
+    else:
+        rate_e4 = _rate_e4(rate)
+        if rate_e4 is None:
+            refusals.append("too_many_decimals")
+        elif rate_e4 < RATE_MIN_E4 or rate_e4 > RATE_MAX_E4:
+            refusals.append("rate_out_of_bounds")
     leftover = payout + carry - chain - sold
     if leftover < 0:
         refusals.append("sold_exceeds_available")
@@ -518,6 +529,35 @@ def _busy(conn: sqlite3.Connection) -> bool:
     return conn.in_transaction
 
 
+def _partner_id_for_request(conn: sqlite3.Connection, request_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT partner_id FROM partner_request WHERE id = ?",
+        (str(request_id),),
+    ).fetchone()
+    return None if row is None else str(row["partner_id"])
+
+
+def _fx_ids(conn: sqlite3.Connection, fx_id: str) -> tuple[str | None, str | None]:
+    row = conn.execute(
+        "SELECT request_id, partner_id FROM partner_payout_fx WHERE id = ?",
+        (str(fx_id),),
+    ).fetchone()
+    if row is None:
+        return None, None
+    return str(row["request_id"]), str(row["partner_id"])
+
+
+def _consume_draft(conn: sqlite3.Connection, request_id: str, token: str, now_ms: int) -> bool:
+    cur = conn.execute(
+        """
+        DELETE FROM partner_payout_fx_draft
+        WHERE request_id = ? AND token = ? AND expires_at_ms > ?
+        """,
+        (str(request_id), str(token), int(now_ms)),
+    )
+    return int(cur.rowcount) == 1
+
+
 def _kyc_gate(conn: sqlite3.Connection, partner_id: str, paid_kyc_id: str | None) -> str | None:
     """Refuse a missing id when this partner has KYC, and an id that is not theirs."""
     has_kyc = conn.execute(
@@ -622,6 +662,7 @@ def record_payout_fx(
     paid_kyc_id: str | None = None,
     entered_by: str,
     now_ms: int,
+    draft_token: str | None = None,
 ) -> dict[str, Any]:
     """Version 1 for a request that is already paid. Does not call mark_paid.
 
@@ -632,8 +673,9 @@ def record_payout_fx(
     ``caller_transaction`` and its work is left uncommitted. PR-2's one-step
     due-to-paid plus this insert needs an inner variant, not this function.
     """
+    known_partner = _partner_id_for_request(conn, request_id)
     if _busy(conn):
-        return _fail(request_id, None, "caller_transaction")
+        return _fail(request_id, known_partner, "caller_transaction")
     reason = _clean_reason(reason)
     payout_in = _as_int(carry_in_micro)
     chain = _as_int(chain_fee_micro)
@@ -647,11 +689,13 @@ def record_payout_fx(
     if None in (payout_in, chain, sold, trade, wd, bank, net, now) or (
         ref_fetched_at_ms is not None and fetched is None
     ):
-        return _fail(request_id, None, "bad_input")
+        return _fail(request_id, known_partner, "bad_input")
     assert payout_in is not None and chain is not None and sold is not None
     assert trade is not None and wd is not None and bank is not None and net is not None and now is not None
     try:
         with transaction(conn):
+            if draft_token is not None and not _consume_draft(conn, str(request_id), draft_token, now):
+                return _fail(request_id, known_partner, "draft_gone")
             req = conn.execute(
                 "SELECT * FROM partner_request WHERE id = ?",
                 (str(request_id),),
@@ -744,11 +788,11 @@ def record_payout_fx(
             )
             return {"ok": True, "fx_id": fx_id, "version": 1, "carry_after": carry_after}
     except _FxAbort as exc:
-        return _fail(request_id, None, exc.reason)
+        return _fail(request_id, known_partner, exc.reason)
     except sqlite3.IntegrityError:
-        return _fail(request_id, None, "db_constraint")
+        return _fail(request_id, known_partner, "db_constraint")
     except OverflowError:
-        return _fail(request_id, None, "bad_input")
+        return _fail(request_id, known_partner, "bad_input")
 
 
 def record_correction(
@@ -774,6 +818,7 @@ def record_correction(
     paid_kyc_id: str | None = None,
     entered_by: str,
     now_ms: int,
+    draft_token: str | None = None,
 ) -> dict[str, Any]:
     """Append version n+1 and reverse the request's live carry rows.
 
@@ -785,8 +830,9 @@ def record_correction(
     Opens its own transaction. A caller that already holds one gets
     ``caller_transaction``. PR-2's combined confirm needs an inner variant.
     """
+    known_request, known_partner = _fx_ids(conn, base_fx_id)
     if _busy(conn):
-        return _fail(None, None, "caller_transaction")
+        return _fail(known_request, known_partner, "caller_transaction")
     reason = _clean_reason(reason)
     carry_in = _as_int(carry_in_micro)
     chain = _as_int(chain_fee_micro)
@@ -800,11 +846,9 @@ def record_correction(
     if None in (carry_in, chain, sold, trade, wd, bank, net, now) or (
         ref_fetched_at_ms is not None and fetched is None
     ):
-        return _fail(None, None, "bad_input")
+        return _fail(known_request, known_partner, "bad_input")
     assert carry_in is not None and chain is not None and sold is not None
     assert trade is not None and wd is not None and bank is not None and net is not None and now is not None
-    request_id: str | None = None
-    partner_id: str | None = None
     try:
         with transaction(conn):
             base = conn.execute(
@@ -812,9 +856,11 @@ def record_correction(
                 (str(base_fx_id),),
             ).fetchone()
             if base is None:
-                return _fail(None, None, "not_found")
+                return _fail(known_request, known_partner, "not_found")
             request_id = str(base["request_id"])
             partner_id = str(base["partner_id"])
+            if draft_token is not None and not _consume_draft(conn, request_id, draft_token, now):
+                return _fail(request_id, partner_id, "draft_gone")
             current = conn.execute(
                 "SELECT MAX(version) AS v FROM partner_payout_fx WHERE request_id = ?",
                 (request_id,),
@@ -823,8 +869,15 @@ def record_correction(
                 return _fail(request_id, partner_id, "not_current")
             if carry_in != int(base["carry_in_micro"]):
                 return _fail(request_id, partner_id, "carry_mismatch")
-            effective_kyc = paid_kyc_id if paid_kyc_id is not None else base["paid_kyc_id"]
-            kyc_reason = _kyc_gate(conn, partner_id, None if effective_kyc is None else str(effective_kyc))
+            # Low 5: a NULL base stays NULL when the caller omits an id, even after KYC exists.
+            if paid_kyc_id is None:
+                effective_kyc = base["paid_kyc_id"]
+                kyc_reason = None
+                if effective_kyc is not None:
+                    kyc_reason = _kyc_gate(conn, partner_id, str(effective_kyc))
+            else:
+                effective_kyc = paid_kyc_id
+                kyc_reason = _kyc_gate(conn, partner_id, str(paid_kyc_id))
             if kyc_reason is not None:
                 return _fail(request_id, partner_id, kyc_reason)
             prepared = _figures_or_reason(
@@ -914,11 +967,11 @@ def record_correction(
             )
             return {"ok": True, "fx_id": fx_id, "version": version, "carry_after": carry_after}
     except _FxAbort as exc:
-        return _fail(request_id, partner_id, exc.reason)
+        return _fail(known_request, known_partner, exc.reason)
     except sqlite3.IntegrityError:
-        return _fail(request_id, partner_id, "db_constraint")
+        return _fail(known_request, known_partner, "db_constraint")
     except OverflowError:
-        return _fail(request_id, partner_id, "bad_input")
+        return _fail(known_request, known_partner, "bad_input")
 
 
 def settle_carry(
@@ -928,6 +981,9 @@ def settle_carry(
     reason: str | None,
     entered_by: str,
     now_ms: int,
+    *,
+    draft_token: str | None = None,
+    draft_request_id: str | None = None,
 ) -> dict[str, Any]:
     """Owner settlement of a remaining leftover. ``amount_micro`` is positive.
 
@@ -942,6 +998,11 @@ def settle_carry(
     cleaned = _clean_reason(reason)
     try:
         with transaction(conn):
+            if draft_token is not None:
+                if draft_request_id is None or not _consume_draft(
+                    conn, draft_request_id, draft_token, int(now)
+                ):
+                    return _fail(draft_request_id, partner_id, "draft_gone")
             amount = _as_int(amount_micro)
             if amount is None or amount <= 0:
                 return _fail(None, partner_id, "bad_amount")
@@ -1107,10 +1168,130 @@ def load_fx_draft(
     return out
 
 
-def delete_fx_draft(conn: sqlite3.Connection, request_id: str) -> bool:
+def delete_fx_draft(conn: sqlite3.Connection, request_id: str, token: str | None = None) -> bool:
+    with transaction(conn):
+        if token is None:
+            cur = conn.execute(
+                "DELETE FROM partner_payout_fx_draft WHERE request_id = ?",
+                (str(request_id),),
+            )
+        else:
+            cur = conn.execute(
+                "DELETE FROM partner_payout_fx_draft WHERE request_id = ? AND token = ?",
+                (str(request_id), str(token)),
+            )
+        return int(cur.rowcount) == 1
+
+
+def set_fx_draft_message_id(conn: sqlite3.Connection, request_id: str, token: str, message_id: int) -> bool:
+    """Store the preview message id only when the token still matches."""
     with transaction(conn):
         cur = conn.execute(
-            "DELETE FROM partner_payout_fx_draft WHERE request_id = ?",
-            (str(request_id),),
+            """
+            UPDATE partner_payout_fx_draft
+            SET admin_message_id = ?
+            WHERE request_id = ? AND token = ?
+            """,
+            (int(message_id), str(request_id), str(token)),
         )
         return int(cur.rowcount) == 1
+
+
+def fx_draft_row(conn: sqlite3.Connection, request_id: str) -> dict[str, Any] | None:
+    """The draft row, including an expired one. None when there is no row."""
+    row = conn.execute(
+        "SELECT * FROM partner_payout_fx_draft WHERE request_id = ?",
+        (str(request_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    return {key: row[key] for key in row.keys()}
+
+
+def carry_locked(conn: sqlite3.Connection, request_id: str) -> bool:
+    """True when a later payout or carry row already followed this request."""
+    row = conn.execute(
+        "SELECT partner_id FROM partner_request WHERE id = ?",
+        (str(request_id),),
+    ).fetchone()
+    if row is None:
+        return False
+    return _later_activity(conn, str(row["partner_id"]), str(request_id))
+
+
+def awaiting_thb(conn: sqlite3.Connection, partner_id: str | None = None) -> list[dict[str, Any]]:
+    """Paid cash payouts with no THB record yet. Read-only; opens no transaction."""
+    sql = """
+        SELECT r.*
+        FROM partner_request AS r
+        JOIN partner AS p ON p.id = r.partner_id
+        WHERE r.status = 'confirmed'
+          AND r.payout_state = 'paid'
+          AND r.kind IN ('withdraw_profit', 'close')
+          AND r.payout_micro > 0
+          AND p.is_admin = 0
+          AND r.paid_at_ms >= ?
+          AND NOT EXISTS (
+              SELECT 1 FROM partner_payout_fx AS f WHERE f.request_id = r.id
+          )
+    """
+    params: list[Any] = [int(THB_FLOW_SINCE_MS)]
+    if partner_id is not None:
+        sql += " AND r.partner_id = ?"
+        params.append(str(partner_id))
+    sql += " ORDER BY r.paid_at_ms, r.id"
+    return _dicts(list(conn.execute(sql, params).fetchall()))
+
+
+def open_settlements(conn: sqlite3.Connection, partner_id: str | None = None) -> list[dict[str, Any]]:
+    """Due USDT, awaiting THB, and leftover carry on a closed partner.
+
+    Read-only and opens no transaction, so it is safe inside ``bind_invite``.
+    """
+    due_sql = """
+        SELECT r.*, p.name AS partner_name
+        FROM partner_request AS r
+        JOIN partner AS p ON p.id = r.partner_id
+        WHERE r.status = 'confirmed'
+          AND r.payout_state = 'due'
+          AND r.kind IN ('withdraw_profit', 'close')
+          AND r.payout_micro > 0
+          AND p.is_admin = 0
+    """
+    params: list[Any] = []
+    if partner_id is not None:
+        due_sql += " AND r.partner_id = ?"
+        params.append(str(partner_id))
+    due_sql += " ORDER BY r.decided_at_ms, r.id"
+    out: list[dict[str, Any]] = []
+    for row in conn.execute(due_sql, params).fetchall():
+        item = {key: row[key] for key in row.keys()}
+        item["stage"] = "due"
+        out.append(item)
+    for row in awaiting_thb(conn, partner_id):
+        named = dict(row)
+        partner = conn.execute("SELECT name FROM partner WHERE id = ?", (row["partner_id"],)).fetchone()
+        named["partner_name"] = "" if partner is None else str(partner["name"])
+        named["stage"] = "awaiting_thb"
+        out.append(named)
+    carry_sql = """
+        SELECT id, name FROM partner
+        WHERE status = 'closed' AND is_admin = 0
+    """
+    carry_params: list[Any] = []
+    if partner_id is not None:
+        carry_sql += " AND id = ?"
+        carry_params.append(str(partner_id))
+    carry_sql += " ORDER BY name"
+    for row in conn.execute(carry_sql, carry_params).fetchall():
+        balance = carry_balance(conn, str(row["id"]))
+        if balance > 0:
+            out.append(
+                {
+                    "stage": "carry_closed",
+                    "partner_id": str(row["id"]),
+                    "partner_name": str(row["name"]),
+                    "carry_micro": balance,
+                }
+            )
+    return out

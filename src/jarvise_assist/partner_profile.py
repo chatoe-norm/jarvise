@@ -8,6 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from jarvise_assist import partner_fx as fx
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
@@ -55,6 +56,7 @@ def profile_data(
         if str(due["partner_id"]) == pid
     ]
     kyc = pk.masked_profile(conn, pid)
+    awaiting = [ps.usdt_from_micro(int(row["payout_micro"] or 0)) for row in fx.awaiting_thb(conn, pid)]
     data: dict[str, Any] = {
         "ok": True,
         "name": str(row["name"]),
@@ -63,6 +65,7 @@ def profile_data(
         "joined_at_ms": joined,
         "fee_rate_bps": int(row["fee_rate_bps"]),
         "dues": dues,
+        "awaiting_thb": awaiting,
         "kyc": kyc,
         "kyc_legacy": kyc is None and status == "active" and joined is not None,
         "close_cash": None,
@@ -125,6 +128,8 @@ def render_profile(data: dict[str, Any]) -> str:
         lines.append(f"กำไร {fmt_signed_usdt(Decimal(data['pnl']))} USDT")
     for cash in data.get("dues") or []:
         lines.append(f"รอโอน {fmt_usdt(Decimal(cash))} USDT")
+    for cash in data.get("awaiting_thb") or []:
+        lines.append(f"กำลังแปลงเป็นเงินบาท {fmt_usdt(Decimal(cash))} USDT")
     kyc = data.get("kyc")
     if not kyc:
         lines.append("ข้อมูลรับเงิน: ยังไม่กรอก")

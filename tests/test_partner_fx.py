@@ -508,7 +508,7 @@ def test_reason_required_null_does_not_pass(tmp_path: Path) -> None:
         )
     with pytest.raises(sqlite3.IntegrityError):
         attempt(residual_satang=101, reason="          ")
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
         attempt(residual_satang=101, reason="\t" * 12)
     with pytest.raises(sqlite3.IntegrityError):
         attempt(residual_satang=101, reason=None)
@@ -1108,7 +1108,7 @@ def test_compute_and_parsers_refuse_extra_decimals() -> None:
         bank_fee_satang=BANK,
         net_satang=NET,
     )
-    assert "too_many_decimals" in huge["refusals"]
+    assert huge["refusals"] == ["rate_out_of_bounds"]
 
 
 def parse_matches() -> bool:
@@ -1417,24 +1417,11 @@ def test_kyc_gate_and_open_transaction_and_second_version(
     legacy.close()
 
 
-def test_partner_fx_does_not_import_telegram_or_kyc_secrets() -> None:
-    root = Path(__file__).resolve().parents[1] / "src" / "jarvise_assist" / "partner_fx.py"
-    src = root.read_text(encoding="utf-8")
+def _assert_boundary(path: Path, allowed: set[str]) -> None:
+    src = path.read_text(encoding="utf-8")
     for banned in ("_decrypt", "_master_key", "reveal_current", "partner_portal", "partner_admin"):
         assert banned not in src
     tree = ast.parse(src)
-    allowed = {
-        "__future__",
-        "json",
-        "logging",
-        "re",
-        "secrets",
-        "sqlite3",
-        "uuid",
-        "decimal",
-        "typing",
-        "jarvise_ingest",
-    }
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -1445,3 +1432,459 @@ def test_partner_fx_does_not_import_telegram_or_kyc_secrets() -> None:
             assert "listen" not in module
             assert "telegram" not in module
             assert "httpx" not in module
+
+
+def test_partner_fx_does_not_import_telegram_or_kyc_secrets() -> None:
+    root = Path(__file__).resolve().parents[1] / "src" / "jarvise_assist"
+    _assert_boundary(
+        root / "partner_fx.py",
+        {
+            "__future__",
+            "json",
+            "logging",
+            "re",
+            "secrets",
+            "sqlite3",
+            "uuid",
+            "decimal",
+            "typing",
+            "jarvise_ingest",
+        },
+    )
+    _assert_boundary(
+        root / "partner_thb.py",
+        {
+            "__future__",
+            "logging",
+            "re",
+            "datetime",
+            "decimal",
+            "typing",
+            "jarvise_assist",
+        },
+    )
+
+
+def test_absurd_rate_is_rate_out_of_bounds() -> None:
+    common = dict(
+        usdt_payout_micro=PAYOUT,
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+    )
+    for raw in ("1E+30", "922337203685478", "61.12345"):
+        out = fx.compute(rate=D(raw), **common)
+        assert out["refusals"] == ["rate_out_of_bounds"]
+    extra = fx.compute(rate=D("33.12345"), **common)
+    assert extra["refusals"] == ["too_many_decimals"]
+    nan = fx.compute(rate=D("NaN"), **common)
+    assert nan["refusals"] == ["too_many_decimals"]
+
+
+def test_int64_boundaries_exact() -> None:
+    assert fx.parse_usdt("9223372036854.775807") == 2**63 - 1
+    assert fx.parse_usdt("9223372036854.775808") is None
+    assert fx.parse_thb("92233720368547758.07") == 2**63 - 1
+    assert fx.parse_thb("92233720368547758.08") is None
+    assert fx.parse_rate("922337203685477.5807") == 2**63 - 1
+    assert fx.parse_rate("922337203685477.5808") is None
+    assert fx._as_int(2**63 - 1) == 2**63 - 1
+    assert fx._as_int(-(2**63)) == -(2**63)
+    assert fx._as_int(2**63) is None
+    assert fx._as_int(-(2**63) - 1) is None
+    assert fx._as_int(True) is None
+    assert fx._as_int(False) is None
+
+
+def test_record_payout_fx_overflow_reaches_the_catch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    conn = open_db(tmp_path / "ov.db")
+    bob = _partner(conn, "Bob")
+    first = _request(conn, bob)
+    assert _record(conn, first)["ok"] is True
+    second = _request(conn, bob, now_ms=NOW + 1)
+    before_fx = conn.execute("SELECT COUNT(*) AS n FROM partner_payout_fx").fetchone()["n"]
+    before_carry = conn.execute("SELECT COUNT(*) AS n FROM partner_usdt_carry").fetchone()["n"]
+    caplog.set_level("INFO")
+    huge = 2**63 - 1
+    out = _record(
+        conn,
+        second,
+        carry_in=LEFTOVER,
+        trade=huge,
+        net=huge,
+        reason="x" * 10,
+        now_ms=NOW + 2,
+    )
+    assert out["reason"] == "bad_input"
+    assert conn.execute("SELECT COUNT(*) AS n FROM partner_payout_fx").fetchone()["n"] == before_fx
+    assert conn.execute("SELECT COUNT(*) AS n FROM partner_usdt_carry").fetchone()["n"] == before_carry
+    assert bob in caplog.text
+    conn.close()
+
+
+def test_record_correction_overflow_is_bad_input(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    conn = open_db(tmp_path / "ovc.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    saved = _record(conn, rid)
+    assert saved["ok"] is True
+    base = str(saved["fx_id"])
+    caplog.set_level("INFO")
+    huge = 2**63 - 1
+    out = fx.record_correction(
+        conn,
+        base_fx_id=base,
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=huge,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=huge,
+        ref_status="off",
+        reason="x" * 10,
+        entered_by="42",
+        now_ms=NOW + 5,
+    )
+    assert out["reason"] == "bad_input"
+    assert fx.current_fx(conn, rid)["version"] == 1
+    assert bob in caplog.text
+    conn.close()
+
+
+def test_settle_carry_overflow_is_bad_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = open_db(tmp_path / "ovs.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    assert _record(conn, rid)["ok"] is True
+
+    def _boom(*_a: Any, **_k: Any) -> int:
+        raise OverflowError("too big")
+
+    monkeypatch.setattr(fx, "_post_carry", _boom)
+    out = fx.settle_carry(conn, bob, LEFTOVER, "จ่ายเศษตามสลิป", "42", NOW + 9)
+    assert out["reason"] == "bad_input"
+    assert fx.carry_balance(conn, bob) == LEFTOVER
+    conn.close()
+
+
+def test_correction_keeps_null_kyc_after_partner_adds_kyc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
+    conn = open_db(tmp_path / "null-kyc.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    saved = _record(conn, rid, paid_kyc_id=None)
+    assert saved["ok"] is True
+    assert fx.current_fx(conn, rid)["paid_kyc_id"] is None
+    added = pk.admin_set_kyc(
+        conn,
+        bob,
+        "ข้อมูลรับเงิน\nชื่อจริง: สมชาย ใจดี\nเบอร์: 0812345678\nธนาคาร: KBANK\nเลขบัญชี: 0000001234\nชื่อบัญชี: สมชาย ใจดี\n",
+        "เพิ่มหลังบันทึก",
+        NOW + 3,
+    )
+    assert added["ok"] is True
+    fixed = fx.record_correction(
+        conn,
+        base_fx_id=str(saved["fx_id"]),
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=1_000,
+        net_satang=NET - 1_000,
+        ref_status="off",
+        reason="ธนาคารหักค่าโอนเพิ่ม",
+        entered_by="42",
+        now_ms=NOW + 4,
+    )
+    assert fixed["ok"] is True
+    assert fx.current_fx(conn, rid)["paid_kyc_id"] is None
+    conn.close()
+
+
+def test_correction_null_base_rejects_foreign_kyc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
+    conn = open_db(tmp_path / "foreign.db")
+    bob = _partner(conn, "Bob")
+    other = _partner(conn, "Other", now_ms=NOW + 1)
+    rid = _request(conn, bob)
+    saved = _record(conn, rid, paid_kyc_id=None)
+    assert saved["ok"] is True
+    added = pk.admin_set_kyc(
+        conn,
+        other,
+        "ข้อมูลรับเงิน\nชื่อจริง: สมชาย ใจดี\nเบอร์: 0812345678\nธนาคาร: KBANK\nเลขบัญชี: 0000001234\nชื่อบัญชี: สมชาย ใจดี\n",
+        "",
+        NOW + 2,
+    )
+    assert added["ok"] is True
+    foreign = str(added["kyc_id"])
+    out = fx.record_correction(
+        conn,
+        base_fx_id=str(saved["fx_id"]),
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+        ref_status="off",
+        reason="ลองใส่บัญชีคนอื่น",
+        paid_kyc_id=foreign,
+        entered_by="42",
+        now_ms=NOW + 3,
+    )
+    assert out["reason"] == "kyc_mismatch"
+    conn.rollback()
+    conn.close()
+
+
+def test_correction_null_base_accepts_own_kyc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
+    conn = open_db(tmp_path / "own.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    saved = _record(conn, rid, paid_kyc_id=None)
+    added = pk.admin_set_kyc(
+        conn,
+        bob,
+        "ข้อมูลรับเงิน\nชื่อจริง: สมชาย ใจดี\nเบอร์: 0812345678\nธนาคาร: KBANK\nเลขบัญชี: 0000001234\nชื่อบัญชี: สมชาย ใจดี\n",
+        "",
+        NOW + 2,
+    )
+    assert added["ok"] is True
+    out = fx.record_correction(
+        conn,
+        base_fx_id=str(saved["fx_id"]),
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+        ref_status="off",
+        reason="ผูกบัญชีของตัวเอง",
+        paid_kyc_id=str(added["kyc_id"]),
+        entered_by="42",
+        now_ms=NOW + 3,
+    )
+    assert out["ok"] is True
+    assert fx.current_fx(conn, rid)["paid_kyc_id"] == str(added["kyc_id"])
+    conn.close()
+
+
+def test_correction_kyc_base_keeps_base_id(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "keep.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    saved = _record(conn, rid)
+    original = fx.current_fx(conn, rid)["paid_kyc_id"]
+    assert original
+    out = fx.record_correction(
+        conn,
+        base_fx_id=str(saved["fx_id"]),
+        carry_in_micro=0,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=1_000,
+        net_satang=NET - 1_000,
+        ref_status="off",
+        reason="คงบัญชีเดิมไว้",
+        entered_by="42",
+        now_ms=NOW + 4,
+    )
+    assert out["ok"] is True
+    assert fx.current_fx(conn, rid)["paid_kyc_id"] == original
+    conn.close()
+
+
+def _kyc_of(conn: sqlite3.Connection, partner_id: str) -> str:
+    row = conn.execute(
+        "SELECT id FROM partner_kyc WHERE partner_id = ? ORDER BY version DESC LIMIT 1",
+        (partner_id,),
+    ).fetchone()
+    assert row is not None
+    return str(row["id"])
+
+
+def _pay(conn: sqlite3.Connection, rid: str, partner_id: str, **extra: Any) -> dict[str, Any]:
+    now_ms = int(extra.pop("now_ms", NOW + 1))
+    carry = int(extra.pop("carry_in_micro", 0))
+    return fx.record_payout_fx(
+        conn,
+        request_id=rid,
+        carry_in_micro=carry,
+        chain_fee_micro=CHAIN,
+        usdt_sold_micro=SOLD,
+        rate=RATE,
+        trade_fee_satang=TRADE,
+        thb_wd_fee_satang=WD,
+        bank_fee_satang=BANK,
+        net_satang=NET,
+        ref_status="off",
+        paid_kyc_id=_kyc_of(conn, partner_id),
+        entered_by="42",
+        now_ms=now_ms,
+        **extra,
+    )
+
+
+def test_draft_token_consumed_in_commit(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "draft.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    staged = fx.stage_fx_draft(
+        conn, request_id=rid, mode="paid", payload={"sold": "1"}, created_by="42", now_ms=NOW
+    )
+    ok = _pay(conn, rid, bob, draft_token=str(staged["token"]))
+    assert ok["ok"] is True
+    assert fx.fx_draft_row(conn, rid) is None
+
+    again = _request(conn, bob, now_ms=NOW + 2)
+    fx.stage_fx_draft(
+        conn, request_id=again, mode="paid", payload={"a": "1"}, created_by="42", now_ms=NOW + 2
+    )
+    wrong = _pay(conn, again, bob, draft_token="00000000", now_ms=NOW + 3)
+    assert wrong["reason"] == "draft_gone"
+    assert fx.current_fx(conn, again) is None
+    assert fx.fx_draft_row(conn, again) is not None
+
+    fx.stage_fx_draft(conn, request_id=again, mode="paid", payload={"a": "1"}, created_by="42", now_ms=NOW)
+    expired = _pay(
+        conn, again, bob, draft_token=fx.fx_draft_row(conn, again)["token"], now_ms=NOW + fx.DRAFT_TTL_MS + 1
+    )
+    assert expired["reason"] == "draft_gone"
+    assert fx.current_fx(conn, again) is None
+
+    fx.stage_fx_draft(
+        conn, request_id=again, mode="paid", payload={"a": "1"}, created_by="42", now_ms=NOW + 10
+    )
+    mismatch = _pay(
+        conn, again, bob, carry_in_micro=1, draft_token=fx.fx_draft_row(conn, again)["token"], now_ms=NOW + 11
+    )
+    assert mismatch["reason"] == "carry_mismatch"
+    assert fx.fx_draft_row(conn, again) is None
+    assert fx.current_fx(conn, again) is None
+
+    fx.stage_fx_draft(
+        conn, request_id=again, mode="paid", payload={"a": "1"}, created_by="42", now_ms=NOW + 12
+    )
+    token = str(fx.fx_draft_row(conn, again)["token"])
+
+    def _explode(*_a: Any, **_k: Any) -> None:
+        raise sqlite3.IntegrityError("forced")
+
+    original = fx._insert_fx
+    fx._insert_fx = _explode  # type: ignore[method-assign]
+    try:
+        forced = _pay(conn, again, bob, carry_in_micro=LEFTOVER, draft_token=token, now_ms=NOW + 13)
+    finally:
+        fx._insert_fx = original  # type: ignore[method-assign]
+    assert forced["reason"] == "db_constraint"
+    kept = fx.fx_draft_row(conn, again)
+    assert kept is not None and kept["token"] == token
+    conn.close()
+
+
+def test_delete_fx_draft_stale_token_keeps_new_draft(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "del.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    first = fx.stage_fx_draft(
+        conn, request_id=rid, mode="paid", payload={"n": "1"}, created_by="42", now_ms=NOW
+    )
+    second = fx.stage_fx_draft(
+        conn, request_id=rid, mode="paid", payload={"n": "2"}, created_by="42", now_ms=NOW + 1
+    )
+    assert fx.delete_fx_draft(conn, rid, token=str(first["token"])) is False
+    kept = fx.fx_draft_row(conn, rid)
+    assert kept is not None and kept["token"] == second["token"]
+    assert fx.delete_fx_draft(conn, rid, token=str(second["token"])) is True
+    assert fx.fx_draft_row(conn, rid) is None
+    conn.close()
+
+
+def test_set_fx_draft_message_id_matches_token(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "mid.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    staged = fx.stage_fx_draft(
+        conn, request_id=rid, mode="paid", payload={"n": "1"}, created_by="42", now_ms=NOW
+    )
+    assert fx.set_fx_draft_message_id(conn, rid, "00000000", 9) is False
+    assert fx.fx_draft_row(conn, rid)["admin_message_id"] is None
+    assert fx.set_fx_draft_message_id(conn, rid, str(staged["token"]), 9) is True
+    assert int(fx.fx_draft_row(conn, rid)["admin_message_id"]) == 9
+    conn.close()
+
+
+def test_fx_draft_row_reports_expired_and_replaced(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "row.db")
+    bob = _partner(conn, "Bob")
+    rid = _request(conn, bob)
+    staged = fx.stage_fx_draft(
+        conn, request_id=rid, mode="paid", payload={"n": "1"}, created_by="42", now_ms=NOW
+    )
+    assert fx.load_fx_draft(conn, rid, str(staged["token"]), NOW + fx.DRAFT_TTL_MS) is None
+    raw = fx.fx_draft_row(conn, rid)
+    assert raw is not None and raw["token"] == staged["token"]
+    replaced = fx.stage_fx_draft(
+        conn, request_id=rid, mode="paid", payload={"n": "2"}, created_by="42", now_ms=NOW + 1
+    )
+    assert fx.fx_draft_row(conn, rid)["token"] == replaced["token"]
+    conn.close()
+
+
+def test_awaiting_thb_cutoff_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = open_db(tmp_path / "cut.db")
+    bob = _partner(conn, "Bob")
+    old = _request(conn, bob, now_ms=100)
+    new = _request(conn, bob, now_ms=200)
+    monkeypatch.setattr(fx, "THB_FLOW_SINCE_MS", 150)
+    rows = fx.awaiting_thb(conn, bob)
+    assert [str(row["id"]) for row in rows] == [new]
+    assert old not in [str(row["id"]) for row in rows]
+    assert "THB_FLOW_SINCE_MS = 0" in (
+        Path(__file__).resolve().parents[1] / "src" / "jarvise_assist" / "partner_fx.py"
+    ).read_text(encoding="utf-8")
+    conn.close()
+
+
+def test_open_settlements_does_not_change_pool_value(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "pool.db")
+    admin = _partner(conn, "admin", admin=True)
+    bob = _partner(conn, "Bob")
+    assert ps.apply_deposit(conn, admin, D("1000"), D("1000"), NOW)["ok"]
+    assert ps.apply_deposit(conn, bob, D("100"), D("1100"), NOW + 1)["ok"]
+    assert ps.apply_withdraw_profit(conn, bob, D("1200"), NOW + 2)["ok"]
+    due = ps.payouts_due_total(conn)
+    pool_before = nav(D("1200") - due, ps.total_units(conn))
+    listed = fx.open_settlements(conn)
+    assert any(row["stage"] == "due" for row in listed)
+    assert ps.payouts_due_total(conn) == due
+    assert nav(D("1200") - ps.payouts_due_total(conn), ps.total_units(conn)) == pool_before
+    rid = next(str(row["id"]) for row in ps.list_due_payouts(conn))
+    assert ps.mark_paid(conn, rid, NOW + 3)["ok"]
+    waiting = fx.awaiting_thb(conn)
+    assert len(waiting) == 1
+    assert ps.payouts_due_total(conn) == D("0")
+    conn.close()
