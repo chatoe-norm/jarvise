@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import logging
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -125,6 +125,15 @@ def test_profile_uses_masks_even_if_decrypt_raises(
 
     monkeypatch.setattr(pk, "_master_key", boom)
     monkeypatch.setattr(pk, "_decrypt", boom)
+    masks = pk.masked_profile(conn, bob)
+    assert masks is not None
+    assert set(masks) == {
+        "real_name_mask",
+        "bank_code",
+        "account_last4",
+        "holder_name_mask",
+        "phone_last4",
+    }
     caplog.set_level(logging.DEBUG)
     text = _text(conn, bob, wallet="1000")
     assert "KBANK" in text
@@ -182,6 +191,7 @@ def test_uncommitted_draft_stays_off_the_profile(tmp_path: Path, monkeypatch: py
     bob = _partner(conn)
     staged = pk.stage_draft(conn, bob, _form(), NOW)
     assert staged["ok"] is True
+    assert pk.masked_profile(conn, bob) is None
     text = _text(conn, bob)
     assert "ข้อมูลรับเงิน: ยังไม่กรอก" in text
     assert ACCOUNT not in text
@@ -197,13 +207,22 @@ def test_joined_date_is_the_first_deposit_in_bangkok(tmp_path: Path, monkeypatch
     admin = _partner(conn, "admin", admin=True, now_ms=NOW)
     bare = _partner(conn, "Bare", now_ms=NOW)
     assert "เข้าร่วม: ยังไม่ฝาก" in _text(conn, bare, now_ms=NOW + 5)
-    joined = int(datetime(2024, 1, 2, 8, 0, tzinfo=BANGKOK).timestamp() * 1000)
+    # 03:00 Bangkok on 2 Jan is 20:00 UTC on 1 Jan, so a UTC date would be wrong.
+    first = datetime(2024, 1, 2, 3, 0, tzinfo=BANGKOK)
+    joined = int(first.timestamp() * 1000)
+    utc = datetime.fromtimestamp(joined / 1000, tz=UTC)
+    assert utc.strftime("%d/%m/%Y %H:%M") == "01/01/2024 20:00"
     bob = _partner(conn, "Bob", now_ms=NOW)
     assert ps.apply_deposit(conn, admin, D("1000"), D("1000"), NOW + 1)["ok"] is True
     assert ps.apply_deposit(conn, bob, D("100"), D("1100"), joined)["ok"] is True
-    text = _text(conn, bob, now_ms=joined + 86_400_000, wallet="1100")
+    text = _text(conn, bob, now_ms=joined + 3_600_000, wallet="1100")
     assert "เข้าร่วม 02/01/2024" in text
-    assert "เข้าร่วม: ยังไม่ฝาก" not in text
+    assert "01/01/2024" not in text
+    second = joined + 86_400_000
+    assert ps.apply_deposit(conn, bob, D("50"), D("1250"), second)["ok"] is True
+    later = _text(conn, bob, now_ms=second, wallet="1250")
+    assert "เข้าร่วม 02/01/2024" in later
+    assert "01/01/2024" not in later
     conn.close()
 
 
@@ -244,7 +263,6 @@ def test_due_line_follows_the_payout_and_matches_the_card(
 
 def test_closed_card_offers_only_the_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-    monkeypatch.setattr(portal, "_read_v_cached", lambda _c, _f, *, now_ms: _value(now_ms, "2000"))
     conn = open_db(tmp_path / "closed.db")
     admin = _partner(conn, "admin", admin=True)
     bob = _partner(conn)
@@ -258,15 +276,21 @@ def test_closed_card_offers_only_the_profile(tmp_path: Path, monkeypatch: pytest
     assert row is not None
     _card, markup = portal._build_card(conn, row, _value(NOW + 3, "2000"), now_ms=NOW + 3)
     assert markup == {"inline_keyboard": [[{"text": "👤 โปรไฟล์", "callback_data": "pp:pf"}]]}
-    edited: list[str] = []
+    edited: list[tuple[str, dict[str, Any] | None]] = []
     sent, send = _capture()
+    reads: list[int] = []
 
     def edit(
         mid: int, text: str, *, reply_markup: dict[str, Any] | None = None, chat_id: str | None = None
     ) -> bool:
-        edited.append(text)
+        edited.append((text, reply_markup))
         return True
 
+    def _must_not_read(*_a: Any, **_k: Any) -> AccountValue:
+        reads.append(1)
+        raise AssertionError("closed profile must not read the wallet")
+
+    monkeypatch.setattr(portal, "_read_v_cached", _must_not_read)
     out = portal.handle_portal_callback(
         conn,
         "pp:pf",
@@ -277,10 +301,30 @@ def test_closed_card_offers_only_the_profile(tmp_path: Path, monkeypatch: pytest
         now_ms=NOW + 4,
     )
     assert out["cmd"] == "profile"
+    assert reads == []
     assert sent == []
-    assert edited
-    assert "โปรไฟล์พาร์ทเนอร์" in edited[-1]
-    assert "สถานะ: ปิดแล้ว" in edited[-1]
+    body, buttons = edited[-1]
+    assert "โปรไฟล์พาร์ทเนอร์" in body
+    assert "สถานะ: ปิดแล้ว" in body
+    assert "ยอดปิด" in body
+    assert "รอโอน" in body
+    assert "ทุน" not in body
+    assert "ยอดสุทธิ" not in body
+    assert "กำไร" not in body
+    assert buttons == {"inline_keyboard": [[{"text": "⬅️ กลับ", "callback_data": "pp:v"}]]}
+    monkeypatch.setattr(portal, "_read_v_cached", lambda _c, _f, *, now_ms: _value(now_ms, "2000"))
+    back = portal.handle_portal_callback(
+        conn,
+        "pp:v",
+        callback=_callback("pp:v", text=body),
+        send=send,
+        answer=lambda *_a, **_k: True,
+        edit=edit,
+        now_ms=NOW + 5,
+    )
+    assert back["cmd"] == "refresh"
+    assert "ปิดพอร์ตแล้ว" in edited[-1][0]
+    assert edited[-1][1] == {"inline_keyboard": [[{"text": "👤 โปรไฟล์", "callback_data": "pp:pf"}]]}
     conn.close()
 
 
@@ -356,11 +400,13 @@ def test_card_keyboard_switches_row_five_when_kyc_is_saved(
 def test_profile_edits_the_card_and_back_returns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    _no_seed(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     monkeypatch.setattr(portal, "_read_v_cached", lambda _c, _f, *, now_ms: _value(now_ms, "1200"))
     conn = open_db(tmp_path / "edit.db")
     admin = _partner(conn, "admin", admin=True)
     bob = _partner(conn)
+    assert pk.admin_set_kyc(conn, bob, _form(), "ตั้งครั้งแรก", NOW)["ok"] is True
     _bind(conn, bob, "501")
     assert ps.apply_deposit(conn, admin, D("1000"), D("1000"), NOW)["ok"] is True
     assert ps.apply_deposit(conn, bob, D("200"), D("1200"), NOW + 1)["ok"] is True
@@ -404,8 +450,11 @@ def test_profile_edits_the_card_and_back_returns(
     assert back["cmd"] == "refresh"
     assert sent == []
     assert "พอร์ตของ Bob" in edited[-1][0]
-    assert PHONE not in caplog.text
-    assert ACCOUNT not in caplog.text
+    assert "KBANK" in profile_text
+    assert "7890" in profile_text
+    for secret in (PHONE, "081-234-5678", ACCOUNT, "123-4-56789-0", REAL_NAME, "ใจดี", HOLDER, "ใจงาม"):
+        assert secret not in caplog.text
+        assert secret not in profile_text
     conn.close()
 
 
@@ -537,3 +586,81 @@ def test_send_message_omits_protect_content_unless_asked(monkeypatch: pytest.Mon
     assert "protect_content" not in http.bodies[-1]
     assert send_message("partner", client=http, chat_id="501", protect_content=True) == 9  # type: ignore[arg-type]
     assert http.bodies[-1]["protect_content"] is True
+
+
+def test_zero_balance_and_unreadable_value_match_the_card(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "empty.db")
+    admin = _partner(conn, "admin", admin=True)
+    bob = _partner(conn)
+    assert ps.apply_deposit(conn, admin, D("1000"), D("1000"), NOW)["ok"] is True
+    empty = _text(conn, bob, wallet="1000")
+    assert "ยังไม่มีเงินในพอร์ต" in empty
+    assert "ยอดสุทธิ" not in empty
+    assert "กำไร" not in empty
+    assert ps.apply_deposit(conn, bob, D("200"), D("1200"), NOW + 1)["ok"] is True
+    unread = _text(conn, bob, now_ms=NOW + 1)
+    assert "อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง" in unread
+    assert "ยอดสุทธิ" not in unread
+    assert "กำไร" not in unread
+    assert "ทุน" in unread
+
+    def refused(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return {"ok": False, "reason": "nav_unavailable"}
+
+    real = ps.view_partner
+    ps.view_partner = refused  # type: ignore[method-assign]
+    try:
+        refused_text = _text(conn, bob, now_ms=NOW + 1, wallet="1200")
+    finally:
+        ps.view_partner = real  # type: ignore[method-assign]
+    assert "อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง" in refused_text
+    assert "ยอดสุทธิ" not in refused_text
+    conn.close()
+
+
+def test_direct_portal_sends_protect_the_partner_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "direct.db")
+    sent, send = _capture()
+    invalid = portal.handle_portal_text(
+        conn,
+        {
+            "chat": {"id": 509, "type": "private"},
+            "from": {"id": 509},
+            "text": "/start " + ("a" * 24),
+        },
+        send=send,
+        now_ms=NOW,
+    )
+    assert invalid["reason"] == "invite_invalid"
+    assert sent[-1]["chat_id"] == "509"
+    assert sent[-1]["protect_content"] is True
+
+    admin = _partner(conn, "admin", admin=True)
+    bob = _partner(conn, "Bob")
+    _bind(conn, bob, "501", NOW + 1)
+    assert ps.apply_deposit(conn, admin, D("1000"), D("1000"), NOW + 2)["ok"] is True
+    assert ps.apply_deposit(conn, bob, D("1000"), D("2000"), NOW + 3)["ok"] is True
+    closed = ps.apply_close(conn, bob, D("2000"), NOW + 4)
+    assert closed["ok"] is True
+    assert D(closed["cash"]) > 0
+    nxt = _partner(conn, "Cara", now_ms=NOW + 5)
+    invited = ps.create_invite(conn, nxt, now_ms=NOW + 6)
+    assert invited["ok"] is True
+    sent.clear()
+    refused = portal.handle_portal_text(
+        conn,
+        {
+            "chat": {"id": 501, "type": "private"},
+            "from": {"id": 501},
+            "text": f"/start {invited['code']}",
+        },
+        send=send,
+        now_ms=NOW + 7,
+    )
+    assert refused["reason"] == "closed_payout_due"
+    assert sent[-1]["chat_id"] == "501"
+    assert sent[-1]["protect_content"] is True
+    conn.close()

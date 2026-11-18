@@ -863,6 +863,9 @@ def partner_payout_line(
     return f"โอนเข้า: {account} ({row['holder_name_mask']})"
 
 
+_KYC_LEGACY = "⚠️ ยังไม่ได้กรอกข้อมูลรับเงิน — ส่งฟอร์มเมื่อสะดวก"
+
+
 def card_kyc_line(conn: sqlite3.Connection, partner_id: str) -> str:
     row = current_kyc(conn, partner_id)
     if row is None:

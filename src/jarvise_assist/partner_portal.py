@@ -47,7 +47,7 @@ _KYC_BEFORE_DEPOSIT = "กรอกข้อมูลรับเงินก่
 _KYC_TEMPLATE = "ข้อมูลรับเงิน\nชื่อจริง: \nเบอร์: \nธนาคาร: \nเลขบัญชี: \nชื่อบัญชี: "
 _KYC_HOLDER_WARN = "⚠️ ชื่อบัญชีไม่ตรงกับชื่อจริง — บัญชีต้องเป็นชื่อของคุณเอง"
 _KYC_LENGTH_WARN = "⚠️ จำนวนหลักบัญชีไม่ตรงกับธนาคารนี้"
-_KYC_LEGACY = "⚠️ ยังไม่ได้กรอกข้อมูลรับเงิน — ส่งฟอร์มเมื่อสะดวก"
+_KYC_LEGACY = pk._KYC_LEGACY
 _START_RE = re.compile(r"^/start(@[A-Za-z0-9_]+)?\s+([A-Za-z0-9_-]{20,64})$")
 _DEP_TEXT_RE = re.compile(r"^ฝาก\s+(\S+)$")
 _KIND_CODE = {"cv": "convert", "wd": "withdraw_profit", "cl": "close"}
@@ -1008,8 +1008,10 @@ def handle_portal_callback(
 
     if data == "pp:pf":
         _answer()
-        av = _read_v_cached(conn, futures, now_ms=now_ms)
-        account_value = av.value if isinstance(av, AccountValue) else None
+        account_value = None
+        if str(row["status"]) == "active":
+            av = _read_v_cached(conn, futures, now_ms=now_ms)
+            account_value = av.value if isinstance(av, AccountValue) else None
         text = profile.render_profile(
             profile.profile_data(conn, str(row["id"]), now_ms, account_value=account_value)
         )

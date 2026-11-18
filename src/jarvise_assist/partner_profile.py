@@ -15,8 +15,7 @@ from jarvise_assist.partner_admin import fmt_signed_usdt, fmt_usdt
 
 logger = logging.getLogger(__name__)
 
-# Same wording as the active card's reminder. Kept here so this module does not import the portal.
-_KYC_LEGACY = "⚠️ ยังไม่ได้กรอกข้อมูลรับเงิน — ส่งฟอร์มเมื่อสะดวก"
+_KYC_LEGACY = pk._KYC_LEGACY
 
 
 def _fee_line(bps: int) -> str:
@@ -40,43 +39,62 @@ def profile_data(
 ) -> dict[str, Any]:
     """Pure data for one partner. ``account_value`` is the live wallet the card uses.
 
-    Omit it and the capital line still comes from the stored cost; net and profit stay unset.
+    A closed partner does not use that wallet. A missing or refused value is reported
+    as unreadable instead of inventing a net figure.
     """
     row = ps.get_partner(conn, partner_id)
     if row is None:
         logger.warning("partner profile missing partner_id=%s reason=not_found", partner_id)
         return {"ok": False, "reason": "not_found"}
     pid = str(row["id"])
+    status = str(row["status"])
     joined = partner_rules.joined_at_ms(conn, pid)
-    cost = ps.usdt_from_micro(int(row["cost_micro"]))
-    net: Decimal | None = None
-    pnl: Decimal | None = None
-    if account_value is not None:
-        view = ps.view_partner(conn, pid, account_value)
-        if view.get("ok"):
-            net = Decimal(view["net"])
-            pnl = net - cost
     dues = [
         ps.usdt_from_micro(int(due["payout_micro"] or 0))
         for due in ps.list_due_payouts(conn)
         if str(due["partner_id"]) == pid
     ]
     kyc = pk.masked_profile(conn, pid)
-    status = str(row["status"])
-    return {
+    data: dict[str, Any] = {
         "ok": True,
         "name": str(row["name"]),
         "status": status,
         "updated_ms": int(now_ms),
         "joined_at_ms": joined,
         "fee_rate_bps": int(row["fee_rate_bps"]),
-        "cost": cost,
-        "net": net,
-        "pnl": pnl,
         "dues": dues,
         "kyc": kyc,
         "kyc_legacy": kyc is None and status == "active" and joined is not None,
+        "close_cash": None,
+        "empty": False,
+        "value_unreadable": False,
+        "cost": None,
+        "net": None,
+        "pnl": None,
     }
+    if status == "closed":
+        summary = ps.close_summary(conn, pid)
+        if summary.get("ok"):
+            close_cash = summary.get("close_cash")
+            data["close_cash"] = close_cash if isinstance(close_cash, Decimal) else Decimal("0")
+        return data
+    cost = ps.usdt_from_micro(int(row["cost_micro"]))
+    units = ps.units_from_e8(int(row["units_e8"]))
+    data["cost"] = cost
+    if account_value is None:
+        data["value_unreadable"] = True
+        return data
+    view = ps.view_partner(conn, pid, account_value)
+    if not view.get("ok"):
+        data["value_unreadable"] = True
+        return data
+    if units == 0 and cost == 0:
+        data["empty"] = True
+        return data
+    net = Decimal(view["net"])
+    data["net"] = net
+    data["pnl"] = net - cost
+    return data
 
 
 def render_profile(data: dict[str, Any]) -> str:
@@ -93,8 +111,16 @@ def render_profile(data: dict[str, Any]) -> str:
     else:
         lines.append(f"เข้าร่วม {partner_rules.fmt_date(int(joined))}")
     lines.append(_fee_line(int(data["fee_rate_bps"])))
-    lines.append(f"ทุน {fmt_usdt(Decimal(data['cost']))} USDT")
-    if data.get("net") is not None and data.get("pnl") is not None:
+    if status == "closed":
+        if data.get("close_cash") is not None:
+            lines.append(f"ยอดปิด {fmt_usdt(Decimal(data['close_cash']))} USDT")
+    elif data.get("empty"):
+        lines.append("ยังไม่มีเงินในพอร์ต")
+    elif data.get("value_unreadable"):
+        lines.append("อ่านยอดไม่ได้ตอนนี้ ลองใหม่อีกครั้ง")
+        lines.append(f"ทุน {fmt_usdt(Decimal(data['cost']))} USDT")
+    else:
+        lines.append(f"ทุน {fmt_usdt(Decimal(data['cost']))} USDT")
         lines.append(f"ยอดสุทธิ {fmt_usdt(Decimal(data['net']))} USDT")
         lines.append(f"กำไร {fmt_signed_usdt(Decimal(data['pnl']))} USDT")
     for cash in data.get("dues") or []:
