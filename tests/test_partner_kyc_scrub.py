@@ -13,6 +13,7 @@ import pytest
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_portal as portal
 from jarvise_assist import partner_store as ps
+from jarvise_assist.listen import process_update
 from jarvise_ingest.db import open_db
 
 D = Decimal
@@ -337,4 +338,166 @@ def test_direct_payout_stores_the_current_kyc_id(tmp_path: Path, monkeypatch: py
         (closed["request_id"],),
     ).fetchone()
     assert cl_row["payout_kyc_id"] == cara_kyc["id"]
+    conn.close()
+
+
+def test_listen_deletes_the_expired_confirm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_seed(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "scrub-listen.db")
+    bob = _partner(conn)
+    _bind(conn, bob, "501")
+    staged = pk.stage_draft(conn, bob, _form(), NOW)
+    assert staged["ok"] is True
+    deleted: list[tuple[str, int]] = []
+
+    def delete(chat_id: str, message_id: int) -> bool:
+        deleted.append((str(chat_id), int(message_id)))
+        return False
+
+    out = process_update(
+        conn,
+        {
+            "update_id": 1,
+            "callback_query": {
+                "id": "cq-listen",
+                "data": f"pp:kyc:ok:{staged['token']}",
+                "from": {"id": 501},
+                "message": {
+                    "message_id": 8,
+                    "chat": {"id": 501, "type": "private"},
+                    "text": "confirm",
+                },
+            },
+        },
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: True,
+        edit=lambda *_a, **_k: False,
+        delete=delete,
+        now_ms_value=NOW + pk.DRAFT_TTL_MS,
+    )
+    assert out["reason"] == "kyc_draft_expired"
+    assert deleted == [("501", 8)]
+    conn.close()
+
+
+def test_direct_payout_without_kyc_stores_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_seed(monkeypatch)
+    conn = open_db(tmp_path / "scrub-nokyc.db")
+    admin = _partner(conn, "admin", admin=True)
+    assert pk.current_kyc(conn, admin) is None
+    assert ps.apply_deposit(conn, admin, D("1000"), D("1000"), NOW + 1)["ok"] is True
+    withdrawn = ps.apply_withdraw_profit(conn, admin, D("1440"), NOW + 2)
+    assert withdrawn["ok"] is True
+    assert D(withdrawn["cash"]) > 0
+    row = conn.execute(
+        "SELECT payout_kyc_id FROM partner_request WHERE id = ?",
+        (withdrawn["request_id"],),
+    ).fetchone()
+    assert row["payout_kyc_id"] is None
+    conn.close()
+
+
+def test_callback_without_delete_sends_the_failure_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_seed(monkeypatch)
+    conn = open_db(tmp_path / "scrub-nodelete.db")
+    bob = _partner(conn)
+    _bind(conn, bob)
+    staged = pk.stage_draft(conn, bob, _form(), NOW)
+    assert staged["ok"] is True
+    sent, send = _send_capture()
+    out = portal.handle_portal_callback(
+        conn,
+        f"pp:kyc:ok:{staged['token']}",
+        callback=_callback(f"pp:kyc:ok:{staged['token']}", mid=6),
+        send=send,
+        answer=lambda *_a, **_k: True,
+        edit=lambda *_a, **_k: False,
+        now_ms=NOW + pk.DRAFT_TTL_MS,
+    )
+    assert out["reason"] == "kyc_draft_expired"
+    assert sent
+    assert "ฟอร์มหมดอายุ" in sent[-1]["text"]
+    assert ACCOUNT not in sent[-1]["text"]
+    assert PHONE not in sent[-1]["text"]
+    conn.close()
+
+
+def test_stage_draft_error_deletes_the_form_and_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_seed(monkeypatch)
+    conn = open_db(tmp_path / "scrub-raise.db")
+    bob = _partner(conn)
+    _bind(conn, bob)
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    deleted: list[tuple[str, int]] = []
+    sent, send = _send_capture()
+
+    def boom(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise sqlite3.OperationalError(f"locked {PHONE} {ACCOUNT} {REAL_NAME}")
+
+    monkeypatch.setattr(pk, "stage_draft", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        portal._handle_kyc_text(
+            conn,
+            row,
+            _form(),
+            message=_form_message(_form(), mid=12),
+            send=send,
+            delete=lambda chat_id, message_id: deleted.append((str(chat_id), int(message_id))),
+            now_ms=NOW + 1,
+        )
+    assert deleted == [("501", 12)]
+    assert sent == []
+    conn.close()
+
+
+def test_confirm_delete_failure_logs_no_plaintext(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _no_seed(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "scrub-log.db")
+    bob = _partner(conn)
+    _bind(conn, bob)
+    caplog.set_level(logging.INFO)
+
+    def _expired(mid: int) -> str:
+        staged = pk.stage_draft(conn, bob, _form(), NOW + mid)
+        assert staged["ok"] is True
+        return str(staged["token"])
+
+    quiet = _expired(1)
+    portal.handle_portal_callback(
+        conn,
+        f"pp:kyc:ok:{quiet}",
+        callback=_callback(f"pp:kyc:ok:{quiet}", mid=21),
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: True,
+        edit=lambda *_a, **_k: False,
+        delete=lambda *_a, **_k: False,
+        now_ms=NOW + 1 + pk.DRAFT_TTL_MS,
+    )
+    noisy = _expired(2)
+
+    def delete_boom(*_a: Any, **_k: Any) -> bool:
+        raise RuntimeError(f"{PHONE} {ACCOUNT} {REAL_NAME}")
+
+    portal.handle_portal_callback(
+        conn,
+        f"pp:kyc:ok:{noisy}",
+        callback=_callback(f"pp:kyc:ok:{noisy}", mid=22),
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: True,
+        edit=lambda *_a, **_k: False,
+        delete=delete_boom,
+        now_ms=NOW + 2 + pk.DRAFT_TTL_MS,
+    )
+    assert PHONE not in caplog.text
+    assert ACCOUNT not in caplog.text
+    assert REAL_NAME not in caplog.text
     conn.close()

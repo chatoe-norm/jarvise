@@ -487,8 +487,11 @@ def _delete_incoming_form(message: dict[str, Any], delete: Any, partner_id: str)
     if delete is None or message.get("message_id") is None:
         return
     try:
-        delete(str(chat.get("id")), int(message["message_id"]))
+        removed = delete(str(chat.get("id")), int(message["message_id"]))
     except Exception:  # noqa: BLE001
+        logger.warning("partner kyc delete failed partner_id=%s", partner_id)
+        return
+    if removed is False:
         logger.warning("partner kyc delete failed partner_id=%s", partner_id)
 
 
@@ -499,6 +502,7 @@ def _retire_kyc_confirm(
     text: str,
     edit: Any,
     delete: Any,
+    partner_id: str,
 ) -> bool:
     """Replace the confirm message. On a failed edit, delete it and report False.
 
@@ -514,9 +518,12 @@ def _retire_kyc_confirm(
         pass
     if delete is not None:
         try:
-            delete(partner_chat, int(mid))
+            removed = delete(partner_chat, int(mid))
         except Exception as exc:  # noqa: BLE001
             logger.warning("partner kyc confirm delete failed err=%s", type(exc).__name__)
+        else:
+            if removed is False:
+                logger.warning("partner kyc confirm delete failed partner_id=%s", partner_id)
     return False
 
 
@@ -564,7 +571,12 @@ def _handle_kyc_text(
     now_ms: int,
 ) -> dict[str, Any]:
     pid = str(row["id"])
-    if pk.kyc_state(conn, pid) == "saved":
+    try:
+        state = pk.kyc_state(conn, pid)
+    except Exception:  # noqa: BLE001
+        _delete_incoming_form(message, delete, pid)
+        raise
+    if state == "saved":
         send_to_partner(send, row, _KYC_LOCKED)
         _delete_incoming_form(message, delete, pid)
         return {"ok": False, "reason": "kyc_locked"}
@@ -575,6 +587,9 @@ def _handle_kyc_text(
         send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
         _delete_incoming_form(message, delete, pid)
         return {"ok": False, "reason": "kyc_key"}
+    except Exception:  # noqa: BLE001
+        _delete_incoming_form(message, delete, pid)
+        raise
     if not staged.get("ok"):
         reason = str(staged.get("reason") or "")
         if reason == "kyc_invalid":
@@ -1002,7 +1017,7 @@ def handle_portal_callback(
             pk.discard_draft(conn, pid, token)
             body = _kyc_template_text()
             if not _retire_kyc_confirm(
-                mid=mid, partner_chat=partner_chat, text=body, edit=edit, delete=delete
+                mid=mid, partner_chat=partner_chat, text=body, edit=edit, delete=delete, partner_id=pid
             ):
                 send_to_partner(send, row, body)
             return {"ok": True, "cmd": "kyc_redo"}
@@ -1012,7 +1027,7 @@ def handle_portal_callback(
             logger.warning("partner kyc key unavailable partner_id=%s", pid)
             fail = _kyc_ok_failure_text("kyc_key")
             if not _retire_kyc_confirm(
-                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete
+                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete, partner_id=pid
             ):
                 send_to_partner(send, row, fail)
             return {"ok": False, "reason": "kyc_key"}
@@ -1020,7 +1035,7 @@ def handle_portal_callback(
             logger.warning("partner kyc decrypt failed partner_id=%s", pid)
             fail = _kyc_ok_failure_text("kyc_crypto")
             if not _retire_kyc_confirm(
-                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete
+                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete, partner_id=pid
             ):
                 send_to_partner(send, row, fail)
             return {"ok": False, "reason": "kyc_crypto"}
@@ -1028,12 +1043,14 @@ def handle_portal_callback(
             reason = str(result.get("reason") or "")
             fail = _kyc_ok_failure_text(reason)
             if not _retire_kyc_confirm(
-                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete
+                mid=mid, partner_chat=partner_chat, text=fail, edit=edit, delete=delete, partner_id=pid
             ):
                 send_to_partner(send, row, fail)
             return {"ok": False, "reason": reason}
         saved = _kyc_saved_text(result)
-        if not _retire_kyc_confirm(mid=mid, partner_chat=partner_chat, text=saved, edit=edit, delete=delete):
+        if not _retire_kyc_confirm(
+            mid=mid, partner_chat=partner_chat, text=saved, edit=edit, delete=delete, partner_id=pid
+        ):
             send_to_partner(send, row, saved)
         _notify_admin_kyc(conn, row, result, send)
         return {"ok": True, "cmd": "kyc_saved", "kyc_id": result.get("kyc_id")}
