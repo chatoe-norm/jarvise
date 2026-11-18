@@ -56,6 +56,7 @@ from jarvise_ingest.db import open_db
 from jarvise_ingest.providers.binance_klines import fetch_klines
 from jarvise_notify.telegram import (
     answer_callback,
+    delete_message,
     edit_message,
     get_updates,
     notify_configured,
@@ -87,12 +88,14 @@ def process_update(
     now_ms_value: int | None = None,
     explore_lookup: Callable[[str], dict[str, Any] | None] | None = None,
     explore_fetch: Callable[[str, str, int], list[dict[str, Any]]] | None = None,
+    delete: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Handle one Telegram update. Ignores foreign chats with no reply."""
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     send_fn = send or send_message
     answer_fn = answer or answer_callback
     edit_fn = edit or edit_message
+    delete_fn = delete or delete_message
     expected = owner_chat_id()
     if not expected:
         return {"ignored": "no_owner_chat"}
@@ -212,6 +215,7 @@ def process_update(
             send=send_fn,
             futures=futures,
             now_ms=ts,
+            delete=delete_fn,
         )
     text = str(message.get("text") or "")
     reply = message.get("reply_to_message")

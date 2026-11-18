@@ -260,7 +260,7 @@ def test_a_active_card_last_row_pp_pos(tmp_path: Path) -> None:
     _bind_partner(conn, "B", PARTNER_TG, now_ms=NOW)
     markup = portal._card_buttons()
     rows = markup["inline_keyboard"]
-    assert len(rows) == 4
+    assert len(rows) == 5
     assert rows[0] == [
         {"text": "🔄 ดูยอด", "callback_data": "pp:v"},
         {"text": "💰 แจ้งฝาก", "callback_data": "pp:dep"},
@@ -271,6 +271,7 @@ def test_a_active_card_last_row_pp_pos(tmp_path: Path) -> None:
     ]
     assert rows[2] == [{"text": "🚪 ปิดพอร์ต", "callback_data": "pp:rq:cl"}]
     assert rows[3] == [{"text": "📊 ไม้ที่เปิดอยู่", "callback_data": "pp:pos"}]
+    assert rows[4] == [{"text": "ข้อมูลรับเงิน", "callback_data": "pp:kyc"}]
     for row in rows:
         for btn in row:
             assert str(btn["callback_data"]).startswith("pp:")

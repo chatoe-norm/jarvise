@@ -1434,3 +1434,36 @@ def test_cost_notifies_bound_partner(tmp_path: Path, monkeypatch: Any, env_chat:
     assert "550" in partner_msgs[0]["text"]
     assert ps.verify_ledger(conn)["ok"] is True
     conn.close()
+
+
+def test_p_dep_refuses_before_the_wallet_when_kyc_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "kyc-dep.db")
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)
+    assert ps.apply_deposit(conn, str(admin["partner_id"]), D("1000"), D("1000"), NOW)["ok"]
+    assert ps.create_partner(conn, name="Bob", now_ms=NOW + 1)["ok"]
+    sent: list[str] = []
+
+    def send(text: str, **_k: Any) -> int:
+        sent.append(text)
+        return 1
+
+    def _no_wallet(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("wallet read")
+
+    monkeypatch.setattr(pa, "_read_v", _no_wallet)
+    out = pa.handle_partner_text(
+        conn,
+        "p dep Bob 100",
+        message={"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "p dep Bob 100"},
+        send=send,
+        futures=object(),
+        now_ms=NOW + 2,
+    )
+    assert out["reason"] == "kyc_required"
+    assert any("p kyc Bob set" in text for text in sent)
+    assert "p kyc" in pa.HELP_TEXT
+    conn.close()

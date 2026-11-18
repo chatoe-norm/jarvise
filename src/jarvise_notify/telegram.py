@@ -107,6 +107,32 @@ def edit_message(
             http.close()
 
 
+def delete_message(
+    chat_id: str,
+    message_id: int,
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """POST deleteMessage. Soft-fail. Does not log the message text."""
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat = str(chat_id or "").strip()
+    if not token or not chat:
+        return False
+    url = f"{TELEGRAM_API}/bot{token}/deleteMessage"
+    body = {"chat_id": chat, "message_id": int(message_id)}
+    own = client is None
+    http = client or httpx.Client(timeout=15.0)
+    try:
+        resp = http.post(url, json=body)
+        return resp.status_code == 200 and bool((resp.json() or {}).get("ok"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram delete soft-fail: %s", type(exc).__name__)
+        return False
+    finally:
+        if own:
+            http.close()
+
+
 def answer_callback(
     callback_query_id: str,
     *,

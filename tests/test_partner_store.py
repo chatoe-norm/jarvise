@@ -37,9 +37,9 @@ def _n_events(conn: sqlite3.Connection, *, kind: str | None = None) -> int:
 
 
 def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 32
+    assert SCHEMA_VERSION == 33
     fresh = open_db(tmp_path / "fresh.db")
-    assert schema_version(fresh) == 32
+    assert schema_version(fresh) == 33
     for table in ("partner", "partner_event", "partner_request"):
         row = fresh.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -82,7 +82,7 @@ def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 32
+    assert schema_version(conn) == 33
     after = conn.execute("SELECT COUNT(*) AS n FROM assist_settings").fetchone()
     n_after = after[0] if not hasattr(after, "keys") else after["n"]
     assert n_after == n_before
@@ -108,7 +108,7 @@ def test_migration_31_adds_request_source_on_v30_db_idempotent(tmp_path: Path) -
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 32
+    assert schema_version(conn) == 33
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(partner_request)")}
     assert "source" in cols
     # No backfill: the pre-31 row keeps NULL.
@@ -125,8 +125,12 @@ def test_migration_31_adds_request_source_on_v30_db_idempotent(tmp_path: Path) -
     conn = open_db(path)
     conn.execute("PRAGMA user_version = 30")
     conn.commit()
-    assert migrate(conn) == ["31:partner_request_source", "32:assist_exit_telemetry"]
-    assert schema_version(conn) == 32
+    assert migrate(conn) == [
+        "31:partner_request_source",
+        "32:assist_exit_telemetry",
+        "33:partner_kyc",
+    ]
+    assert schema_version(conn) == 33
     conn.close()
 
 
@@ -944,4 +948,26 @@ def test_verify_ledger_event_request_links(tmp_path: Path) -> None:
     null_wd = ps.verify_ledger(conn)
     assert null_wd["ok"] is False
     assert any(m.get("event_id") == wd_eid for m in null_wd["mismatches"])
+    conn.close()
+
+
+def test_first_deposit_without_kyc_stays_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
+    conn = open_db(tmp_path / "kyc-gate.db")
+    now = 1_700_000_000_000
+    admin = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)
+    bob = ps.create_partner(conn, name="Bob", now_ms=now)
+    assert ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), now + 1)["ok"] is True
+    created = ps.create_request(conn, bob["partner_id"], "deposit", now + 2, amount=D("100"), source="admin")
+    assert created == {"ok": False, "reason": "kyc_required"}
+    real = ps.deposit_kyc_required
+    monkeypatch.setattr(ps, "deposit_kyc_required", lambda *_a, **_k: False)
+    pending = ps.create_request(conn, bob["partner_id"], "deposit", now + 3, amount=D("100"), source="admin")
+    monkeypatch.setattr(ps, "deposit_kyc_required", real)
+    result = ps.confirm_request(conn, pending["request_id"], D("1100"), now + 4, amount_received=D("100"))
+    assert result["reason"] == "kyc_required"
+    status = conn.execute(
+        "SELECT status FROM partner_request WHERE id = ?", (pending["request_id"],)
+    ).fetchone()
+    assert status["status"] == "pending"
     conn.close()

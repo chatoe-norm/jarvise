@@ -18,6 +18,7 @@ import uuid
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
+from jarvise_assist import partner_kyc as pk
 from jarvise_assist.partner_ledger import (
     ClosePlan,
     ConvertPlan,
@@ -614,6 +615,27 @@ def _insert_confirmed_payout_request(
     return rid
 
 
+def deposit_kyc_required(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    """True when a non-admin partner's first deposit still needs a saved KYC row.
+
+    Partners who already have a deposit event are not blocked. The admin partner
+    and ``p init`` are exempt. Inline SELECT; does not import partner_rules.
+    """
+    if int(row["is_admin"] or 0) == 1:
+        return False
+    hit = conn.execute(
+        """
+        SELECT 1 FROM partner_event
+        WHERE partner_id = ? AND kind = 'deposit'
+        LIMIT 1
+        """,
+        (str(row["id"]),),
+    ).fetchone()
+    if hit is not None:
+        return False
+    return pk.kyc_state(conn, str(row["id"])) == "none"
+
+
 def _apply_deposit_tx(
     conn: sqlite3.Connection,
     partner_id: str,
@@ -634,6 +656,8 @@ def _apply_deposit_tx(
     closed = _refuse_if_closed(row)
     if closed:
         return closed
+    if deposit_kyc_required(conn, row):
+        return {"ok": False, "reason": "kyc_required"}
     u_before = total_units(conn)
     v_pool = _pool_value(conn, v_raw)
     partner_units = units_from_e8(int(row["units_e8"]))
@@ -1149,6 +1173,8 @@ def create_request(
             return {"ok": False, "reason": "not_found"}
         if str(row["status"]) == "closed":
             return {"ok": False, "reason": "closed"}
+        if kind == "deposit" and deposit_kyc_required(conn, row):
+            return {"ok": False, "reason": "kyc_required"}
 
         ts = int(now_ms)
         conn.execute(
@@ -1202,6 +1228,7 @@ def _confirm_request_row(
     now_ms: int,
     cash: Decimal,
     kind: str,
+    payout_kyc_id: str | None = None,
 ) -> None:
     if kind in ("withdraw_profit", "close") and cash > 0:
         payout_state = "due"
@@ -1209,13 +1236,15 @@ def _confirm_request_row(
     else:
         payout_state = "none"
         payout_micro = None
+        payout_kyc_id = None
     cur = conn.execute(
         """
         UPDATE partner_request
-        SET status = 'confirmed', decided_at_ms = ?, payout_state = ?, payout_micro = ?
+        SET status = 'confirmed', decided_at_ms = ?, payout_state = ?, payout_micro = ?,
+            payout_kyc_id = ?
         WHERE id = ? AND status = 'pending'
         """,
-        (int(now_ms), payout_state, payout_micro, request_id),
+        (int(now_ms), payout_state, payout_micro, payout_kyc_id, request_id),
     )
     if cur.rowcount != 1:
         raise RuntimeError("request_changed")
@@ -1278,7 +1307,19 @@ def confirm_request(
             return result
 
         cash = Decimal(result.get("cash", Decimal("0")))
-        _confirm_request_row(conn, request_id=request_id, now_ms=now_ms, cash=cash, kind=kind)
+        payout_kyc_id: str | None = None
+        if kind in ("withdraw_profit", "close") and cash > 0:
+            current = pk.current_kyc(conn, partner_id)
+            if current is not None:
+                payout_kyc_id = str(current["id"])
+        _confirm_request_row(
+            conn,
+            request_id=request_id,
+            now_ms=now_ms,
+            cash=cash,
+            kind=kind,
+            payout_kyc_id=payout_kyc_id,
+        )
         out = dict(result)
         out["request_id"] = request_id
         return out

@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from jarvise_assist import partner_ledger as pl
 from jarvise_assist import partner_store as ps
+from jarvise_assist.partner_kyc import kyc_state
 from jarvise_assist.pause import BANGKOK
 
 MIN_CONVERT_PROFIT = Decimal("20")
@@ -100,6 +101,19 @@ def block(
         else:
             label = "🔒 ปิดพอร์ต"
         return Block(code="pending", toast="มีคำขอค้างอยู่ รอแอดมิน", label=label)
+
+    if kind in ("withdraw_profit", "close") and kyc_state(conn, pid) == "none":
+        if kind == "withdraw_profit":
+            return Block(
+                code="kyc_missing",
+                toast="กรอกข้อมูลรับเงินก่อนถอน",
+                label="🔒 ถอนกำไร",
+            )
+        return Block(
+            code="kyc_missing",
+            toast="กรอกข้อมูลรับเงินก่อนปิดพอร์ต",
+            label="🔒 ปิดพอร์ต",
+        )
 
     if kind == "close":
         joined = joined_at_ms(conn, pid)
