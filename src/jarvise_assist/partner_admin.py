@@ -14,6 +14,7 @@ from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_ledger as pl
 from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
@@ -63,6 +64,9 @@ HELP_TEXT = (
     "p close <ชื่อ> — สร้างคำขอปิดพอร์ต\n"
     "p closed — พาร์ทเนอร์ที่ปิดแล้ว\n"
     "p due — รายการค้างจ่ายและคำขอค้าง\n"
+    "p kyc — สถานะข้อมูลรับเงิน\n"
+    "p kyc <ชื่อ> — ดูข้อมูลรับเงินเต็ม\n"
+    "p kyc <ชื่อ> set <เหตุผล> — แก้ข้อมูลรับเงิน (บรรทัดถัดไปเป็นฟอร์ม)\n"
     "ถอนเงินต้นแอดมิน: p cost admin <ทุนใหม่> <เหตุผล> แล้ว p wd admin"
 )
 
@@ -91,6 +95,12 @@ _STORE_TH: dict[str, str] = {
     "below_min": "กำไรน้อยเกินไป",
     "not_due": "รายการนี้ปิดไปแล้ว",
     "payout_due": "มียอดค้างจ่าย — โอนแล้วกด โอนแล้ว ก่อน",
+    "kyc_required": "ยังไม่มีข้อมูลรับเงิน",
+    "kyc_locked": "บันทึกข้อมูลรับเงินแล้ว แก้ไขเองไม่ได้",
+    "kyc_draft_expired": "ฟอร์มหมดอายุ — ให้ส่งใหม่",
+    "kyc_invalid": "ข้อมูลรับเงินไม่ครบหรือไม่ถูกต้อง",
+    "kyc_key": "ยังไม่ได้ตั้งคีย์ข้อมูลรับเงิน",
+    "admin_exempt": "แอดมินไม่ต้องกรอก",
 }
 
 _VALUE_TH: dict[str, str] = {
@@ -211,10 +221,26 @@ def send_to_partner(
         return False
 
 
+def _parse_kyc_command(parts: list[str], rest: str) -> dict[str, Any]:
+    """First line only. The form is the remaining lines and is not split()."""
+    if len(parts) == 2:
+        return {"cmd": "kyc_list"}
+    if len(parts) == 3 and _NAME_RE.match(parts[2]):
+        return {"cmd": "kyc_show", "name": parts[2]}
+    if len(parts) >= 5 and parts[3].lower() == "set" and _NAME_RE.match(parts[2]):
+        return {"cmd": "kyc_set", "name": parts[2], "reason": " ".join(parts[4:]), "form": rest}
+    return {"error": "usage"}
+
+
 def parse_partner_command(text: str) -> dict[str, Any] | None:
-    if not _CMD_RE.match(text or ""):
+    raw = text or ""
+    if not _CMD_RE.match(raw):
         return None
-    parts = (text or "").strip().split()
+    first, _, rest = raw.partition("\n")
+    first_parts = first.strip().split()
+    if len(first_parts) >= 2 and first_parts[1].lower() == "kyc":
+        return _parse_kyc_command(first_parts, rest)
+    parts = raw.strip().split()
     if not parts:
         return None
     if len(parts) == 1:
@@ -478,6 +504,12 @@ def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, An
             body = (
                 f"✅ ยืนยันแล้ว · ค้างจ่าย {fmt_usdt(x)} USDT ให้ {pname}\nโอนออกจาก futures wallet แล้วค่อยกด โอนแล้ว"
             )
+            body += "\n" + pk.payout_account_line(
+                conn,
+                partner_id=str(req["partner_id"]),
+                payout_kyc_id=req["payout_kyc_id"],
+                partner_name=pname,
+            )
             return body, _paid_button(rid)
         if payout_state == "paid":
             x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
@@ -706,6 +738,10 @@ def _handle_dep(
         send(thai_reason("closed"))
         return {"ok": False, "reason": "closed"}
     partner_id = str(row["id"])
+    if ps.deposit_kyc_required(conn, row):
+        stored = str(row["name"])
+        send(f"ยังไม่มีข้อมูลรับเงิน\nให้พาร์ทเนอร์ส่งข้อมูลรับเงิน หรือ p kyc {stored} set")
+        return {"ok": False, "reason": "kyc_required"}
     pending = _pending_request(conn, partner_id, now_ms=now_ms)
     if pending is not None:
         pend_kind = str(pending["kind"])
@@ -762,6 +798,7 @@ def _handle_dep(
         f"ฝาก {fmt_usdt(amount)} · ต้องเข้า futures wallet แล้ว",
         f"V {fmt_usdt(av.value)} · NAV ก่อนฝาก {fmt_nav(plan.nav_pre)}",
         f"หน่วยโดยประมาณ {fmt_units(plan.units_issued)} · ทุนหลัง {fmt_usdt(plan.cost_after)}",
+        pk.deposit_kyc_line(conn, partner_id),
         "ตัวเลขจริงคิดใหม่ตอนกดยืนยัน · หมดอายุใน 24 ชม.",
     ]
     last = _latest_nav(conn)
@@ -914,6 +951,21 @@ def _closing_note(conn: sqlite3.Connection, partner_id: str, *, cash: Decimal, f
     if summary.get("ok"):
         for due in summary.get("dues") or []:
             lines.append(f"รอโอน {fmt_usdt(Decimal(due['cash']))} USDT")
+    partner = ps.get_partner(conn, partner_id)
+    pname = str(partner["name"]) if partner is not None else "?"
+    snap = conn.execute(
+        """
+        SELECT payout_kyc_id FROM partner_request
+        WHERE partner_id = ? AND kind = 'close' AND status = 'confirmed'
+        ORDER BY decided_at_ms DESC, id DESC
+        LIMIT 1
+        """,
+        (partner_id,),
+    ).fetchone()
+    kyc_id = None if snap is None else snap["payout_kyc_id"]
+    lines.append(
+        pk.payout_account_line(conn, partner_id=partner_id, payout_kyc_id=kyc_id, partner_name=pname)
+    )
     return "\n".join(lines)
 
 
@@ -1007,13 +1059,20 @@ def _admin_request_message(
             cl = pl.plan_close(units=units, cost=cost, fee_rate=fee_rate, nav=n)
             if not isinstance(cl, pl.Refusal):
                 cash, fee = cl.cash, cl.fee
-    send(
+    notice = (
         f"📥 คำขอจาก {row['name']}: {kind_th(kind)}\n"
-        f"ประมาณการตอนนี้: เงินออก {fmt_usdt(cash)} · ค่าธรรมเนียม {fmt_usdt(fee)}\n"
-        f"กดยืนยัน = ล็อกตัวเลขตามยอดพอร์ตตอนกด และตั้งเป็นยอดค้างจ่าย\n"
-        f"หมดอายุใน 24 ชม.",
-        reply_markup=_request_buttons(rid),
+        f"ประมาณการตอนนี้: เงินออก {fmt_usdt(cash)} · ค่าธรรมเนียม {fmt_usdt(fee)}"
     )
+    if kind in ("withdraw_profit", "close"):
+        current = pk.current_kyc(conn, str(row["id"]))
+        notice += "\n" + pk.payout_account_line(
+            conn,
+            partner_id=str(row["id"]),
+            payout_kyc_id=None if current is None else str(current["id"]),
+            partner_name=str(row["name"]),
+        )
+    notice += "\nกดยืนยัน = ล็อกตัวเลขตามยอดพอร์ตตอนกด และตั้งเป็นยอดค้างจ่าย\nหมดอายุใน 24 ชม."
+    send(notice, reply_markup=_request_buttons(rid))
     return {"ok": True, "cmd": kind, "request_id": rid}
 
 
@@ -1068,8 +1127,15 @@ def _handle_due(conn: sqlite3.Connection, *, send: Any, now_ms: int) -> dict[str
         pname = str(partner["name"]) if partner is not None else "?"
         x = ps.usdt_from_micro(int(req["payout_micro"] or 0))
         decided = int(req["decided_at_ms"] or req["created_at_ms"] or now_ms)
+        account = pk.payout_account_line(
+            conn,
+            partner_id=str(req["partner_id"]),
+            payout_kyc_id=req["payout_kyc_id"],
+            partner_name=pname,
+        )
         send(
-            f"{pname} · {kind_th(str(req['kind']))} · {fmt_usdt(x)} USDT · ยืนยัน {_bangkok_stamp(decided)}",
+            f"{pname} · {kind_th(str(req['kind']))} · {fmt_usdt(x)} USDT · ยืนยัน {_bangkok_stamp(decided)}\n"
+            f"{account}",
             reply_markup=_paid_button(str(req["id"])),
         )
         msgs += 1
@@ -1184,6 +1250,112 @@ def _show_admin(
         send(body)
 
 
+def _masked_kyc_bits(result: dict[str, Any]) -> str:
+    account = pk.mask_account(str(result["bank_code"]), str(result["account_last4"]))
+    return f"{result['real_name_mask']} · {account} ({result['holder_name_mask']})"
+
+
+def _handle_kyc_list(conn: sqlite3.Connection, *, send: Any, now_ms: int) -> dict[str, Any]:
+    pk.purge_expired_drafts(conn, now_ms)
+    rows = pk.list_kyc_status(conn)
+    if not rows:
+        send("ยังไม่มีพาร์ทเนอร์")
+        return {"ok": True, "cmd": "kyc_list", "n": 0}
+    lines = ["ข้อมูลรับเงิน"]
+    for item in rows:
+        name = str(item["name"])
+        if item["is_admin"]:
+            lines.append(f"{name} · แอดมินไม่ต้องกรอก")
+        elif item["state"] == "none":
+            lines.append(f"{name} · ยังไม่กรอก")
+        else:
+            flag = "" if item.get("holder_matches") else " ⚠️ ชื่อบัญชีไม่ตรง"
+            lines.append(f"{name} · บันทึกแล้ว · {item['bank_code']} ••••{item['account_last4']}{flag}")
+    send("\n".join(lines))
+    return {"ok": True, "cmd": "kyc_list", "n": len(rows)}
+
+
+def _handle_kyc_show(conn: sqlite3.Connection, name: str, *, send: Any) -> dict[str, Any]:
+    row = _find_partner_by_name(conn, name)
+    if row is None:
+        send(thai_reason("not_found"))
+        return {"ok": False, "reason": "not_found"}
+    if int(row["is_admin"] or 0) == 1:
+        send("แอดมินไม่ต้องกรอก")
+        return {"ok": False, "reason": "admin_exempt"}
+    try:
+        revealed = pk.reveal_current(conn, str(row["id"]))
+    except pk.KycKeyError:
+        logger.warning("partner kyc key unavailable partner_id=%s", row["id"])
+        send(thai_reason("kyc_key"))
+        return {"ok": False, "reason": "kyc_key"}
+    if not revealed.get("ok"):
+        send(f"{row['name']} · ยังไม่กรอก")
+        return {"ok": True, "cmd": "kyc_show", "state": "none"}
+    lines = [f"ข้อมูลรับเงินของ {row['name']}"]
+    for ver in revealed["versions"]:
+        lines.append(
+            f"v{ver['version']} · {ver['source']} · {partner_rules.fmt_date(int(ver['created_at_ms']))}"
+        )
+        lines.append(f"ชื่อจริง: {ver['real_name']}")
+        lines.append(f"เบอร์: {ver['phone']}")
+        lines.append(f"ธนาคาร: {ver['bank_code']}")
+        lines.append(f"เลขบัญชี: {ver['account_no']}")
+        lines.append(f"ชื่อบัญชี: {ver['holder_name']}")
+        if not ver["holder_matches"]:
+            lines.append("⚠️ ชื่อบัญชีไม่ตรงกับชื่อจริง")
+        if ver["account_length_warn"]:
+            lines.append("⚠️ จำนวนหลักบัญชีไม่ตรงกับธนาคารนี้")
+        if ver["change_reason"]:
+            lines.append(f"เหตุผล: {ver['change_reason']}")
+    send("\n".join(lines))
+    return {"ok": True, "cmd": "kyc_show", "state": "saved"}
+
+
+def _handle_kyc_set(
+    conn: sqlite3.Connection,
+    name: str,
+    reason: str,
+    form: str,
+    *,
+    send: Any,
+    now_ms: int,
+) -> dict[str, Any]:
+    row = _find_partner_by_name(conn, name)
+    if row is None:
+        send(thai_reason("not_found"))
+        return {"ok": False, "reason": "not_found"}
+    if int(row["is_admin"] or 0) == 1:
+        send("แอดมินไม่ต้องกรอก")
+        return {"ok": False, "reason": "admin_exempt"}
+    try:
+        result = pk.admin_set_kyc(conn, str(row["id"]), form, reason, now_ms)
+    except pk.KycKeyError:
+        logger.warning("partner kyc key unavailable partner_id=%s", row["id"])
+        send(thai_reason("kyc_key"))
+        return {"ok": False, "reason": "kyc_key"}
+    if not result.get("ok"):
+        code = str(result.get("reason") or "")
+        if code == "kyc_invalid":
+            send("\n".join(str(err) for err in (result.get("errors") or [])))
+        else:
+            send(thai_reason(code))
+        return {"ok": False, "reason": code}
+    bits = _masked_kyc_bits(result)
+    lines = [f"บันทึกข้อมูลรับเงิน {row['name']} เวอร์ชัน {result['version']} แล้ว", bits]
+    if not result.get("holder_matches"):
+        lines.append("⚠️ ชื่อบัญชีไม่ตรงกับชื่อจริง")
+    if result.get("account_length_warn"):
+        lines.append("⚠️ จำนวนหลักบัญชีไม่ตรงกับธนาคารนี้")
+    send("\n".join(lines))
+    send_to_partner(
+        send,
+        row,
+        f"แอดมินแก้ไขข้อมูลรับเงินของคุณแล้ว: {bits} — ถ้าไม่ได้ขอ ติดต่อแอดมินทันที",
+    )
+    return {"ok": True, "cmd": "kyc_set", "kyc_id": result.get("kyc_id"), "version": result.get("version")}
+
+
 def handle_partner_text(
     conn: sqlite3.Connection,
     text: str,
@@ -1258,6 +1430,19 @@ def handle_partner_text(
             return _handle_closed(conn, send=send)
         if cmd == "due":
             return _handle_due(conn, send=send, now_ms=now_ms)
+        if cmd == "kyc_list":
+            return _handle_kyc_list(conn, send=send, now_ms=now_ms)
+        if cmd == "kyc_show":
+            return _handle_kyc_show(conn, str(parsed["name"]), send=send)
+        if cmd == "kyc_set":
+            return _handle_kyc_set(
+                conn,
+                str(parsed["name"]),
+                str(parsed["reason"]),
+                str(parsed.get("form") or ""),
+                send=send,
+                now_ms=now_ms,
+            )
         send(HELP_TEXT)
         return {"ok": False, "reason": "usage"}
     except Exception:  # noqa: BLE001
@@ -1421,6 +1606,11 @@ def handle_partner_callback(
             if str(req["kind"]) != "deposit":
                 _answer("ไม่ใช่รายการฝาก")
                 return {"ok": False, "reason": "not_deposit"}
+            dep_partner = ps.get_partner(conn, str(req["partner_id"]))
+            if dep_partner is not None and ps.deposit_kyc_required(conn, dep_partner):
+                _answer("ยังไม่มีข้อมูลรับเงิน")
+                send(f"ให้พาร์ทเนอร์ส่งข้อมูลรับเงิน หรือ p kyc {dep_partner['name']} set")
+                return {"ok": False, "reason": "kyc_required"}
             due_total = ps.payouts_due_total(conn)
             if due_total > 0:
                 _answer(f"มียอดค้างจ่าย {fmt_usdt(due_total)} — โอนแล้วกด โอนแล้ว ก่อน (p due)")
@@ -1567,9 +1757,21 @@ def handle_partner_callback(
                             f"✅ ทบกำไรแล้ว · ค่าธรรมเนียม {fmt_usdt(fee)} · ทุนใหม่ {fmt_usdt(cost_after)} USDT",
                         )
                 elif cash > 0:
+                    saved = conn.execute(
+                        "SELECT payout_kyc_id FROM partner_request WHERE id = ?",
+                        (rid,),
+                    ).fetchone()
+                    kyc_id = None if saved is None else saved["payout_kyc_id"]
+                    account = pk.payout_account_line(
+                        conn,
+                        partner_id=str(req["partner_id"]),
+                        payout_kyc_id=kyc_id,
+                        partner_name=pname,
+                    )
                     body = (
                         f"✅ ยืนยันแล้ว · ค้างจ่าย {fmt_usdt(cash)} USDT ให้ {pname}\n"
-                        f"โอนออกจาก futures wallet แล้วค่อยกด โอนแล้ว"
+                        f"โอนออกจาก futures wallet แล้วค่อยกด โอนแล้ว\n"
+                        f"{account}"
                     )
                     body += guard_suffix
                     if mid is not None:
@@ -1673,6 +1875,12 @@ def handle_partner_callback(
                 warnings = []
                 if partner is not None:
                     note = f"💸 แอดมินแจ้งว่าโอน {fmt_usdt(amount)} USDT ให้คุณแล้ว"
+                    note += "\n" + pk.payout_account_line(
+                        conn,
+                        partner_id=str(req["partner_id"]) if req is not None else "",
+                        payout_kyc_id=req["payout_kyc_id"] if req is not None else None,
+                        partner_name=pname,
+                    )
                     # mark_paid already cleared this row. Unbind only when it was
                     # the last due payout and the partner actually received the note.
                     if str(partner["status"]) == "closed" and not _due_for(conn, str(partner["id"])):

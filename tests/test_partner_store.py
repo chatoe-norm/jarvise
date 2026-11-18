@@ -949,3 +949,25 @@ def test_verify_ledger_event_request_links(tmp_path: Path) -> None:
     assert null_wd["ok"] is False
     assert any(m.get("event_id") == wd_eid for m in null_wd["mismatches"])
     conn.close()
+
+
+def test_first_deposit_without_kyc_stays_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
+    conn = open_db(tmp_path / "kyc-gate.db")
+    now = 1_700_000_000_000
+    admin = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)
+    bob = ps.create_partner(conn, name="Bob", now_ms=now)
+    assert ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), now + 1)["ok"] is True
+    created = ps.create_request(conn, bob["partner_id"], "deposit", now + 2, amount=D("100"), source="admin")
+    assert created == {"ok": False, "reason": "kyc_required"}
+    real = ps.deposit_kyc_required
+    monkeypatch.setattr(ps, "deposit_kyc_required", lambda *_a, **_k: False)
+    pending = ps.create_request(conn, bob["partner_id"], "deposit", now + 3, amount=D("100"), source="admin")
+    monkeypatch.setattr(ps, "deposit_kyc_required", real)
+    result = ps.confirm_request(conn, pending["request_id"], D("1100"), now + 4, amount_received=D("100"))
+    assert result["reason"] == "kyc_required"
+    status = conn.execute(
+        "SELECT status FROM partner_request WHERE id = ?", (pending["request_id"],)
+    ).fetchone()
+    assert status["status"] == "pending"
+    conn.close()

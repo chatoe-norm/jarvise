@@ -2,7 +2,57 @@
 
 from __future__ import annotations
 
+import base64
+import os
+import secrets
+from pathlib import Path
+
 import pytest
+
+from jarvise_assist import partner_kyc as pk
+from jarvise_assist import partner_store as ps
+
+
+def _seed_kyc_form(partner_id: str) -> str:
+    tail = str(partner_id).replace("pt_", "")
+    number = int(tail[:8], 16) if tail else 1
+    account = f"{number % 10**10:010d}"
+    phone = f"08{number % 10**8:08d}"
+    return (
+        f"ข้อมูลรับเงิน\nชื่อจริง: ทดสอบ ระบบ\nเบอร์: {phone}\nธนาคาร: KBANK\nเลขบัญชี: {account}\nชื่อบัญชี: ทดสอบ ระบบ\n"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _seed_partner_kyc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Give every non-admin partner a saved KYC row so existing deposit tests stay valid.
+
+    Tests that need the first-deposit gate set ``JARVISE_TEST_NO_KYC_SEED=1``.
+    The key is random and lives only in the test tmp directory.
+    """
+    key_path = tmp_path / "partner_kyc.key"
+    key_path.write_text(base64.b64encode(secrets.token_bytes(32)).decode("ascii"), encoding="utf-8")
+    monkeypatch.setenv("JARVISE_PARTNER_KYC_KEY_PATH", str(key_path))
+    original = ps.create_partner
+
+    def _wrapped(conn: object, **kwargs: object) -> dict[str, object]:
+        result = original(conn, **kwargs)  # type: ignore[arg-type]
+        if os.environ.get("JARVISE_TEST_NO_KYC_SEED") == "1":
+            return result
+        if not result.get("ok") or kwargs.get("is_admin"):
+            return result
+        saved = pk.admin_set_kyc(
+            conn,  # type: ignore[arg-type]
+            str(result["partner_id"]),
+            _seed_kyc_form(str(result["partner_id"])),
+            "seeded for existing tests",
+            int(kwargs["now_ms"]),  # type: ignore[arg-type]
+        )
+        if not saved.get("ok"):
+            raise RuntimeError(str(saved.get("reason")))
+        return result
+
+    monkeypatch.setattr(ps, "create_partner", _wrapped)
 
 
 @pytest.fixture(autouse=True)

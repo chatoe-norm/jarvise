@@ -368,8 +368,9 @@ def test_cards_at_v_2160_privacy(tmp_path: Path, monkeypatch: Any, env_chat: Non
     card_c = sent_c[0]["text"]
     assert "345.00" in card_c
     assert "🟢 +15.00 (+4.54%)" in card_c
-    for bad in ("NAV", "หน่วย", "wallet", "ยังไม่ปิด", "2,160", "B", "admin"):
+    for bad in ("NAV", "หน่วย", "wallet", "ยังไม่ปิด", "2,160", "admin"):
         assert bad not in card_c
+    assert "พอร์ตของ B" not in card_c
 
     portal.reset_value_cache()
     sent_b, send_b = _send_capture()
@@ -377,8 +378,9 @@ def test_cards_at_v_2160_privacy(tmp_path: Path, monkeypatch: Any, env_chat: Non
     card_b = sent_b[0]["text"]
     assert "600.00" in card_b
     assert "⚪" in card_b
-    for bad in ("NAV", "หน่วย", "wallet", "ยังไม่ปิด", "2,160", "C", "admin"):
+    for bad in ("NAV", "หน่วย", "wallet", "ยังไม่ปิด", "2,160", "admin"):
         assert bad not in card_b
+    assert "พอร์ตของ C" not in card_b
     assert ps.verify_ledger(conn)["ok"] is True
     conn.close()
 
@@ -561,3 +563,18 @@ def test_static_guards_portal() -> None:
         assert not (0x0E80 <= o <= 0x0EFF)
         assert not (0x1000 <= o <= 0x109F)
         assert not (0x1780 <= o <= 0x17FF)
+
+
+def test_deposit_without_kyc_says_not_to_transfer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    conn = open_db(tmp_path / "kyc.db")
+    admin = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=NOW)
+    bob = ps.create_partner(conn, name="Bob", now_ms=NOW)
+    assert ps.apply_deposit(conn, str(admin["partner_id"]), D("1000"), D("1000"), NOW)["ok"]
+    invited = ps.create_invite(conn, str(bob["partner_id"]), now_ms=NOW)
+    assert ps.bind_invite(conn, invited["code"], "501", admin_chat_id=ADMIN, now_ms=NOW)["ok"]
+    sent, send = _send_capture()
+    portal.handle_portal_text(conn, _msg("ฝาก 100"), send=send, now_ms=NOW + 1)
+    assert any("อย่าโอนเงินก่อน" in row["text"] for row in sent)
+    conn.close()

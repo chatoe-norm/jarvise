@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_ledger as pl
 from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
@@ -38,6 +39,14 @@ logger = logging.getLogger(__name__)
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 _CACHE_TTL_MS = 30_000
+_KYC_TOKEN_RE = re.compile(r"^pp:kyc:(ok|re):([0-9a-f]{8})$")
+_KYC_LOCKED = "บันทึกข้อมูลรับเงินแล้ว แก้ไขเองไม่ได้ — ติดต่อแอดมิน"
+_KYC_SAVED = "บันทึกแล้ว แก้ไขเองไม่ได้"
+_KYC_BEFORE_DEPOSIT = "กรอกข้อมูลรับเงินก่อนฝากครั้งแรก\nส่งข้อความที่ขึ้นต้นด้วย ข้อมูลรับเงิน\nอย่าโอนเงินก่อน"
+_KYC_TEMPLATE = "ข้อมูลรับเงิน\nชื่อจริง: \nเบอร์: \nธนาคาร: \nเลขบัญชี: \nชื่อบัญชี: "
+_KYC_HOLDER_WARN = "⚠️ ชื่อบัญชีไม่ตรงกับชื่อจริง — บัญชีต้องเป็นชื่อของคุณเอง"
+_KYC_LENGTH_WARN = "⚠️ จำนวนหลักบัญชีไม่ตรงกับธนาคารนี้"
+_KYC_LEGACY = "⚠️ ยังไม่ได้กรอกข้อมูลรับเงิน — ส่งฟอร์มเมื่อสะดวก"
 _START_RE = re.compile(r"^/start(@[A-Za-z0-9_]+)?\s+([A-Za-z0-9_-]{20,64})$")
 _DEP_TEXT_RE = re.compile(r"^ฝาก\s+(\S+)$")
 _KIND_CODE = {"cv": "convert", "wd": "withdraw_profit", "cl": "close"}
@@ -131,12 +140,13 @@ def _read_v_cached(
     return av
 
 
-def _card_buttons(locks: dict[str, Block] | None = None) -> dict[str, Any]:
+def _card_buttons(locks: dict[str, Block] | None = None, *, kyc_saved: bool = False) -> dict[str, Any]:
     """Active-card keyboard. Locked buttons change only ``text``; callbacks stay ``pp:rq:*``."""
     locks = locks or {}
     cv = locks.get("cv")
     wd = locks.get("wd")
     cl = locks.get("cl")
+    kyc_label = "แก้ไขข้อมูล: ติดต่อแอดมิน" if kyc_saved else "ข้อมูลรับเงิน"
     return {
         "inline_keyboard": [
             [
@@ -154,6 +164,7 @@ def _card_buttons(locks: dict[str, Block] | None = None) -> dict[str, Any]:
                 }
             ],
             [{"text": "📊 ไม้ที่เปิดอยู่", "callback_data": "pp:pos"}],
+            [{"text": kyc_label, "callback_data": "pp:kyc"}],
         ]
     }
 
@@ -258,6 +269,13 @@ def _build_card(
     units = ps.units_from_e8(int(row["units_e8"]))
     pid = str(row["id"])
     joined = partner_rules.joined_at_ms(conn, pid)
+    kyc_saved = pk.kyc_state(conn, pid) == "saved"
+
+    def _with_kyc(lines: list[str]) -> list[str]:
+        lines.append(pk.card_kyc_line(conn, pid))
+        if not kyc_saved and joined is not None:
+            lines.append(_KYC_LEGACY)
+        return lines
 
     def _header() -> list[str]:
         lines = [f"พอร์ตของ {name} · {stamp}"]
@@ -299,13 +317,13 @@ def _build_card(
             lines.append(f"ยอดปิด {fmt_usdt(close_cash)} USDT")
             for due in summary.get("dues") or []:
                 lines.append(f"รอโอน {fmt_usdt(Decimal(due['cash']))} USDT")
-        return "\n".join(lines), None
+        return "\n".join(_with_kyc(lines)), None
 
     nav: Decimal | None = None
     if isinstance(av, AccountValue):
         nav = _nav_for_rules(conn, av)
     locks = _locks_for_row(conn, row, nav=nav, now_ms=now_ms)
-    markup = _card_buttons(locks)
+    markup = _card_buttons(locks, kyc_saved=kyc_saved)
 
     if isinstance(av, AccountValueError):
         lines = _header()
@@ -316,13 +334,13 @@ def _build_card(
             ]
         )
         _pending_and_due(lines)
-        return "\n".join(lines), markup
+        return "\n".join(_with_kyc(lines)), markup
 
     if units == 0 and cost == 0:
         lines = _header()
         lines.append("ยังไม่มีเงินในพอร์ต")
         _pending_and_due(lines)
-        return "\n".join(lines), markup
+        return "\n".join(_with_kyc(lines)), markup
 
     view = ps.view_partner(conn, pid, av.value)
     if not view.get("ok"):
@@ -334,7 +352,7 @@ def _build_card(
             ]
         )
         _pending_and_due(lines)
-        return "\n".join(lines), markup
+        return "\n".join(_with_kyc(lines)), markup
 
     net = Decimal(view["net"])
     pnl = net - cost
@@ -350,7 +368,7 @@ def _build_card(
         ]
     )
     _pending_and_due(lines)
-    return "\n".join(lines), markup
+    return "\n".join(_with_kyc(lines)), markup
 
 
 def _send_card(
@@ -378,6 +396,9 @@ def _handle_deposit_text(
     if str(row["status"]) != "active":
         send_to_partner(send, row, "ปิดพอร์ตแล้ว")
         return {"ok": False, "reason": "closed"}
+    if ps.deposit_kyc_required(conn, row):
+        send_to_partner(send, row, _KYC_BEFORE_DEPOSIT)
+        return {"ok": False, "reason": "kyc_required"}
     amount = parse_amount(amount_raw, allow_zero=False)
     if amount is None or amount < ps.MIN_DEPOSIT_USDT:
         send_to_partner(send, row, _BAD_DEP_TEXT)
@@ -395,6 +416,7 @@ def _handle_deposit_text(
     try:
         send(
             f"📥 {row['name']} แจ้งฝาก {fmt_usdt(amount)} USDT\n"
+            f"{pk.deposit_kyc_line(conn, str(row['id']))}\n"
             f"กดบันทึกเมื่อเงินเข้า futures wallet แล้วเท่านั้น\n"
             f"ถ้ายอดเข้าจริงไม่เท่านี้ ให้ยกเลิก แล้วใช้ p dep {row['name']} <ยอดจริง>",
             reply_markup=_admin_deposit_buttons(rid),
@@ -404,6 +426,124 @@ def _handle_deposit_text(
     return {"ok": True, "cmd": "deposit_notify", "request_id": rid}
 
 
+def _is_kyc_form(text: str) -> bool:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped == "ข้อมูลรับเงิน"
+    return False
+
+
+def _kyc_confirm_text(staged: dict[str, Any]) -> str:
+    lines = [
+        "ตรวจข้อมูลก่อนบันทึก",
+        f"ชื่อจริง: {staged['real_name']}",
+        f"เบอร์: {staged['phone']}",
+        f"ธนาคาร: {staged['bank_code']}",
+        f"เลขบัญชี: {staged['account_no']}",
+        f"ชื่อบัญชี: {staged['holder_name']}",
+        pk.KYC_WARNING,
+    ]
+    if not staged.get("holder_matches"):
+        lines.append(_KYC_HOLDER_WARN)
+    if staged.get("account_length_warn"):
+        lines.append(_KYC_LENGTH_WARN)
+    return "\n".join(lines)
+
+
+def _kyc_saved_text(result: dict[str, Any]) -> str:
+    account = pk.mask_account(str(result["bank_code"]), str(result["account_last4"]))
+    phone = pk.mask_phone(str(result["phone_last4"]))
+    return (
+        f"{_KYC_SAVED}\n"
+        f"ข้อมูลรับเงิน: {result['real_name_mask']}\n"
+        f"{phone}\n"
+        f"โอนเข้า: {account} ({result['holder_name_mask']})"
+    )
+
+
+def _kyc_buttons(token: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ ยืนยันบันทึก", "callback_data": f"pp:kyc:ok:{token}"},
+                {"text": "✏️ กรอกใหม่", "callback_data": f"pp:kyc:re:{token}"},
+            ]
+        ]
+    }
+
+
+def _kyc_template_text() -> str:
+    return pk.KYC_WARNING + "\n" + _KYC_TEMPLATE
+
+
+def _notify_admin_kyc(conn: sqlite3.Connection, row: sqlite3.Row, result: dict[str, Any], send: Any) -> None:
+    account = pk.mask_account(str(result["bank_code"]), str(result["account_last4"]))
+    lines = [
+        f"📝 {row['name']} บันทึกข้อมูลรับเงิน",
+        str(result["real_name_mask"]),
+        pk.mask_phone(str(result["phone_last4"])),
+        f"โอนเข้า: {account} ({result['holder_name_mask']})",
+    ]
+    if not result.get("holder_matches"):
+        lines.append("⚠️ ชื่อบัญชีไม่ตรงกับชื่อจริง")
+    if result.get("account_length_warn"):
+        lines.append(_KYC_LENGTH_WARN)
+    for other_id in result.get("duplicate_partner_ids") or []:
+        other = ps.get_partner(conn, str(other_id))
+        handle = str(other["name"]) if other is not None else str(other_id)
+        lines.append(f"⚠️ ซ้ำกับ {handle}")
+    lines.append(f"ดูเต็ม: p kyc {row['name']}")
+    try:
+        send("\n".join(lines))
+    except Exception:  # noqa: BLE001
+        logger.warning("partner kyc admin notice failed partner_id=%s", row["id"])
+
+
+def _handle_kyc_text(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    text: str,
+    *,
+    message: dict[str, Any],
+    send: Any,
+    delete: Any,
+    now_ms: int,
+) -> dict[str, Any]:
+    pid = str(row["id"])
+    if pk.kyc_state(conn, pid) == "saved":
+        send_to_partner(send, row, _KYC_LOCKED)
+        return {"ok": False, "reason": "kyc_locked"}
+    try:
+        staged = pk.stage_draft(conn, pid, text, now_ms)
+    except pk.KycKeyError:
+        logger.warning("partner kyc key unavailable partner_id=%s", pid)
+        send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+        return {"ok": False, "reason": "kyc_key"}
+    if not staged.get("ok"):
+        reason = str(staged.get("reason") or "")
+        if reason == "kyc_invalid":
+            send_to_partner(send, row, "\n".join(str(e) for e in (staged.get("errors") or [])))
+        elif reason == "kyc_locked":
+            send_to_partner(send, row, _KYC_LOCKED)
+        elif reason == "closed":
+            send_to_partner(send, row, "ปิดพอร์ตแล้ว")
+        elif reason == "admin_exempt":
+            send_to_partner(send, row, "แอดมินไม่ต้องกรอก")
+        else:
+            send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+        return {"ok": False, "reason": reason}
+    raw_chat = message.get("chat")
+    chat: dict[str, Any] = raw_chat if isinstance(raw_chat, dict) else {}
+    if delete is not None and message.get("message_id") is not None:
+        try:
+            delete(str(chat.get("id")), int(message["message_id"]))
+        except Exception:  # noqa: BLE001
+            logger.warning("partner kyc delete failed partner_id=%s", pid)
+    send_to_partner(send, row, _kyc_confirm_text(staged), reply_markup=_kyc_buttons(str(staged["token"])))
+    return {"ok": True, "cmd": "kyc_confirm", "token": staged["token"]}
+
+
 def handle_portal_text(
     conn: sqlite3.Connection,
     message: dict[str, Any],
@@ -411,6 +551,7 @@ def handle_portal_text(
     send: Any,
     futures: Any = None,
     now_ms: int,
+    delete: Any = None,
 ) -> dict[str, Any]:
     raw_chat = message.get("chat")
     chat: dict[str, Any] = raw_chat if isinstance(raw_chat, dict) else {}
@@ -429,6 +570,8 @@ def handle_portal_text(
         dep = _DEP_TEXT_RE.match(text.strip())
         if dep is not None:
             return _handle_deposit_text(conn, row, dep.group(1), send=send, now_ms=now_ms)
+        if _is_kyc_form(text):
+            return _handle_kyc_text(conn, row, text, message=message, send=send, delete=delete, now_ms=now_ms)
         return _send_card(conn, row, send=send, futures=futures, now_ms=now_ms)
 
     if start is None:
@@ -531,6 +674,11 @@ def _preview_request(
         body = f"ถอนกำไร ≈ {fmt_usdt(cash)} USDT · ค่าธรรมเนียม {fmt_usdt(fee)} · ทุนเท่าเดิม"
     else:
         body = f"ปิดพอร์ต · จะได้รับ ≈ {fmt_usdt(cash)} USDT · ค่าธรรมเนียม {fmt_usdt(fee)}"
+    if kind in ("withdraw_profit", "close"):
+        current = pk.current_kyc(conn, str(row["id"]))
+        if current is not None:
+            account = pk.mask_account(str(current["bank_code"]), str(current["account_last4"]))
+            body += f"\nโอนเข้า: {account} ({current['holder_name_mask']})"
     body = body + "\nตัวเลขจริงคิดตอนแอดมินยืนยัน"
     markup = _go_buttons(code)
     if mid is not None:
@@ -541,6 +689,19 @@ def _preview_request(
             pass
     send_to_partner(send, row, body, reply_markup=markup)
     return {"ok": True, "cmd": "preview", "kind": kind}
+
+
+def _request_kyc_line(conn: sqlite3.Connection, row: sqlite3.Row, kind: str) -> str:
+    if kind not in ("withdraw_profit", "close"):
+        return ""
+    current = pk.current_kyc(conn, str(row["id"]))
+    kyc_id = None if current is None else str(current["id"])
+    return pk.payout_account_line(
+        conn,
+        partner_id=str(row["id"]),
+        payout_kyc_id=kyc_id,
+        partner_name=str(row["name"]),
+    )
 
 
 def _submit_request(
@@ -605,13 +766,15 @@ def _submit_request(
     else:
         send_to_partner(send, row, done)
     try:
-        send(
+        notice = (
             f"📥 คำขอจาก {row['name']}: {kind_th(kind)}\n"
-            f"ประมาณการตอนนี้: เงินออก {fmt_usdt(cash)} · ค่าธรรมเนียม {fmt_usdt(fee)}\n"
-            f"กดยืนยัน = ล็อกตัวเลขตามยอดพอร์ตตอนกด และตั้งเป็นยอดค้างจ่าย\n"
-            f"หมดอายุใน 24 ชม.",
-            reply_markup=_admin_request_buttons(rid),
+            f"ประมาณการตอนนี้: เงินออก {fmt_usdt(cash)} · ค่าธรรมเนียม {fmt_usdt(fee)}"
         )
+        kyc_line = _request_kyc_line(conn, row, kind)
+        if kyc_line:
+            notice += "\n" + kyc_line
+        notice += "\nกดยืนยัน = ล็อกตัวเลขตามยอดพอร์ตตอนกด และตั้งเป็นยอดค้างจ่าย\nหมดอายุใน 24 ชม."
+        send(notice, reply_markup=_admin_request_buttons(rid))
     except Exception:  # noqa: BLE001
         logger.warning("portal admin request notice failed: %s", "Exception")
     return {"ok": True, "cmd": "request", "request_id": rid, "kind": kind}
@@ -672,6 +835,10 @@ def handle_portal_callback(
         if str(row["status"]) != "active":
             _answer("ปิดพอร์ตแล้ว")
             return {"ok": False, "reason": "closed"}
+        if ps.deposit_kyc_required(conn, row):
+            _answer()
+            send_to_partner(send, row, _KYC_BEFORE_DEPOSIT)
+            return {"ok": False, "reason": "kyc_required"}
         _answer()
         tip = (
             "โอนเงินให้แอดมินตามที่ตกลงกัน แล้วพิมพ์ ฝาก <จำนวน> เช่น ฝาก 500\n"
@@ -763,6 +930,59 @@ def handle_portal_callback(
             row=row,
             cmd="positions",
         )
+
+    if data == "pp:kyc":
+        _answer()
+        if str(row["status"]) != "active":
+            send_to_partner(send, row, "ปิดพอร์ตแล้ว — ติดต่อแอดมิน")
+            return {"ok": False, "reason": "closed"}
+        if pk.kyc_state(conn, str(row["id"])) == "saved":
+            send_to_partner(send, row, "แก้ไขข้อมูล: ติดต่อแอดมิน")
+            return {"ok": True, "cmd": "kyc_locked"}
+        send_to_partner(send, row, _kyc_template_text())
+        return {"ok": True, "cmd": "kyc_template"}
+
+    kyc_cb = _KYC_TOKEN_RE.match(data)
+    if kyc_cb is not None:
+        action, token = kyc_cb.group(1), kyc_cb.group(2)
+        _answer()
+        pid = str(row["id"])
+        if action == "re":
+            pk.discard_draft(conn, pid)
+            body = _kyc_template_text()
+            if mid is not None:
+                try:
+                    if edit(int(mid), body, reply_markup={"inline_keyboard": []}, chat_id=partner_chat):
+                        return {"ok": True, "cmd": "kyc_redo"}
+                except Exception:  # noqa: BLE001
+                    pass
+            send_to_partner(send, row, body)
+            return {"ok": True, "cmd": "kyc_redo"}
+        try:
+            result = pk.commit_draft(conn, pid, token, now_ms)
+        except pk.KycKeyError:
+            logger.warning("partner kyc key unavailable partner_id=%s", pid)
+            send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+            return {"ok": False, "reason": "kyc_key"}
+        if not result.get("ok"):
+            reason = str(result.get("reason") or "")
+            if reason == "kyc_draft_expired":
+                send_to_partner(send, row, "ฟอร์มหมดอายุ ส่งข้อมูลรับเงินอีกครั้ง")
+            elif reason == "kyc_locked":
+                send_to_partner(send, row, _KYC_LOCKED)
+            else:
+                send_to_partner(send, row, "บันทึกข้อมูลรับเงินไม่ได้ตอนนี้")
+            return {"ok": False, "reason": reason}
+        saved = _kyc_saved_text(result)
+        if mid is not None:
+            try:
+                edit(int(mid), saved, reply_markup={"inline_keyboard": []}, chat_id=partner_chat)
+            except Exception:  # noqa: BLE001
+                send_to_partner(send, row, saved)
+        else:
+            send_to_partner(send, row, saved)
+        _notify_admin_kyc(conn, row, result, send)
+        return {"ok": True, "cmd": "kyc_saved", "kyc_id": result.get("kyc_id")}
 
     _answer("ปุ่มนี้ใช้ไม่ได้แล้ว")
     return {"ok": False, "reason": "unknown"}
