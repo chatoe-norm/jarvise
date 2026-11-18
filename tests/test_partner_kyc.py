@@ -861,17 +861,20 @@ def test_draft_buttons_keep_the_newer_token_and_refuse_a_closed_partner(
     assert "ข้อมูลรับเงิน" in edited[-1]
 
     sent.clear()
+    edited.clear()
     expired = portal.handle_portal_callback(
         conn,
         f"pp:kyc:ok:{second['token']}",
         callback=_portal_cb(f"pp:kyc:ok:{second['token']}"),
         send=send,
         answer=lambda *_a, **_k: True,
-        edit=lambda *_a, **_k: True,
+        edit=edit_ok,
         now_ms=NOW + 1 + pk.DRAFT_TTL_MS,
     )
     assert expired["reason"] == "kyc_draft_expired"
-    assert any("ฟอร์มหมดอายุ" in row["text"] for row in sent)
+    assert "ฟอร์มหมดอายุ" in edited[-1]
+    assert ACCOUNT not in edited[-1]
+    assert PHONE not in edited[-1]
     assert conn.execute("SELECT COUNT(*) AS n FROM partner_kyc").fetchone()["n"] == 0
 
     fresh = pk.stage_draft(conn, bob, _form(), NOW + 3)
@@ -914,17 +917,27 @@ def test_draft_buttons_keep_the_newer_token_and_refuse_a_closed_partner(
     staged = pk.stage_draft(conn, cara, _form(phone="0891111111", account="3333333333"), NOW + 6)
     conn.execute("UPDATE partner SET status = 'closed' WHERE id = ?", (cara,))
     sent.clear()
+    closed_edits: list[str] = []
+
+    def edit_closed(
+        _mid: int, text: str, *, reply_markup: dict[str, Any] | None = None, chat_id: str | None = None
+    ) -> bool:
+        closed_edits.append(text)
+        return True
+
     closed = portal.handle_portal_callback(
         conn,
         f"pp:kyc:ok:{staged['token']}",
         callback=_portal_cb(f"pp:kyc:ok:{staged['token']}", tg="502"),
         send=send,
         answer=lambda *_a, **_k: True,
-        edit=lambda *_a, **_k: True,
+        edit=edit_closed,
         now_ms=NOW + 7,
     )
     assert closed["reason"] == "closed"
-    assert any("ปิดพอร์ตแล้ว — ติดต่อแอดมิน" in row["text"] for row in sent)
+    assert closed_edits
+    assert "ปิดพอร์ตแล้ว — ติดต่อแอดมิน" in closed_edits[-1]
+    assert "3333333333" not in closed_edits[-1]
     assert (
         conn.execute("SELECT COUNT(*) AS n FROM partner_kyc WHERE partner_id = ?", (cara,)).fetchone()["n"]
         == 0
