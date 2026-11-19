@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from jarvise_assist.listen import process_update
 from jarvise_assist.menu import handle_menu_text, render_open_positions, render_open_positions_message
 from jarvise_assist.store import (
     claim_exec_intent,
+    get_exec_intent,
     insert_exec_intent,
     insert_exec_log,
     insert_watch_advice,
@@ -838,4 +840,341 @@ def test_menu_xx_off_and_quick_refused(tmp_path: Path, monkeypatch: pytest.Monke
         now_ms_value=ts,
     )
     assert sent[-1] == MSG_MENU_QUICK
+    conn.close()
+
+
+def _menu_close_handlers(*, open_orders: Any) -> dict[tuple[str, str], Any]:
+    return {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/positionRisk"): _open_then_flat([_open_pos()]),
+        ("GET", "/fapi/v1/openOrders"): open_orders,
+        ("GET", "/fapi/v1/userTrades"): (200, [{"realizedPnl": "0.9"}]),
+        ("POST", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 9, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+    }
+
+
+def test_menu_xx_close_appends_owner_limit_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "xx-owner.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_limit = {
+        "symbol": "DOGEUSDT",
+        "type": "LIMIT",
+        "side": "BUY",
+        "price": "0.075",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+    }
+    handlers = _menu_close_handlers(open_orders=(200, [owner_limit]))
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    sent: list[str] = []
+
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda t, **_k: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    assert row["status"] == "done"
+    result_text = str(row["result_text"])
+    assert "✅" in result_text
+    assert "LIMIT BUY 0.075" in result_text
+    assert OWNER_CLOSING_ORDER_NOTE in result_text
+    assert sent[-1] == result_text
+
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda t, **_k: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=ts + 1,
+        message={"message_id": 1},
+    )
+    posts = [c for c in transport.calls if c[0] == "POST"]
+    assert len(posts) == 1
+    assert sent[-1] == result_text
+    conn.close()
+
+
+def test_menu_xx_close_plain_when_owner_append_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "xx-plain.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+
+    counts = {"open": 0}
+
+    def open_orders(_params: dict[str, Any]) -> tuple[int, list[Any]]:
+        counts["open"] += 1
+        if counts["open"] < 3:
+            return (200, [])
+        raise RuntimeError("openOrders failed")
+
+    transport = RecordingTransport(_menu_close_handlers(open_orders=open_orders))
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    assert row["status"] == "done"
+    assert str(row["result_text"]).startswith("✅ ปิด")
+    assert OWNER_CLOSING_ORDER_NOTE not in str(row["result_text"])
+    assert len([c for c in transport.calls if c[0] == "POST"]) == 1
+    conn.close()
+
+
+def test_menu_xx_close_plain_when_owner_line_malformed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "xx-badqty.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    bad = {
+        "symbol": "DOGEUSDT",
+        "type": "LIMIT",
+        "side": "BUY",
+        "price": "0.075",
+        "origQty": "not-a-qty",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+    }
+    counts = {"open": 0}
+
+    def open_orders(_params: dict[str, Any]) -> tuple[int, list[Any]]:
+        counts["open"] += 1
+        if counts["open"] < 3:
+            return (200, [])
+        return (200, [bad])
+
+    transport = RecordingTransport(_menu_close_handlers(open_orders=open_orders))
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    assert row["status"] == "done"
+    assert str(row["result_text"]).startswith("✅ ปิด")
+    assert OWNER_CLOSING_ORDER_NOTE not in str(row["result_text"])
+    assert len([c for c in transport.calls if c[0] == "POST"]) == 1
+    conn.close()
+
+
+@pytest.mark.parametrize("advice_ms,expect_active", [(999_000, False), (1_001_000, True)])
+def test_xc_exit_advice_active_and_r_at_tap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    advice_ms: int,
+    expect_active: bool,
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / f"xc-advice-{advice_ms}.db")
+    entry_ms = 1_000_000
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 100.0,
+            "qty": 0.01,
+            "in_universe": 1,
+            "signal_id": "s1",
+            "initial_stop": 90.0,
+            "initial_stop_source": "signal",
+            "entry_time_ms": entry_ms,
+            "no_stop_latched": 0,
+            "last_seen_ms": entry_ms,
+            "closed_at_ms": None,
+        },
+    )
+    insert_watch_advice(
+        conn,
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        kind="exit",
+        reason="flat",
+        level=None,
+        approx_r=0.5,
+        status="sent",
+        created_at_ms=advice_ms,
+    )
+    out = handle_exec_callback(
+        conn,
+        "xc:BTCUSDT:l",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        read_futures=FakeFutures(positions=[_long_pos()], orders=[]),
+        now_ms_value=entry_ms + 5_000,
+    )
+    intent_id = str(out["preview"])
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    preview = json.loads(str(row["preview_json"]))
+    assert preview.get("exit_advice_active") is expect_active
+    r_at = preview.get("r_at_tap")
+    assert r_at is None or isinstance(r_at, float)
+    if expect_active:
+        assert r_at == pytest.approx(0.1)
+    conn.close()
+
+
+def test_menu_xx_testnet_refuses_no_post(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    conn = open_db(tmp_path / "xx-testnet.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"source": "menu", "qty": "1", "entry": "1"},
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    transport = RecordingTransport({})
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda t, **_k: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+    )
+    assert sent == [MSG_MENU_LIVE_ONLY]
+    assert not [c for c in transport.calls if c[0] == "POST"]
+    conn.close()
+
+
+def test_menu_xx_wrong_side_stores_menu_wording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "xx-wrong.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"source": "menu", "qty": "0.01", "entry": "100", "confirm_text": "c"},
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    short_row = {
+        "symbol": "BTCUSDT",
+        "positionSide": "BOTH",
+        "positionAmt": "-0.01",
+        "entryPrice": "100",
+        "markPrice": "101",
+    }
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+            ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+            ("GET", "/fapi/v3/positionRisk"): (200, [short_row]),
+        }
+    )
+    markups: list[Any] = []
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda _t, **kw: (markups.append(kw.get("reply_markup")), True)[1],
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    assert str(row["result_text"]) == MSG_MENU_POSITION_CHANGED
+    assert markups and "🔄 อัปเดต" in str(markups[-1])
     conn.close()

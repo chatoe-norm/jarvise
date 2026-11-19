@@ -3195,6 +3195,13 @@ def _format_menu_exit_confirm(
     return "\n".join(lines)
 
 
+def _menu_exit_result_text(result_text: str) -> str:
+    """Owner-facing close copy for menu paths (stored before finish_exec_intent)."""
+    if result_text in {MSG_EXIT_POSITION_CHANGED, _reason_th("wrong_side")}:
+        return MSG_MENU_POSITION_CHANGED
+    return result_text
+
+
 def _append_menu_close_owner_orders(
     base: str,
     trade: BinanceTradeClient,
@@ -3206,13 +3213,15 @@ def _append_menu_close_owner_orders(
 ) -> str:
     try:
         orders = trade.all_open_orders(symbol=symbol)
+        owner = _owner_closing_orders(
+            orders, symbol=symbol, position_side=position_side, trade_side=trade_side
+        )
+        if not owner:
+            return base
+        extra = [_format_owner_order_line(order, tick=tick) for order in owner]
+        return "\n".join([base, *extra])
     except Exception:  # noqa: BLE001 — result status unchanged
         return base
-    owner = _owner_closing_orders(orders, symbol=symbol, position_side=position_side, trade_side=trade_side)
-    if not owner:
-        return base
-    extra = [_format_owner_order_line(order, tick=tick) for order in owner]
-    return "\n".join([base, *extra])
 
 
 def _parse_menu_close_callback(data: str) -> tuple[str, str] | None:
@@ -3667,25 +3676,27 @@ def handle_exec_callback(
                     else ("done" if result.startswith("✅") else "failed")
                 )
                 result_text = str(result)
-                if prefix == "xx:" and menu_exit and status == "done" and result_text.startswith("✅"):
-                    tick_menu: Decimal | None = None
-                    try:
-                        tick_menu = client.symbol_filters(str(intent["symbol"])).tick_size
-                    except Exception:  # noqa: BLE001
-                        tick_menu = None
-                    pos_side = (
-                        str(preview_gate.get("position_side"))
-                        if isinstance(preview_gate, dict) and preview_gate.get("position_side")
-                        else "BOTH"
-                    )
-                    result_text = _append_menu_close_owner_orders(
-                        result_text,
-                        client,
-                        symbol=str(intent["symbol"]),
-                        position_side=pos_side,
-                        trade_side=str(intent["side"]),
-                        tick=tick_menu,
-                    )
+                if prefix == "xx:" and menu_exit:
+                    result_text = _menu_exit_result_text(result_text)
+                    if status == "done" and result_text.startswith("✅"):
+                        tick_menu: Decimal | None = None
+                        try:
+                            tick_menu = client.symbol_filters(str(intent["symbol"])).tick_size
+                        except Exception:  # noqa: BLE001
+                            tick_menu = None
+                        pos_side = (
+                            str(preview_gate.get("position_side"))
+                            if isinstance(preview_gate, dict) and preview_gate.get("position_side")
+                            else "BOTH"
+                        )
+                        result_text = _append_menu_close_owner_orders(
+                            result_text,
+                            client,
+                            symbol=str(intent["symbol"]),
+                            position_side=pos_side,
+                            trade_side=str(intent["side"]),
+                            tick=tick_menu,
+                        )
                 wrote = finish_exec_intent(
                     conn,
                     intent_id,
@@ -3713,13 +3724,11 @@ def handle_exec_callback(
                             reply_markup={"inline_keyboard": []},
                         )
                     out_markup: dict[str, Any] | None = None
-                    if result_text in {MSG_EXIT_POSITION_CHANGED, MSG_MENU_POSITION_CHANGED}:
+                    if result_text == MSG_MENU_POSITION_CHANGED:
                         out_markup = menu_close_refresh_keyboard(
                             str(intent["symbol"]),
                             str(intent["side"]),
                         )
-                        if result_text == MSG_EXIT_POSITION_CHANGED:
-                            result_text = MSG_MENU_POSITION_CHANGED
                     send(result_text, reply_markup=out_markup)
                 elif mid is not None and markup is None and prefix == "ey:":
                     edit(int(mid), result, reply_markup={"inline_keyboard": []})
