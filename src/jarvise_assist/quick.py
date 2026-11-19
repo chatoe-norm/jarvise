@@ -30,9 +30,6 @@ CAP_ALLOWED = (0.5, 1.0, 1.5, 2.0)
 RISK_CONFIRM_AT = 1.0
 CAP_CONFIRM_ABOVE = 1.0
 
-_MSG_DL_ST_ALLOWED = (1.0, 1.5, 2.0)
-_MSG_ST_ALLOWED = (2, 3)
-
 MSG_QUICK_LOCK_REMOVED = "ตั้งค่านี้ถูกยกเลิกแล้ว — quick ไม่มีล็อกรายวัน/แพ้ติดกัน (ยังหยุดเมื่อขาดทุนสัปดาห์เกิน 4R)"
 
 
@@ -718,18 +715,7 @@ def _apply_quick_setting(
         send(f"บันทึกเพดาน {_fmt_pct(val)}% แล้ว\n{text}", reply_markup=kb)
         return {"ok": True, "cap_pct": val}
 
-    if key == "dl":
-        if val not in _MSG_DL_ST_ALLOWED:
-            send("รับได้แค่ 1 / 1.5 / 2 R")
-            return {"ok": False, "rejected": True}
-        send(MSG_QUICK_LOCK_REMOVED)
-        return {"ok": True}
-
-    if key == "st":
-        ival = int(val) if val == int(val) else -1
-        if ival not in _MSG_ST_ALLOWED:
-            send("รับได้แค่ 2 / 3")
-            return {"ok": False, "rejected": True}
+    if key in ("dl", "st"):
         send(MSG_QUICK_LOCK_REMOVED)
         return {"ok": True}
 

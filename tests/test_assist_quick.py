@@ -925,24 +925,21 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
     process_update(conn, _cq("qs:ok:cap:2"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 2.0
 
-    n_sent = len(sent)
-    process_update(conn, _cq("qs:dl:1.5"), send=send, answer=answer, now_ms_value=now)
-    assert get_quick_settings(conn)["day_max_loss_r"] == 2.0
-    assert any(s["text"] == MSG_QUICK_LOCK_REMOVED for s in sent[n_sent:])
-    n_sent = len(sent)
-    process_update(conn, _cq("qs:st:2"), send=send, answer=answer, now_ms_value=now)
-    assert get_quick_settings(conn)["streak_lock_n"] == 3
-    assert any(s["text"] == MSG_QUICK_LOCK_REMOVED for s in sent[n_sent:])
-
-    n_sent = len(sent)
-    process_update(conn, _cq("qs:dl:1"), send=send, answer=answer, now_ms_value=now)
-    assert len([s for s in sent[n_sent:] if s["text"] == MSG_QUICK_LOCK_REMOVED]) == 1
-    process_update(conn, _cq("qs:st:3"), send=send, answer=answer, now_ms_value=now)
-
-    before = dict(get_quick_settings(conn))
-    for data in ("qs:risk:3", "qs:dl:3", "qs:st:5"):
+    settings_frozen = dict(get_quick_settings(conn))
+    for data in ("qs:dl:1", "qs:dl:1.5", "qs:st:2", "qs:st:3", "qs:dl:3", "qs:st:5"):
+        n_ans = len(answers)
+        n_sent = len(sent)
         out = process_update(conn, _cq(data), send=send, answer=answer, now_ms_value=now)
         assert "unhandled_callback" not in out
+        assert len(answers) == n_ans + 1
+        new_sends = sent[n_sent:]
+        assert len(new_sends) == 1
+        assert new_sends[0]["text"] == MSG_QUICK_LOCK_REMOVED
+        assert dict(get_quick_settings(conn)) == settings_frozen
+
+    before = dict(get_quick_settings(conn))
+    out = process_update(conn, _cq("qs:risk:3"), send=send, answer=answer, now_ms_value=now)
+    assert "unhandled_callback" not in out
     assert dict(get_quick_settings(conn)) == before
 
     # foreign chat
