@@ -98,6 +98,42 @@ def bangkok_week_id(now_ms: int) -> str:
     return monday.strftime("%Y-%m-%d")
 
 
+def main_week_loss_pause_until(conn: Any, *, now_ms: int) -> int | None:
+    """Return paused_until_ms when the main weekly 4R pause is active, else None.
+
+    Rule: active pause with pause_reason == 'week_loss' returns until.
+    Any other non-NULL reason (streak / day_loss / day_loss_deeper) → None.
+    NULL reason (pause set before migration 29) falls back to the legacy
+    week_pause_id window rule: paused_until_ms > now AND week_pause_id ∈
+    {bangkok_week_id(until − 86_400_000), bangkok_week_id(now)}.
+
+    Read-only: plain SELECTs. Does not call ensure_settings or get_edge
+    (both INSERT a default row when missing).
+    """
+    row_s = conn.execute("SELECT paused_until_ms, pause_reason FROM assist_settings WHERE id=1").fetchone()
+    if row_s is None or row_s[0] is None:
+        return None
+    until = int(row_s[0])
+    if until <= int(now_ms):
+        return None
+    reason = row_s[1] if len(row_s) > 1 else None
+    if reason == "week_loss":
+        return until
+    if reason is not None:
+        return None
+    row_e = conn.execute("SELECT week_pause_id FROM assist_edge WHERE id=1").fetchone()
+    if row_e is None or row_e[0] is None:
+        return None
+    week_id = str(row_e[0])
+    allowed = {
+        bangkok_week_id(until - 86_400_000),
+        bangkok_week_id(int(now_ms)),
+    }
+    if week_id not in allowed:
+        return None
+    return until
+
+
 def monday_bangkok_ms(now_ms: int) -> int:
     local = datetime.fromtimestamp(now_ms / 1000.0, tz=BANGKOK)
     monday = local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=local.weekday())

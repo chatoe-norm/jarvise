@@ -151,7 +151,7 @@ Stays: the separate quick stats bucket, the quick report metrics, net-of-fee (an
 
 **Existing rules that remain (QPR2a / #336):** Quick is blocked while the **main week_loss** pause is active (`pause_reason = 'week_loss'`; a pre-migration-29 NULL reason fails closed via `paused_until_ms` + `week_pause_id`). The main **day-3R and streak pauses do not block Quick**.
 
-On 2026-11-20 the owner chose **no Quick daily stop and no 3-loss lock beyond those existing rules**. A small settings follow-up (before or with M1) must stop enforcing `day_max_loss_r` / `streak_lock_n`, stop advertising them on the settings screen, and leave only the week_loss block plus the caps. Until that PR merges, the shipped locks still fire.
+On 2026-11-20 the owner chose **no Quick daily stop and no 3-loss lock beyond those existing rules**. A small settings follow-up (before or with M1) must stop enforcing `day_max_loss_r` / `streak_lock_n`, stop advertising them on the settings screen, and leave only the week_loss block plus the caps. Removed by the L PR (2026-11-20): the locks no longer fire or appear in settings; the columns stay for rollback.
 
 ## 3. Milestones (after this document is accepted)
 

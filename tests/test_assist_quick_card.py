@@ -448,11 +448,37 @@ def _assert_refusal(
         assert text_has in sent[0]["text"]
 
 
-def test_refusal_locked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stale_locked_until_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     conn = open_db(tmp_path / "lock.db")
     _seed_settings(conn)
-    write_quick_settings(conn, locked_until_ms=NOW + 3_600_000, lock_reason="streak")
-    _assert_refusal(conn, _happy_fake(), reason="locked", monkeypatch=monkeypatch)
+    conn.execute(
+        """
+        UPDATE assist_quick_settings
+        SET locked_until_ms=?, lock_reason='streak'
+        WHERE id=1
+        """,
+        (NOW + 3_600_000,),
+    )
+    conn.commit()
+    card = build_quick_card(
+        conn,
+        _happy_fake(),
+        symbol="SUIUSDT",
+        side="long",
+        stop=Decimal("1.994"),
+        now_ms=NOW,
+    )
+    assert card["ok"] is True
+    rid, reason = create_quick_registration(
+        conn,
+        symbol="ADAUSDT",
+        side="long",
+        planned_entry=100.0,
+        planned_stop=90.0,
+        qty=1.0,
+        now_ms=NOW,
+    )
+    assert rid is not None and reason is None
     conn.close()
 
 
@@ -1480,7 +1506,6 @@ def test_qr_never_hits_exec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_refusal_texts_cover_reasons() -> None:
     for key in (
-        "locked",
         "quick_open",
         "main_position",
         "in_flight",

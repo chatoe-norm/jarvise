@@ -14,12 +14,15 @@ from tests.test_assist import _ms_bangkok
 from tests.test_assist_listen import _send_capture
 from tests.test_assist_real_trades import FakeFutures as HistoryFakeFutures
 
+import jarvise_assist.quick as quick_mod
 from jarvise_assist.journal import summarize_journal
 from jarvise_assist.keyboard import BTN_QUICK, BTN_TOGGLE, reply_keyboard
 from jarvise_assist.listen import process_update
 from jarvise_assist.menu import match_menu_label
-from jarvise_assist.pause import bangkok_day_start_ms, day_bot_net_r, evaluate_pause
+from jarvise_assist.pause import day_bot_net_r, evaluate_pause, format_paused_until
 from jarvise_assist.quick import (
+    MSG_QUICK_LOCK_REMOVED,
+    QUICK_USAGE,
     create_quick_registration,
     get_quick_settings,
     render_quick_menu,
@@ -27,13 +30,14 @@ from jarvise_assist.quick import (
     sync_quick_trades,
     write_quick_settings,
 )
+from jarvise_assist.quick_card import build_quick_card
 from jarvise_assist.quick_tags import quick_income_predicate
 from jarvise_assist.real_trades import (
     build_income_reconcile,
     build_real_rows,
     summarize_real_vs_virtual,
 )
-from jarvise_assist.store import ensure_settings, get_edge, upsert_watch_position, write_settings
+from jarvise_assist.store import ensure_settings, upsert_watch_position, write_settings
 from jarvise_assist.watch import run_assist_watch
 from jarvise_assist.weekly import format_weekly_summary, summarize_income
 from jarvise_ingest.db import SCHEMA_VERSION, open_db, schema_version
@@ -255,29 +259,7 @@ def test_registration_create_and_refusals(tmp_path: Path) -> None:
     )
     assert bad is None and why == "qty_non_positive"
 
-    # lock blocks
-    conn.execute(
-        """
-        UPDATE assist_quick_settings
-        SET locked_until_ms=?, lock_reason='streak', lock_day_id='2026-11-10'
-        WHERE id=1
-        """,
-        (t0 + 86_400_000,),
-    )
-    conn.commit()
-    bad, why = create_quick_registration(
-        conn,
-        symbol="SOLUSDT",
-        side="long",
-        planned_entry=100.0,
-        planned_stop=95.0,
-        qty=0.01,
-        now_ms=t0,
-    )
-    assert bad is None and why == "locked"
-
     # open quick trade blocks
-    conn.execute("UPDATE assist_quick_settings SET locked_until_ms=NULL, lock_reason=NULL WHERE id=1")
     rid, _ = create_quick_registration(
         conn,
         symbol="BNBUSDT",
@@ -750,8 +732,13 @@ def _close_quick_loss(
     conn.commit()
 
 
-def test_quick_lock_streak_and_day_loss(tmp_path: Path) -> None:
-    conn = open_db(tmp_path / "lock.db")
+def test_quick_no_day_or_streak_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.test_assist_execute import _forbid_trade_client
+    from tests.test_assist_quick_card import _happy_fake, _seed_settings
+
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "nolock.db")
+    _seed_settings(conn)
     day = _ms_bangkok(2026, 11, 10, 15, 0)
     sent: list[str] = []
 
@@ -759,116 +746,45 @@ def test_quick_lock_streak_and_day_loss(tmp_path: Path) -> None:
         sent.append(text)
         return True
 
-    for i in range(3):
+    for i, net_r in enumerate((-0.9, -0.8, -0.8)):
         _close_quick_loss(
             conn,
-            symbol="BTCUSDT",
-            net_usdt=-1.0,
-            net_r=-0.1,
+            symbol=("BTCUSDT", "ETHUSDT", "SOLUSDT")[i],
+            net_usdt=net_r * 10,
+            net_r=net_r,
             closed_at_ms=day - (3 - i) * 60_000,
             idx=i,
         )
-    # settings snapshot before
-    settings_before = dict(ensure_settings(conn))
-    edge_before = dict(get_edge(conn))
 
+    qs_before = dict(get_quick_settings(conn))
     fake = HistoryFakeFutures()
-    sync_quick_trades(conn, fake, now_ms=day, send=send)
-    qs = get_quick_settings(conn)
-    assert qs["locked_until_ms"] == bangkok_day_start_ms(day) + 86_400_000
-    assert len([m for m in sent if m.startswith("🔒 Quick")]) == 1
-    assert "แพ้ติดกัน 3 ไม้" in sent[0]
+    out = sync_quick_trades(conn, fake, now_ms=day, send=send)
+    assert out == {}
+    assert sent == []
+    assert "lock" not in out
+    assert dict(get_quick_settings(conn)) == qs_before
 
-    n = len(sent)
-    sync_quick_trades(conn, fake, now_ms=day + 1000, send=send)
-    assert len(sent) == n
-
-    # registration refused while locked
-    bad, why = create_quick_registration(
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    card = build_quick_card(
         conn,
-        symbol="SOLUSDT",
+        _happy_fake(),
+        symbol="SUIUSDT",
+        side="long",
+        stop=Decimal("1.994"),
+        now_ms=day,
+    )
+    assert card["ok"] is True
+
+    rid, reason = create_quick_registration(
+        conn,
+        symbol="BNBUSDT",
         side="long",
         planned_entry=100.0,
         planned_stop=90.0,
         qty=1.0,
-        now_ms=day + 2000,
+        now_ms=day,
     )
-    assert bad is None and why == "locked"
-
-    assert dict(ensure_settings(conn)) == settings_before
-    assert dict(get_edge(conn)) == edge_before
-
-    # next day unlocks
-    next_day = bangkok_day_start_ms(day) + 86_400_000 + 60_000
-    sync_quick_trades(conn, fake, now_ms=next_day, send=send)
-    qs = get_quick_settings(conn)
-    # clear lock when past locked_until (evaluate may not clear fields until unlock path)
-    assert qs["locked_until_ms"] is None or int(qs["locked_until_ms"]) <= next_day
-
-    # win resets streak: two losses then win then two losses — no lock at 2
-    conn2 = open_db(tmp_path / "win.db")
-    sent2: list[str] = []
-    t = _ms_bangkok(2026, 11, 11, 14, 0)
-    _close_quick_loss(conn2, symbol="BTCUSDT", net_usdt=-1, net_r=-0.1, closed_at_ms=t - 4000, idx=1)
-    _close_quick_loss(conn2, symbol="ETHUSDT", net_usdt=-1, net_r=-0.1, closed_at_ms=t - 3000, idx=2)
-    # win
-    conn2.execute(
-        """
-        INSERT INTO assist_quick_registration (
-            id, symbol, side, planned_entry, planned_stop, qty,
-            created_at_ms, expires_at_ms, status, trade_id, updated_at_ms
-        ) VALUES ('regw', 'SOLUSDT', 'long', 100, 90, 1, ?, ?, 'tagged', 'qtw', ?)
-        """,
-        (t - 2000, t, t - 1000),
-    )
-    conn2.execute(
-        """
-        INSERT INTO assist_quick_trade (
-            id, registration_id, symbol, side, planned_stop, entry_time_ms,
-            entry_qty, entry_avg, closed_at_ms, exit_avg,
-            entry_trade_ids, exit_trade_ids, realized_pnl_usdt, commission_usdt,
-            funding_usdt, net_usdt, risk_usdt, net_r, fee_r, status, updated_at_ms
-        ) VALUES (
-            'qtw', 'regw', 'SOLUSDT', 'long', 90, ?, 1, 100, ?, 110,
-            '[]', '[]', 5, 0, 0, 5, 10, 0.5, 0, 'closed', ?
-        )
-        """,
-        (t - 1500, t - 1000, t - 1000),
-    )
-    _close_quick_loss(conn2, symbol="BNBUSDT", net_usdt=-1, net_r=-0.1, closed_at_ms=t - 500, idx=3)
-    _close_quick_loss(conn2, symbol="ADAUSDT", net_usdt=-1, net_r=-0.1, closed_at_ms=t - 100, idx=4)
-    sync_quick_trades(
-        conn2, HistoryFakeFutures(), now_ms=t, send=lambda text, **_k: sent2.append(text) or True
-    )
-    assert get_quick_settings(conn2)["locked_until_ms"] in (None, 0) or not any("แพ้ติดกัน" in m for m in sent2)
-    # only 2 losses in a row at end — streak_lock_n=3, no streak lock
-    assert not any("แพ้ติดกัน" in m for m in sent2)
-    conn2.close()
-
-    # day max loss
-    conn3 = open_db(tmp_path / "dl.db")
-    sent3: list[str] = []
-    t = _ms_bangkok(2026, 11, 12, 16, 0)
-    _close_quick_loss(conn3, symbol="BTCUSDT", net_usdt=-12, net_r=-1.2, closed_at_ms=t - 2000, idx=1)
-    _close_quick_loss(conn3, symbol="ETHUSDT", net_usdt=-9, net_r=-0.9, closed_at_ms=t - 1000, idx=2)
-    sync_quick_trades(
-        conn3, HistoryFakeFutures(), now_ms=t, send=lambda text, **_k: sent3.append(text) or True
-    )
-    assert any("ขาดทุนวันนี้" in m and "−2R" in m.replace("-", "−") or "ขาดทุนวันนี้" in m for m in sent3)
-    assert get_quick_settings(conn3)["locked_until_ms"] is not None
-
-    conn4 = open_db(tmp_path / "dl1.db")
-    conn4.execute("UPDATE assist_quick_settings SET day_max_loss_r=1 WHERE id=1")
-    conn4.commit()
-    sent4: list[str] = []
-    t = _ms_bangkok(2026, 11, 13, 16, 0)
-    _close_quick_loss(conn4, symbol="BTCUSDT", net_usdt=-12, net_r=-1.2, closed_at_ms=t - 1000, idx=1)
-    sync_quick_trades(
-        conn4, HistoryFakeFutures(), now_ms=t, send=lambda text, **_k: sent4.append(text) or True
-    )
-    assert any("ขาดทุนวันนี้" in m for m in sent4)
-    conn3.close()
-    conn4.close()
+    assert rid is not None and reason is None
     conn.close()
 
 
@@ -1009,10 +925,19 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
     process_update(conn, _cq("qs:ok:cap:2"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 2.0
 
+    n_sent = len(sent)
     process_update(conn, _cq("qs:dl:1.5"), send=send, answer=answer, now_ms_value=now)
-    assert get_quick_settings(conn)["day_max_loss_r"] == 1.5
+    assert get_quick_settings(conn)["day_max_loss_r"] == 2.0
+    assert any(s["text"] == MSG_QUICK_LOCK_REMOVED for s in sent[n_sent:])
+    n_sent = len(sent)
     process_update(conn, _cq("qs:st:2"), send=send, answer=answer, now_ms_value=now)
-    assert get_quick_settings(conn)["streak_lock_n"] == 2
+    assert get_quick_settings(conn)["streak_lock_n"] == 3
+    assert any(s["text"] == MSG_QUICK_LOCK_REMOVED for s in sent[n_sent:])
+
+    n_sent = len(sent)
+    process_update(conn, _cq("qs:dl:1"), send=send, answer=answer, now_ms_value=now)
+    assert len([s for s in sent[n_sent:] if s["text"] == MSG_QUICK_LOCK_REMOVED]) == 1
+    process_update(conn, _cq("qs:st:3"), send=send, answer=answer, now_ms_value=now)
 
     before = dict(get_quick_settings(conn))
     for data in ("qs:risk:3", "qs:dl:3", "qs:st:5"):
@@ -1048,6 +973,46 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
         now_ms_value=now,
     )
     assert any("Quick" in s["text"] for s in sent[-1:])
+    conn.close()
+
+
+def test_quick_module_no_lock_exports() -> None:
+    assert not hasattr(quick_mod, "is_quick_locked")
+    assert not hasattr(quick_mod, "_evaluate_quick_lock")
+
+
+def test_quick_menu_no_daily_streak_lock_ui(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "menu_lock.db")
+    ensure_settings(conn)
+    now = _ms_bangkok(2026, 11, 14, 15, 0)
+    text, kb = render_quick_menu(conn, now_ms=now)
+    assert "ไม่มีล็อกรายวัน/แพ้ติดกันของ quick" in text
+    assert "ขาดทุนสูงสุดต่อวัน" not in text
+    assert "= ล็อกถึง 00:00" not in text
+    assert text.strip().endswith(QUICK_USAGE)
+    rows = kb.get("inline_keyboard") or []
+    callbacks = [btn["callback_data"] for row in rows for btn in row]
+    assert not any(cd.startswith("qs:dl:") or cd.startswith("qs:st:") for cd in callbacks)
+    assert all(len(cd) <= 64 for cd in callbacks)
+    conn.close()
+
+
+def test_quick_menu_status_week_loss_vs_main_streak(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "menu_stat.db")
+    now = _ms_bangkok(2026, 11, 14, 15, 0)
+    until = now + 86_400_000
+    write_settings(conn, paused_until_ms=until, pause_reason="week_loss")
+    text, _ = render_quick_menu(conn, now_ms=now)
+    assert "สถานะ: ⏸ ลงทะเบียนไม่ได้ — ขาดทุนสัปดาห์นี้เกิน 4R" in text
+    assert format_paused_until(until, now_ms=now) in text
+
+    write_settings(conn, paused_until_ms=until, pause_reason="streak")
+    text2, _ = render_quick_menu(conn, now_ms=now)
+    assert "สถานะ: พร้อม" in text2
+
+    write_settings(conn, paused_until_ms=until, pause_reason="day_loss")
+    text3, _ = render_quick_menu(conn, now_ms=now)
+    assert "สถานะ: พร้อม" in text3
     conn.close()
 
 

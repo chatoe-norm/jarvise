@@ -25,13 +25,12 @@ from jarvise_assist.messages import (
     fmt_qty,
     safe_symbol_configs,
 )
-from jarvise_assist.pause import bangkok_week_id, format_paused_until
+from jarvise_assist.pause import format_paused_until, main_week_loss_pause_until
 from jarvise_assist.quick import (
     QUICK_USAGE,
     REG_TTL_MS,
     create_quick_registration,
     get_quick_settings,
-    is_quick_locked,
 )
 from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.signals import build_existing_ideas
@@ -55,10 +54,6 @@ QUICK_REGISTER_PREFIX = "qr:"
 BTN_QUICK_REGISTER = "⚡ เริ่มไม้ quick"
 
 _BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
-
-
-def _refusal_locked() -> str:
-    return "🔒 quick ล็อกอยู่ — รอถึง 00:00 หรือปลดล็อกจากเมนู Quick"
 
 
 def _refusal_week_loss(until: int, *, now_ms: int) -> str:
@@ -128,7 +123,6 @@ def _refusal_bad_data() -> str:
 
 
 REFUSAL: dict[str, str] = {
-    "locked": _refusal_locked(),
     "quick_open": _refusal_quick_open(),
     "main_position": _refusal_main_position(),
     "in_flight": _refusal_in_flight(),
@@ -145,42 +139,6 @@ REFUSAL: dict[str, str] = {
     "card_expired": _refusal_card_expired(),
     "bad_data": _refusal_bad_data(),
 }
-
-
-def main_week_loss_pause_until(conn: Any, *, now_ms: int) -> int | None:
-    """Return paused_until_ms when the main weekly 4R pause is active, else None.
-
-    Rule: active pause with pause_reason == 'week_loss' returns until.
-    Any other non-NULL reason (streak / day_loss / day_loss_deeper) → None.
-    NULL reason (pause set before migration 29) falls back to the legacy
-    week_pause_id window rule: paused_until_ms > now AND week_pause_id ∈
-    {bangkok_week_id(until − 86_400_000), bangkok_week_id(now)}.
-
-    Read-only: plain SELECTs. Does not call ensure_settings or get_edge
-    (both INSERT a default row when missing).
-    """
-    row_s = conn.execute("SELECT paused_until_ms, pause_reason FROM assist_settings WHERE id=1").fetchone()
-    if row_s is None or row_s[0] is None:
-        return None
-    until = int(row_s[0])
-    if until <= int(now_ms):
-        return None
-    reason = row_s[1] if len(row_s) > 1 else None
-    if reason == "week_loss":
-        return until
-    if reason is not None:
-        return None
-    row_e = conn.execute("SELECT week_pause_id FROM assist_edge WHERE id=1").fetchone()
-    if row_e is None or row_e[0] is None:
-        return None
-    week_id = str(row_e[0])
-    allowed = {
-        bangkok_week_id(until - 86_400_000),
-        bangkok_week_id(int(now_ms)),
-    }
-    if week_id not in allowed:
-        return None
-    return until
 
 
 def parse_quick_command(text: str) -> dict[str, Any] | None:
@@ -314,12 +272,9 @@ def build_quick_card(
     stop_pct: Decimal | None = None,
     now_ms: int,
 ) -> dict[str, Any]:
-    """Build the on-demand sizing card. Read-only except lock clear."""
+    """Build the on-demand sizing card. Read-only."""
     sym = str(symbol).upper()
     side_l = str(side).lower()
-
-    if is_quick_locked(conn, now_ms=now_ms):
-        return _fail("locked")
 
     week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
     if week_until is not None:
@@ -671,7 +626,6 @@ def handle_quick_register_callback(
             "open_quick_trade": "quick_open",
             "open_assist_watch": "main_position",
             "live_position": "main_position",
-            "locked": "locked",
         }.get(str(reason), str(reason))
         text = REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
         send(text)
