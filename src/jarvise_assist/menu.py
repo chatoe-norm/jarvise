@@ -371,8 +371,8 @@ def compute_position_unrealized(
     orders: list[dict[str, Any]],
     now_ms: int,
     tick: Decimal | None,
-) -> str:
-    """Unrealized USDT and R line for a position (matches render_open_positions numbers)."""
+) -> tuple[str, float | None, float]:
+    """Return display line, R multiple (None if unknown), and risk distance used for R."""
     sym = pos.symbol
     watch = get_watch_position(conn, sym, pos.position_side)
     linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
@@ -417,7 +417,9 @@ def compute_position_unrealized(
         r_s = _signed_r_one(r_mult) + r_note
     else:
         r_s = "R unknown"
-    return f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s} (ก่อนค่าธรรมเนียม)"
+        r_mult = None
+    line = f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s} (ก่อนค่าธรรมเนียม)"
+    return line, r_mult if risk > 0 else None, risk
 
 
 def render_open_positions(
@@ -505,17 +507,11 @@ def render_open_positions_message(
             f"{side_l} · qty {fmt_qty(pos.qty)} · {_margin_text(pos)}",
             f"เข้า {_price_text(pos.entry_price, tick)} · mark {mark_s}",
         ]
-        unrealized = compute_position_unrealized(conn, pos=pos, orders=orders, now_ms=now_ms, tick=tick)
+        unrealized, _r_mult, risk = compute_position_unrealized(
+            conn, pos=pos, orders=orders, now_ms=now_ms, tick=tick
+        )
         entry = float(pos.entry_price)
         qty = float(pos.qty)
-        if initial_stop is not None:
-            risk = abs(entry - initial_stop)
-        elif stop_info is not None:
-            placed = float(stop_info.price)
-            loss_side = (pos.side == "long" and placed < entry) or (pos.side == "short" and placed > entry)
-            risk = abs(entry - placed) if loss_side else 0.0
-        else:
-            risk = 0.0
 
         if coverage == "none":
             details.append(_NO_STOP_LINE)

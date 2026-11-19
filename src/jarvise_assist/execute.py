@@ -39,7 +39,6 @@ from jarvise_assist.futures import (
     build_futures_client,
     find_protective_stop,
     is_protective_stop,
-    is_take_profit_order,
     order_stop_price,
     order_type,
     protective_stop_coverage,
@@ -78,6 +77,7 @@ from jarvise_assist.sizing import (
     size_signal,
 )
 from jarvise_assist.store import (
+    advice_already_sent,
     cancel_exec_intent,
     claim_exec_intent,
     claim_exec_intent_for_recovery,
@@ -145,7 +145,10 @@ MSG_MOVE_STOP_OLD_UNREADABLE = "เลื่อน stop ไม่ได้ — �
 MSG_CANCELLED = "ยกเลิกแล้ว"
 MSG_MENU_QUICK = "ไม้ quick — ปิดในแอป"
 OWNER_CLOSING_ORDER_NOTE = "✋ คุณตั้งเอง — จะยังค้างอยู่ ลบในแอป"
+OWNER_CLOSING_HEADER = "stop/TP ที่คุณตั้งเอง (บอทจะไม่ยกเลิก):"
 MSG_MENU_EXIT_EXPIRED = "หมดเวลา — กด 🔄 อัปเดต หรือเปิด 📋 ไม้ที่ถืออยู่ใหม่"
+MSG_MENU_LIVE_ONLY = "ปุ่มปิดไม้ใช้ได้เฉพาะโหมดเงินจริง — ยังไม่ได้ส่งคำสั่ง ปิดในแอป Binance"
+MSG_MENU_POSITION_CHANGED = "ไม้เปลี่ยนไป — ไม่ปิด"
 MSG_STOP_CLOSED = "วาง stop ไม่ได้ — ปิดไม้แล้วเพื่อความปลอดภัย"
 MSG_TP_KEEP = "เข้าแล้วและมี stop — วาง TP ไม่ได้ ตั้งเองได้"
 MSG_HANDLER_ERROR = "ทำคำสั่งไม่สำเร็จ — ลองใหม่หรือปิดเอง"
@@ -823,6 +826,10 @@ def _query_fill_after_unknown(
 
 def _msg_symbol_in_flight(symbol: str) -> str:
     return f"คำสั่ง {symbol.upper()} ยังไม่จบ — ยังไม่เปิดไม้ใหม่ ดู 📋 ไม้ที่ถืออยู่"
+
+
+def _msg_menu_in_flight(symbol: str) -> str:
+    return f"คำสั่ง {symbol.upper()} ยังไม่จบ — ยังไม่ปิดไม้ รอสักครู่แล้วเปิด 📋 ใหม่"
 
 
 def _preorder_fail_text(prefix: str) -> str:
@@ -3069,6 +3076,28 @@ def _close_position_flag(order: dict[str, Any]) -> bool:
     return str(raw or "").lower() in {"true", "1"}
 
 
+def _is_owner_reducing_order(
+    order: dict[str, Any],
+    *,
+    position_side: str,
+    trade_side: str,
+) -> bool:
+    cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
+    if cid.startswith("jv-"):
+        return False
+    reduce_only = bool(order.get("reduceOnly")) or _close_position_flag(order)
+    if not reduce_only:
+        return False
+    close_side = "SELL" if trade_side == "long" else "BUY"
+    if str(order.get("side") or "").upper() != close_side:
+        return False
+    ops = str(order.get("positionSide") or "BOTH").upper()
+    pos_side = position_side.upper()
+    if ops in {"LONG", "SHORT"}:
+        return ops == pos_side
+    return ops in {"BOTH", pos_side}
+
+
 def _owner_closing_orders(
     orders: list[dict[str, Any]],
     *,
@@ -3080,23 +3109,29 @@ def _owner_closing_orders(
     for order in orders:
         if str(order.get("symbol") or "").upper() != symbol.upper():
             continue
-        cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
-        if cid.startswith("jv-"):
-            continue
-        reduce_only = bool(order.get("reduceOnly")) or _close_position_flag(order)
-        if not reduce_only:
-            continue
-        if is_protective_stop(
-            order, position_side=position_side, trade_side=trade_side
-        ) or is_take_profit_order(order, position_side=position_side, trade_side=trade_side):
+        if _is_owner_reducing_order(order, position_side=position_side, trade_side=trade_side):
             out.append(order)
     return out
+
+
+def _order_list_price(order: dict[str, Any]) -> Decimal | None:
+    px = order_stop_price(order)
+    if px is not None:
+        return px
+    raw = order.get("price")
+    if raw in (None, "", "0", "0.0", "0.00000000"):
+        return None
+    try:
+        dec = Decimal(str(raw))
+    except Exception:  # noqa: BLE001
+        return None
+    return dec if dec > 0 else None
 
 
 def _format_owner_order_line(order: dict[str, Any], *, tick: Decimal | None) -> str:
     otype = order_type(order)
     side = str(order.get("side") or "").upper()
-    px = order_stop_price(order)
+    px = _order_list_price(order)
     px_s = (
         _fmt_price_tick(px, tick)
         if px is not None and tick is not None and tick > 0
@@ -3110,16 +3145,23 @@ def _format_owner_order_line(order: dict[str, Any], *, tick: Decimal | None) -> 
     return f"• {otype} {side} {px_s} · {qty_s} · {OWNER_CLOSING_ORDER_NOTE}"
 
 
-def _exit_advice_active(conn: Any, symbol: str, *, now_ms: int) -> bool:
-    row = conn.execute(
-        """
-        SELECT 1 FROM assist_watch_advice
-        WHERE symbol=? AND kind='exit' AND status IN ('sent', 'held')
-        LIMIT 1
-        """,
-        (symbol.upper(),),
-    ).fetchone()
-    return row is not None
+def _exit_advice_active(
+    conn: Any,
+    *,
+    symbol: str,
+    position_side: str,
+) -> bool:
+    watch = get_watch_position(conn, symbol, position_side)
+    if watch is None or watch.get("entry_time_ms") is None:
+        return False
+    since_ms = int(watch["entry_time_ms"])
+    return advice_already_sent(
+        conn,
+        symbol=symbol,
+        position_side=position_side,
+        kind="exit",
+        since_ms=since_ms,
+    )
 
 
 def _format_menu_exit_confirm(
@@ -3146,11 +3188,31 @@ def _format_menu_exit_confirm(
     ]
     if owner_orders:
         lines.append("")
-        lines.append("คำสั่งป้องกันที่ไม่ใช่ jv- (จะไม่ถูกยกเลิก):")
+        lines.append(OWNER_CLOSING_HEADER)
         for order in owner_orders:
             lines.append(_format_owner_order_line(order, tick=tick))
     lines.append("💰 เงินจริง")
     return "\n".join(lines)
+
+
+def _append_menu_close_owner_orders(
+    base: str,
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    position_side: str,
+    trade_side: str,
+    tick: Decimal | None = None,
+) -> str:
+    try:
+        orders = trade.all_open_orders(symbol=symbol)
+    except Exception:  # noqa: BLE001 — result status unchanged
+        return base
+    owner = _owner_closing_orders(orders, symbol=symbol, position_side=position_side, trade_side=trade_side)
+    if not owner:
+        return base
+    extra = [_format_owner_order_line(order, tick=tick) for order in owner]
+    return "\n".join([base, *extra])
 
 
 def _parse_menu_close_callback(data: str) -> tuple[str, str] | None:
@@ -3209,8 +3271,8 @@ def handle_exec_callback(
 
     if data.startswith("xc:"):
         if assist_execute_mode() != "live":
-            answer("ปิดอยู่")
-            send(MSG_OFF)
+            answer(MSG_MENU_LIVE_ONLY)
+            send(MSG_MENU_LIVE_ONLY)
             return {"ok": False, "reason": "off"}
         parsed = _parse_menu_close_callback(data)
         if parsed is None:
@@ -3224,7 +3286,7 @@ def handle_exec_callback(
             return {"ok": False, "reason": "quick"}
         if symbol_has_in_flight_exec(conn, symbol):
             answer()
-            send(_msg_symbol_in_flight(symbol))
+            send(_msg_menu_in_flight(symbol))
             return {"ok": False, "reason": "in_flight"}
         reader = read_futures if read_futures is not None else build_futures_client()
         if reader is None:
@@ -3233,7 +3295,7 @@ def handle_exec_callback(
             return {"ok": False, "reason": "no_futures"}
         try:
             positions = reader.position_risk(symbol=symbol)
-            orders = reader.all_open_orders()
+            orders = reader.all_open_orders(symbol=symbol)
         except Exception:  # noqa: BLE001
             answer()
             send("อ่าน futures ไม่ได้")
@@ -3242,11 +3304,15 @@ def handle_exec_callback(
             answer()
             send(MSG_ALREADY_CLOSED)
             return {"ok": False, "reason": "no_position"}
-        pos = positions[0]
-        if pos.side != side:
+        matched = [p for p in positions if p.side == side]
+        if not matched:
             answer()
-            send(MSG_EXIT_POSITION_CHANGED)
+            send(
+                MSG_MENU_POSITION_CHANGED,
+                reply_markup=menu_close_refresh_keyboard(symbol, side),
+            )
             return {"ok": False, "reason": "wrong_side"}
+        pos = matched[0]
         tick: Decimal | None = None
         try:
             tick = reader.symbol_filters(symbol).tick_size
@@ -3254,10 +3320,11 @@ def handle_exec_callback(
             tick = None
         from jarvise_assist.menu import compute_position_unrealized
 
-        unrealized_line = compute_position_unrealized(conn, pos=pos, orders=orders, now_ms=ts, tick=tick)
+        unrealized_line, r_at_tap, _risk = compute_position_unrealized(
+            conn, pos=pos, orders=orders, now_ms=ts, tick=tick
+        )
         mark_at_tap = float(pos.mark_price)
-        r_at_tap = unrealized_line
-        exit_advice_active = _exit_advice_active(conn, symbol, now_ms=ts)
+        exit_advice_active = _exit_advice_active(conn, symbol=symbol, position_side=pos.position_side)
         confirm_text = _format_menu_exit_confirm(
             pos=pos,
             orders=orders,
@@ -3272,8 +3339,10 @@ def handle_exec_callback(
             preview={
                 "qty": str(pos.qty),
                 "entry": str(pos.entry_price),
+                "position_side": pos.position_side,
                 "source": "menu",
                 "early_close": False,
+                "unrealized_line": unrealized_line,
                 "r_at_tap": r_at_tap,
                 "mark_at_tap": mark_at_tap,
                 "exit_advice_active": exit_advice_active,
@@ -3304,8 +3373,8 @@ def handle_exec_callback(
         menu_xx_gate = isinstance(early_preview, dict) and early_preview.get("source") == "menu"
         if menu_xx_gate:
             if assist_execute_mode() != "live":
-                answer("ปิดอยู่")
-                send(MSG_OFF)
+                answer(MSG_MENU_LIVE_ONLY)
+                send(MSG_MENU_LIVE_ONLY)
                 return {"ok": False, "reason": "off"}
         elif not protective_buttons_enabled(conn):
             answer("ปิดอยู่")
@@ -3474,7 +3543,7 @@ def handle_exec_callback(
             return {"ok": False, "reason": "expired"}
         if menu_exit and symbol_has_in_flight_exec(conn, str(intent["symbol"]), exclude_id=intent_id):
             answer()
-            send(_msg_symbol_in_flight(str(intent["symbol"])))
+            send(_msg_menu_in_flight(str(intent["symbol"])))
             return {"ok": False, "reason": "in_flight"}
         if menu_exit and str(intent["symbol"]).upper() in quick_symbols(conn):
             answer()
@@ -3597,22 +3666,42 @@ def handle_exec_callback(
                     if isinstance(result, ExecResult)
                     else ("done" if result.startswith("✅") else "failed")
                 )
+                result_text = str(result)
+                if prefix == "xx:" and menu_exit and status == "done" and result_text.startswith("✅"):
+                    tick_menu: Decimal | None = None
+                    try:
+                        tick_menu = client.symbol_filters(str(intent["symbol"])).tick_size
+                    except Exception:  # noqa: BLE001
+                        tick_menu = None
+                    pos_side = (
+                        str(preview_gate.get("position_side"))
+                        if isinstance(preview_gate, dict) and preview_gate.get("position_side")
+                        else "BOTH"
+                    )
+                    result_text = _append_menu_close_owner_orders(
+                        result_text,
+                        client,
+                        symbol=str(intent["symbol"]),
+                        position_side=pos_side,
+                        trade_side=str(intent["side"]),
+                        tick=tick_menu,
+                    )
                 wrote = finish_exec_intent(
                     conn,
                     intent_id,
                     status=status,
-                    result_text=str(result),
+                    result_text=result_text,
                     expect_status="confirmed",
                 )
                 if not wrote:
                     return {"ok": False, "reason": "lost_write", "status": status}
                 if prefix == "ms:":
-                    position_gone = str(result) in {MSG_ALREADY_CLOSED, _reason_th("wrong_side")}
+                    position_gone = result_text in {MSG_ALREADY_CLOSED, _reason_th("wrong_side")}
                     _strip_ms_buttons(position_gone=position_gone)
                     if markup is not None:
-                        send(result, reply_markup=markup)
+                        send(result_text, reply_markup=markup)
                     else:
-                        send(result)
+                        send(result_text)
                 elif prefix == "xx:" and menu_exit:
                     if mid is not None:
                         confirm_body = (
@@ -3620,16 +3709,18 @@ def handle_exec_callback(
                         )
                         edit(
                             int(mid),
-                            str(confirm_body) if confirm_body else str(result),
+                            str(confirm_body) if confirm_body else result_text,
                             reply_markup={"inline_keyboard": []},
                         )
                     out_markup: dict[str, Any] | None = None
-                    if str(result) == MSG_EXIT_POSITION_CHANGED:
+                    if result_text in {MSG_EXIT_POSITION_CHANGED, MSG_MENU_POSITION_CHANGED}:
                         out_markup = menu_close_refresh_keyboard(
                             str(intent["symbol"]),
                             str(intent["side"]),
                         )
-                    send(result, reply_markup=out_markup)
+                        if result_text == MSG_EXIT_POSITION_CHANGED:
+                            result_text = MSG_MENU_POSITION_CHANGED
+                    send(result_text, reply_markup=out_markup)
                 elif mid is not None and markup is None and prefix == "ey:":
                     edit(int(mid), result, reply_markup={"inline_keyboard": []})
                     # Telegram does not notify on edits — send a new message for non-success.

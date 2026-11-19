@@ -238,15 +238,16 @@ def collect_auto_checks(conn: Any, trade: dict[str, Any]) -> dict[str, Any]:
         "exit_followed_plan": exit_ok,
         "not_in_streak_pause": pause_ok,
     }
-    if not exit_ok and str(trade.get("exit_kind") or "") == "owner_exit":
-        preview = _exit_intent_preview(conn, trade)
+    exit_kind = str(trade.get("exit_kind") or "")
+    preview = _exit_intent_preview(conn, trade) if exit_kind == "owner_exit" else None
+    if isinstance(preview, dict) and preview.get("source") == "menu":
+        out["exit_source"] = "menu"
+        out["exit_followed_plan"] = bool(preview.get("exit_advice_active"))
+    elif not exit_ok and exit_kind == "owner_exit":
         if isinstance(preview, dict) and preview.get("source") == "progress":
             out["exit_source"] = "progress"
             if (level := preview.get("level")) is not None:
                 out["exit_level"] = str(level)
-        elif isinstance(preview, dict) and preview.get("source") == "menu":
-            out["exit_source"] = "menu"
-            out["exit_followed_plan"] = bool(preview.get("exit_advice_active"))
     return out
 
 
