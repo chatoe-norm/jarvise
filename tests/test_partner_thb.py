@@ -2136,15 +2136,15 @@ def test_settle_reason_with_embedded_at_keeps_thb(tmp_path: Path, env_chat: None
     conn.close()
 
 
-def _due_close(conn: Any, pid: str, rid: str, micro: int, when: int) -> None:
+def _due_close(conn: Any, pid: str, rid: str, micro: int, when: int, *, kind: str = "close") -> None:
     conn.execute(
         """
         INSERT INTO partner_request (
             id, partner_id, kind, status, payout_state, payout_micro,
             created_at_ms, expires_at_ms, decided_at_ms, source
-        ) VALUES (?, ?, 'close', 'confirmed', 'due', ?, ?, ?, ?, 'admin')
+        ) VALUES (?, ?, ?, 'confirmed', 'due', ?, ?, ?, ?, 'admin')
         """,
-        (rid, pid, micro, when, when + 1, when),
+        (rid, pid, kind, micro, when, when + 1, when),
     )
     conn.commit()
 
@@ -2235,4 +2235,82 @@ def test_withdraw_leftover_separate_when_close_unsellable(tmp_path: Path, env_ch
     kept = thb.partner_notice(conn, wid)
     assert "แยกต่างหาก" in kept
     assert "ยกไปรวมกับยอดปิดพอร์ต" not in kept
+    conn.close()
+
+
+def test_withdraw_leftover_generic_when_withdraw_and_close_open(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "bothopen.db")
+    pid = _partner(conn, "nok")
+    _bind(conn, pid)
+    wid = "pr_0000000000000e21"
+    nxt = "pr_0000000000000e22"
+    close = "pr_0000000000000e23"
+    _paid_request(conn, pid, rid=wid, micro=1_310_000)
+    _record_simple(conn, pid, wid, payout=1_310_000, sold=1_000_000, now_ms=NOW + 2)
+    _due_close(conn, pid, nxt, 2_000_000, NOW + 3, kind="withdraw_profit")
+    _due_close(conn, pid, close, 2_000_000, NOW + 4)
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW + 5, pid))
+    conn.commit()
+    sent, _send = _fix_w2_and_notes(conn, pid, wid)
+    notes = [item["text"] for item in sent if item["chat_id"] == TG]
+    assert len(notes) >= 2
+    for note in notes[-2:]:
+        assert "ยกไปรวมกับการถอนครั้งถัดไป" in note
+        assert "ยอดปิดพอร์ต" not in note
+        assert "แยกต่างหาก" not in note
+    conn.close()
+
+
+def test_withdraw_leftover_rolls_into_open_withdraw_on_closed_partner(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "wdopen.db")
+    pid = _partner(conn, "nok")
+    _bind(conn, pid)
+    wid = "pr_0000000000000e31"
+    nxt = "pr_0000000000000e32"
+    close = "pr_0000000000000e33"
+    _paid_request(conn, pid, rid=wid, micro=1_310_000)
+    _record_simple(conn, pid, wid, payout=1_310_000, sold=1_000_000, now_ms=NOW + 2)
+    _due_close(conn, pid, nxt, 2_000_000, NOW + 3, kind="withdraw_profit")
+    _due_close(conn, pid, close, 500_000, NOW + 4)
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW + 5, pid))
+    conn.commit()
+    sent, send = _fix_w2_and_notes(conn, pid, wid)
+    notes = [item["text"] for item in sent if item["chat_id"] == TG]
+    assert notes
+    for note in notes:
+        assert "ยกไปรวมกับการถอนครั้งถัดไป" in note
+        assert "แยกต่างหาก" not in note
+    assert ps.mark_paid(conn, nxt, NOW + 9)["ok"] is True
+    assert [row["id"] for row in fx.awaiting_thb(conn, pid)] == [nxt]
+    resent = pa.handle_partner_callback(
+        conn,
+        f"pa:fs:{wid}",
+        callback=_cb(f"pa:fs:{wid}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=_edit_capture()[1],
+        now_ms=NOW + 10,
+    )
+    assert resent["ok"] is True, resent
+    again = next(item["text"] for item in reversed(sent) if item["chat_id"] == TG)
+    assert "ยกไปรวมกับการถอนครั้งถัดไป" in again
+    assert "แยกต่างหาก" not in again
+    conn.close()
+
+
+def test_withdraw_leftover_wording_after_close_recorded(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "closerecorded.db")
+    pid = _partner(conn, "nok")
+    _bind(conn, pid)
+    wid = "pr_0000000000000e41"
+    close = "pr_0000000000000e42"
+    _paid_request(conn, pid, rid=wid, micro=1_310_000)
+    _record_simple(conn, pid, wid, payout=1_310_000, sold=1_000_000, now_ms=NOW + 2)
+    _due_close(conn, pid, close, 2_000_000, NOW + 3)
+    conn.execute("UPDATE partner SET status = 'closed', updated_at_ms = ? WHERE id = ?", (NOW + 4, pid))
+    conn.commit()
+    assert ps.mark_paid(conn, close, NOW + 9)["ok"] is True
+    _record_simple(conn, pid, close, payout=2_000_000, sold=2_000_000, carry=300_000, now_ms=NOW + 11)
+    note = thb.partner_notice(conn, wid)
+    assert "ยกไปรวมกับยอดปิดพอร์ต" in note
     conn.close()

@@ -619,17 +619,25 @@ def partner_notice(conn: Any, request_id: str) -> str:
         f"(เฉลี่ย {fmt_effective(int(row['net_satang']), denom)} บาท/USDT)"
     )
     if int(row["usdt_leftover_micro"]) > 0:
-        partner_id = "" if req is None else str(req["partner_id"])
-        later = req is not None and _later_v1_fx(conn, partner_id, request_id)
-        rolls_in = req is not None and _open_takes_carry(conn, partner_id)
-        separate = kind == "close" or (closed and req is not None and not later and not rolls_in)
+        target: str | None = None
+        if req is not None:
+            partner_id = str(req["partner_id"])
+            later = _first_later_v1_kind(conn, partner_id, request_id)
+            if later is not None:
+                target = later
+            else:
+                open_kinds = _open_absorbing_kinds(conn, partner_id)
+                if open_kinds == {"close"}:
+                    target = "close"
+                elif open_kinds:
+                    target = "withdraw_profit"
+        separate = kind == "close" or (closed and target is None)
         if separate:
             lines.append(
                 f"เศษ {_usdt_2(int(row['usdt_leftover_micro']))} USDT แอดมินจะแจ้งการชำระเศษนี้แยกต่างหาก"
             )
         else:
-            into_close = req is not None and not later and _open_close_takes_carry(conn, partner_id)
-            tail = "ยกไปรวมกับยอดปิดพอร์ต" if into_close else "ยกไปรวมกับการถอนครั้งถัดไป"
+            tail = "ยกไปรวมกับยอดปิดพอร์ต" if target == "close" else "ยกไปรวมกับการถอนครั้งถัดไป"
             lines.append(
                 f"เศษ {_usdt_2(int(row['usdt_leftover_micro']))} USDT ยังไม่ได้ขาย (ขายได้ขั้นละ 1 USDT) — {tail}"
             )
@@ -651,33 +659,25 @@ def partner_notice(conn: Any, request_id: str) -> str:
     return "\n".join(lines)
 
 
-def _open_takes_carry(conn: Any, partner_id: str) -> bool:
-    """True when a later payout can still absorb this leftover."""
+def _open_absorbing_kinds(conn: Any, partner_id: str) -> set[str]:
+    """Kinds of open rows that can still take this leftover as carry_in."""
+    kinds: set[str] = set()
     for row in fx.open_settlements(conn, partner_id):
-        stage = str(row.get("stage") or "")
-        if stage == "awaiting_thb":
-            return True
-        if stage == "due" and not fx.unsellable(conn, row):
-            return True
-    return False
-
-
-def _open_close_takes_carry(conn: Any, partner_id: str) -> bool:
-    for row in fx.open_settlements(conn, partner_id):
-        if str(row.get("kind") or "") != "close":
-            continue
         stage = str(row.get("stage") or "")
         if stage == "awaiting_thb" or (stage == "due" and not fx.unsellable(conn, row)):
-            return True
-    return False
+            kind = row.get("kind")
+            if kind:
+                kinds.add(str(kind))
+    return kinds
 
 
-def _later_v1_fx(conn: Any, partner_id: str, request_id: str) -> bool:
-    """True when another request has a version-1 fx row inserted after this one."""
+def _first_later_v1_kind(conn: Any, partner_id: str, request_id: str) -> str | None:
+    """Kind of the earliest later version-1 fx row, or None."""
     row = conn.execute(
         """
-        SELECT 1
+        SELECT req.kind AS kind
         FROM partner_payout_fx AS other
+        JOIN partner_request AS req ON req.id = other.request_id
         WHERE other.partner_id = ?
           AND other.version = 1
           AND other.request_id != ?
@@ -685,11 +685,14 @@ def _later_v1_fx(conn: Any, partner_id: str, request_id: str) -> bool:
               SELECT rowid FROM partner_payout_fx
               WHERE request_id = ? AND version = 1
           )
+        ORDER BY other.rowid
         LIMIT 1
         """,
         (str(partner_id), str(request_id), str(request_id)),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return None
+    return str(row["kind"])
 
 
 def correction_notice(conn: Any, request_id: str, previous: dict[str, Any]) -> str:
