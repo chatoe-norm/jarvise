@@ -64,6 +64,7 @@ EXIT_SOURCE_LABELS: dict[str, str] = {
     "manual": "มือ",
     "manual_stop": "stop ที่ตั้งเอง",
     "early_exit": "⚠️ ปิดก่อนแผน",
+    "menu": "ปิดจากเมนู",
     "owner_exit": "ปิดตามปุ่ม",
     "emergency": "ปิดฉุกเฉิน",
     "unknown": "ไม่ทราบชนิด",
@@ -146,11 +147,14 @@ def format_journal_card(
     pnl = _net_usdt(shown)
     pnl_line = "ไม่ทราบ" if pnl is None else f"{_signed(pnl)} USDT"
     progress = checks.get("exit_source") == "progress"
+    menu_close = checks.get("exit_source") == "menu"
     exit_label: str | None = None
     level_s = ""
     if progress:
         level_s = _progress_level_text(checks.get("exit_level"))
         exit_label = f"ปิดจากแจ้งเตือน +{level_s}R" if level_s else "ปิดจากแจ้งเตือน"
+    elif menu_close:
+        exit_label = EXIT_SOURCE_LABELS["menu"]
     lines = [
         "📘 บันทึกไม้",
         f"{emoji} {symbol} · {label}",
@@ -166,6 +170,10 @@ def format_journal_card(
     for key, title in CHECK_LABELS:
         if key == "exit_followed_plan" and progress:
             lines.append(f"· {title}: ก่อนแผน ({exit_label})")
+            continue
+        if key == "exit_followed_plan" and menu_close:
+            flag = "ผ่าน" if checks.get("exit_followed_plan") else "ไม่ผ่าน"
+            lines.append(f"· {title}: {flag}")
             continue
         flag = "ผ่าน" if checks.get(key) else "ไม่ผ่าน"
         lines.append(f"· {title}: {flag}")
@@ -230,8 +238,12 @@ def collect_auto_checks(conn: Any, trade: dict[str, Any]) -> dict[str, Any]:
         "exit_followed_plan": exit_ok,
         "not_in_streak_pause": pause_ok,
     }
-    if not exit_ok and str(trade.get("exit_kind") or "") == "owner_exit":
-        preview = _exit_intent_preview(conn, trade)
+    exit_kind = str(trade.get("exit_kind") or "")
+    preview = _exit_intent_preview(conn, trade) if exit_kind == "owner_exit" else None
+    if isinstance(preview, dict) and preview.get("source") == "menu":
+        out["exit_source"] = "menu"
+        out["exit_followed_plan"] = bool(preview.get("exit_advice_active"))
+    elif not exit_ok and exit_kind == "owner_exit":
         if isinstance(preview, dict) and preview.get("source") == "progress":
             out["exit_source"] = "progress"
             if (level := preview.get("level")) is not None:

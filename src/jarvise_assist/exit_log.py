@@ -538,6 +538,8 @@ def record_intent_action(conn: Any, intent: dict[str, Any], *, action: str, acti
         if kind not in {"move_stop", "exit"}:
             return
         preview = intent.get("preview")
+        if kind == "exit" and isinstance(preview, dict) and preview.get("source") == "menu":
+            return
         response_kind = kind
         intent_id = str(intent.get("id") or "")
         if kind == "exit" and isinstance(preview, dict) and preview.get("source") == "progress":

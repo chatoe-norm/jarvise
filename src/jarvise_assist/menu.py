@@ -8,7 +8,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
-from jarvise_assist.execute import execution_buttons_enabled
+from jarvise_assist.execute import assist_execute_mode, execution_buttons_enabled
 from jarvise_assist.explore import render_explore_message
 from jarvise_assist.futures import (
     BinanceFuturesClient,
@@ -54,6 +54,7 @@ from jarvise_assist.pause import (
     week_start_risk_pct,
 )
 from jarvise_assist.quick import render_quick_menu
+from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.signals import scan_signal_candidates
 from jarvise_assist.sizing import (
     below_min_notional,
@@ -161,9 +162,9 @@ def handle_menu_text(
     )
     result: dict[str, Any]
     if kind == "positions":
-        body = render_open_positions(conn, futures=futures, now_ms=now_ms)
-        send_fn(body)
-        result = {"handled": True, "kind": kind, "text": body}
+        body, markup = render_open_positions_message(conn, futures=futures, now_ms=now_ms)
+        send_fn(body, reply_markup=markup)
+        result = {"handled": True, "kind": kind, "text": body, "reply_markup": markup}
     elif kind == "anything":
         messages = render_coin_trend(conn, futures=futures, now_ms=now_ms)
         texts: list[str] = []
@@ -363,22 +364,90 @@ def _append_position_block(lines: list[str], number: int, symbol: str, details: 
         lines.append(f"• {detail}")
 
 
+def compute_position_unrealized(
+    conn: Any,
+    *,
+    pos: FuturesPosition,
+    orders: list[dict[str, Any]],
+    now_ms: int,
+    tick: Decimal | None,
+) -> tuple[str, float | None, float]:
+    """Return display line, R multiple (None if unknown), and risk distance used for R."""
+    sym = pos.symbol
+    watch = get_watch_position(conn, sym, pos.position_side)
+    linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
+    initial_stop: float | None
+    if watch and watch.get("initial_stop") is not None:
+        initial_stop = float(watch["initial_stop"])
+    elif linked is not None:
+        initial_stop = float(linked["stop"])
+    else:
+        initial_stop = None
+    stop_info = find_protective_stop_info(
+        orders,
+        symbol=sym,
+        position_side=pos.position_side,
+        trade_side=pos.side,
+    )
+    entry = float(pos.entry_price)
+    mark = float(pos.mark_price)
+    qty = float(pos.qty)
+    if pos.side == "long":
+        unreal_usdt = (mark - entry) * qty
+    else:
+        unreal_usdt = (entry - mark) * qty
+    r_note = ""
+    if initial_stop is not None:
+        risk = abs(entry - initial_stop)
+    elif stop_info is not None:
+        placed = float(stop_info.price)
+        loss_side = (pos.side == "long" and placed < entry) or (pos.side == "short" and placed > entry)
+        if loss_side:
+            risk = abs(entry - placed)
+            r_note = " (จาก stop จริง)"
+        else:
+            risk = 0.0
+    else:
+        risk = 0.0
+    if risk > 0:
+        if pos.side == "long":
+            r_mult = (mark - entry) / risk
+        else:
+            r_mult = (entry - mark) / risk
+        r_s = _signed_r_one(r_mult) + r_note
+    else:
+        r_s = "R unknown"
+        r_mult = None
+    line = f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s} (ก่อนค่าธรรมเนียม)"
+    return line, r_mult if risk > 0 else None, risk
+
+
 def render_open_positions(
     conn: Any,
     *,
     futures: BinanceFuturesClient | None = None,
     now_ms: int,
 ) -> str:
+    body, _ = render_open_positions_message(conn, futures=futures, now_ms=now_ms)
+    return body
+
+
+def render_open_positions_message(
+    conn: Any,
+    *,
+    futures: BinanceFuturesClient | None = None,
+    now_ms: int,
+) -> tuple[str, dict[str, Any] | None]:
     client = futures if futures is not None else build_futures_client()
     if client is None:
-        return "อ่าน futures ไม่ได้"
+        return "อ่าน futures ไม่ได้", None
     try:
         positions = client.position_risk()
         orders = client.all_open_orders()
     except Exception:  # noqa: BLE001
-        return "อ่าน futures ไม่ได้"
+        return "อ่าน futures ไม่ได้", None
     if not positions:
-        return "ไม่มีไม้ที่ถืออยู่"
+        return "ไม่มีไม้ที่ถืออยู่", None
     lines = ["📋 ไม้ที่ถืออยู่"]
     for number, pos in enumerate(positions, start=1):
         sym = pos.symbol
@@ -427,9 +496,6 @@ def render_open_positions(
             position_side=pos.position_side,
             trade_side=pos.side,
         )
-        entry = float(pos.entry_price)
-        mark = float(pos.mark_price)
-        qty = float(pos.qty)
         covered_qty = float(min(covered, pos.qty))
         mark_s = _price_text(pos.mark_price, tick)
         liq_s = (
@@ -441,32 +507,11 @@ def render_open_positions(
             f"{side_l} · qty {fmt_qty(pos.qty)} · {_margin_text(pos)}",
             f"เข้า {_price_text(pos.entry_price, tick)} · mark {mark_s}",
         ]
-        if pos.side == "long":
-            unreal_usdt = (mark - entry) * qty
-        else:
-            unreal_usdt = (entry - mark) * qty
-        r_note = ""
-        if initial_stop is not None:
-            risk = abs(entry - initial_stop)
-        elif stop_info is not None:
-            placed = float(stop_info.price)
-            loss_side = (pos.side == "long" and placed < entry) or (pos.side == "short" and placed > entry)
-            if loss_side:
-                risk = abs(entry - placed)
-                r_note = " (จาก stop จริง)"
-            else:
-                risk = 0.0
-        else:
-            risk = 0.0
-        if risk > 0:
-            if pos.side == "long":
-                r_mult = (mark - entry) / risk
-            else:
-                r_mult = (entry - mark) / risk
-            r_s = _signed_r_one(r_mult) + r_note
-        else:
-            r_s = "R unknown"
-        unrealized = f"ยังไม่ปิด: {_signed_usdt(unreal_usdt)} USDT · ≈ {r_s} (ก่อนค่าธรรมเนียม)"
+        unrealized, _r_mult, risk = compute_position_unrealized(
+            conn, pos=pos, orders=orders, now_ms=now_ms, tick=tick
+        )
+        entry = float(pos.entry_price)
+        qty = float(pos.qty)
 
         if coverage == "none":
             details.append(_NO_STOP_LINE)
@@ -544,7 +589,26 @@ def render_open_positions(
         if liq_s is not None:
             details.append(f"liquidation {liq_s}")
         _append_position_block(lines, number, sym, details)
-    return "\n".join(lines)
+    markup: dict[str, Any] | None = None
+    if assist_execute_mode() == "live":
+        quick = quick_symbols(conn)
+        rows: list[list[dict[str, str]]] = []
+        for pos in positions:
+            if pos.symbol.upper() in quick:
+                continue
+            side_l = "LONG" if pos.side == "long" else "SHORT"
+            side_code = "l" if pos.side == "long" else "s"
+            rows.append(
+                [
+                    {
+                        "text": f"ปิดไม้ {pos.symbol.upper()} {side_l}",
+                        "callback_data": f"xc:{pos.symbol.upper()}:{side_code}",
+                    }
+                ]
+            )
+        if rows:
+            markup = {"inline_keyboard": rows}
+    return "\n".join(lines), markup
 
 
 def _reason_line(symbol: str, reason: str) -> str:
