@@ -119,6 +119,22 @@ def exit_confirm_keyboard(intent_id: str) -> dict[str, Any]:
     return {"inline_keyboard": [[{"text": "✅ ปิดไม้", "callback_data": f"xx:{intent_id}"}]]}
 
 
+def menu_exit_confirm_keyboard(intent_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ ยืนยันปิดไม้", "callback_data": f"xx:{intent_id}"},
+                {"text": "↩️ ยังไม่ปิด", "callback_data": f"en:{intent_id}"},
+            ]
+        ]
+    }
+
+
+def menu_close_refresh_keyboard(symbol: str, side: str) -> dict[str, Any]:
+    side_code = "l" if side.lower() == "long" else "s"
+    return {"inline_keyboard": [[{"text": "🔄 อัปเดต", "callback_data": f"xc:{symbol.upper()}:{side_code}"}]]}
+
+
 def progress_keyboard(
     exit_intent_id: str,
     *,
