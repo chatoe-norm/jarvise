@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 from tests.test_assist_execute import _forbid_trade_client
 from tests.test_assist_quick import _fill
-from tests.test_assist_quick_m1a1_round1 import _flow_to_quoted as flow_sui_quoted
 from tests.test_assist_quick_m1a1_round4 import (
     MSG_ALREADY_REGISTERED,
     MSG_BAD_BUTTON,
@@ -22,10 +21,14 @@ from tests.test_assist_quick_m1a1_round4 import (
 )
 from tests.test_assist_real_trades import FakeFutures
 
-from jarvise_assist.messages import fmt_price
+from jarvise_assist.messages import fmt_price, fmt_qty
 from jarvise_assist.quick import create_quick_registration, sync_quick_trades
 from jarvise_assist.quick_card import quick_mode_tag
-from jarvise_assist.quick_m1a1 import _registered_idempotent_card_text
+from jarvise_assist.quick_m1a1 import (
+    _decorate_card_text,
+    _registered_idempotent_card_text,
+    _side_label,
+)
 from jarvise_ingest.db import open_db
 
 
@@ -42,7 +45,7 @@ def test_qk_rg_replay_uses_stored_registration_not_mark(
     conn = open_db(tmp_path / "a1a.db")
     _seed_settings(conn)
     fake = _happy_fake(marks={"SUIUSDT": Decimal("2.0")})
-    cid = flow_sui_quoted(conn, fake)
+    cid = _flow_to_quoted(conn, fake)
     _, _, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
     assert out.get("ok") is True
     reg = conn.execute(
@@ -55,10 +58,11 @@ def test_qk_rg_replay_uses_stored_registration_not_mark(
     assert answers == [MSG_ALREADY_REGISTERED]
     assert len(edits) == 1
     assert edits[-1]["reply_markup"] == {"inline_keyboard": []}
+    card_row = dict(conn.execute("SELECT * FROM assist_quick_card WHERE id=?", (cid,)).fetchone())
+    assert edits[-1]["text"] == _registered_idempotent_card_text(conn, card_row)
     body = edits[-1]["text"]
     assert fmt_price(Decimal(str(before["planned_entry"]))) in body
     assert fmt_price(Decimal(str(before["planned_stop"]))) in body
-    assert str(before["planned_entry"]) in body or "2" in body
     assert "2.1" not in body
     after = conn.execute("SELECT * FROM assist_quick_registration WHERE id=?", (reg["id"],)).fetchone()
     assert float(after["planned_entry"]) == float(before["planned_entry"])
@@ -139,8 +143,39 @@ def test_orphan_repair_noop_when_rid_linked(tmp_path: Any, monkeypatch: pytest.M
     conn.close()
 
 
+class _UnsortedFakeFutures(FakeFutures):
+    """Like FakeFutures but does not sort user_trades by id (venue order may differ)."""
+
+    def user_trades(
+        self,
+        symbol: str,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        from_id: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        self._maybe_fail()
+        self.user_trade_calls.append(
+            {
+                "symbol": symbol,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "from_id": from_id,
+                "limit": limit,
+            }
+        )
+        rows = [t for t in self.trades if str(t.get("symbol") or "").upper() == symbol.upper()]
+        if from_id is not None:
+            rows = [t for t in rows if int(t.get("id") or 0) >= int(from_id)]
+        else:
+            assert start_ms is not None and end_ms is not None
+            rows = [t for t in rows if int(start_ms) <= int(t.get("time") or 0) <= int(end_ms)]
+        return rows[: int(limit)]
+
+
 def test_s33_opening_fill_fallback_picks_earliest_opening(tmp_path: Path) -> None:
-    """S33b/c: two opening-side fills — earliest time/id wins on rebuild fallback."""
+    """S33 sort mutants: earliest time wins even when that fill has the higher trade id."""
     conn = open_db(tmp_path / "s33bc.db")
     t0 = T0
     rid, _ = create_quick_registration(
@@ -160,8 +195,8 @@ def test_s33_opening_fill_fallback_picks_earliest_opening(tmp_path: Path) -> Non
     fake1 = FakeFutures(
         trades=[
             _fill(tid=3, symbol="BTCUSDT", side="SELL", price=110, qty=1, time_ms=t_late + 10_000),
-            _fill(tid=9, symbol="BTCUSDT", side="BUY", price=101, qty=0.5, time_ms=t_late),
-            _fill(tid=5, symbol="BTCUSDT", side="BUY", price=100, qty=0.5, time_ms=t_early),
+            _fill(tid=5, symbol="BTCUSDT", side="BUY", price=100, qty=0.5, time_ms=t_late),
+            _fill(tid=9, symbol="BTCUSDT", side="BUY", price=101, qty=0.5, time_ms=t_early),
         ]
     )
     sync_quick_trades(conn, fake1, now_ms=t_late + 20_000, send=lambda *_a, **_k: True)
@@ -170,8 +205,113 @@ def test_s33_opening_fill_fallback_picks_earliest_opening(tmp_path: Path) -> Non
         (trade["id"],),
     ).fetchone()
     ids = json.loads(row["entry_trade_ids"] or "[]")
-    assert ids[0] == 5
+    assert ids[0] == 9
     assert int(row["entry_time_ms"]) == t_early
+    conn.close()
+
+
+def test_s33_same_time_opening_fill_lower_id_wins(tmp_path: Path) -> None:
+    """S33 time-only key mutant: same time → lower trade id wins after stable sort."""
+    conn = open_db(tmp_path / "s33tie.db")
+    t0 = T0
+    rid, _ = create_quick_registration(
+        conn, symbol="ETHUSDT", side="long", planned_entry=100, planned_stop=90, qty=1.0, now_ms=t0
+    )
+    t_open = t0 + 5_000
+    fake0 = FakeFutures(trades=[_fill(tid=1, symbol="ETHUSDT", side="BUY", price=100, qty=1, time_ms=t_open)])
+    sync_quick_trades(conn, fake0, now_ms=t_open + 100, send=lambda *_a, **_k: True)
+    trade = conn.execute("SELECT id FROM assist_quick_trade WHERE registration_id=?", (rid,)).fetchone()
+    conn.execute(
+        "UPDATE assist_quick_trade SET entry_trade_ids='[999]', entry_time_ms=? WHERE id=?",
+        (t_open, trade["id"]),
+    )
+    conn.commit()
+    t_same = t_open + 20_000
+    fake1 = _UnsortedFakeFutures(
+        trades=[
+            _fill(tid=55, symbol="ETHUSDT", side="BUY", price=101, qty=0.5, time_ms=t_same),
+            _fill(tid=50, symbol="ETHUSDT", side="BUY", price=100, qty=0.5, time_ms=t_same),
+        ]
+    )
+    sync_quick_trades(conn, fake1, now_ms=t_same + 5_000, send=lambda *_a, **_k: True)
+    row = conn.execute(
+        "SELECT entry_trade_ids, entry_time_ms FROM assist_quick_trade WHERE id=?",
+        (trade["id"],),
+    ).fetchone()
+    ids = json.loads(row["entry_trade_ids"] or "[]")
+    assert ids[0] == 50
+    assert int(row["entry_time_ms"]) == t_same
+    conn.close()
+
+
+def test_s33d_continue_after_no_opening_candidate(tmp_path: Path) -> None:
+    """S33d: first open trade has no opening-side cand → second trade still rebuilds."""
+    conn = open_db(tmp_path / "s33d.db")
+    t0 = T0
+    rid_btc, _ = create_quick_registration(
+        conn, symbol="BTCUSDT", side="long", planned_entry=100, planned_stop=90, qty=1.0, now_ms=t0
+    )
+    t_btc = t0 + 5_000
+    sync_quick_trades(
+        conn,
+        FakeFutures(trades=[_fill(tid=1, symbol="BTCUSDT", side="BUY", price=100, qty=1, time_ms=t_btc)]),
+        now_ms=t_btc + 100,
+        send=lambda *_a, **_k: True,
+    )
+    trade_btc = conn.execute(
+        "SELECT id FROM assist_quick_trade WHERE registration_id=?", (rid_btc,)
+    ).fetchone()
+    t_sync = t_btc + 50_000
+    conn.execute(
+        "UPDATE assist_quick_trade SET entry_trade_ids='[]', entry_time_ms=? WHERE id=?",
+        (t_sync - 1, trade_btc["id"]),
+    )
+    conn.commit()
+
+    t_eth0 = t0 + 10_000
+    rid_eth, _ = create_quick_registration(
+        conn,
+        symbol="ETHUSDT",
+        side="long",
+        planned_entry=200,
+        planned_stop=180,
+        qty=1.0,
+        now_ms=t_eth0,
+    )
+    t_eth = t_eth0 + 5_000
+    sync_quick_trades(
+        conn,
+        FakeFutures(trades=[_fill(tid=10, symbol="ETHUSDT", side="BUY", price=200, qty=1, time_ms=t_eth)]),
+        now_ms=t_eth + 100,
+        send=lambda *_a, **_k: True,
+    )
+    trade_eth = conn.execute(
+        "SELECT id FROM assist_quick_trade WHERE registration_id=?", (rid_eth,)
+    ).fetchone()
+    conn.execute(
+        "UPDATE assist_quick_trade SET entry_trade_ids='[888]', entry_time_ms=? WHERE id=?",
+        (t_eth, trade_eth["id"]),
+    )
+    conn.commit()
+
+    fake = FakeFutures(
+        trades=[
+            _fill(tid=2, symbol="BTCUSDT", side="SELL", price=110, qty=1, time_ms=t_sync),
+            _fill(tid=10, symbol="ETHUSDT", side="BUY", price=200, qty=1, time_ms=t_eth),
+            _fill(tid=12, symbol="ETHUSDT", side="BUY", price=201, qty=0.5, time_ms=t_sync),
+        ]
+    )
+    info = sync_quick_trades(conn, fake, now_ms=t_sync + 5_000, send=lambda *_a, **_k: True)
+    assert info.get("updated") == 1
+    row_eth = conn.execute(
+        "SELECT entry_trade_ids, entry_time_ms FROM assist_quick_trade WHERE id=?",
+        (trade_eth["id"],),
+    ).fetchone()
+    assert json.loads(row_eth["entry_trade_ids"] or "[]")[0] == 10
+    row_btc = conn.execute(
+        "SELECT entry_trade_ids FROM assist_quick_trade WHERE id=?", (trade_btc["id"],)
+    ).fetchone()
+    assert json.loads(row_btc["entry_trade_ids"] or "[]") == []
     conn.close()
 
 
@@ -338,8 +478,26 @@ def test_registered_idempotent_text_helper(tmp_path: Path) -> None:
     )
     conn.commit()
     text = _registered_idempotent_card_text(conn, row)
-    assert "2" in text
-    assert "1.99" in text
-    assert "500" in text
-    assert quick_mode_tag() in text
+    expected_body = "\n".join(
+        [
+            f"⚡ Quick · SUIUSDT · {_side_label('long')}",
+            f"เข้า {fmt_price(Decimal('2.0'))} · stop {fmt_price(Decimal('1.99'))} · qty {fmt_qty(Decimal('500'))}",
+            "✅ ลงทะเบียนแล้ว",
+        ]
+    )
+    assert text == _decorate_card_text(expected_body)
+    conn.close()
+
+
+def test_registered_idempotent_text_missing_registration_row(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "txt_miss.db")
+    text = _registered_idempotent_card_text(conn, {"registration_id": "ghost"})
+    assert text == _decorate_card_text("✅ ลงทะเบียนแล้ว")
+    conn.close()
+
+
+def test_registered_idempotent_text_no_registration_id(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "txt_norid.db")
+    text = _registered_idempotent_card_text(conn, {})
+    assert text == _decorate_card_text("✅ ลงทะเบียนแล้ว")
     conn.close()

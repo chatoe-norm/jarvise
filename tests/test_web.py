@@ -1186,8 +1186,11 @@ def test_api_paper_auto_decide_config(monkeypatch) -> None:
 
     _stub_control_deps(monkeypatch)
     auto_key = "JARVISE_PAPER_AUTO_DECIDE"
+    risk_key = "JARVISE_MAX_RISK_PER_TRADE_PCT"
     auto_before = os.environ.get(auto_key)
+    risk_before = os.environ.get(risk_key)
     try:
+        monkeypatch.delenv("REDIS_URL", raising=False)
         client = TestClient(app)
 
         # 1. GET config
@@ -1232,6 +1235,10 @@ def test_api_paper_auto_decide_config(monkeypatch) -> None:
             os.environ.pop(auto_key, None)
         else:
             os.environ[auto_key] = auto_before
+        if risk_before is None:
+            os.environ.pop(risk_key, None)
+        else:
+            os.environ[risk_key] = risk_before
 
 
 def test_api_paper_auto_decide_run(monkeypatch) -> None:
@@ -1273,9 +1280,11 @@ def test_api_risk_caps_get_and_save(monkeypatch) -> None:
         "JARVISE_MAX_GROSS_NOTIONAL_PCT",
         "JARVISE_MAX_SYMBOL_NOTIONAL_PCT",
         "JARVISE_MAX_CORRELATED_BUCKET_PCT",
+        "JARVISE_MAX_RISK_PER_TRADE_PCT",
     )
     cap_env_before = {key: os.environ.get(key) for key in cap_env_keys}
     try:
+        monkeypatch.delenv("REDIS_URL", raising=False)
         client = TestClient(app)
 
         # GET /api/risk/caps

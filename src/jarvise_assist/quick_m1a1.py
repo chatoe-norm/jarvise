@@ -407,7 +407,10 @@ def _render_registered_card_edit(
     edit: Callable[[str, dict[str, Any] | None], bool],
 ) -> None:
     body = _registered_idempotent_card_text(conn, row)
-    edit(body, {"inline_keyboard": []})
+    try:
+        edit(body, {"inline_keyboard": []})
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:rg idempotent edit failed card_id=%s", row.get("id"))
 
 
 def _handle_qk_register(
