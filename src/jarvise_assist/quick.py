@@ -1,4 +1,4 @@
-"""Quick (scalping) assist: settings, registration, fill tagging, lock, report.
+"""Quick (scalping) assist: settings, registration, fill tagging, report.
 
 No orders. Binance access is read-only GET and only when a registration or
 open quick trade exists. Never writes assist_settings or assist_edge.
@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 from jarvise_assist.futures import FuturesPosition
-from jarvise_assist.pause import bangkok_day_id, bangkok_day_start_ms
+from jarvise_assist.pause import bangkok_day_start_ms, format_paused_until, main_week_loss_pause_until
 from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
 from jarvise_assist.sizing import portfolio_risk_cap_pct
 from jarvise_assist.store import ensure_settings
@@ -27,13 +27,10 @@ QUICK_USAGE = "พิมพ์: q BTC long 67000 (stop เป็นราคา)
 
 RISK_ALLOWED = (0.25, 0.5, 0.75, 1.0)
 CAP_ALLOWED = (0.5, 1.0, 1.5, 2.0)
-DAY_LOSS_ALLOWED = (1.0, 1.5, 2.0)
-STREAK_ALLOWED = (2, 3)
 RISK_CONFIRM_AT = 1.0
 CAP_CONFIRM_ABOVE = 1.0
 
-LOCK_STREAK_MSG = "🔒 Quick ล็อกถึง 00:00 — แพ้ติดกัน {n} ไม้ · ระบบหลักทำงานตามปกติ"
-LOCK_DAY_MSG = "🔒 Quick ล็อกถึง 00:00 — ขาดทุนวันนี้ {net:+.2f}R (เพดาน −{dl:g}R) · ระบบหลักทำงานตามปกติ"
+MSG_QUICK_LOCK_REMOVED = "ตั้งค่านี้ถูกยกเลิกแล้ว — quick ไม่มีล็อกรายวัน/แพ้ติดกัน (ยังหยุดเมื่อขาดทุนสัปดาห์เกิน 4R)"
 
 
 def get_quick_settings(conn: Any) -> dict[str, Any]:
@@ -54,12 +51,7 @@ def get_quick_settings(conn: Any) -> dict[str, Any]:
 def write_quick_settings(conn: Any, **fields: Any) -> dict[str, Any]:
     allowed = {
         "risk_pct",
-        "day_max_loss_r",
-        "streak_lock_n",
         "cap_pct",
-        "locked_until_ms",
-        "lock_reason",
-        "lock_day_id",
         "updated_at_ms",
     }
     sets: list[str] = []
@@ -77,29 +69,6 @@ def write_quick_settings(conn: Any, **fields: Any) -> dict[str, Any]:
     return get_quick_settings(conn)
 
 
-def _is_locked(settings: dict[str, Any], *, now_ms: int) -> bool:
-    until = settings.get("locked_until_ms")
-    return until is not None and int(until) > int(now_ms)
-
-
-def _clear_lock_if_expired(conn: Any, *, now_ms: int) -> dict[str, Any]:
-    settings = get_quick_settings(conn)
-    until = settings.get("locked_until_ms")
-    if until is not None and int(until) <= int(now_ms):
-        return write_quick_settings(
-            conn,
-            locked_until_ms=None,
-            lock_reason=None,
-            lock_day_id=None,
-            updated_at_ms=now_ms,
-        )
-    return settings
-
-
-def is_quick_locked(conn: Any, *, now_ms: int) -> bool:
-    return _is_locked(_clear_lock_if_expired(conn, now_ms=now_ms), now_ms=now_ms)
-
-
 def create_quick_registration(
     conn: Any,
     *,
@@ -112,10 +81,6 @@ def create_quick_registration(
     live_positions: Sequence[FuturesPosition] | None = None,
 ) -> tuple[str | None, str | None]:
     """Create an open registration. Returns (id, None) or (None, reason_code)."""
-    settings = _clear_lock_if_expired(conn, now_ms=now_ms)
-    if _is_locked(settings, now_ms=now_ms):
-        return None, "locked"
-
     sym = str(symbol).upper()
     side_l = str(side).lower()
     if side_l not in {"long", "short"}:
@@ -352,81 +317,6 @@ def _rebuild_open_trade(
     return payload
 
 
-def _next_midnight_bangkok_ms(now_ms: int) -> int:
-    return bangkok_day_start_ms(now_ms) + 86_400_000
-
-
-def _evaluate_quick_lock(conn: Any, *, now_ms: int, send: SendFn) -> dict[str, Any]:
-    settings = _clear_lock_if_expired(conn, now_ms=now_ms)
-    if _is_locked(settings, now_ms=now_ms):
-        return {"locked": True, "reason": settings.get("lock_reason")}
-
-    day_start = bangkok_day_start_ms(now_ms)
-    day_id = bangkok_day_id(now_ms)
-    streak_n = int(settings.get("streak_lock_n") or 3)
-    day_max = float(settings.get("day_max_loss_r") or 2)
-
-    closed = conn.execute(
-        """
-        SELECT net_usdt, net_r, closed_at_ms
-        FROM assist_quick_trade
-        WHERE status='closed' AND closed_at_ms IS NOT NULL
-        ORDER BY closed_at_ms ASC, id ASC
-        """
-    ).fetchall()
-
-    # Streak: trailing losses closed today (Bangkok). A win resets. Next day starts at 0.
-    today_closed = [
-        row for row in closed if row["closed_at_ms"] is not None and int(row["closed_at_ms"]) >= day_start
-    ]
-    streak = 0
-    for row in reversed(today_closed):
-        net = row["net_usdt"]
-        if net is None:
-            continue
-        if float(net) < 0:
-            streak += 1
-        else:
-            break
-
-    if streak >= streak_n:
-        until = _next_midnight_bangkok_ms(now_ms)
-        write_quick_settings(
-            conn,
-            locked_until_ms=until,
-            lock_reason="streak",
-            lock_day_id=day_id,
-            updated_at_ms=now_ms,
-        )
-        send(LOCK_STREAK_MSG.format(n=streak_n))
-        return {"locked": True, "reason": "streak"}
-
-    # Day net R (R-eligible only)
-    day_r = 0.0
-    for row in closed:
-        if row["closed_at_ms"] is None:
-            continue
-        if int(row["closed_at_ms"]) < day_start or int(row["closed_at_ms"]) >= int(now_ms):
-            continue
-        if row["net_r"] is None:
-            continue
-        day_r += float(row["net_r"])
-
-    if day_r <= -day_max:
-        until = _next_midnight_bangkok_ms(now_ms)
-        write_quick_settings(
-            conn,
-            locked_until_ms=until,
-            lock_reason="day_loss",
-            lock_day_id=day_id,
-            updated_at_ms=now_ms,
-        )
-        send(LOCK_DAY_MSG.format(net=day_r, dl=day_max))
-        return {"locked": True, "reason": "day_loss"}
-
-    return {"locked": False}
-
-
 def sync_quick_trades(
     conn: Any,
     client: Any,
@@ -438,11 +328,6 @@ def sync_quick_trades(
     open_regs = conn.execute("SELECT * FROM assist_quick_registration WHERE status='open'").fetchall()
     open_trades = conn.execute("SELECT * FROM assist_quick_trade WHERE status='open'").fetchall()
     if not open_regs and not open_trades:
-        # No Binance calls. Still evaluate the quick lock on closed trades.
-        was_locked = _is_locked(_clear_lock_if_expired(conn, now_ms=now_ms), now_ms=now_ms)
-        lock_info = _evaluate_quick_lock(conn, now_ms=now_ms, send=send)
-        if lock_info.get("locked") and not was_locked:
-            return {"lock": lock_info}
         return {}
 
     info: dict[str, Any] = {"tagged": 0, "expired": 0, "updated": 0}
@@ -572,9 +457,6 @@ def sync_quick_trades(
         )
         info["updated"] += 1
 
-    lock_info = _evaluate_quick_lock(conn, now_ms=now_ms, send=send)
-    if lock_info.get("locked"):
-        info["lock"] = lock_info
     return {k: v for k, v in info.items() if v}
 
 
@@ -676,19 +558,18 @@ def _fmt_pct(v: float) -> str:
 
 
 def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
-    settings = _clear_lock_if_expired(conn, now_ms=now_ms)
+    settings = get_quick_settings(conn)
     risk = float(settings["risk_pct"])
     cap = float(settings["cap_pct"])
-    dl = float(settings["day_max_loss_r"])
-    st = int(settings["streak_lock_n"])
     main_cap = float(portfolio_risk_cap_pct(Decimal(str(ensure_settings(conn)["risk_pct"]))))
     total = main_cap + cap
     stats = summarize_quick(conn, until_ms=now_ms)
 
-    if _is_locked(settings, now_ms=now_ms):
-        reason = str(settings.get("lock_reason") or "")
-        reason_th = "แพ้ติดกัน" if reason == "streak" else "ขาดทุนวันนี้"
-        status = f"🔒 ล็อกถึง 00:00 ({reason_th})"
+    week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
+    if week_until is not None:
+        status = (
+            f"⏸ ลงทะเบียนไม่ได้ — ขาดทุนสัปดาห์นี้เกิน 4R · ระบบหลัก{format_paused_until(week_until, now_ms=now_ms)}"
+        )
     else:
         status = "พร้อม"
 
@@ -700,7 +581,7 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
             f"ความเสี่ยงรวมสูงสุด {_fmt_pct(total)}% "
             f"(หลัก {_fmt_pct(main_cap)}% + quick {_fmt_pct(cap)}%)"
         ),
-        f"ขาดทุนสูงสุดต่อวัน {_fmt_pct(dl)}R · แพ้ติดกัน {st} ไม้ = ล็อกถึง 00:00",
+        "ไม่มีล็อกรายวัน/แพ้ติดกันของ quick · หยุดเฉพาะเมื่อขาดทุนสัปดาห์เกิน 4R (กฎระบบหลัก)",
         f"สถานะ: {status}",
     ]
     n = int(stats["n"])
@@ -728,21 +609,6 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
         lines.append(f"ยังไม่พิสูจน์ edge — ตัวอย่าง {n}/20 ไม้")
     lines.append(QUICK_USAGE)
 
-    def _mark(cur: float, options: tuple[float, ...], prefix: str) -> list[dict[str, str]]:
-        row: list[dict[str, str]] = []
-        for v in options:
-            bare = _fmt_pct(v)
-            label = f"✓ {bare}R" if abs(cur - v) < 1e-9 else f"{bare}R"
-            row.append({"text": label, "callback_data": f"qs:{prefix}:{_fmt_pct(v)}"})
-        return row
-
-    def _mark_st(cur: int) -> list[dict[str, str]]:
-        row = []
-        for v in STREAK_ALLOWED:
-            label = f"✓ {v}" if cur == v else str(v)
-            row.append({"text": label, "callback_data": f"qs:st:{v}"})
-        return row
-
     keyboard = {
         "inline_keyboard": [
             [
@@ -757,8 +623,6 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
                 else {"text": f"✓ cap {_fmt_pct(v)}%", "callback_data": f"qs:cap:{_fmt_pct(v)}"}
                 for v in CAP_ALLOWED
             ],
-            _mark(dl, DAY_LOSS_ALLOWED, "dl"),
-            _mark_st(st),
         ]
     }
     return "\n".join(lines), keyboard
@@ -851,24 +715,9 @@ def _apply_quick_setting(
         send(f"บันทึกเพดาน {_fmt_pct(val)}% แล้ว\n{text}", reply_markup=kb)
         return {"ok": True, "cap_pct": val}
 
-    if key == "dl":
-        if val not in DAY_LOSS_ALLOWED:
-            send("รับได้แค่ 1 / 1.5 / 2 R")
-            return {"ok": False, "rejected": True}
-        write_quick_settings(conn, day_max_loss_r=val, updated_at_ms=now_ms)
-        text, kb = render_quick_menu(conn, now_ms=now_ms)
-        send(f"บันทึกขาดทุนสูงสุดต่อวัน {_fmt_pct(val)}R แล้ว\n{text}", reply_markup=kb)
-        return {"ok": True, "day_max_loss_r": val}
-
-    if key == "st":
-        ival = int(val) if val == int(val) else -1
-        if ival not in STREAK_ALLOWED:
-            send("รับได้แค่ 2 / 3")
-            return {"ok": False, "rejected": True}
-        write_quick_settings(conn, streak_lock_n=ival, updated_at_ms=now_ms)
-        text, kb = render_quick_menu(conn, now_ms=now_ms)
-        send(f"บันทึกแพ้ติดกัน {ival} ไม้ แล้ว\n{text}", reply_markup=kb)
-        return {"ok": True, "streak_lock_n": ival}
+    if key in ("dl", "st"):
+        send(MSG_QUICK_LOCK_REMOVED)
+        return {"ok": True}
 
     send("คำสั่งไม่รู้จัก")
     return {"ok": False}
