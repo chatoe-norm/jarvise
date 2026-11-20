@@ -17,7 +17,6 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jarvise_assist.explore import contract_rejection, normalize_explore_symbol
-from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.messages import (
     STOP_INSTRUCTION,
     _fmt_price_tick,
@@ -30,7 +29,6 @@ from jarvise_assist.order_lines import format_closing_order_line
 from jarvise_assist.pause import format_paused_until, main_week_loss_pause_until
 from jarvise_assist.quick import (
     QUICK_USAGE,
-    create_quick_registration,
     get_quick_settings,
 )
 from jarvise_assist.quick_tags import quick_symbols
@@ -626,29 +624,22 @@ def handle_quick_register_callback(
         send(_refusal_week_loss(week_until, now_ms=now_ms))
         return {"ok": False, "reason": "week_loss_pause"}
 
-    positions: list[FuturesPosition] = list(card.get("positions") or [])
-    rid, reason = create_quick_registration(
+    from jarvise_assist.quick_m1a1 import (
+        _registration_refusal_text,
+        create_quick_registration_from_card,
+        registration_success_message,
+    )
+
+    rid, reason = create_quick_registration_from_card(
         conn,
         symbol=sym,
         side=side,
-        planned_entry=float(card["entry"]),
-        planned_stop=float(card["stop"]),
-        qty=float(card["qty"]),
+        card=card,
         now_ms=now_ms,
-        live_positions=positions,
     )
     if rid is None:
-        mapped = {
-            "open_registration": "quick_open",
-            "open_quick_trade": "quick_open",
-            "open_assist_watch": "main_position",
-            "live_position": "main_position",
-        }.get(str(reason), str(reason))
-        text = REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
-        send(text)
-        return {"ok": False, "reason": mapped}
-
-    from jarvise_assist.quick_m1a1 import registration_success_message
+        send(_registration_refusal_text(str(reason)))
+        return {"ok": False, "reason": reason}
 
     tick = Decimal(str(card.get("tick") or "0.0001"))
     send(

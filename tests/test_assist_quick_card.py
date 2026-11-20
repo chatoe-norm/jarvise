@@ -327,6 +327,8 @@ def test_text_process_update_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     conn = open_db(tmp_path / "txt.db")
     _seed_settings(conn)
     fake = _happy_fake()
+    from jarvise_assist.quick_m1a1 import _quoted_markup
+
     sent, send = _send_capture()
     direct = build_quick_card(conn, fake, symbol="SUIUSDT", side="long", stop=Decimal("1.994"), now_ms=NOW)
     fake2 = _happy_fake()
@@ -341,10 +343,11 @@ def test_text_process_update_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert out["kind"] == "quick_card"
     assert len(sent) == 1
     assert sent[0]["text"] == direct["text"]
-    kb = sent[0]["reply_markup"]["inline_keyboard"]
-    assert kb[0][0]["callback_data"].startswith("qk:rg:")
-    assert kb[1][0]["callback_data"].startswith("qk:rf:")
-    assert kb[1][1]["callback_data"].startswith("qk:x:")
+    row = conn.execute(
+        "SELECT id, stop_kind FROM assist_quick_card ORDER BY created_at_ms DESC LIMIT 1"
+    ).fetchone()
+    assert row["stop_kind"] == "price"
+    assert sent[0]["reply_markup"] == _quoted_markup(str(row["id"]))
     conn.close()
 
 

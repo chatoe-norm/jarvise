@@ -160,7 +160,11 @@ def process_update(
             def _qk_answer(text: str | None = None) -> None:
                 answer_fn(cq_id, text=text)
 
-            client = futures if futures is not None else build_futures_client()
+            qk_parts = data.split(":")
+            qk_op = qk_parts[1] if len(qk_parts) > 1 else ""
+            client: Any = None
+            if qk_op in {"sl", "rf", "rg"}:
+                client = futures if futures is not None else build_futures_client()
             return handle_quick_trade_callback(
                 conn,
                 data,

@@ -518,17 +518,21 @@ def _send_tag_notice(
 ) -> None:
     from jarvise_assist.quick_card import quick_mode_tag
 
-    cur = conn.execute(
-        """
-        UPDATE assist_quick_registration
-        SET notice_sent_at_ms=?
-        WHERE id=? AND notice_sent_at_ms IS NULL
-        """,
-        (int(now_ms), registration_id),
-    )
-    if cur.rowcount == 0:
+    try:
+        cur = conn.execute(
+            """
+            UPDATE assist_quick_registration
+            SET notice_sent_at_ms=?
+            WHERE id=? AND notice_sent_at_ms IS NULL
+            """,
+            (int(now_ms), registration_id),
+        )
+        if cur.rowcount == 0:
+            return
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("quick tag notice mark failed")
         return
-    conn.commit()
     trade = conn.execute(
         "SELECT * FROM assist_quick_trade WHERE registration_id=?",
         (registration_id,),
@@ -572,25 +576,33 @@ def _send_close_notice(
 
     if skip_reason is not None:
         return
-    cur = conn.execute(
-        """
-        UPDATE assist_quick_trade
-        SET close_notice_at_ms=?
-        WHERE id=? AND close_notice_at_ms IS NULL
-        """,
-        (int(now_ms), trade_id),
-    )
-    if cur.rowcount == 0:
+    try:
+        cur = conn.execute(
+            """
+            UPDATE assist_quick_trade
+            SET close_notice_at_ms=?
+            WHERE id=? AND close_notice_at_ms IS NULL
+            """,
+            (int(now_ms), trade_id),
+        )
+        if cur.rowcount == 0:
+            return
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("quick close notice mark failed")
         return
-    conn.commit()
     try:
         sym = str(payload["symbol"])
         label = _side_menu_label(str(payload["side"]))
         net_usdt = float(payload.get("net_usdt") or 0)
         net_r = payload.get("net_r")
         other = payload.get("commission_other_asset")
+        risk_usdt = float(payload.get("risk_usdt") or 0)
         if net_r is None:
-            r_line = f"R คำนวณไม่ได้ (ค่าธรรมเนียมเป็น {other or '?'})"
+            if other and risk_usdt > 0:
+                r_line = f"R คำนวณไม่ได้ (ค่าธรรมเนียมเป็น {other})"
+            else:
+                r_line = "R คำนวณไม่ได้"
         else:
             r_line = f"{float(net_r):+.2f}R (รวมค่าธรรมเนียมจริง + funding)"
         lines = [

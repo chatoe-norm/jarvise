@@ -32,6 +32,8 @@ from jarvise_assist.quick_m1a1 import (
     QUICK_DRAFT_TTL_MS,
     _quoted_markup,
     _refresh_only_markup,
+    _stop_step_markup,
+    _symbol_buttons,
     create_card_from_typed_command,
 )
 from jarvise_ingest.db import SCHEMA_VERSION, open_db, schema_version
@@ -214,12 +216,13 @@ def test_quote_register_expired_markup_refresh_only(tmp_path: Any, monkeypatch: 
     cid = _flow_to_quoted(conn, fake)
     row = conn.execute("SELECT quoted_at_ms FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
     late = int(row["quoted_at_ms"]) + QUICK_CARD_TTL_MS + 1
-    sent, seen, _, edits = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=late)
-    if sent:
-        kb = sent[-1].get("reply_markup") or sent[0].get("reply_markup")
-        if kb:
-            flat = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
-            assert not any(d.startswith("qk:rg:") for d in flat)
+    _, seen, _, edits = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=late)
+    assert edits, "quote-expired rg must edit the card"
+    kb = edits[-1]["reply_markup"]
+    flat = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
+    assert any(d.startswith("qk:rf:") for d in flat)
+    assert any(d.startswith("qk:x:") for d in flat)
+    assert not any(d.startswith("qk:rg:") for d in flat)
     conn.close()
 
 
@@ -247,15 +250,58 @@ def test_edit_false_sends_new_message(tmp_path: Any, monkeypatch: pytest.MonkeyP
     conn = open_db(tmp_path / "edf.db")
     _seed_settings(conn)
     fake = _happy_fake()
-    _run_qk(conn, "qk:sd:l", fake)
+    sent: list[dict[str, Any]] = []
+    next_mid = 99
+
+    def send(t: str, **kw: Any) -> int:
+        nonlocal next_mid
+        next_mid += 1
+        sent.append({"text": t, **kw})
+        return next_mid
+
+    def edit(_mid: int, _text: str, **kw: Any) -> bool:
+        return False
+
+    answer_texts, answer = _answer_capture()
+    chat_id = 1
+    for data in ("qk:sd:l",):
+        upd = {
+            "callback_query": {
+                "id": f"cq-{data}",
+                "data": data,
+                "message": {"chat": {"id": chat_id}, "message_id": 1},
+            }
+        }
+        process_update(
+            conn,
+            upd,
+            send=send,
+            answer=answer,
+            edit=edit,
+            futures=fake,
+            now_ms_value=NOW,
+        )
     cid = conn.execute("SELECT id, message_id FROM assist_quick_card LIMIT 1").fetchone()
     mid_before = int(cid["message_id"])
-    sent, _, _, edits = _run_qk(conn, f"qk:sy:{cid['id']}:SUIUSDT", fake, edit_returns=False)
-    assert len(sent) >= 1 or len(edits) >= 1
+    process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "cq-sy",
+                "data": f"qk:sy:{cid['id']}:SUIUSDT",
+                "message": {"chat": {"id": chat_id}, "message_id": mid_before},
+            }
+        },
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=fake,
+        now_ms_value=NOW,
+    )
+    assert len(sent) == 2
     row = conn.execute("SELECT message_id FROM assist_quick_card WHERE id=?", (cid["id"],)).fetchone()
-    # edit failure must fall back to send and persist the new message id when possible
-    if len(sent) >= 1:
-        assert int(row["message_id"]) >= mid_before
+    assert int(row["message_id"]) == 101
+    assert mid_before == 100
     conn.close()
 
 
@@ -283,12 +329,31 @@ def test_hello_world_not_consumed_during_draft(tmp_path: Any, monkeypatch: pytes
 def test_listen_no_futures_without_draft(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+
+    def _boom() -> Any:
+        raise AssertionError("build_futures_client must not run")
+
+    monkeypatch.setattr("jarvise_assist.listen.build_futures_client", _boom)
     conn = open_db(tmp_path / "nf.db")
     _seed_settings(conn)
-    fake = _happy_fake()
     sent, send = _send_capture()
-    process_update(conn, _msg("สวัสดี"), send=send, futures=fake, now_ms_value=NOW)
-    assert "mark_price" not in fake.calls
+    _, answer = _answer_capture()
+    out = process_update(
+        conn,
+        {
+            "callback_query": {
+                "id": "1",
+                "data": "qk:sd:l",
+                "message": {"chat": {"id": 42}, "message_id": 1},
+            }
+        },
+        send=send,
+        answer=answer,
+        futures=None,
+        now_ms_value=NOW,
+    )
+    assert out.get("step") == "pick_symbol"
+    assert len(sent) == 1
     conn.close()
 
 
@@ -373,6 +438,7 @@ def test_close_notice_net_r_none_text(tmp_path: Any) -> None:
             "side": "long",
             "net_usdt": 1.0,
             "net_r": None,
+            "risk_usdt": 5.0,
             "commission_other_asset": "BNB",
         },
         now_ms=NOW,
@@ -385,6 +451,7 @@ def test_close_notice_net_r_none_text(tmp_path: Any) -> None:
 def test_migration_34_adds_quick_card(tmp_path: Any) -> None:
     path = tmp_path / "m34.db"
     conn = open_db(path)
+    conn.execute("DROP TABLE IF EXISTS assist_quick_card")
     conn.execute("PRAGMA user_version = 34")
     conn.commit()
     conn.close()
@@ -393,20 +460,28 @@ def test_migration_34_adds_quick_card(tmp_path: Any) -> None:
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='assist_quick_card'"
     ).fetchone()
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(assist_quick_registration)").fetchall()}
-    assert "notice_sent_at_ms" in cols
+    reg_cols = {r[1] for r in conn.execute("PRAGMA table_info(assist_quick_registration)").fetchall()}
+    tr_cols = {r[1] for r in conn.execute("PRAGMA table_info(assist_quick_trade)").fetchall()}
+    assert "notice_sent_at_ms" in reg_cols
+    assert "close_notice_at_ms" in tr_cols
+    ver1 = schema_version(conn)
     conn.close()
     conn2 = open_db(path)
-    assert schema_version(conn2) == 35
+    assert schema_version(conn2) == ver1 == 35
     conn2.close()
 
 
 def test_callback_data_within_64_bytes() -> None:
     cid = "deadbeef"
-    sym = "1000PEPEUSDT"
-    cb = f"qk:sy:{cid}:{sym}"
-    assert len(cb.encode("utf-8")) <= 64
-    for m in (_quoted_markup(cid), _refresh_only_markup(cid)):
+    long_sym = "A" * 16 + "USDT"
+    for sym in ("1000PEPEUSDT", long_sym):
+        for btn in [b for row in _symbol_buttons(cid, [sym]) for b in row]:
+            assert len(btn["callback_data"].encode("utf-8")) <= 64
+    for m in (
+        _stop_step_markup(cid),
+        _quoted_markup(cid),
+        _refresh_only_markup(cid),
+    ):
         for row in m["inline_keyboard"]:
             for btn in row:
                 assert len(btn["callback_data"].encode("utf-8")) <= 64
@@ -473,15 +548,23 @@ def test_stop_presets_build_pct_cards(tmp_path: Any, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "pct.db")
     _seed_settings(conn)
-    fake = _happy_fake()
+    mark = Decimal("100000")
+    fake = _happy_fake(marks={"BTCUSDT": mark})
     for preset in ("0.3", "0.5", "1"):
-        _run_qk(conn, "qk:sd:l", fake)
+        _run_qk(conn, "qk:sd:l", fake, now_ms=NOW)
         row = conn.execute(
             "SELECT id FROM assist_quick_card WHERE status='pick_symbol' ORDER BY created_at_ms DESC LIMIT 1"
         ).fetchone()
         cid = str(row["id"])
-        _run_qk(conn, f"qk:sy:{cid}:BTCUSDT", fake)
-        _run_qk(conn, f"qk:sl:{cid}:{preset}", fake)
-        sv = conn.execute("SELECT stop_value FROM assist_quick_card WHERE id=?", (cid,)).fetchone()[0]
-        assert sv == preset
+        _run_qk(conn, f"qk:sy:{cid}:BTCUSDT", fake, now_ms=NOW)
+        _run_qk(conn, f"qk:sl:{cid}:{preset}", fake, now_ms=NOW)
+        card_row = conn.execute(
+            "SELECT status, stop_value, quote_stop FROM assist_quick_card WHERE id=?",
+            (cid,),
+        ).fetchone()
+        assert card_row["status"] == "quoted"
+        assert card_row["stop_value"] == preset
+        pct = Decimal(preset)
+        expected_stop = float(mark * (Decimal("1") - pct / Decimal("100")))
+        assert float(card_row["quote_stop"]) == pytest.approx(expected_stop, rel=1e-4)
     conn.close()
