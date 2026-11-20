@@ -745,6 +745,43 @@ def _migrate_assist_quick(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_assist_quick_m1a1(conn: sqlite3.Connection) -> None:
+    """Quick card stepper storage and notice timestamps (M1a-1)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_quick_card (
+            id TEXT PRIMARY KEY,
+            side TEXT NOT NULL CHECK (side IN ('long', 'short')),
+            symbol TEXT,
+            stop_kind TEXT CHECK (stop_kind IN ('pct', 'price')),
+            stop_value TEXT,
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'pick_symbol', 'pick_stop', 'quoted',
+                    'registered', 'cancelled', 'expired'
+                )
+            ),
+            quoted_at_ms INTEGER,
+            quote_entry REAL,
+            quote_stop REAL,
+            quote_qty REAL,
+            registration_id TEXT,
+            message_id INTEGER,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_quick_card_status_created
+        ON assist_quick_card (status, created_at_ms)
+        """
+    )
+    _add_column_if_missing(conn, "assist_quick_registration", "notice_sent_at_ms", "INTEGER")
+    _add_column_if_missing(conn, "assist_quick_trade", "close_notice_at_ms", "INTEGER")
+
+
 def _migrate_assist_income_status(conn: sqlite3.Connection) -> None:
     """Income completeness on closed real trades. Nullable. Does not rewrite existing rows.
 
@@ -1834,6 +1871,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (32, "assist_exit_telemetry", _migrate_assist_exit_telemetry, True),
     (33, "partner_kyc", _migrate_partner_kyc, True),
     (34, "partner_payout_fx", _migrate_partner_payout_fx, True),
+    (35, "assist_quick_m1a1", _migrate_assist_quick_m1a1, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

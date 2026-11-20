@@ -1,7 +1,7 @@
 -- Jarvise SQLite schema (documentation mirror of jarvise_ingest.db.SCHEMA_SQL)
 -- Regenerate: python -c "from jarvise_ingest.db import SCHEMA_SQL; print(SCHEMA_SQL)"
 -- Runtime owner: src/jarvise_ingest.db.py (migrate() applies SCHEMA_SQL + numbered
--- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 34).
+-- migrations tracked in PRAGMA user_version; current SCHEMA_VERSION = 35).
 -- Connection pragmas: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
 -- Retention: `jarvise db prune` trims order_book_microstructure, exchange_balances,
 -- and superseded derivatives_analytics versions only; paper/approval/live tables are never pruned.
@@ -562,8 +562,33 @@ CREATE TABLE IF NOT EXISTS assist_quick_registration (
     expires_at_ms INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('open', 'tagged', 'expired')),
     trade_id TEXT,
+    notice_sent_at_ms INTEGER,
     updated_at_ms INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS assist_quick_card (
+    id TEXT PRIMARY KEY,
+    side TEXT NOT NULL CHECK (side IN ('long', 'short')),
+    symbol TEXT,
+    stop_kind TEXT CHECK (stop_kind IN ('pct', 'price')),
+    stop_value TEXT,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'pick_symbol', 'pick_stop', 'quoted',
+            'registered', 'cancelled', 'expired'
+        )
+    ),
+    quoted_at_ms INTEGER,
+    quote_entry REAL,
+    quote_stop REAL,
+    quote_qty REAL,
+    registration_id TEXT,
+    message_id INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assist_quick_card_status_created
+    ON assist_quick_card (status, created_at_ms);
 
 CREATE TABLE IF NOT EXISTS assist_quick_trade (
     id TEXT PRIMARY KEY,
@@ -587,6 +612,7 @@ CREATE TABLE IF NOT EXISTS assist_quick_trade (
     net_r REAL,
     fee_r REAL,
     status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+    close_notice_at_ms INTEGER,
     updated_at_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_assist_quick_trade_status_symbol

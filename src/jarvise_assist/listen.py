@@ -42,6 +42,11 @@ from jarvise_assist.quick_card import (
     handle_quick_text,
     parse_quick_command,
 )
+from jarvise_assist.quick_m1a1 import (
+    handle_quick_draft_text,
+    handle_quick_trade_callback,
+    has_active_quick_draft,
+)
 from jarvise_assist.store import (
     ensure_settings,
     get_edge,
@@ -150,6 +155,26 @@ def process_update(
         if data.startswith("qs:"):
             answer_fn(cq_id)
             return handle_quick_callback(conn, data, send=send_fn, now_ms=ts)
+        if data.startswith("qk:"):
+
+            def _qk_answer(text: str | None = None) -> None:
+                answer_fn(cq_id, text=text)
+
+            qk_parts = data.split(":")
+            qk_op = qk_parts[1] if len(qk_parts) > 1 else ""
+            client: Any = None
+            if qk_op in {"sl", "rf", "rg"}:
+                client = futures if futures is not None else build_futures_client()
+            return handle_quick_trade_callback(
+                conn,
+                data,
+                futures=client,
+                send=send_fn,
+                answer=_qk_answer,
+                edit=edit_fn,
+                message=msg if isinstance(msg, dict) else {},
+                now_ms=ts,
+            )
         if data.startswith(QUICK_REGISTER_PREFIX):
             answer_fn(cq_id)
             return handle_quick_register_callback(
@@ -248,6 +273,17 @@ def process_update(
         quick_out = handle_quick_text(conn, text, futures=client, send=send_fn, now_ms=ts)
         if quick_out is not None:
             return quick_out
+    settings_row = ensure_settings(conn)
+    if (
+        match_menu_label(text) is None
+        and not settings_row.get("awaiting_explore")
+        and settings_row.get("awaiting_risk") is None
+        and has_active_quick_draft(conn, now_ms=ts)
+    ):
+        client = futures if futures is not None else build_futures_client()
+        draft_out = handle_quick_draft_text(conn, text, futures=client, send=send_fn, edit=edit_fn, now_ms=ts)
+        if draft_out is not None:
+            return draft_out
     if ensure_settings(conn).get("awaiting_explore") and match_menu_label(text) is None:
         lookup = explore_lookup or _explore_lookup(futures)
         fetch = explore_fetch or fetch_klines

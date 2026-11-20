@@ -32,8 +32,8 @@ DAY_NOW = _ms_bangkok(2026, 11, 9, 15, 0)
 
 def test_n_migration_29(tmp_path: Path) -> None:
     fresh = open_db(tmp_path / "fresh.db")
-    assert SCHEMA_VERSION == 34
-    assert schema_version(fresh) == 34
+    assert SCHEMA_VERSION == 35
+    assert schema_version(fresh) == 35
     cols = {row[1] for row in fresh.execute("PRAGMA table_info(assist_settings)").fetchall()}
     assert "pause_reason" in cols
     assert ensure_settings(fresh)["pause_reason"] is None
@@ -57,7 +57,7 @@ def test_n_migration_29(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 34
+    assert schema_version(conn) == 35
     settings = ensure_settings(conn)
     assert settings["paused_until_ms"] == x
     assert settings["pause_reason"] is None
@@ -70,7 +70,7 @@ def test_n_migration_29(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 34
+    assert schema_version(conn) == 35
     settings = ensure_settings(conn)
     assert settings["paused_until_ms"] == x
     assert settings["pause_reason"] is None

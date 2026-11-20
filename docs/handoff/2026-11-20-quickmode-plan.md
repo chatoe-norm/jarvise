@@ -245,6 +245,14 @@ Rejected: (b) skip the main signal; (c) the bot closes the quick position by its
 13. **M2 has no extra first-trade risk limit** beyond the quick risk settings and caps (owner, 2026-11-20 02:02).
 14. **M0.5 is live-mode only** (`assist_execute_mode() == 'live'`, same rule as the watch): in testnet mode the read client is live fapi but the trade client is demo, so a close would wrongly answer "already closed". The kill switch keeps blocking entries only; exits stay allowed.
 
+15. **Owner decision 15 (2026-11-20 02:20), scope of this PR:**
+
+- (a) `🔄 อัปเดตราคา` on the quick card. The card is stored under a short server id and rebuilt from the original % stop when one was typed. Otherwise it requotes, and blocks when the stop is now on the wrong side. This fixes the 2-min card TTL vs the 10-min registration.
+- (b) Telegram notices when a registration is tagged to a fill, when it expires, and when a quick trade is closed in Binance. The Quick menu shows the registration countdown and, once the trade is open, the position.
+- (c) A mode tag (`🧪 เทสเน็ต` / `💰 เงินจริง`) on every quick card, confirm and result. Leftover orders are listed one by one instead of as a count.
+- Also: the Quick menu leads with trade buttons, and settings move below them. Typed `q …` stays as a fallback. The settings Yes/No buttons become Thai. `SL ตาม ATR` stays out (M4).
+- Plus decision 6: explicit Long / Short buttons on the Quick menu (this is the core of M1a-1).
+
 ## 5. Hard rules (carry into every quick-mode prompt)
 
 - The main system's rules are unchanged: floors 0.55/0.70, analyzer formula, 1.5× ATR stop, `flat_exit`, `same_side_hold`, profit lock, the main universe, the 4h signal path.
@@ -305,6 +313,7 @@ Not done on `main`: close button, leftover cancel of owner-placed orders, live `
 - **Paper vs live label.** The card, the confirm, and the result must say whether this is testnet/paper or live, using the current `assist_execute_mode()` (and, for M2, `QUICK_ORDERS_ENABLED`).
 - Quick settings must keep showing worst-case total risk as 2× main % + the quick cap.
 - Telegram "retry" / `ลองใหม่` stays forbidden on confirm paths that may already have sent an order (`ey:` / `xx:`), as in `AGENTS.md`.
+- M1a-1 (this PR): Long/Short stepper `qk:`, stored card + 🔄 อัปเดตราคา, tag/expire/close notices, mode tag.
 
 ## 9. Open points (not blocking M0 review)
 

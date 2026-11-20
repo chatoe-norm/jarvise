@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,6 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jarvise_assist.explore import contract_rejection, normalize_explore_symbol
-from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.messages import (
     STOP_INSTRUCTION,
     _fmt_price_tick,
@@ -25,11 +25,10 @@ from jarvise_assist.messages import (
     fmt_qty,
     safe_symbol_configs,
 )
+from jarvise_assist.order_lines import format_closing_order_line
 from jarvise_assist.pause import format_paused_until, main_week_loss_pause_until
 from jarvise_assist.quick import (
     QUICK_USAGE,
-    REG_TTL_MS,
-    create_quick_registration,
     get_quick_settings,
 )
 from jarvise_assist.quick_tags import quick_symbols
@@ -50,10 +49,20 @@ SendFn = Callable[..., Any]
 
 QUICK_FEE_BPS_PER_SIDE = Decimal("6")
 QUICK_CARD_TTL_MS = 120_000
+CARD_TTL_PREFIX = "การ์ดนี้ใช้ได้ถึง"
 QUICK_REGISTER_PREFIX = "qr:"
 BTN_QUICK_REGISTER = "⚡ เริ่มไม้ quick"
 
 _BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+
+
+def quick_mode_tag() -> str:
+    raw = (os.environ.get("JARVISE_ASSIST_EXECUTE") or "off").strip().lower()
+    if raw == "live":
+        return "💰 เงินจริง"
+    if raw == "testnet":
+        return "🧪 เทสเน็ต · ราคา/ยอดอ่านจากบัญชีจริง"
+    return "💰 เงินจริง · บอทไม่ส่งคำสั่ง"
 
 
 def _refusal_week_loss(until: int, *, now_ms: int) -> str:
@@ -299,7 +308,7 @@ def build_quick_card(
     if futures is None:
         return _fail("read_failed")
 
-    leftover_n = 0
+    leftover_orders: list[dict[str, Any]] = []
     try:
         row = futures.exchange_symbol(sym)
         if contract_rejection(row) is not None:
@@ -314,7 +323,7 @@ def build_quick_card(
             if str(order.get("symbol") or "").upper() != sym:
                 continue
             if _is_reduce_or_close(order):
-                leftover_n += 1
+                leftover_orders.append(order)
             else:
                 pending = True
         if pending:
@@ -469,6 +478,7 @@ def build_quick_card(
     side_label = "LONG" if side_l == "long" else "SHORT"
     lines = [
         f"⚡ Quick · {sym} · {side_label}",
+        quick_mode_tag(),
         f"เข้า (mark ตอนนี้): {entry_s}",
         f"Stop: {stop_s} ({float(stop_pct_shown):+.2f}%)",
         f"ขนาด: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT",
@@ -484,8 +494,10 @@ def build_quick_card(
     ]
     if fees["warn"]:
         lines.append("⚠ ค่าธรรมเนียมสูงเทียบระยะ stop — reward < 3× ค่าไป-กลับ")
-    if leftover_n > 0:
-        lines.append(f"⚠ มีคำสั่งป้องกันค้างบนสัญลักษณ์นี้ {leftover_n} อัน — ตรวจก่อนเข้า")
+    if leftover_orders:
+        lines.append(f"⚠ มีคำสั่งป้องกันค้างบนสัญลักษณ์นี้ {len(leftover_orders)} อัน — ตรวจก่อนเข้า:")
+        for order in leftover_orders:
+            lines.append(format_closing_order_line(order, tick=tick))
     cfg = safe_symbol_configs(futures).get(sym)
     for warn in account_leverage_warning_lines(sized, cfg):
         lines.append(warn)
@@ -495,7 +507,8 @@ def build_quick_card(
         f"(เพดาน quick {fmt_price(cap_pct)}% · รวม {fmt_price(portfolio_cap_pct)}%)"
     )
     lines.append(
-        f"การ์ดนี้ใช้ได้ถึง {_hhmmss(card_until)} · บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน 10 นาที"
+        f"{CARD_TTL_PREFIX} {_hhmmss(card_until)} (หมดแล้วกด 🔄 อัปเดตราคา) · "
+        "บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน 10 นาที"
     )
     lines.append(STOP_INSTRUCTION)
 
@@ -533,27 +546,30 @@ def handle_quick_text(
     send: SendFn,
     now_ms: int,
 ) -> dict[str, Any] | None:
+    from jarvise_assist.quick_m1a1 import (
+        _quoted_markup,
+        create_card_from_typed_command,
+    )
+
     parsed = parse_quick_command(text)
     if parsed is None:
         return None
     if parsed.get("error") == "usage":
         send(QUICK_USAGE)
         return {"handled": True, "kind": "quick_card", "ok": False, "reason": "usage"}
-    card = build_quick_card(
-        conn,
-        futures,
-        symbol=str(parsed["symbol"]),
-        side=str(parsed["side"]),
-        stop=parsed.get("stop"),
-        stop_pct=parsed.get("stop_pct"),
-        now_ms=now_ms,
-    )
-    send(card["text"], reply_markup=card.get("reply_markup"))
+    card_id, card = create_card_from_typed_command(conn, futures, parsed, now_ms=now_ms)
+    markup = card.get("reply_markup")
+    if card.get("ok") and card_id:
+        markup = _quoted_markup(card_id)
+    elif not card.get("ok"):
+        markup = None
+    send(card["text"], reply_markup=markup)
     return {
         "handled": True,
         "kind": "quick_card",
         "ok": bool(card.get("ok")),
         "reason": card.get("reason"),
+        "card_id": card_id,
     }
 
 
@@ -609,44 +625,33 @@ def handle_quick_register_callback(
         send(_refusal_week_loss(week_until, now_ms=now_ms))
         return {"ok": False, "reason": "week_loss_pause"}
 
-    positions: list[FuturesPosition] = list(card.get("positions") or [])
-    rid, reason = create_quick_registration(
+    from jarvise_assist.quick_m1a1 import (
+        _registration_refusal_text,
+        create_quick_registration_from_card,
+        registration_success_message,
+    )
+
+    rid, reason = create_quick_registration_from_card(
         conn,
         symbol=sym,
         side=side,
-        planned_entry=float(card["entry"]),
-        planned_stop=float(card["stop"]),
-        qty=float(card["qty"]),
+        card=card,
         now_ms=now_ms,
-        live_positions=positions,
     )
     if rid is None:
-        mapped = {
-            "open_registration": "quick_open",
-            "open_quick_trade": "quick_open",
-            "open_assist_watch": "main_position",
-            "live_position": "main_position",
-        }.get(str(reason), str(reason))
-        text = REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
-        send(text)
-        return {"ok": False, "reason": mapped}
+        send(_registration_refusal_text(str(reason)))
+        return {"ok": False, "reason": reason}
 
-    expires = int(now_ms) + REG_TTL_MS
-    side_label = "LONG" if side == "long" else "SHORT"
     tick = Decimal(str(card.get("tick") or "0.0001"))
-    entry_s = _fmt_price_tick(Decimal(str(card["entry"])), tick)
-    stop_fmt = _fmt_price_tick(Decimal(str(card["stop"])), tick)
-    qty_s = fmt_qty(Decimal(str(card["qty"])))
-    body = "\n".join(
-        [
-            (
-                f"✅ ลงทะเบียนไม้ quick {sym} {side_label} แล้ว — "
-                f"เปิดเองใน Binance ภายใน 10 นาที (ถึง {_hhmm(expires)} น.)"
-            ),
-            f"เข้า {entry_s} · stop {stop_fmt} · qty {qty_s}",
-            STOP_INSTRUCTION,
-            (f"บอทไม่ส่งคำสั่ง · ไม้แรกฝั่ง {side_label} บน {sym} ในช่วงนี้จะนับเป็น quick"),
-        ]
+    send(
+        registration_success_message(
+            sym=sym,
+            side=side,
+            entry=Decimal(str(card["entry"])),
+            stop=Decimal(str(card["stop"])),
+            qty=Decimal(str(card["qty"])),
+            tick=tick,
+            now_ms=now_ms,
+        )
     )
-    send(body)
     return {"ok": True, "registration_id": rid}

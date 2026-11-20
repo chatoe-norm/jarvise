@@ -633,27 +633,47 @@ def test_drawdown_blocks_approve(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_set_risk_cap_and_load_risk_caps(monkeypatch) -> None:
+    import os
+
     from jarvise_risk.caps import load_risk_caps, set_risk_cap
 
-    monkeypatch.delenv("REDIS_URL", raising=False)
-    # Set cap without redis updates os.environ and is read by load_risk_caps
-    set_risk_cap("max_notional_per_order", 3500.0)
-    set_risk_cap("max_daily_loss_usd", 250.0)
-    set_risk_cap("drawdown_lock_pct", 7.5)
-    set_risk_cap("max_open_positions", 4)
-    set_risk_cap("max_gross_notional_pct", 25.0)
-    set_risk_cap("max_symbol_notional_pct", 12.0)
-    set_risk_cap("max_correlated_bucket_pct", 18.0)
-    set_risk_cap("max_risk_per_trade_pct", 0.75)
+    env_keys = (
+        "JARVISE_MAX_NOTIONAL_PER_ORDER",
+        "JARVISE_MAX_DAILY_LOSS_USD",
+        "JARVISE_DRAWDOWN_LOCK_PCT",
+        "JARVISE_MAX_OPEN_POSITIONS",
+        "JARVISE_MAX_GROSS_NOTIONAL_PCT",
+        "JARVISE_MAX_SYMBOL_NOTIONAL_PCT",
+        "JARVISE_MAX_CORRELATED_BUCKET_PCT",
+        "JARVISE_MAX_RISK_PER_TRADE_PCT",
+    )
+    before = {k: os.environ.get(k) for k in env_keys}
+    try:
+        monkeypatch.delenv("REDIS_URL", raising=False)
+        # Set cap without redis updates os.environ and is read by load_risk_caps
+        set_risk_cap("max_notional_per_order", 3500.0)
+        set_risk_cap("max_daily_loss_usd", 250.0)
+        set_risk_cap("drawdown_lock_pct", 7.5)
+        set_risk_cap("max_open_positions", 4)
+        set_risk_cap("max_gross_notional_pct", 25.0)
+        set_risk_cap("max_symbol_notional_pct", 12.0)
+        set_risk_cap("max_correlated_bucket_pct", 18.0)
+        set_risk_cap("max_risk_per_trade_pct", 0.75)
 
-    caps = load_risk_caps()
-    assert caps.max_notional_per_order == 3500.0
-    assert caps.max_daily_loss_usd == 250.0
-    assert caps.drawdown_lock_pct == 7.5
-    assert caps.max_open_positions == 4
-    assert caps.max_gross_notional_pct == 25.0
-    assert caps.max_symbol_notional_pct == 12.0
-    assert caps.max_correlated_bucket_pct == 18.0
+        caps = load_risk_caps()
+        assert caps.max_notional_per_order == 3500.0
+        assert caps.max_daily_loss_usd == 250.0
+        assert caps.drawdown_lock_pct == 7.5
+        assert caps.max_open_positions == 4
+        assert caps.max_gross_notional_pct == 25.0
+        assert caps.max_symbol_notional_pct == 12.0
+        assert caps.max_correlated_bucket_pct == 18.0
 
-    d = caps.as_dict()
-    assert d["max_risk_per_trade_pct"] == 0.75
+        d = caps.as_dict()
+        assert d["max_risk_per_trade_pct"] == 0.75
+    finally:
+        for key, prev in before.items():
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev

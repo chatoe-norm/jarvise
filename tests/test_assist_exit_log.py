@@ -480,8 +480,8 @@ def test_migration_32_keeps_existing_fees(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert SCHEMA_VERSION == 34
-    assert schema_version(conn) == 34
+    assert SCHEMA_VERSION == 35
+    assert schema_version(conn) == 35
     row = conn.execute(
         "SELECT commission_usdt, funding_usdt, exit_source, atr_at_entry FROM assist_real_trade"
     ).fetchone()

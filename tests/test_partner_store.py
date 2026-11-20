@@ -37,9 +37,9 @@ def _n_events(conn: sqlite3.Connection, *, kind: str | None = None) -> int:
 
 
 def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 35
     fresh = open_db(tmp_path / "fresh.db")
-    assert schema_version(fresh) == 34
+    assert schema_version(fresh) == 35
     for table in ("partner", "partner_event", "partner_request"):
         row = fresh.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -82,7 +82,7 @@ def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 34
+    assert schema_version(conn) == 35
     after = conn.execute("SELECT COUNT(*) AS n FROM assist_settings").fetchone()
     n_after = after[0] if not hasattr(after, "keys") else after["n"]
     assert n_after == n_before
@@ -108,7 +108,7 @@ def test_migration_31_adds_request_source_on_v30_db_idempotent(tmp_path: Path) -
     conn.close()
 
     conn = open_db(path)
-    assert schema_version(conn) == 34
+    assert schema_version(conn) == 35
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(partner_request)")}
     assert "source" in cols
     # No backfill: the pre-31 row keeps NULL.
@@ -130,8 +130,9 @@ def test_migration_31_adds_request_source_on_v30_db_idempotent(tmp_path: Path) -
         "32:assist_exit_telemetry",
         "33:partner_kyc",
         "34:partner_payout_fx",
+        "35:assist_quick_m1a1",
     ]
-    assert schema_version(conn) == 34
+    assert schema_version(conn) == 35
     conn.close()
 
 

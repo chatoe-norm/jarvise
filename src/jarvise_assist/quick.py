@@ -7,21 +7,29 @@ open quick trade exists. Never writes assist_settings or assist_edge.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Callable, Sequence
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 from jarvise_assist.futures import FuturesPosition
+from jarvise_assist.messages import fmt_price, fmt_qty
+from jarvise_assist.order_lines import format_closing_order_line
 from jarvise_assist.pause import bangkok_day_start_ms, format_paused_until, main_week_loss_pause_until
 from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
 from jarvise_assist.sizing import portfolio_risk_cap_pct
 from jarvise_assist.store import ensure_settings
 
+logger = logging.getLogger(__name__)
+_BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
+
 SendFn = Callable[..., Any]
 
 REG_TTL_MS = 10 * 60_000
 REG_EXPIRE_GRACE_MS = 2 * 60_000
+QUICK_SAMPLE_TARGET = 25
 
 QUICK_USAGE = "พิมพ์: q BTC long 67000 (stop เป็นราคา) หรือ q BTC short 0.4% (stop ห่างจากราคา %)"
 
@@ -79,6 +87,7 @@ def create_quick_registration(
     qty: float,
     now_ms: int,
     live_positions: Sequence[FuturesPosition] | None = None,
+    commit: bool = True,
 ) -> tuple[str | None, str | None]:
     """Create an open registration. Returns (id, None) or (None, reason_code)."""
     sym = str(symbol).upper()
@@ -140,7 +149,8 @@ def create_quick_registration(
         """,
         (rid, sym, side_l, entry, stop, float(qty), int(now_ms), expires, int(now_ms)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return rid, None
 
 
@@ -356,6 +366,12 @@ def sync_quick_trades(
                 )
                 conn.commit()
                 info["expired"] += 1
+                _send_reg_expire_notice(
+                    send,
+                    sym=sym,
+                    side=side,
+                    kind="no_fill",
+                )
             continue
 
         first = after[0]
@@ -372,6 +388,8 @@ def sync_quick_trades(
             )
             conn.commit()
             info["expired"] += 1
+            opp = "SHORT" if side == "long" else "LONG"
+            _send_reg_expire_notice(send, sym=sym, side=side, kind="wrong_side", opposite=opp)
             continue
 
         if first_time > expires:
@@ -386,6 +404,7 @@ def sync_quick_trades(
                 )
                 conn.commit()
                 info["expired"] += 1
+                _send_reg_expire_notice(send, sym=sym, side=side, kind="late_fill")
             continue
 
         trade_id = f"aqt_{uuid.uuid4().hex[:16]}"
@@ -395,7 +414,7 @@ def sync_quick_trades(
         ).fetchone()
         if existing is not None:
             trade_id = str(existing["id"])
-        _rebuild_open_trade(
+        rebuilt = _rebuild_open_trade(
             conn,
             trade_id=trade_id,
             registration_id=rid,
@@ -418,6 +437,9 @@ def sync_quick_trades(
         conn.commit()
         tagged_trade_ids.add(trade_id)
         info["tagged"] += 1
+        _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
+        if str(rebuilt.get("status")) == "closed":
+            _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     # Rebuild already-open trades (skip ones tagged earlier in this run)
     open_trades = conn.execute("SELECT * FROM assist_quick_trade WHERE status='open'").fetchall()
@@ -425,6 +447,7 @@ def sync_quick_trades(
         trade_id = str(trade["id"])
         if trade_id in tagged_trade_ids:
             continue
+        was_open = str(trade["status"]) == "open"
         sym = str(trade["symbol"]).upper()
         side = str(trade["side"])
         entry_ms = int(trade["entry_time_ms"] or 0)
@@ -443,7 +466,7 @@ def sync_quick_trades(
             if not cand:
                 continue
             first_fill = cand[0]
-        _rebuild_open_trade(
+        rebuilt = _rebuild_open_trade(
             conn,
             trade_id=trade_id,
             registration_id=str(trade["registration_id"]),
@@ -456,8 +479,164 @@ def sync_quick_trades(
             client=client,
         )
         info["updated"] += 1
+        if was_open and str(rebuilt.get("status")) == "closed":
+            _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     return {k: v for k, v in info.items() if v}
+
+
+def _send_reg_expire_notice(
+    send: SendFn,
+    *,
+    sym: str,
+    side: str,
+    kind: str,
+    opposite: str | None = None,
+) -> None:
+    from jarvise_assist.quick_card import quick_mode_tag
+
+    label = _side_menu_label(side)
+    try:
+        if kind == "no_fill":
+            text = f"⌛ ลงทะเบียน quick {sym} {label} หมดเวลา — ไม่พบไม้ภายใน 10 นาที (ไม่นับเป็น quick)"
+        elif kind == "wrong_side" and opposite:
+            text = (
+                f"⌛ ลงทะเบียน quick {sym} {label} ถูกยกเลิก — ไม้แรกเป็นฝั่ง {opposite} จึงนับเป็นไม้ปกติ (ระบบหลักเฝ้าให้)"
+            )
+        else:
+            text = f"⌛ ลงทะเบียน quick {sym} {label} หมดเวลา — ไม้ที่เปิดหลังหมดเวลาไม่นับเป็น quick"
+        send("\n".join([text, quick_mode_tag()]))
+    except Exception:  # noqa: BLE001
+        logger.exception("quick expire notice failed")
+
+
+def _send_tag_notice(
+    conn: Any,
+    send: SendFn,
+    *,
+    registration_id: str,
+    client: Any,
+    now_ms: int,
+) -> None:
+    from jarvise_assist.quick_card import quick_mode_tag
+
+    try:
+        cur = conn.execute(
+            """
+            UPDATE assist_quick_registration
+            SET notice_sent_at_ms=?
+            WHERE id=? AND notice_sent_at_ms IS NULL
+            """,
+            (int(now_ms), registration_id),
+        )
+        if cur.rowcount == 0:
+            return
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("quick tag notice mark failed")
+        return
+    try:
+        trade = conn.execute(
+            "SELECT * FROM assist_quick_trade WHERE registration_id=?",
+            (registration_id,),
+        ).fetchone()
+        reg = conn.execute(
+            "SELECT * FROM assist_quick_registration WHERE id=?", (registration_id,)
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        logger.exception("quick tag notice load failed")
+        return
+    if trade is None or reg is None:
+        return
+    try:
+        sym = str(trade["symbol"])
+        label = _side_menu_label(str(trade["side"]))
+        risk = float(trade["risk_usdt"] or 0)
+        body = "\n".join(
+            [
+                (
+                    f"✅ จับไม้ quick ได้แล้ว — {sym} {label} "
+                    f"เข้า {fmt_price(Decimal(str(trade['entry_avg'])))} · "
+                    f"qty {fmt_qty(Decimal(str(trade['entry_qty'] or 0)))} · "
+                    f"stop ที่ลงทะเบียน {fmt_price(Decimal(str(reg['planned_stop'])))}"
+                ),
+                f"ความเสี่ยงจริง ≈ {fmt_price(Decimal(str(risk)))} USDT · บอทไม่ได้วาง stop — ตั้ง stop ในแอปเอง",
+                quick_mode_tag(),
+            ]
+        )
+        send(body)
+    except Exception:  # noqa: BLE001
+        logger.exception("quick tag notice failed")
+
+
+def _send_close_notice(
+    conn: Any,
+    send: SendFn,
+    *,
+    trade_id: str,
+    client: Any,
+    payload: dict[str, Any],
+    now_ms: int,
+    skip_reason: str | None = None,
+) -> None:
+    """skip_reason reserved for M1a-2 bot closes."""
+    from jarvise_assist.quick_card import quick_mode_tag
+
+    if skip_reason is not None:
+        return
+    try:
+        cur = conn.execute(
+            """
+            UPDATE assist_quick_trade
+            SET close_notice_at_ms=?
+            WHERE id=? AND close_notice_at_ms IS NULL
+            """,
+            (int(now_ms), trade_id),
+        )
+        if cur.rowcount == 0:
+            return
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("quick close notice mark failed")
+        return
+    try:
+        sym = str(payload["symbol"])
+        label = _side_menu_label(str(payload["side"]))
+        net_usdt = float(payload.get("net_usdt") or 0)
+        net_r = payload.get("net_r")
+        other = payload.get("commission_other_asset")
+        risk_usdt = float(payload.get("risk_usdt") or 0)
+        if net_r is None:
+            if other and risk_usdt > 0:
+                r_line = f"R คำนวณไม่ได้ (ค่าธรรมเนียมเป็น {other})"
+            else:
+                r_line = "R คำนวณไม่ได้"
+        else:
+            r_line = f"{float(net_r):+.2f}R (รวมค่าธรรมเนียมจริง + funding)"
+        lines = [
+            (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว (ปิดใน Binance) — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
+        ]
+        from jarvise_assist.order_lines import is_symbol_protective_leftover
+
+        leftovers: list[dict[str, Any]] = []
+        try:
+            if client is not None and hasattr(client, "all_open_orders"):
+                leftovers = [
+                    o for o in client.all_open_orders(symbol=sym) if is_symbol_protective_leftover(o)
+                ]
+        except Exception:  # noqa: BLE001
+            lines.append("อ่านคำสั่งค้างไม่ได้ — ตรวจในแอป")
+        else:
+            if leftovers:
+                lines.append(f"คำสั่งที่ยังค้างบน {sym}:")
+                tick = None
+                for o in leftovers:
+                    lines.append(format_closing_order_line(o, tick=tick))
+                lines.append("✋ ยังค้างอยู่ — ลบในแอป")
+        lines.append(quick_mode_tag())
+        send("\n".join(lines))
+    except Exception:  # noqa: BLE001
+        logger.exception("quick close notice failed")
 
 
 def summarize_quick(
@@ -557,7 +736,54 @@ def _fmt_pct(v: float) -> str:
     return f"{v:g}"
 
 
+def _menu_hhmm(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000.0, tz=_BANGKOK).strftime("%H:%M")
+
+
+def _side_menu_label(side: str) -> str:
+    return "LONG" if str(side).lower() == "long" else "SHORT"
+
+
+def _quick_live_lines(conn: Any, *, now_ms: int) -> list[str]:
+    lines: list[str] = []
+    regs = conn.execute(
+        "SELECT * FROM assist_quick_registration WHERE status='open' ORDER BY expires_at_ms ASC"
+    ).fetchall()
+    for reg in regs:
+        sym = str(reg["symbol"])
+        side = _side_menu_label(str(reg["side"]))
+        expires = int(reg["expires_at_ms"])
+        if int(now_ms) < expires:
+            rem_m = max(1, int((expires - int(now_ms) + 59_999) // 60_000))
+            lines.append(f"⏳ ลงทะเบียน {sym} {side} — เหลือ {rem_m} นาที (ถึง {_menu_hhmm(expires)} น.)")
+        elif int(now_ms) <= expires + REG_EXPIRE_GRACE_MS:
+            lines.append(f"⏳ ลงทะเบียน {sym} {side} — หมดเวลาแล้ว รอตรวจรอบสุดท้าย")
+    trades = conn.execute(
+        "SELECT * FROM assist_quick_trade WHERE status='open' ORDER BY entry_time_ms ASC"
+    ).fetchall()
+    for tr in trades:
+        sym = str(tr["symbol"])
+        side = _side_menu_label(str(tr["side"]))
+        entry = tr["entry_avg"]
+        qty = tr["entry_qty"]
+        stop = tr["planned_stop"]
+        entry_ms = int(tr["entry_time_ms"] or now_ms)
+        held_m = max(0, int((int(now_ms) - entry_ms) // 60_000))
+        lines.append(
+            f"📈 ไม้ quick เปิดอยู่: {sym} {side} · เข้า {fmt_price(Decimal(str(entry or 0)))} · "
+            f"qty {fmt_qty(Decimal(str(qty or 0)))} · "
+            f"stop ที่ลงทะเบียน {fmt_price(Decimal(str(stop or 0)))} · "
+            f"ถือมา {held_m} นาที"
+        )
+        lines.append("ดูกำไร/ขาดทุนใน 📋 ไม้ที่ถืออยู่")
+    if lines:
+        lines.append("ข้อมูลอัปเดตทุก 5 นาที")
+    return lines
+
+
 def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
+    from jarvise_assist.quick_card import quick_mode_tag
+
     settings = get_quick_settings(conn)
     risk = float(settings["risk_pct"])
     cap = float(settings["cap_pct"])
@@ -575,6 +801,9 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
 
     lines = [
         "⚡ Quick (scalping) — แยกจากระบบหลัก",
+        quick_mode_tag(),
+        *_quick_live_lines(conn, now_ms=now_ms),
+        f"สถานะ: {status}",
         (
             f"ความเสี่ยงต่อไม้ {_fmt_pct(risk)}% · "
             f"เพดานไม้ quick ที่เปิดพร้อมกัน {_fmt_pct(cap)}% · "
@@ -582,7 +811,6 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
             f"(หลัก {_fmt_pct(main_cap)}% + quick {_fmt_pct(cap)}%)"
         ),
         "ไม่มีล็อกรายวัน/แพ้ติดกันของ quick · หยุดเฉพาะเมื่อขาดทุนสัปดาห์เกิน 4R (กฎระบบหลัก)",
-        f"สถานะ: {status}",
     ]
     n = int(stats["n"])
     if n == 0:
@@ -605,12 +833,16 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
             f"วันนี้ {float(stats['today_r']):+.2f}R · streak {int(stats['streak'])} · "
             f"no-R {int(stats['no_r_n'])}"
         )
-    if n < 20:
-        lines.append(f"ยังไม่พิสูจน์ edge — ตัวอย่าง {n}/20 ไม้")
+    if n < QUICK_SAMPLE_TARGET:
+        lines.append(f"ยังไม่พิสูจน์ edge — ตัวอย่าง {n}/{QUICK_SAMPLE_TARGET} ไม้")
     lines.append(QUICK_USAGE)
 
     keyboard = {
         "inline_keyboard": [
+            [
+                {"text": "🟢 LONG", "callback_data": "qk:sd:l"},
+                {"text": "🔴 SHORT", "callback_data": "qk:sd:s"},
+            ],
             [
                 {"text": f"risk {_fmt_pct(v)}%", "callback_data": f"qs:risk:{_fmt_pct(v)}"}
                 if abs(risk - v) >= 1e-9
@@ -677,8 +909,8 @@ def _apply_quick_setting(
                 reply_markup={
                     "inline_keyboard": [
                         [
-                            {"text": "Yes", "callback_data": f"qs:ok:risk:{_fmt_pct(val)}"},
-                            {"text": "No", "callback_data": "qs:no"},
+                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:risk:{_fmt_pct(val)}"},
+                            {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"},
                         ]
                     ]
                 },
@@ -703,8 +935,8 @@ def _apply_quick_setting(
                 reply_markup={
                     "inline_keyboard": [
                         [
-                            {"text": "Yes", "callback_data": f"qs:ok:cap:{_fmt_pct(val)}"},
-                            {"text": "No", "callback_data": "qs:no"},
+                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:cap:{_fmt_pct(val)}"},
+                            {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"},
                         ]
                     ]
                 },
