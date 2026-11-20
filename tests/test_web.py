@@ -63,8 +63,12 @@ def test_basic_header_check() -> None:
 
 
 def _stub_control_deps(monkeypatch) -> None:
+    import jarvise_web.app as jarvise_web_app_module
+
     monkeypatch.delenv("WEB_BASIC_AUTH_USER", raising=False)
     monkeypatch.delenv("WEB_BASIC_AUTH_PASSWORD", raising=False)
+    monkeypatch.setenv("JARVISE_JOBS_URL", "http://127.0.0.1:9")
+    monkeypatch.setattr(jarvise_web_app_module, "JOBS_URL", "http://127.0.0.1:9")
 
     def fake_redis_get(key: str):
         return "0"
@@ -1248,7 +1252,19 @@ def test_api_doctrine_query(monkeypatch) -> None:
 
 
 def test_api_risk_caps_get_and_save(monkeypatch) -> None:
+    import os
+
     _stub_control_deps(monkeypatch)
+    cap_env_keys = (
+        "JARVISE_MAX_NOTIONAL_PER_ORDER",
+        "JARVISE_MAX_DAILY_LOSS_USD",
+        "JARVISE_DRAWDOWN_LOCK_PCT",
+        "JARVISE_MAX_OPEN_POSITIONS",
+        "JARVISE_MAX_GROSS_NOTIONAL_PCT",
+        "JARVISE_MAX_SYMBOL_NOTIONAL_PCT",
+        "JARVISE_MAX_CORRELATED_BUCKET_PCT",
+    )
+    cap_env_before = {key: os.environ.get(key) for key in cap_env_keys}
     client = TestClient(app)
 
     # GET /api/risk/caps
@@ -1268,6 +1284,11 @@ def test_api_risk_caps_get_and_save(monkeypatch) -> None:
     assert data["ok"] is True
     assert data["risk_caps"]["max_notional_per_order"] == 2500.0
     assert data["risk_caps"]["drawdown_lock_pct"] == 6.0
+    for key, prev in cap_env_before.items():
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
 
 
 def test_api_risk_caps_rejects_zero_and_negative(monkeypatch) -> None:

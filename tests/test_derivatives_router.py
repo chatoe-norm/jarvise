@@ -131,6 +131,8 @@ def test_cli_no_key_does_not_exit_2_before_fetch(tmp_path, monkeypatch, capsys):
             "global_market_cap_usd": 1e12,
         },
     )
+    monkeypatch.setattr(ingest_cli, "fetch_fear_greed", lambda *a, **k: None)
+    monkeypatch.setattr(ingest_cli, "fetch_altseason", lambda *a, **k: None)
     monkeypatch.setattr(
         ingest_cli,
         "fetch_derivatives",

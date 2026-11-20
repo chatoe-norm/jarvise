@@ -252,7 +252,7 @@ def test_menu_grace_line(tmp_path: Any) -> None:
     )
     conn.commit()
     text, _ = render_quick_menu(conn, now_ms=t0 + 60_000 + REG_EXPIRE_GRACE_MS - 1)
-    assert "หมดเวลาแล้ว รอตรวจรอบสุดท้าย" in text
+    assert "⏳ ลงทะเบียน BTCUSDT LONG — หมดเวลาแล้ว รอตรวจรอบสุดท้าย" in text.split("\n")
 
 
 def test_sync_tag_notice_select_failure_continues(tmp_path: Any) -> None:
