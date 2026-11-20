@@ -1187,51 +1187,46 @@ def test_api_paper_auto_decide_config(monkeypatch) -> None:
     _stub_control_deps(monkeypatch)
     auto_key = "JARVISE_PAPER_AUTO_DECIDE"
     auto_before = os.environ.get(auto_key)
-    if auto_before is None:
-        monkeypatch.delenv(auto_key, raising=False)
-    else:
-        monkeypatch.setenv(auto_key, auto_before)
-    client = TestClient(app)
-
-    # 1. GET config
-    resp = client.get("/api/paper/auto-decide/config")
-    assert resp.status_code == 200
-    cfg = resp.json()
-    assert cfg["ok"] is True
-    assert "enabled" in cfg
-    assert "max_risk_per_trade_pct" in cfg
-
-    # 2. POST config JSON
-    resp = client.post(
-        "/api/paper/auto-decide/config",
-        json={"enabled": True, "max_risk_per_trade_pct": 0.5},
-        headers={"accept": "application/json"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert resp.json()["enabled"] is True
-    assert resp.json()["max_risk_per_trade_pct"] == 0.5
-
-    # 3. GET /api/status includes auto_decide_config
-    resp = client.get("/api/status")
-    assert resp.status_code == 200
-    status_data = resp.json()
-    assert "auto_decide_config" in status_data
-    assert status_data["auto_decide_config"]["enabled"] is True
-    assert status_data["auto_decide_config"]["max_risk_per_trade_pct"] == 0.5
-
-    # 4. POST config Form with clamp (> 1.0 clamped to 1.0)
-    resp = client.post(
-        "/api/paper/auto-decide/config",
-        data={"enabled": "false", "max_risk_per_trade_pct": "2.5"},
-        headers={"accept": "application/json"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert resp.json()["enabled"] is False
-    assert resp.json()["max_risk_per_trade_pct"] == 1.0
     try:
-        pass
+        client = TestClient(app)
+
+        # 1. GET config
+        resp = client.get("/api/paper/auto-decide/config")
+        assert resp.status_code == 200
+        cfg = resp.json()
+        assert cfg["ok"] is True
+        assert "enabled" in cfg
+        assert "max_risk_per_trade_pct" in cfg
+
+        # 2. POST config JSON
+        resp = client.post(
+            "/api/paper/auto-decide/config",
+            json={"enabled": True, "max_risk_per_trade_pct": 0.5},
+            headers={"accept": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["enabled"] is True
+        assert resp.json()["max_risk_per_trade_pct"] == 0.5
+
+        # 3. GET /api/status includes auto_decide_config
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        status_data = resp.json()
+        assert "auto_decide_config" in status_data
+        assert status_data["auto_decide_config"]["enabled"] is True
+        assert status_data["auto_decide_config"]["max_risk_per_trade_pct"] == 0.5
+
+        # 4. POST config Form with clamp (> 1.0 clamped to 1.0)
+        resp = client.post(
+            "/api/paper/auto-decide/config",
+            data={"enabled": "false", "max_risk_per_trade_pct": "2.5"},
+            headers={"accept": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["enabled"] is False
+        assert resp.json()["max_risk_per_trade_pct"] == 1.0
     finally:
         if auto_before is None:
             os.environ.pop(auto_key, None)
@@ -1280,32 +1275,26 @@ def test_api_risk_caps_get_and_save(monkeypatch) -> None:
         "JARVISE_MAX_CORRELATED_BUCKET_PCT",
     )
     cap_env_before = {key: os.environ.get(key) for key in cap_env_keys}
-    for key in cap_env_keys:
-        if key in os.environ:
-            monkeypatch.setenv(key, os.environ[key])
-        else:
-            monkeypatch.delenv(key, raising=False)
-    client = TestClient(app)
-
-    # GET /api/risk/caps
-    resp = client.get("/api/risk/caps")
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert "max_notional_per_order" in resp.json()["risk_caps"]
-
-    # POST /api/risk/caps JSON
-    resp = client.post(
-        "/api/risk/caps",
-        json={"max_notional_per_order": 2500.0, "drawdown_lock_pct": 6.0},
-        headers={"accept": "application/json"},
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["ok"] is True
-    assert data["risk_caps"]["max_notional_per_order"] == 2500.0
-    assert data["risk_caps"]["drawdown_lock_pct"] == 6.0
     try:
-        pass
+        client = TestClient(app)
+
+        # GET /api/risk/caps
+        resp = client.get("/api/risk/caps")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert "max_notional_per_order" in resp.json()["risk_caps"]
+
+        # POST /api/risk/caps JSON
+        resp = client.post(
+            "/api/risk/caps",
+            json={"max_notional_per_order": 2500.0, "drawdown_lock_pct": 6.0},
+            headers={"accept": "application/json"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["risk_caps"]["max_notional_per_order"] == 2500.0
+        assert data["risk_caps"]["drawdown_lock_pct"] == 6.0
     finally:
         for key, prev in cap_env_before.items():
             if prev is None:

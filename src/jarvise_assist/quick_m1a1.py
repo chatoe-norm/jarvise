@@ -15,6 +15,7 @@ from jarvise_assist.messages import STOP_INSTRUCTION, _fmt_price_tick, fmt_price
 from jarvise_assist.pause import main_week_loss_pause_until
 from jarvise_assist.quick import REG_TTL_MS, create_quick_registration
 from jarvise_assist.quick_card import (
+    CARD_TTL_PREFIX,
     QUICK_CARD_TTL_MS,
     REFUSAL,
     _fail,
@@ -131,8 +132,6 @@ def _quote_is_expired(quoted_at_ms: int, now_ms: int) -> bool:
 
 
 def _card_text_after_registration(card_text: str) -> str:
-    from jarvise_assist.quick_card import CARD_TTL_PREFIX
-
     lines = [ln for ln in card_text.split("\n") if not ln.startswith(CARD_TTL_PREFIX)]
     lines.append("✅ ลงทะเบียนแล้ว")
     return "\n".join(lines)
@@ -380,21 +379,35 @@ def registration_success_message(
     )
 
 
+def _registered_idempotent_card_text(conn: Any, row: dict[str, Any]) -> str:
+    """Replay body from the stored registration row — never the live mark."""
+    rid = row.get("registration_id")
+    if not rid:
+        return _decorate_card_text("✅ ลงทะเบียนแล้ว")
+    reg = conn.execute("SELECT * FROM assist_quick_registration WHERE id=?", (rid,)).fetchone()
+    if reg is None:
+        return _decorate_card_text("✅ ลงทะเบียนแล้ว")
+    sym = str(reg["symbol"]).upper()
+    side = str(reg["side"])
+    entry = Decimal(str(reg["planned_entry"]))
+    stop = Decimal(str(reg["planned_stop"]))
+    qty = Decimal(str(reg["qty"]))
+    lines = [
+        f"⚡ Quick · {sym} · {_side_label(side)}",
+        f"เข้า {fmt_price(entry)} · stop {fmt_price(stop)} · qty {fmt_qty(qty)}",
+        "✅ ลงทะเบียนแล้ว",
+    ]
+    return _decorate_card_text("\n".join(lines))
+
+
 def _render_registered_card_edit(
     conn: Any,
-    futures: Any,
     row: dict[str, Any],
     *,
-    now_ms: int,
     edit: Callable[[str, dict[str, Any] | None], bool],
 ) -> None:
-    try:
-        card = build_card_at_quoted_stop(conn, futures, row, now_ms=now_ms)
-        if card.get("ok"):
-            body = _decorate_card_text(_card_text_after_registration(str(card["text"])))
-            edit(body, {"inline_keyboard": []})
-    except Exception:  # noqa: BLE001
-        logger.exception("qk:rg idempotent re-render failed card_id=%s", row.get("id"))
+    body = _registered_idempotent_card_text(conn, row)
+    edit(body, {"inline_keyboard": []})
 
 
 def _handle_qk_register(
@@ -412,20 +425,24 @@ def _handle_qk_register(
     if st == "registered":
         rid_existing = row.get("registration_id")
         if rid_existing:
-            _render_registered_card_edit(conn, futures, row, now_ms=now_ms, edit=edit)
+            _render_registered_card_edit(conn, row, edit=edit)
             answer(MSG_ALREADY_REGISTERED)
             return {"ok": True, "idempotent": True}
-        conn.execute(
+        repaired = conn.execute(
             """
             UPDATE assist_quick_card
             SET status='quoted', updated_at_ms=?
             WHERE id=? AND status='registered' AND registration_id IS NULL
             """,
             (int(now_ms), card_id),
-        )
+        ).rowcount
         conn.commit()
         row = _load_card(conn, card_id) or row
         st = str(row["status"])
+        if repaired == 0 and row.get("registration_id"):
+            _render_registered_card_edit(conn, row, edit=edit)
+            answer(MSG_ALREADY_REGISTERED)
+            return {"ok": True, "idempotent": True}
 
     if st != "quoted":
         answer(MSG_BAD_BUTTON)

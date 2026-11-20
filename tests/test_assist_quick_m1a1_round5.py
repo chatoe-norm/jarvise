@@ -755,6 +755,7 @@ def test_s29_typed_draft_pct_and_price_paths(tmp_path: Any, monkeypatch: pytest.
     )
     assert out2.get("ok") is False
     assert edits[-1]["text"] == _decorate_card_text(str(expect_price["text"]))
+    assert edits[-1]["reply_markup"] == _stop_step_markup(cid2)
     assert (
         conn2.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid2,)).fetchone()["status"]
         == "pick_stop"
