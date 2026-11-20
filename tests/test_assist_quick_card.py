@@ -344,6 +344,7 @@ def test_text_process_update_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     kb = sent[0]["reply_markup"]["inline_keyboard"]
     assert kb[0][0]["callback_data"].startswith("qk:rg:")
     assert kb[1][0]["callback_data"].startswith("qk:rf:")
+    assert kb[1][1]["callback_data"].startswith("qk:x:")
     conn.close()
 
 

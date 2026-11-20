@@ -42,7 +42,11 @@ from jarvise_assist.quick_card import (
     handle_quick_text,
     parse_quick_command,
 )
-from jarvise_assist.quick_m1a1 import handle_quick_draft_text, handle_quick_trade_callback
+from jarvise_assist.quick_m1a1 import (
+    handle_quick_draft_text,
+    handle_quick_trade_callback,
+    has_active_quick_draft,
+)
 from jarvise_assist.store import (
     ensure_settings,
     get_edge,
@@ -270,6 +274,7 @@ def process_update(
         match_menu_label(text) is None
         and not settings_row.get("awaiting_explore")
         and settings_row.get("awaiting_risk") is None
+        and has_active_quick_draft(conn, now_ms=ts)
     ):
         client = futures if futures is not None else build_futures_client()
         draft_out = handle_quick_draft_text(conn, text, futures=client, send=send_fn, edit=edit_fn, now_ms=ts)

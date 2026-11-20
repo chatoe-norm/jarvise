@@ -8,7 +8,7 @@ from typing import Any
 from jarvise_assist.futures import order_stop_price, order_type
 from jarvise_assist.messages import _fmt_price_tick, fmt_price, fmt_qty
 
-OWNER_CLOSING_ORDER_NOTE = "✋ คุณตั้งเอง"
+QUICK_LIST_CLOSING_NOTE = "✋ คุณตั้งเอง"
 BOT_CLOSING_ORDER_NOTE = "🤖 ของบอท"
 
 
@@ -37,7 +37,7 @@ def closing_order_note(order: dict[str, Any]) -> str:
     cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
     if cid.startswith("jv-"):
         return BOT_CLOSING_ORDER_NOTE
-    return OWNER_CLOSING_ORDER_NOTE
+    return QUICK_LIST_CLOSING_NOTE
 
 
 def format_closing_order_line(
@@ -101,5 +101,14 @@ def owner_closing_orders(
     return out
 
 
-def format_owner_order_line(order: dict[str, Any], *, tick: Decimal | None) -> str:
-    return format_closing_order_line(order, tick=tick, note=OWNER_CLOSING_ORDER_NOTE)
+def reduce_only_flag(order: dict[str, Any]) -> bool:
+    raw = order.get("reduceOnly")
+    if raw is True:
+        return True
+    if raw is False:
+        return False
+    return str(raw or "").lower() in {"true", "1"}
+
+
+def is_symbol_protective_leftover(order: dict[str, Any]) -> bool:
+    return reduce_only_flag(order) or close_position_flag(order)

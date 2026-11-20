@@ -6,7 +6,7 @@ import logging
 import re
 import secrets
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -44,13 +44,10 @@ MSG_CARD_TOO_OLD = "การ์ดเก่าเกิน 30 นาที — 
 MSG_ALREADY_REGISTERED = "ลงทะเบียนไปแล้ว — ดูสถานะในเมนู ⚡ Quick"
 MSG_CARD_QUOTE_EXPIRED = "การ์ดหมดอายุ — กด 🔄 อัปเดตราคา ก่อนลงทะเบียน"
 MSG_STOP_FAR = "stop ห่างเกิน 20% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+STOP_STEP_HINT = "เลือก stop หรือพิมพ์ราคา/เปอร์เซ็นต์ (เช่น 67000 หรือ 0.4%)"
 
 
-def _now_local(ms: int) -> datetime:
-    return datetime.fromtimestamp(ms / 1000.0, tz=_BANGKOK)
-
-
-def _new_card_id(conn: Any, *, now_ms: int) -> str:
+def _new_card_id(conn: Any) -> str:
     for _ in range(8):
         cid = secrets.token_hex(4)
         exists = conn.execute("SELECT 1 FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
@@ -67,19 +64,6 @@ def cancel_quick_drafts(conn: Any, *, now_ms: int) -> None:
         WHERE status IN ('pick_symbol', 'pick_stop')
         """,
         (int(now_ms),),
-    )
-    conn.commit()
-
-
-def _expire_stale_drafts(conn: Any, *, now_ms: int) -> None:
-    cutoff = int(now_ms) - QUICK_DRAFT_TTL_MS
-    conn.execute(
-        """
-        UPDATE assist_quick_card
-        SET status='expired', updated_at_ms=?
-        WHERE status IN ('pick_symbol', 'pick_stop') AND updated_at_ms < ?
-        """,
-        (int(now_ms), cutoff),
     )
     conn.commit()
 
@@ -145,6 +129,16 @@ def _stop_step_markup(card_id: str) -> dict[str, Any]:
         "inline_keyboard": [
             presets,
             [{"text": _BTN_CANCEL, "callback_data": f"qk:x:{card_id}"}],
+        ]
+    }
+
+
+def _refresh_only_markup(card_id: str) -> dict[str, Any]:
+    rf = f"qk:rf:{card_id}"
+    xb = f"qk:x:{card_id}"
+    return {
+        "inline_keyboard": [
+            [{"text": _BTN_REFRESH, "callback_data": rf}, {"text": _BTN_CANCEL, "callback_data": xb}]
         ]
     }
 
@@ -237,38 +231,51 @@ def build_card_for_row(
     return build_quick_card(conn, futures, **kw)
 
 
-def _send_symbol_step(
+def build_card_at_quoted_stop(
     conn: Any,
+    futures: Any,
+    row: dict[str, Any],
     *,
-    card_id: str,
-    side: str,
-    send: SendFn,
-) -> int | None:
-    label = _side_label(side)
-    text = "\n".join(
-        [
-            f"⚡ Quick · {label} — เลือกเหรียญ หรือพิมพ์ชื่อ (เช่น BTC)",
-            _mode_tag(),
-        ]
-    )
-    syms = _recent_quick_symbols(conn)
-    kb = {"inline_keyboard": _symbol_buttons(card_id, syms)}
-    mid = send(text, reply_markup=kb)
-    if mid is not None:
-        conn.execute(
-            "UPDATE assist_quick_card SET message_id=?, updated_at_ms=? WHERE id=?",
-            (
-                int(mid),
-                int(
-                    conn.execute(
-                        "SELECT updated_at_ms FROM assist_quick_card WHERE id=?", (card_id,)
-                    ).fetchone()[0]
-                ),
-                card_id,
-            ),
+    now_ms: int,
+) -> dict[str, Any]:
+    from jarvise_assist.quick_card import build_quick_card
+
+    sym = str(row.get("symbol") or "")
+    side = str(row["side"])
+    qs = row.get("quote_stop")
+    if qs is not None:
+        return build_quick_card(
+            conn,
+            futures,
+            symbol=sym,
+            side=side,
+            stop=Decimal(str(qs)),
+            now_ms=now_ms,
         )
-        conn.commit()
-    return mid
+    return build_card_for_row(conn, futures, row, now_ms=now_ms)
+
+
+def _terminal_status_answer(status: str) -> str:
+    if status == "registered":
+        return MSG_ALREADY_REGISTERED
+    return MSG_BAD_BUTTON
+
+
+def _expire_draft_row_if_needed(conn: Any, row: dict[str, Any], *, now_ms: int) -> dict[str, Any] | None:
+    if row["status"] not in {"pick_symbol", "pick_stop"}:
+        return row
+    if int(now_ms) - int(row["updated_at_ms"]) <= QUICK_DRAFT_TTL_MS:
+        return row
+    conn.execute(
+        "UPDATE assist_quick_card SET status='expired', updated_at_ms=? WHERE id=? AND status=?",
+        (int(now_ms), row["id"], row["status"]),
+    )
+    conn.commit()
+    return None
+
+
+def has_active_quick_draft(conn: Any, *, now_ms: int) -> bool:
+    return _active_draft(conn, now_ms=now_ms) is not None
 
 
 def register_quick_from_quote(
@@ -338,7 +345,6 @@ def handle_quick_trade_callback(
     message: dict[str, Any],
     now_ms: int,
 ) -> dict[str, Any]:
-    _expire_stale_drafts(conn, now_ms=now_ms)
     parts = data.split(":")
     if len(parts) < 3 or parts[0] != "qk":
         answer(MSG_BAD_BUTTON)
@@ -356,7 +362,7 @@ def handle_quick_trade_callback(
         from jarvise_assist.store import write_settings
 
         write_settings(conn, awaiting_explore=False, awaiting_risk=None, pending_risk_pct=None)
-        card_id = _new_card_id(conn, now_ms=now_ms)
+        card_id = _new_card_id(conn)
         conn.execute(
             """
             INSERT INTO assist_quick_card (
@@ -389,17 +395,11 @@ def handle_quick_trade_callback(
     if row is None:
         answer(MSG_BAD_BUTTON)
         return {"ok": False}
-    if (
-        row["status"] in {"pick_symbol", "pick_stop"}
-        and int(now_ms) - int(row["updated_at_ms"]) > QUICK_DRAFT_TTL_MS
-    ):
-        conn.execute(
-            "UPDATE assist_quick_card SET status='expired', updated_at_ms=? WHERE id=?",
-            (int(now_ms), card_id),
-        )
-        conn.commit()
+    fresh = _expire_draft_row_if_needed(conn, row, now_ms=now_ms)
+    if fresh is None:
         answer(MSG_DRAFT_EXPIRED)
         return {"ok": False, "expired": True}
+    row = fresh
 
     mid = message.get("message_id")
     chat_id = (message.get("chat") or {}).get("id")
@@ -415,50 +415,79 @@ def handle_quick_trade_callback(
                 conn.commit()
             return new_mid is not None
         try:
-            edit(int(mid), text, reply_markup=markup or {"inline_keyboard": []}, chat_id=str(chat_id))
-            return True
+            ok = edit(
+                int(mid),
+                text,
+                reply_markup=markup or {"inline_keyboard": []},
+                chat_id=str(chat_id),
+            )
+            if ok:
+                return True
         except Exception:  # noqa: BLE001
-            new_mid = send(text, reply_markup=markup)
-            if new_mid is not None:
-                conn.execute(
-                    "UPDATE assist_quick_card SET message_id=? WHERE id=?",
-                    (int(new_mid), card_id),
-                )
-                conn.commit()
-            return True
+            pass
+        new_mid = send(text, reply_markup=markup)
+        if new_mid is not None:
+            conn.execute(
+                "UPDATE assist_quick_card SET message_id=? WHERE id=?",
+                (int(new_mid), card_id),
+            )
+            conn.commit()
+        return new_mid is not None
+
+    st = str(row["status"])
 
     if op == "x":
-        conn.execute(
-            "UPDATE assist_quick_card SET status='cancelled', updated_at_ms=? WHERE id=?",
+        if st == "registered":
+            answer(MSG_ALREADY_REGISTERED)
+            return {"ok": True, "idempotent": True}
+        if st in {"cancelled", "expired"}:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+        cur = conn.execute(
+            """
+            UPDATE assist_quick_card
+            SET status='cancelled', updated_at_ms=?
+            WHERE id=? AND status IN ('pick_symbol', 'pick_stop', 'quoted')
+            """,
             (int(now_ms), card_id),
         )
+        if cur.rowcount == 0:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
         conn.commit()
         _edit("ยกเลิกแล้ว", {"inline_keyboard": []})
         answer(None)
         return {"ok": True, "cancelled": True}
 
+    if st in {"registered", "cancelled", "expired"}:
+        answer(_terminal_status_answer(st))
+        return {"ok": st == "registered", "idempotent": st == "registered"}
+
     if op == "sy" and len(parts) >= 4:
+        if st != "pick_symbol":
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
         sym = ":".join(parts[3:]).upper()
         symbol = normalize_explore_symbol(sym)
         if symbol is None:
             answer(MSG_BAD_BUTTON)
             return {"ok": False}
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE assist_quick_card
             SET symbol=?, status='pick_stop', updated_at_ms=?
-            WHERE id=?
+            WHERE id=? AND status='pick_symbol'
             """,
             (symbol, int(now_ms), card_id),
         )
+        if cur.rowcount == 0:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
         conn.commit()
         side = str(row["side"])
         text = "\n".join(
             [
-                (
-                    f"⚡ Quick · {symbol} · {_side_label(side)} — "
-                    "เลือก stop หรือพิมพ์ราคา/เปอร์เซ็นต์ (เช่น 67000 หรือ 0.4%)"
-                ),
+                f"⚡ Quick · {symbol} · {_side_label(side)} — {STOP_STEP_HINT}",
                 _mode_tag(),
             ]
         )
@@ -467,18 +496,24 @@ def handle_quick_trade_callback(
         return {"ok": True, "step": "pick_stop"}
 
     if op == "sl" and len(parts) >= 4:
+        if st != "pick_stop":
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
         pct_s = parts[3]
         if pct_s not in STOP_PRESETS:
-            answer(None)
+            answer(MSG_BAD_BUTTON)
             return {"ok": False, "stale": True}
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE assist_quick_card
             SET stop_kind='pct', stop_value=?, updated_at_ms=?
-            WHERE id=?
+            WHERE id=? AND status='pick_stop'
             """,
             (pct_s, int(now_ms), card_id),
         )
+        if cur.rowcount == 0:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
         conn.commit()
         row = _load_card(conn, card_id) or row
         return _finalize_quoted_card(
@@ -486,25 +521,24 @@ def handle_quick_trade_callback(
         )
 
     if op == "rf":
-        if row["status"] == "registered":
-            answer(MSG_ALREADY_REGISTERED)
-            return {"ok": True, "idempotent": True}
         if int(now_ms) - int(row["created_at_ms"]) > QUICK_CARD_MAX_AGE_MS:
             answer(MSG_CARD_TOO_OLD)
             return {"ok": False}
-        if row["status"] not in {"quoted", "pick_stop"}:
+        if st not in {"quoted", "pick_stop"}:
             answer(MSG_BAD_BUTTON)
             return {"ok": False}
         rebuilt = build_card_for_row(conn, futures, row, now_ms=now_ms)
         if not rebuilt.get("ok") and rebuilt.get("reason") == "stop_wrong_side":
+            sym = str(row.get("symbol") or "")
             mark_s = "?"
-            try:
-                mark_s = fmt_price(rebuilt.get("mark") or Decimal("0"))
-            except Exception:  # noqa: BLE001
-                pass
+            if futures is not None and sym:
+                try:
+                    mark_s = fmt_price(Decimal(str(futures.mark_price(sym))))
+                except Exception:  # noqa: BLE001
+                    pass
             stop_v = row.get("stop_value") or "?"
             conn.execute(
-                "UPDATE assist_quick_card SET status='pick_stop', updated_at_ms=? WHERE id=?",
+                "UPDATE assist_quick_card SET status='pick_stop', updated_at_ms=? WHERE id=? AND status IN ('quoted', 'pick_stop')",
                 (int(now_ms), card_id),
             )
             conn.commit()
@@ -514,7 +548,7 @@ def handle_quick_trade_callback(
             return {"ok": False, "stop_wrong_side": True}
         if not rebuilt.get("ok"):
             body = _decorate_card_text(str(rebuilt.get("text") or REFUSAL.get("read_failed", "")))
-            _edit(body, _quoted_markup(card_id))
+            _edit(body, _refresh_only_markup(card_id))
             answer(None)
             return {"ok": False, "reason": rebuilt.get("reason")}
         _persist_quote(
@@ -531,68 +565,79 @@ def handle_quick_trade_callback(
         return {"ok": True, "refreshed": True}
 
     if op == "rg":
-        if row["status"] == "registered":
-            answer(MSG_ALREADY_REGISTERED)
-            return {"ok": True, "idempotent": True}
-        if row["status"] != "quoted":
+        if st != "quoted":
             answer(MSG_BAD_BUTTON)
             return {"ok": False}
         quoted_at = int(row.get("quoted_at_ms") or 0)
         if quoted_at and int(now_ms) - quoted_at > QUICK_CARD_TTL_MS:
-            body = _decorate_card_text(
-                "\n".join(
-                    [
-                        MSG_CARD_QUOTE_EXPIRED,
-                        _mode_tag(),
-                    ]
-                )
-            )
-            _edit(body, _quoted_markup(card_id))
+            body = _decorate_card_text("\n".join([MSG_CARD_QUOTE_EXPIRED, _mode_tag()]))
+            _edit(body, _refresh_only_markup(card_id))
             answer(MSG_CARD_QUOTE_EXPIRED)
             return {"ok": False, "quote_expired": True}
-        card = build_card_for_row(conn, futures, row, now_ms=now_ms)
+        claim = conn.execute(
+            """
+            UPDATE assist_quick_card SET status='registered', updated_at_ms=?
+            WHERE id=? AND status='quoted'
+            """,
+            (int(now_ms), card_id),
+        )
+        if claim.rowcount == 0:
+            answer(MSG_ALREADY_REGISTERED)
+            return {"ok": True, "idempotent": True}
+        conn.commit()
+        week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
+        if week_until is not None:
+            conn.execute(
+                "UPDATE assist_quick_card SET status='quoted', updated_at_ms=? WHERE id=?",
+                (int(now_ms), card_id),
+            )
+            conn.commit()
+            answer(_refusal_week_loss(week_until, now_ms=now_ms))
+            return {"ok": False, "reason": "week_loss_pause"}
+        card = build_card_at_quoted_stop(conn, futures, row, now_ms=now_ms)
         if not card.get("ok"):
+            conn.execute(
+                "UPDATE assist_quick_card SET status='quoted', updated_at_ms=? WHERE id=?",
+                (int(now_ms), card_id),
+            )
+            conn.commit()
             send(str(card.get("text") or REFUSAL.get("read_failed", "")))
             answer(None)
             return {"ok": False, "reason": card.get("reason")}
-        week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
-        if week_until is not None:
-            answer(_refusal_week_loss(week_until, now_ms=now_ms))
-            return {"ok": False, "reason": "week_loss_pause"}
         sym = str(row["symbol"]).upper()
         side = str(row["side"])
+        quote_stop = float(row["quote_stop"])
+        quote_entry = float(row["quote_entry"])
+        quote_qty = float(row["quote_qty"])
         rid, reason = register_quick_from_quote(
             conn,
             symbol=sym,
             side=side,
-            quote_stop=float(card["stop"]),
-            quote_entry=float(card["entry"]),
-            quote_qty=float(card["qty"]),
+            quote_stop=quote_stop,
+            quote_entry=quote_entry,
+            quote_qty=quote_qty,
             positions=list(card.get("positions") or []),
             now_ms=now_ms,
         )
         if rid is None:
+            conn.execute(
+                "UPDATE assist_quick_card SET status='quoted', updated_at_ms=? WHERE id=?",
+                (int(now_ms), card_id),
+            )
+            conn.commit()
             mapped = {
                 "open_registration": "quick_open",
                 "open_quick_trade": "quick_open",
                 "open_assist_watch": "main_position",
                 "live_position": "main_position",
             }.get(str(reason), str(reason))
-            text = REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
-            send(text)
+            send(REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason))))
             answer(None)
             return {"ok": False, "reason": mapped}
-        cur = conn.execute(
-            """
-            UPDATE assist_quick_card
-            SET registration_id=?, status='registered', updated_at_ms=?
-            WHERE id=? AND status='quoted'
-            """,
+        conn.execute(
+            "UPDATE assist_quick_card SET registration_id=?, updated_at_ms=? WHERE id=?",
             (rid, int(now_ms), card_id),
         )
-        if cur.rowcount == 0:
-            answer(MSG_ALREADY_REGISTERED)
-            return {"ok": True, "idempotent": True}
         conn.commit()
         tick = Decimal(str(card.get("tick") or "0.0001"))
         _edit(_decorate_card_text(str(card["text"])), {"inline_keyboard": []})
@@ -600,9 +645,9 @@ def handle_quick_trade_callback(
             registration_success_message(
                 sym=sym,
                 side=side,
-                entry=Decimal(str(card["entry"])),
-                stop=Decimal(str(card["stop"])),
-                qty=Decimal(str(card["qty"])),
+                entry=Decimal(str(quote_entry)),
+                stop=Decimal(str(quote_stop)),
+                qty=Decimal(str(quote_qty)),
                 tick=tick,
                 now_ms=now_ms,
             )
@@ -651,7 +696,6 @@ def _finalize_quoted_card(
 
 
 def _active_draft(conn: Any, *, now_ms: int) -> dict[str, Any] | None:
-    _expire_stale_drafts(conn, now_ms=now_ms)
     rows = conn.execute(
         """
         SELECT * FROM assist_quick_card
@@ -663,6 +707,31 @@ def _active_draft(conn: Any, *, now_ms: int) -> dict[str, Any] | None:
     if len(alive) != 1:
         return None
     return alive[0]
+
+
+def _edit_draft_message(
+    conn: Any,
+    *,
+    card_id: str,
+    message_id: int | None,
+    text: str,
+    markup: dict[str, Any] | None,
+    send: SendFn,
+    edit: EditFn,
+) -> None:
+    if message_id is not None:
+        try:
+            if edit(int(message_id), text, reply_markup=markup):
+                return
+        except Exception:  # noqa: BLE001
+            pass
+    new_mid = send(text, reply_markup=markup)
+    if new_mid is not None:
+        conn.execute(
+            "UPDATE assist_quick_card SET message_id=? WHERE id=?",
+            (int(new_mid), card_id),
+        )
+        conn.commit()
 
 
 def handle_quick_draft_text(
@@ -680,32 +749,42 @@ def handle_quick_draft_text(
     card_id = str(draft["id"])
     token = text.strip()
     if draft["status"] == "pick_symbol":
-        sym = token.upper().replace("/", "").replace("-", "")
+        if not re.fullmatch(r"[A-Za-z0-9]{1,20}", token):
+            return None
+        sym = token.upper()
         if not sym.endswith("USDT"):
             sym = f"{sym}USDT"
         symbol = normalize_explore_symbol(sym)
         if symbol is None:
             return None
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE assist_quick_card
             SET symbol=?, status='pick_stop', updated_at_ms=?
-            WHERE id=?
+            WHERE id=? AND status='pick_symbol'
             """,
             (symbol, int(now_ms), card_id),
         )
+        if cur.rowcount == 0:
+            return None
         conn.commit()
         side = str(draft["side"])
         body = "\n".join(
             [
-                (
-                    f"⚡ Quick · {symbol} · {_side_label(side)} — "
-                    "เลือก stop หรือพิมพ์ราคา/เปอร์เซ็ντ์ (เช่น 67000 หรือ 0.4%)"
-                ),
+                f"⚡ Quick · {symbol} · {_side_label(side)} — {STOP_STEP_HINT}",
                 _mode_tag(),
             ]
         )
-        send(body, reply_markup=_stop_step_markup(card_id))
+        mid = draft.get("message_id")
+        _edit_draft_message(
+            conn,
+            card_id=card_id,
+            message_id=int(mid) if mid is not None else None,
+            text=body,
+            markup=_stop_step_markup(card_id),
+            send=send,
+            edit=edit,
+        )
         return {"handled": True, "step": "pick_stop"}
 
     if draft["status"] == "pick_stop":
@@ -730,10 +809,26 @@ def handle_quick_draft_text(
             row = _load_card(conn, card_id) or draft
             card = build_card_for_row(conn, futures, row, now_ms=now_ms)
             if not card.get("ok"):
-                send(_decorate_card_text(str(card.get("text") or "")))
+                _edit_draft_message(
+                    conn,
+                    card_id=card_id,
+                    message_id=int(draft["message_id"]) if draft.get("message_id") else None,
+                    text=_decorate_card_text(str(card.get("text") or "")),
+                    markup=_stop_step_markup(card_id),
+                    send=send,
+                    edit=edit,
+                )
                 return {"handled": True, "ok": False}
             _persist_quote(conn, card_id, card, stop_kind="pct", stop_value=str(pct), now_ms=now_ms)
-            send(_decorate_card_text(str(card["text"])), reply_markup=_quoted_markup(card_id))
+            _edit_draft_message(
+                conn,
+                card_id=card_id,
+                message_id=int(draft["message_id"]) if draft.get("message_id") else None,
+                text=_decorate_card_text(str(card["text"])),
+                markup=_quoted_markup(card_id),
+                send=send,
+                edit=edit,
+            )
             return {"handled": True, "quoted": True}
         try:
             price = Decimal(token.replace(",", ""))
@@ -763,10 +858,26 @@ def handle_quick_draft_text(
         row = _load_card(conn, card_id) or draft
         card = build_card_for_row(conn, futures, row, now_ms=now_ms)
         if not card.get("ok"):
-            send(_decorate_card_text(str(card.get("text") or "")))
+            _edit_draft_message(
+                conn,
+                card_id=card_id,
+                message_id=int(draft["message_id"]) if draft.get("message_id") else None,
+                text=_decorate_card_text(str(card.get("text") or "")),
+                markup=_stop_step_markup(card_id),
+                send=send,
+                edit=edit,
+            )
             return {"handled": True, "ok": False}
         _persist_quote(conn, card_id, card, stop_kind="price", stop_value=str(price), now_ms=now_ms)
-        send(_decorate_card_text(str(card["text"])), reply_markup=_quoted_markup(card_id))
+        _edit_draft_message(
+            conn,
+            card_id=card_id,
+            message_id=int(draft["message_id"]) if draft.get("message_id") else None,
+            text=_decorate_card_text(str(card["text"])),
+            markup=_quoted_markup(card_id),
+            send=send,
+            edit=edit,
+        )
         return {"handled": True, "quoted": True}
     return None
 
@@ -781,29 +892,41 @@ def create_card_from_typed_command(
     """Store assist_quick_card row for typed q command; returns (card_id, card)."""
     side = str(parsed["side"])
     sym = str(parsed["symbol"]).upper()
-    card_id = _new_card_id(conn, now_ms=now_ms)
     if parsed.get("stop_pct") is not None:
         stop_kind, stop_value = "pct", str(parsed["stop_pct"])
     else:
         stop_kind, stop_value = "price", str(parsed.get("stop"))
+    row_stub = {
+        "symbol": sym,
+        "side": side,
+        "stop_kind": stop_kind,
+        "stop_value": stop_value,
+    }
+    card = build_card_for_row(conn, futures, row_stub, now_ms=now_ms)
+    if not card.get("ok"):
+        return None, card
+    card_id = _new_card_id(conn)
     conn.execute(
         """
         INSERT INTO assist_quick_card (
             id, side, symbol, stop_kind, stop_value, status,
+            quoted_at_ms, quote_entry, quote_stop, quote_qty,
             created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, 'pick_stop', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, 'quoted', ?, ?, ?, ?, ?, ?)
         """,
-        (card_id, side, sym, stop_kind, stop_value, int(now_ms), int(now_ms)),
+        (
+            card_id,
+            side,
+            sym,
+            stop_kind,
+            stop_value,
+            int(now_ms),
+            float(card["entry"]),
+            float(card["stop"]),
+            float(card["qty"]),
+            int(now_ms),
+            int(now_ms),
+        ),
     )
     conn.commit()
-    row = _load_card(conn, card_id) or {}
-    card = build_card_for_row(conn, futures, row, now_ms=now_ms)
-    if card.get("ok"):
-        _persist_quote(conn, card_id, card, stop_kind=stop_kind, stop_value=stop_value, now_ms=now_ms)
-    else:
-        conn.execute(
-            "UPDATE assist_quick_card SET status='pick_stop', updated_at_ms=? WHERE id=?",
-            (int(now_ms), card_id),
-        )
-        conn.commit()
     return card_id, card

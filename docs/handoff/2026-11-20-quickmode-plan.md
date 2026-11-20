@@ -245,7 +245,13 @@ Rejected: (b) skip the main signal; (c) the bot closes the quick position by its
 13. **M2 has no extra first-trade risk limit** beyond the quick risk settings and caps (owner, 2026-11-20 02:02).
 14. **M0.5 is live-mode only** (`assist_execute_mode() == 'live'`, same rule as the watch): in testnet mode the read client is live fapi but the trade client is demo, so a close would wrongly answer "already closed". The kill switch keeps blocking entries only; exits stay allowed.
 
-15. **M1a-1 stepper, stored card, notices, mode tag (owner, 2026-11-20 02:20).** Scope of the first M1a slice before the close button (M1a-2): (a) `🔄 อัปเดตราคา` on the quick sizing card via stored `assist_quick_card` rows (fixes 2-minute card TTL vs 10-minute registration; % stops recompute from mark, price stops requote; wrong-side price stop returns to the stop step). (b) Telegram notices when a registration tags to a fill, expires (no fill / wrong side / late fill), and when a quick trade closes in Binance; Quick menu shows registration countdown and open quick position. (c) Mode tag on every quick card, confirm and result (`🧪 เทสเน็ต` / `💰 เงินจริง`); leftover protective orders listed one per line instead of a count. Also: explicit Long / Short buttons on the Quick menu (`qk:sd:`); settings Yes/No → Thai; typed `q …` remains fallback; `SL ตาม ATR` stays out (M4). No orders in this PR — bot sends nothing; owner opens and closes in the Binance app.
+15. **Owner decision 15 (2026-11-20 02:20), scope of this PR:**
+
+- (a) `🔄 อัปเดตราคา` on the quick card. The card is stored under a short server id and rebuilt from the original % stop when one was typed. Otherwise it requotes, and blocks when the stop is now on the wrong side. This fixes the 2-min card TTL vs the 10-min registration.
+- (b) Telegram notices when a registration is tagged to a fill, when it expires, and when a quick trade is closed in Binance. The Quick menu shows the registration countdown and, once the trade is open, the position.
+- (c) A mode tag (`🧪 เทสเน็ต` / `💰 เงินจริง`) on every quick card, confirm and result. Leftover orders are listed one by one instead of as a count.
+- Also: the Quick menu leads with trade buttons, and settings move below them. Typed `q …` stays as a fallback. The settings Yes/No buttons become Thai. `SL ตาม ATR` stays out (M4).
+- Plus decision 6: explicit Long / Short buttons on the Quick menu (this is the core of M1a-1).
 
 ## 5. Hard rules (carry into every quick-mode prompt)
 

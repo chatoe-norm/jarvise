@@ -816,6 +816,3 @@ CREATE TABLE IF NOT EXISTS assist_exchange_stop (
 );
 CREATE INDEX IF NOT EXISTS idx_assist_exchange_stop_pos
     ON assist_exchange_stop (symbol, position_side, observed_at_ms);
-
--- Current jarvise_ingest.db SCHEMA_VERSION (see src/jarvise_ingest/db.py).
-SCHEMA_VERSION = 35

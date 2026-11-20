@@ -21,7 +21,6 @@ from jarvise_assist.pause import bangkok_day_start_ms, format_paused_until, main
 from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
 from jarvise_assist.sizing import portfolio_risk_cap_pct
 from jarvise_assist.store import ensure_settings
-from jarvise_assist.store import now_ms as _now_ms
 
 logger = logging.getLogger(__name__)
 _BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -436,17 +435,17 @@ def sync_quick_trades(
         conn.commit()
         tagged_trade_ids.add(trade_id)
         info["tagged"] += 1
-        _send_tag_notice(conn, send, registration_id=rid, client=client)
+        _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
         if str(rebuilt.get("status")) == "closed":
-            _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt)
+            _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     # Rebuild already-open trades (skip ones tagged earlier in this run)
     open_trades = conn.execute("SELECT * FROM assist_quick_trade WHERE status='open'").fetchall()
     for trade in open_trades:
         trade_id = str(trade["id"])
-        was_open = str(trade["status"]) == "open"
         if trade_id in tagged_trade_ids:
-            was_open = False
+            continue
+        was_open = str(trade["status"]) == "open"
         sym = str(trade["symbol"]).upper()
         side = str(trade["side"])
         entry_ms = int(trade["entry_time_ms"] or 0)
@@ -479,7 +478,7 @@ def sync_quick_trades(
         )
         info["updated"] += 1
         if was_open and str(rebuilt.get("status")) == "closed":
-            _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt)
+            _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     return {k: v for k, v in info.items() if v}
 
@@ -515,15 +514,21 @@ def _send_tag_notice(
     *,
     registration_id: str,
     client: Any,
+    now_ms: int,
 ) -> None:
     from jarvise_assist.quick_card import quick_mode_tag
 
-    row = conn.execute(
-        "SELECT notice_sent_at_ms FROM assist_quick_registration WHERE id=?",
-        (registration_id,),
-    ).fetchone()
-    if row is None or row[0] is not None:
+    cur = conn.execute(
+        """
+        UPDATE assist_quick_registration
+        SET notice_sent_at_ms=?
+        WHERE id=? AND notice_sent_at_ms IS NULL
+        """,
+        (int(now_ms), registration_id),
+    )
+    if cur.rowcount == 0:
         return
+    conn.commit()
     trade = conn.execute(
         "SELECT * FROM assist_quick_trade WHERE registration_id=?",
         (registration_id,),
@@ -548,11 +553,6 @@ def _send_tag_notice(
             ]
         )
         send(body)
-        conn.execute(
-            "UPDATE assist_quick_registration SET notice_sent_at_ms=? WHERE id=?",
-            (_now_ms(), registration_id),
-        )
-        conn.commit()
     except Exception:  # noqa: BLE001
         logger.exception("quick tag notice failed")
 
@@ -564,6 +564,7 @@ def _send_close_notice(
     trade_id: str,
     client: Any,
     payload: dict[str, Any],
+    now_ms: int,
     skip_reason: str | None = None,
 ) -> None:
     """skip_reason reserved for M1a-2 bot closes."""
@@ -571,9 +572,17 @@ def _send_close_notice(
 
     if skip_reason is not None:
         return
-    row = conn.execute("SELECT close_notice_at_ms FROM assist_quick_trade WHERE id=?", (trade_id,)).fetchone()
-    if row is None or row[0] is not None:
+    cur = conn.execute(
+        """
+        UPDATE assist_quick_trade
+        SET close_notice_at_ms=?
+        WHERE id=? AND close_notice_at_ms IS NULL
+        """,
+        (int(now_ms), trade_id),
+    )
+    if cur.rowcount == 0:
         return
+    conn.commit()
     try:
         sym = str(payload["symbol"])
         label = _side_menu_label(str(payload["side"]))
@@ -587,13 +596,13 @@ def _send_close_notice(
         lines = [
             (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว (ปิดใน Binance) — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
         ]
+        from jarvise_assist.order_lines import is_symbol_protective_leftover
+
         leftovers: list[dict[str, Any]] = []
         try:
             if client is not None and hasattr(client, "all_open_orders"):
                 leftovers = [
-                    o
-                    for o in client.all_open_orders(symbol=sym)
-                    if bool(o.get("reduceOnly")) or str(o.get("closePosition") or "").lower() in {"true", "1"}
+                    o for o in client.all_open_orders(symbol=sym) if is_symbol_protective_leftover(o)
                 ]
         except Exception:  # noqa: BLE001
             lines.append("อ่านคำสั่งค้างไม่ได้ — ตรวจในแอป")
@@ -606,11 +615,6 @@ def _send_close_notice(
                 lines.append("✋ ยังค้างอยู่ — ลบในแอป")
         lines.append(quick_mode_tag())
         send("\n".join(lines))
-        conn.execute(
-            "UPDATE assist_quick_trade SET close_notice_at_ms=? WHERE id=?",
-            (_now_ms(), trade_id),
-        )
-        conn.commit()
     except Exception:  # noqa: BLE001
         logger.exception("quick close notice failed")
 

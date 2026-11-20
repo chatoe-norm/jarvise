@@ -30,7 +30,6 @@ from jarvise_assist.order_lines import format_closing_order_line
 from jarvise_assist.pause import format_paused_until, main_week_loss_pause_until
 from jarvise_assist.quick import (
     QUICK_USAGE,
-    REG_TTL_MS,
     create_quick_registration,
     get_quick_settings,
 )
@@ -563,6 +562,8 @@ def handle_quick_text(
     markup = card.get("reply_markup")
     if card.get("ok") and card_id:
         markup = _quoted_markup(card_id)
+    elif not card.get("ok"):
+        markup = None
     send(card["text"], reply_markup=markup)
     return {
         "handled": True,
@@ -647,30 +648,18 @@ def handle_quick_register_callback(
         send(text)
         return {"ok": False, "reason": mapped}
 
-    expires = int(now_ms) + REG_TTL_MS
-    side_label = "LONG" if side == "long" else "SHORT"
+    from jarvise_assist.quick_m1a1 import registration_success_message
+
     tick = Decimal(str(card.get("tick") or "0.0001"))
-    entry_s = _fmt_price_tick(Decimal(str(card["entry"])), tick)
-    stop_fmt = _fmt_price_tick(Decimal(str(card["stop"])), tick)
-    qty_s = fmt_qty(Decimal(str(card["qty"])))
-    body = "\n".join(
-        [
-            (
-                f"✅ ลงทะเบียนไม้ quick {sym} {side_label} แล้ว — "
-                f"เปิดเองใน Binance ภายใน 10 นาที (ถึง {_hhmm(expires)} น.)"
-            ),
-            f"เข้า {entry_s} · stop {stop_fmt} · qty {qty_s}",
-            STOP_INSTRUCTION,
-            (f"บอทไม่ส่งคำสั่ง · ไม้แรกฝั่ง {side_label} บน {sym} ในช่วงนี้จะนับเป็น quick"),
-        ]
+    send(
+        registration_success_message(
+            sym=sym,
+            side=side,
+            entry=Decimal(str(card["entry"])),
+            stop=Decimal(str(card["stop"])),
+            qty=Decimal(str(card["qty"])),
+            tick=tick,
+            now_ms=now_ms,
+        )
     )
-    body = "\n".join(
-        [
-            body.split("\n")[0],
-            quick_mode_tag(),
-            *body.split("\n")[1:],
-            f"⏳ เหลือ 10 นาที (ถึง {_hhmm(expires)} น.) · ดูสถานะใน ⚡ Quick",
-        ]
-    )
-    send(body)
     return {"ok": True, "registration_id": rid}
