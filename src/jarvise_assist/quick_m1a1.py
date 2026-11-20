@@ -69,7 +69,7 @@ def cancel_quick_drafts(conn: Any, *, now_ms: int) -> None:
     conn.commit()
 
 
-def _cancel_other_drafts(conn: Any, keep_id: str, *, now_ms: int, commit: bool = True) -> None:
+def _cancel_other_drafts(conn: Any, keep_id: str, *, now_ms: int, commit: bool) -> None:
     conn.execute(
         """
         UPDATE assist_quick_card
@@ -643,8 +643,6 @@ def handle_quick_trade_callback(
 
         def _mark_answer(text: str | None = None) -> None:
             nonlocal answered
-            if answered:
-                return
             try:
                 answer(text)
             except Exception:  # noqa: BLE001
@@ -702,25 +700,32 @@ def handle_quick_trade_callback(
             return {"ok": True, "registration_id": rid}
         except Exception:  # noqa: BLE001
             logger.exception("qk:rg registration failed card_id=%s", card_id)
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                logger.exception("qk:rg rollback failed card_id=%s", card_id)
+            reply = MSG_REGISTER_FAILED
+            out: dict[str, Any] = {"ok": False, "reason": "read_failed"}
+            if rid is not None:
+                reply = MSG_ALREADY_REGISTERED
+                out = {"ok": True, "registration_id": rid}
             if not answered:
                 try:
                     if rid is None:
                         _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
-                        _mark_answer(MSG_REGISTER_FAILED)
                     else:
                         conn.execute(
                             """
-                            UPDATE assist_quick_card SET registration_id=?
+                            UPDATE assist_quick_card SET registration_id=?, updated_at_ms=?
                             WHERE id=? AND status='registered' AND registration_id IS NULL
                             """,
-                            (rid, card_id),
+                            (rid, int(now_ms), card_id),
                         )
                         conn.commit()
-                        _mark_answer(MSG_ALREADY_REGISTERED)
                 except Exception:  # noqa: BLE001
                     logger.exception("qk:rg except recovery failed card_id=%s", card_id)
-            return {"ok": False, "reason": "read_failed"}
+                _mark_answer(reply)
+            return out
 
     answer(MSG_BAD_BUTTON)
     return {"ok": False}

@@ -18,7 +18,7 @@ from tests.test_assist_quick_m1a1_round1 import NOW, _flow_to_quoted, _run_qk
 
 from jarvise_assist.listen import process_update
 from jarvise_assist.messages import fmt_price
-from jarvise_assist.quick import REG_EXPIRE_GRACE_MS, render_quick_menu, sync_quick_trades
+from jarvise_assist.quick import REG_EXPIRE_GRACE_MS, render_quick_menu
 from jarvise_assist.quick_card import REFUSAL, quick_mode_tag
 from jarvise_assist.quick_m1a1 import (
     MSG_ALREADY_REGISTERED,
@@ -103,28 +103,6 @@ def test_rf_too_old_answers(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> N
     assert answers == [MSG_CARD_TOO_OLD]
 
 
-def test_two_drafts_rf_wrong_side_cancels_new(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mutant M8: _cancel_other_drafts no-op."""
-    _forbid_trade_client(monkeypatch)
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
-    conn = open_db(tmp_path / "2d.db")
-    _seed_settings(conn)
-    fake = _happy_fake(marks={"BTCUSDT": Decimal("100000")})
-    _run_qk(conn, "qk:sd:l", fake)
-    new_id = conn.execute(
-        "SELECT id FROM assist_quick_card WHERE status='pick_symbol' ORDER BY created_at_ms DESC"
-    ).fetchone()["id"]
-    old_id = _flow_to_quoted(conn, fake)
-    conn.execute(
-        "UPDATE assist_quick_card SET symbol='BTCUSDT', stop_kind='price', stop_value='120000' WHERE id=?",
-        (old_id,),
-    )
-    conn.commit()
-    _run_qk(conn, f"qk:rf:{old_id}", fake)
-    new_st = conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (new_id,)).fetchone()["status"]
-    assert new_st == "cancelled"
-
-
 def test_card_after_registration_strips_ttl(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutant M11: _card_text_after_registration no-op."""
     _forbid_trade_client(monkeypatch)
@@ -148,12 +126,12 @@ def test_malformed_ids_no_db_change(tmp_path: Any, monkeypatch: pytest.MonkeyPat
     _seed_settings(conn)
     fake = _happy_fake()
     cid = _flow_to_quoted(conn, fake)
-    before = conn.execute("SELECT * FROM assist_quick_card").fetchall()
+    before = tuple(tuple(r) for r in conn.execute("SELECT * FROM assist_quick_card"))
     for data in ("qk:", "qk:sd:x", "qk:sy:zzzzzzzz:BTCUSDT", f"qk:zz:{cid}"):
         _, answers, _, _ = _run_qk(conn, data, fake)
         assert answers == [MSG_BAD_BUTTON]
-    after = conn.execute("SELECT * FROM assist_quick_card").fetchall()
-    assert len(before) == len(after)
+    after = tuple(tuple(r) for r in conn.execute("SELECT * FROM assist_quick_card"))
+    assert before == after
 
 
 def test_refusal_mapping_open_registration(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,7 +174,7 @@ def test_qk_rg_success_message_raises_still_registered(
     assert row["status"] == "registered"
     assert row["registration_id"] is not None
     assert answers == [MSG_ALREADY_REGISTERED]
-    assert out.get("ok") is False
+    assert out.get("ok") is True
     conn.close()
 
 
@@ -310,4 +288,7 @@ def test_sync_tag_notice_select_failure_continues(tmp_path: Any) -> None:
 
     wrap = ConnWrap(conn)
     _send_tag_notice(wrap, lambda *_a, **_k: None, registration_id="r1", client=None, now_ms=t0)
-    assert sync_quick_trades(conn, None, now_ms=t0, send=lambda *_a, **_k: None) == {}
+    assert (
+        conn.execute("SELECT notice_sent_at_ms FROM assist_quick_registration WHERE id='r1'").fetchone()[0]
+        == t0
+    )

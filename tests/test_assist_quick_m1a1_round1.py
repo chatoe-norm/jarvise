@@ -455,11 +455,12 @@ def test_migration_34_adds_quick_card(tmp_path: Any) -> None:
     path = tmp_path / "m34.db"
     conn = open_db(path)
     conn.execute("DROP TABLE IF EXISTS assist_quick_card")
-    try:
-        conn.execute("ALTER TABLE assist_quick_registration DROP COLUMN notice_sent_at_ms")
-        conn.execute("ALTER TABLE assist_quick_trade DROP COLUMN close_notice_at_ms")
-    except Exception:
-        pass
+    conn.execute("ALTER TABLE assist_quick_registration DROP COLUMN notice_sent_at_ms")
+    conn.execute("ALTER TABLE assist_quick_trade DROP COLUMN close_notice_at_ms")
+    reg_cols = {r[1] for r in conn.execute("PRAGMA table_info(assist_quick_registration)").fetchall()}
+    tr_cols = {r[1] for r in conn.execute("PRAGMA table_info(assist_quick_trade)").fetchall()}
+    assert "notice_sent_at_ms" not in reg_cols
+    assert "close_notice_at_ms" not in tr_cols
     conn.execute("PRAGMA user_version = 34")
     conn.commit()
     conn.close()
