@@ -43,6 +43,7 @@ MSG_BAD_BUTTON = "ข้อมูลปุ่มไม่ถูกต้อง �
 MSG_CARD_TOO_OLD = "การ์ดเก่าเกิน 30 นาที — เริ่มใหม่จากเมนู ⚡ Quick"
 MSG_ALREADY_REGISTERED = "ลงทะเบียนไปแล้ว — ดูสถานะในเมนู ⚡ Quick"
 MSG_CARD_QUOTE_EXPIRED = "การ์ดหมดอายุ — กด 🔄 อัปเดตราคา ก่อนลงทะเบียน"
+MSG_REGISTER_FAILED = "ลงทะเบียนไม่สำเร็จ — ยังไม่ได้ลงทะเบียน · ดูสถานะในเมนู ⚡ Quick"
 MSG_STOP_FAR = "stop ห่างเกิน 20% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 STOP_STEP_HINT = "เลือก stop หรือพิมพ์ราคา/เปอร์เซ็นต์ (เช่น 67000 หรือ 0.4%)"
 
@@ -68,7 +69,7 @@ def cancel_quick_drafts(conn: Any, *, now_ms: int) -> None:
     conn.commit()
 
 
-def _cancel_other_drafts(conn: Any, keep_id: str, *, now_ms: int) -> None:
+def _cancel_other_drafts(conn: Any, keep_id: str, *, now_ms: int, commit: bool = True) -> None:
     conn.execute(
         """
         UPDATE assist_quick_card
@@ -77,7 +78,8 @@ def _cancel_other_drafts(conn: Any, keep_id: str, *, now_ms: int) -> None:
         """,
         (int(now_ms), keep_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 _QUICK_REG_REFUSAL_MAP = {
@@ -577,14 +579,18 @@ def handle_quick_trade_callback(
                 except Exception:  # noqa: BLE001
                     pass
             stop_v = row.get("stop_value") or "?"
-            _cancel_other_drafts(conn, card_id, now_ms=now_ms)
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE assist_quick_card SET status='pick_stop', updated_at_ms=?
                 WHERE id=? AND status IN ('quoted', 'pick_stop')
                 """,
                 (int(now_ms), card_id),
             )
+            if cur.rowcount != 1:
+                conn.rollback()
+                answer(MSG_BAD_BUTTON)
+                return {"ok": False}
+            _cancel_other_drafts(conn, card_id, now_ms=now_ms, commit=False)
             conn.commit()
             text = f"stop {stop_v} อยู่ผิดฝั่งของราคาแล้ว (ตอนนี้ {mark_s}) — เลือก stop ใหม่"
             _edit("\n".join([text, _mode_tag()]), _stop_step_markup(card_id))
@@ -632,18 +638,31 @@ def handle_quick_trade_callback(
         conn.commit()
         sym = str(row["symbol"]).upper()
         side = str(row["side"])
+        rid: str | None = None
+        answered = False
+
+        def _mark_answer(text: str | None = None) -> None:
+            nonlocal answered
+            if answered:
+                return
+            try:
+                answer(text)
+            except Exception:  # noqa: BLE001
+                logger.exception("qk:rg answer failed card_id=%s", card_id)
+            answered = True
+
         try:
             card = build_card_at_quoted_stop(conn, futures, row, now_ms=now_ms)
             if not card.get("ok"):
                 _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
                 send(str(card.get("text") or REFUSAL.get("read_failed", "")))
-                answer(None)
+                _mark_answer(None)
                 return {"ok": False, "reason": card.get("reason")}
             week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
             if week_until is not None:
                 _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
                 send(_refusal_week_loss(week_until, now_ms=now_ms))
-                answer(None)
+                _mark_answer(None)
                 return {"ok": False, "reason": "week_loss_pause"}
             rid, reason = create_quick_registration_from_card(
                 conn,
@@ -655,7 +674,7 @@ def handle_quick_trade_callback(
             if rid is None:
                 _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
                 send(_registration_refusal_text(str(reason)))
-                answer(None)
+                _mark_answer(None)
                 return {"ok": False, "reason": reason}
             conn.execute(
                 """
@@ -679,14 +698,28 @@ def handle_quick_trade_callback(
                     now_ms=now_ms,
                 )
             )
-            answer(None)
+            _mark_answer(None)
             return {"ok": True, "registration_id": rid}
         except Exception:  # noqa: BLE001
             logger.exception("qk:rg registration failed card_id=%s", card_id)
-            row_after = _load_card(conn, card_id) or {}
-            if row_after.get("registration_id") is None:
-                _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
-            answer(REFUSAL.get("read_failed"))
+            conn.rollback()
+            if not answered:
+                try:
+                    if rid is None:
+                        _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
+                        _mark_answer(MSG_REGISTER_FAILED)
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE assist_quick_card SET registration_id=?
+                            WHERE id=? AND status='registered' AND registration_id IS NULL
+                            """,
+                            (rid, card_id),
+                        )
+                        conn.commit()
+                        _mark_answer(MSG_ALREADY_REGISTERED)
+                except Exception:  # noqa: BLE001
+                    logger.exception("qk:rg except recovery failed card_id=%s", card_id)
             return {"ok": False, "reason": "read_failed"}
 
     answer(MSG_BAD_BUTTON)
@@ -706,22 +739,7 @@ def _finalize_quoted_card(
 ) -> dict[str, Any]:
     card = build_card_for_row(conn, futures, row, now_ms=now_ms)
     if not card.get("ok"):
-        if card.get("reason") == "stop_wrong_side" and row.get("stop_kind") == "price":
-            _cancel_other_drafts(conn, card_id, now_ms=now_ms)
-            conn.execute(
-                """
-                UPDATE assist_quick_card SET status='pick_stop', updated_at_ms=?
-                WHERE id=? AND status='pick_stop'
-                """,
-                (int(now_ms), card_id),
-            )
-            conn.commit()
-            edit(
-                "\n".join([str(card.get("text") or REFUSAL["stop_wrong_side"]), _mode_tag()]),
-                _stop_step_markup(card_id),
-            )
-            answer(None)
-            return {"ok": False, "reason": "stop_wrong_side"}
+        # sl/qk:sl presets only produce pct cards; price wrong-side uses qk:rf or typed draft.
         edit(_decorate_card_text(str(card.get("text") or "")), _stop_step_markup(card_id))
         answer(None)
         return {"ok": False, "reason": card.get("reason")}
@@ -804,6 +822,7 @@ def handle_quick_draft_text(
             (symbol, int(now_ms), card_id),
         )
         if cur.rowcount == 0:
+            conn.rollback()
             return None
         conn.commit()
         side = str(draft["side"])

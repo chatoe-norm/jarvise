@@ -533,11 +533,17 @@ def _send_tag_notice(
     except Exception:  # noqa: BLE001
         logger.exception("quick tag notice mark failed")
         return
-    trade = conn.execute(
-        "SELECT * FROM assist_quick_trade WHERE registration_id=?",
-        (registration_id,),
-    ).fetchone()
-    reg = conn.execute("SELECT * FROM assist_quick_registration WHERE id=?", (registration_id,)).fetchone()
+    try:
+        trade = conn.execute(
+            "SELECT * FROM assist_quick_trade WHERE registration_id=?",
+            (registration_id,),
+        ).fetchone()
+        reg = conn.execute(
+            "SELECT * FROM assist_quick_registration WHERE id=?", (registration_id,)
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        logger.exception("quick tag notice load failed")
+        return
     if trade is None or reg is None:
         return
     try:

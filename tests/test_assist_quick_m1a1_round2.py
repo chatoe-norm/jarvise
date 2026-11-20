@@ -19,8 +19,8 @@ from tests.test_assist_quick_m1a1_round1 import NOW, _flow_to_quoted, _run_qk
 
 from jarvise_assist.listen import process_update
 from jarvise_assist.messages import fmt_qty
-from jarvise_assist.quick_card import REFUSAL, quick_mode_tag
-from jarvise_assist.quick_m1a1 import STOP_STEP_HINT
+from jarvise_assist.quick_card import quick_mode_tag
+from jarvise_assist.quick_m1a1 import MSG_REGISTER_FAILED, STOP_STEP_HINT
 from jarvise_ingest.db import open_db
 
 
@@ -72,7 +72,7 @@ def test_qk_rg_create_raises_rolls_back_to_quoted(tmp_path: Any, monkeypatch: py
         conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()["status"]
         == "quoted"
     )
-    assert answers == [REFUSAL["read_failed"]]
+    assert answers == [MSG_REGISTER_FAILED]
     _, answers2, out2, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
     assert out2.get("ok") is True
     assert conn.execute("SELECT COUNT(*) c FROM assist_quick_registration").fetchone()["c"] == 1

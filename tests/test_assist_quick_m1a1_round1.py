@@ -27,6 +27,7 @@ from jarvise_assist.quick_card import quick_mode_tag
 from jarvise_assist.quick_m1a1 import (
     MSG_ALREADY_REGISTERED,
     MSG_BAD_BUTTON,
+    MSG_CARD_QUOTE_EXPIRED,
     MSG_DRAFT_EXPIRED,
     QUICK_CARD_TTL_MS,
     QUICK_DRAFT_TTL_MS,
@@ -216,7 +217,9 @@ def test_quote_register_expired_markup_refresh_only(tmp_path: Any, monkeypatch: 
     cid = _flow_to_quoted(conn, fake)
     row = conn.execute("SELECT quoted_at_ms FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
     late = int(row["quoted_at_ms"]) + QUICK_CARD_TTL_MS + 1
-    _, seen, _, edits = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=late)
+    _, answers, _, edits = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=late)
+    assert answers == [MSG_CARD_QUOTE_EXPIRED]
+    assert conn.execute("SELECT COUNT(*) c FROM assist_quick_registration").fetchone()["c"] == 0
     assert edits, "quote-expired rg must edit the card"
     kb = edits[-1]["reply_markup"]
     flat = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
@@ -452,6 +455,11 @@ def test_migration_34_adds_quick_card(tmp_path: Any) -> None:
     path = tmp_path / "m34.db"
     conn = open_db(path)
     conn.execute("DROP TABLE IF EXISTS assist_quick_card")
+    try:
+        conn.execute("ALTER TABLE assist_quick_registration DROP COLUMN notice_sent_at_ms")
+        conn.execute("ALTER TABLE assist_quick_trade DROP COLUMN close_notice_at_ms")
+    except Exception:
+        pass
     conn.execute("PRAGMA user_version = 34")
     conn.commit()
     conn.close()
@@ -473,8 +481,14 @@ def test_migration_34_adds_quick_card(tmp_path: Any) -> None:
 
 def test_callback_data_within_64_bytes() -> None:
     cid = "deadbeef"
-    long_sym = "A" * 16 + "USDT"
-    for sym in ("1000PEPEUSDT", long_sym):
+    too_long = "A" * 46 + "USDT"
+    buttons = [b for row in _symbol_buttons(cid, [too_long, "1000PEPEUSDT"]) for b in row]
+    cbs = {b["callback_data"] for b in buttons}
+    assert not any(too_long in cb for cb in cbs)
+    assert any(b["text"] == "1000PEPE" for b in buttons)
+    assert any(b["callback_data"] == f"qk:sy:{cid}:1000PEPEUSDT" for b in buttons)
+    assert any(b["callback_data"] == f"qk:x:{cid}" for b in buttons)
+    for sym in ("1000PEPEUSDT",):
         for btn in [b for row in _symbol_buttons(cid, [sym]) for b in row]:
             assert len(btn["callback_data"].encode("utf-8")) <= 64
     for m in (
