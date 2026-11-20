@@ -104,8 +104,8 @@ def _income(
 
 def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     fresh = open_db(tmp_path / "fresh.db")
-    assert SCHEMA_VERSION == 34
-    assert schema_version(fresh) == 34
+    assert SCHEMA_VERSION == 35
+    assert schema_version(fresh) == 35
     for table in (
         "assist_quick_settings",
         "assist_quick_registration",
@@ -149,7 +149,7 @@ def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path26)
-    assert schema_version(conn) == 34
+    assert schema_version(conn) == 35
     row = conn.execute("SELECT qty FROM assist_signal WHERE id='old'").fetchone()
     assert row["qty"] == 2
     qs = get_quick_settings(conn)
@@ -866,7 +866,38 @@ def test_summarize_quick_math(tmp_path: Path) -> None:
     assert s["today_r"] == pytest.approx(1.0)
     assert s["streak"] == -2  # two losses at end
     text, _kb = render_quick_menu(conn, now_ms=t)
-    assert "ยังไม่พิสูจน์ edge — ตัวอย่าง 4/20 ไม้" in text
+    assert "ยังไม่พิสูจน์ edge — ตัวอย่าง 4/25 ไม้" in text
+    conn.close()
+
+
+def test_menu_edge_sample_hides_at_25(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "edge25.db")
+    t = _ms_bangkok(2026, 11, 20, 12, 0)
+    for i in range(24):
+        conn.execute(
+            """
+            INSERT INTO assist_quick_trade (
+                id, registration_id, symbol, side, status, closed_at_ms,
+                net_r, fee_r, net_usdt, entry_time_ms, updated_at_ms
+            ) VALUES (?, ?, 'BTCUSDT', 'long', 'closed', ?, 0.1, -0.01, 1.0, ?, ?)
+            """,
+            (f"t{i}", f"r{i}", t - 1000 - i, t - 2000 - i, t),
+        )
+    conn.commit()
+    text24, _ = render_quick_menu(conn, now_ms=t)
+    assert "ตัวอย่าง 24/25 ไม้" in text24
+    conn.execute(
+        """
+        INSERT INTO assist_quick_trade (
+            id, registration_id, symbol, side, status, closed_at_ms,
+            net_r, fee_r, net_usdt, entry_time_ms, updated_at_ms
+        ) VALUES ('t25', 'r25', 'BTCUSDT', 'long', 'closed', ?, 0.1, -0.01, 1.0, ?, ?)
+        """,
+        (t - 100, t - 200, t),
+    )
+    conn.commit()
+    text25, _ = render_quick_menu(conn, now_ms=t)
+    assert "ยังไม่พิสูจน์ edge" not in text25
     conn.close()
 
 

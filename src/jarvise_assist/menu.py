@@ -152,6 +152,9 @@ def handle_menu_text(
     kind = match_menu_label(text)
     if kind is None:
         return {"handled": False}
+    from jarvise_assist.quick_m1a1 import cancel_quick_drafts
+
+    cancel_quick_drafts(conn, now_ms=now_ms)
     if kind != "explore" and ensure_settings(conn).get("awaiting_explore"):
         write_settings(conn, awaiting_explore=False)
     send_fn = send or (lambda t, **kw: send_message(t, reply_markup=kw.get("reply_markup")) is not None)

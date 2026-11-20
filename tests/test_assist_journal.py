@@ -45,7 +45,7 @@ GAP_MS = 30 * 60 * 1000
 
 def test_schema_is_migration_31(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "j.db")
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 35
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='assist_journal'"
     ).fetchone()

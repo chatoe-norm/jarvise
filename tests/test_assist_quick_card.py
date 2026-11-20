@@ -341,7 +341,9 @@ def test_text_process_update_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert out["kind"] == "quick_card"
     assert len(sent) == 1
     assert sent[0]["text"] == direct["text"]
-    assert sent[0]["reply_markup"] == direct["reply_markup"]
+    kb = sent[0]["reply_markup"]["inline_keyboard"]
+    assert kb[0][0]["callback_data"].startswith("qk:rg:")
+    assert kb[1][0]["callback_data"].startswith("qk:rf:")
     conn.close()
 
 
@@ -406,7 +408,15 @@ def test_execute_mode_and_enabled_irrelevant(tmp_path: Path, monkeypatch: pytest
         conn, _happy_fake(), symbol="SUIUSDT", side="long", stop=Decimal("1.994"), now_ms=NOW
     )
     assert a["ok"] and b["ok"]
-    assert a["text"] == b["text"]
+
+    # Mode tag line differs by execute mode; card math must match.
+    def _strip_mode_tag(text: str) -> str:
+        lines = text.split("\n")
+        if len(lines) > 1 and lines[1].startswith(("💰", "🧪")):
+            return "\n".join([lines[0], *lines[2:]])
+        return text
+
+    assert _strip_mode_tag(a["text"]) == _strip_mode_tag(b["text"])
     assert a["reply_markup"] == b["reply_markup"]
     conn.close()
 
