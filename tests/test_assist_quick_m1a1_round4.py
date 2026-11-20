@@ -299,7 +299,8 @@ def test_qk_rg_rollback_raises_still_answers(tmp_path: Any, monkeypatch: pytest.
     assert out.get("ok") is False
 
 
-def test_qk_rg_recovery_raises_still_answers(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_qk_rg_txn_failure_leaves_quoted(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise inside qk:rg transaction → quoted card, no registration, one failure answer."""
     import jarvise_assist.quick_m1a1 as m1
 
     _forbid_trade_client(monkeypatch)
@@ -313,13 +314,13 @@ def test_qk_rg_recovery_raises_still_answers(tmp_path: Any, monkeypatch: pytest.
         "create_quick_registration_from_card",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("x")),
     )
-    monkeypatch.setattr(
-        m1,
-        "_rollback_registered_to_quoted",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("rb")),
-    )
-    _, answers, _, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
+    _, answers, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
     assert answers == [MSG_REGISTER_FAILED]
+    assert out == {"ok": False, "reason": "read_failed"}
+    assert conn.execute("SELECT COUNT(*) c FROM assist_quick_registration").fetchone()["c"] == 0
+    row = conn.execute("SELECT status, registration_id FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "quoted"
+    assert row["registration_id"] is None
 
 
 def test_qk_rg_refusal_answer_once(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -855,8 +856,8 @@ def test_sync_close_leftovers_one_per_line(tmp_path: Path) -> None:
         f"🏁 ไม้ quick BTCUSDT LONG ปิดแล้ว (ปิดใน Binance) — สุทธิ {net:+.2f} USDT · "
         "+1.00R (รวมค่าธรรมเนียมจริง + funding)",
         "คำสั่งที่ยังค้างบน BTCUSDT:",
-        format_closing_order_line(bot, tick=None),
-        format_closing_order_line(owner, tick=None),
+        "• STOP_MARKET SELL 95 · 1 · 🤖 ของบอท",
+        "• STOP_MARKET SELL 94 · 1 · ✋ คุณตั้งเอง",
         "✋ ยังค้างอยู่ — ลบในแอป",
         quick_mode_tag(),
     ]
@@ -866,6 +867,13 @@ def test_sync_close_leftovers_one_per_line(tmp_path: Path) -> None:
 def test_sync_tagged_same_run_one_user_trades_call(tmp_path: Path) -> None:
     """S2: tagged trade must not fall through to second user_trades fetch."""
     conn, fake, _sent, _ = _sync_buy_sell(tmp_path / "utc", with_close=False)
+    assert len(fake.user_trade_calls) == 1
+    conn.close()
+
+
+def test_sync_tag_and_close_one_run_one_user_trades_call(tmp_path: Path) -> None:
+    """Companion S2: tag + close in one sync still fetches user_trades once."""
+    conn, fake, _sent, _ = _sync_buy_sell(tmp_path / "utc2", with_close=True)
     assert len(fake.user_trade_calls) == 1
     conn.close()
 
@@ -1066,6 +1074,7 @@ def test_registration_success_countdown_line() -> None:
         now_ms=T0,
     )
     lines = msg.split("\n")
+    assert lines[1] == quick_mode_tag()
     assert lines[3] == (f"⏳ เหลือ 10 นาที (ถึง {_hhmm(T0 + REG_TTL_MS)} น.) · ดูสถานะใน ⚡ Quick")
 
 
@@ -1092,6 +1101,17 @@ def test_format_owner_order_line_literals() -> None:
     }
     assert _format_owner_order_line(limit, tick=tick) == (
         "• LIMIT SELL 110000.0 · 0.01 · ✋ คุณตั้งเอง — จะยังค้างอยู่ ลบในแอป"
+    )
+    stop_qty = {
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "type": "STOP_MARKET",
+        "reduceOnly": True,
+        "stopPrice": "99",
+        "origQty": "1",
+    }
+    assert _format_owner_order_line(stop_qty, tick=tick) == (
+        "• STOP_MARKET SELL 99.0 · 1 · ✋ คุณตั้งเอง — จะยังค้างอยู่ ลบในแอป"
     )
 
 
@@ -1132,7 +1152,7 @@ def test_qs_cap_confirm_button_callbacks(tmp_path: Path) -> None:
 
 def test_quoted_card_leftovers_and_ttl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """S17/S18."""
-    from jarvise_assist.quick_card import _hhmmss
+    from jarvise_assist.quick_card import CARD_TTL_PREFIX, _hhmmss
 
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "card-lo.db")
@@ -1167,7 +1187,10 @@ def test_quoted_card_leftovers_and_ttl(tmp_path: Path, monkeypatch: pytest.Monke
     assert lines[idx] == "⚠ มีคำสั่งป้องกันค้างบนสัญลักษณ์นี้ 2 อัน — ตรวจก่อนเข้า:"
     assert lines[idx + 1] == format_closing_order_line(bot, tick=Decimal("0.1"))
     assert lines[idx + 2] == format_closing_order_line(owner, tick=Decimal("0.1"))
-    ttl = f"การ์ดนี้ใช้ได้ถึง {_hhmmss(T0 + 120_000)} (หมดแล้วกด 🔄 อัปเดตราคา) · บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน 10 นาที"
+    ttl = (
+        f"{CARD_TTL_PREFIX} {_hhmmss(T0 + 120_000)} (หมดแล้วกด 🔄 อัปเดตราคา) · "
+        "บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน 10 นาที"
+    )
     assert ttl in lines
     conn.close()
 

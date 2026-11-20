@@ -87,6 +87,7 @@ def create_quick_registration(
     qty: float,
     now_ms: int,
     live_positions: Sequence[FuturesPosition] | None = None,
+    commit: bool = True,
 ) -> tuple[str | None, str | None]:
     """Create an open registration. Returns (id, None) or (None, reason_code)."""
     sym = str(symbol).upper()
@@ -148,7 +149,8 @@ def create_quick_registration(
         """,
         (rid, sym, side_l, entry, stop, float(qty), int(now_ms), expires, int(now_ms)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return rid, None
 
 

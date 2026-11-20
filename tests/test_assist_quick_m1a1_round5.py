@@ -1,4 +1,4 @@
-"""M1a-1 fix round 5 — mutation-backed tests S19–S34."""
+"""M1a-1 fix round 5 — mutation-backed tests S19–S36."""
 
 from __future__ import annotations
 
@@ -28,9 +28,7 @@ from tests.test_assist_quick_m1a1_round4 import (
 )
 from tests.test_assist_real_trades import FakeFutures
 
-from jarvise_assist.keyboard import BTN_QUICK
-from jarvise_assist.menu import match_menu_label
-from jarvise_assist.messages import fmt_qty
+from jarvise_assist.messages import fmt_price, fmt_qty
 from jarvise_assist.pause import next_0820_bangkok_ms
 from jarvise_assist.quick import (
     REG_TTL_MS,
@@ -39,22 +37,28 @@ from jarvise_assist.quick import (
     create_quick_registration,
     sync_quick_trades,
 )
-from jarvise_assist.quick_card import _refusal_week_loss, quick_mode_tag
+from jarvise_assist.quick_card import (
+    _refusal_week_loss,
+    quick_mode_tag,
+)
 from jarvise_assist.quick_m1a1 import (
     MSG_ALREADY_REGISTERED,
     MSG_BAD_BUTTON,
+    MSG_CARD_QUOTE_EXPIRED,
     MSG_CARD_TOO_OLD,
-    MSG_STOP_FAR,
     QUICK_CARD_MAX_AGE_MS,
-    STOP_STEP_HINT,
+    QUICK_CARD_TTL_MS,
+    QUOTE_CLOCK_SKEW_MS,
     _decorate_card_text,
     _edit_draft_message,
     _persist_quote,
+    _quote_is_expired,
     _quoted_markup,
     _recent_quick_symbols,
     _refresh_only_markup,
     _side_label,
     _stop_step_markup,
+    build_card_for_row,
     handle_quick_trade_callback,
 )
 from jarvise_ingest.db import open_db
@@ -139,7 +143,7 @@ def test_s19_persist_quote_ignores_terminal_statuses(tmp_path: Any) -> None:
 
 
 def test_s19_rf_after_registration_doc_p3(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """S19: rf on registered never persists quotes (documents round4 test_rf_after_registration / P3)."""
+    """S19 companion: rf on registered never persists quotes (round4 P3; does not kill S19)."""
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "s19b.db")
@@ -162,7 +166,7 @@ def test_s19_rf_after_registration_doc_p3(tmp_path: Any, monkeypatch: pytest.Mon
 
 
 def test_s20_cancel_other_drafts_cards_a_through_e(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """S20: wrong-side rf cancels competing drafts A–E via _cancel_other_drafts."""
+    """S20: wrong-side rf cancels pick_symbol/pick_stop only; quoted and registered rows untouched."""
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "s20.db")
@@ -187,8 +191,40 @@ def test_s20_cancel_other_drafts_cards_a_through_e(tmp_path: Any, monkeypatch: p
         side="short",
         created_at_ms=T0,
     )
-    _insert_draft_card(conn, cid="dddd0004", status="cancelled", symbol="SOLUSDT", created_at_ms=T0)
-    _insert_draft_card(conn, cid="eeee0005", status="pick_symbol", side="short", created_at_ms=T0)
+    conn.execute(
+        """
+        INSERT INTO assist_quick_card (
+            id, side, symbol, stop_kind, stop_value, status,
+            quote_entry, quote_stop, quote_qty, quoted_at_ms,
+            created_at_ms, updated_at_ms
+        ) VALUES ('dddd0004', 'long', 'SOLUSDT', 'pct', '0.5', 'quoted',
+            180.0, 179.1, 2.5, ?, ?, ?)
+        """,
+        (T0, T0, T0),
+    )
+    rid_f = "aqr00000000001"
+    conn.execute(
+        """
+        INSERT INTO assist_quick_registration (
+            id, symbol, side, planned_entry, planned_stop, qty,
+            status, created_at_ms, expires_at_ms, updated_at_ms
+        ) VALUES (?, 'LINKUSDT', 'long', 10, 9, 1, 'open', ?, ?, ?)
+        """,
+        (rid_f, T0, T0 + 600_000, T0),
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_quick_card (
+            id, side, symbol, stop_kind, stop_value, status, registration_id,
+            quote_entry, quote_stop, quote_qty, quoted_at_ms,
+            created_at_ms, updated_at_ms
+        ) VALUES ('ffff0006', 'long', 'LINKUSDT', 'pct', '0.5', 'registered', ?,
+            10.0, 9.5, 1.0, ?, ?, ?)
+        """,
+        (rid_f, T0, T0, T0),
+    )
+    conn.commit()
+    rows_before = {r["id"]: tuple(r) for r in conn.execute("SELECT * FROM assist_quick_card ORDER BY id")}
     _, answers, out, _ = _run_qk(conn, f"qk:rf:{keep}", fake, now_ms=T1)
     assert out == {"ok": False, "stop_wrong_side": True}
     assert answers == [None]
@@ -196,8 +232,9 @@ def test_s20_cancel_other_drafts_cards_a_through_e(tmp_path: Any, monkeypatch: p
     assert st[keep] == "pick_stop"
     assert st["bbbb0002"] == "cancelled"
     assert st["cccc0003"] == "cancelled"
-    assert st["dddd0004"] == "cancelled"
-    assert st["eeee0005"] == "cancelled"
+    rows_after = {r["id"]: tuple(r) for r in conn.execute("SELECT * FROM assist_quick_card ORDER BY id")}
+    assert rows_after["dddd0004"] == rows_before["dddd0004"]
+    assert rows_after["ffff0006"] == rows_before["ffff0006"]
     conn.close()
 
 
@@ -313,12 +350,18 @@ def test_s23_rf_success_dict_edit_and_answers_none(tmp_path: Any, monkeypatch: p
     _seed_settings(conn)
     fake = _happy_fake()
     cid = _flow_to_quoted(conn, fake)
+    pre = conn.execute("SELECT stop_kind, stop_value FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    row = dict(conn.execute("SELECT * FROM assist_quick_card WHERE id=?", (cid,)).fetchone())
     fake.marks["SUIUSDT"] = Decimal("2.02")
+    expect = build_card_for_row(conn, fake, dict(row), now_ms=T1)
+    assert expect.get("ok")
     _, answers, out, edits = _run_qk(conn, f"qk:rf:{cid}", fake, now_ms=T1)
     assert answers == [None]
     assert out == {"ok": True, "refreshed": True}
     assert edits[-1]["reply_markup"] == _quoted_markup(cid)
-    assert quick_mode_tag() in edits[-1]["text"]
+    assert edits[-1]["text"] == _decorate_card_text(str(expect["text"]))
+    post = conn.execute("SELECT stop_kind, stop_value FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    assert (post["stop_kind"], post["stop_value"]) == (pre["stop_kind"], pre["stop_value"])
     conn.close()
 
 
@@ -326,7 +369,7 @@ def test_s23_rf_success_dict_edit_and_answers_none(tmp_path: Any, monkeypatch: p
 
 
 def test_s24_qk_rg_low_balance_rolls_back(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """S24: qk:rg rebuild failure sends refusal and rolls card back to quoted."""
+    """S24: qk:rg margin_cap refusal before txn — no registration row."""
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "s24a.db")
@@ -341,18 +384,18 @@ def test_s24_qk_rg_low_balance_rolls_back(tmp_path: Any, monkeypatch: pytest.Mon
         lambda *_a, **_k: {"ok": False, "reason": "margin_cap", "text": REFUSAL["margin_cap"]},
     )
     sent, answers, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
+    assert out == {"ok": False, "reason": "margin_cap"}
     assert answers == [None]
-    assert out.get("ok") is False
-    assert REFUSAL["margin_cap"] in sent[0]["text"]
-    assert (
-        conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()["status"]
-        == "quoted"
-    )
+    assert sent == [{"text": REFUSAL["margin_cap"]}]
+    row = conn.execute("SELECT status, registration_id FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "quoted"
+    assert row["registration_id"] is None
+    assert conn.execute("SELECT COUNT(*) c FROM assist_quick_registration").fetchone()["c"] == 0
     conn.close()
 
 
 def test_s24_qk_rg_week_loss_pause(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """S24: qk:rg refuses under main week-loss pause."""
+    """S24: qk:rg refuses under main week-loss pause before txn."""
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "s24b.db")
@@ -365,21 +408,20 @@ def test_s24_qk_rg_week_loss_pause(tmp_path: Any, monkeypatch: pytest.MonkeyPatc
         lambda *_a, **_k: until,
     )
     sent, answers, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
+    assert out == {"ok": False, "reason": "week_loss_pause"}
     assert answers == [None]
-    assert out.get("reason") == "week_loss_pause"
-    assert _refusal_week_loss(until, now_ms=NOW) in sent[0]["text"]
-    assert (
-        conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()["status"]
-        == "quoted"
-    )
+    assert sent[0]["text"] == _refusal_week_loss(until, now_ms=NOW)
+    row = conn.execute("SELECT status, registration_id FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "quoted"
+    assert row["registration_id"] is None
     conn.close()
 
 
 # --- S25: qk:rg except paths, success dict, qk:zz --------------------------------
 
 
-def test_s25_qk_rg_except_rid_unknown_and_known(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """S25: except handler answers once; rid known → already registered, else register failed."""
+def test_s25_qk_rg_txn_raise_leaves_quoted(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S25 A2: txn raise rolls back — quoted card, no registration row."""
     import jarvise_assist.quick_m1a1 as m1
 
     _forbid_trade_client(monkeypatch)
@@ -395,23 +437,38 @@ def test_s25_qk_rg_except_rid_unknown_and_known(tmp_path: Any, monkeypatch: pyte
     )
     _, answers, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
     assert answers == [m1.MSG_REGISTER_FAILED]
-    assert out.get("ok") is False
+    assert out == {"ok": False, "reason": "read_failed"}
+    assert conn.execute("SELECT COUNT(*) c FROM assist_quick_registration").fetchone()["c"] == 0
+    row = conn.execute("SELECT status, registration_id FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "quoted"
+    assert row["registration_id"] is None
+    conn.close()
 
-    conn2 = open_db(tmp_path / "s25b.db")
-    _seed_settings(conn2)
-    cid2 = _flow_to_quoted(conn2, fake)
 
-    monkeypatch.setattr(m1, "create_quick_registration_from_card", lambda *_a, **_k: ("fixed-rid", None))
+def test_s25_qk_rg_send_fail_still_registered(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S25 A2: post-commit send fail still returns registration_id; answer None."""
+    import jarvise_assist.quick_m1a1 as m1
+
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    conn = open_db(tmp_path / "s25b.db")
+    _seed_settings(conn)
+    fake = _happy_fake()
+    cid = _flow_to_quoted(conn, fake)
     monkeypatch.setattr(
         m1,
         "registration_success_message",
         lambda **_k: (_ for _ in ()).throw(RuntimeError("send")),
     )
-    _, answers2, out2, _ = _run_qk(conn2, f"qk:rg:{cid2}", fake)
-    assert answers2 == [MSG_ALREADY_REGISTERED]
-    assert out2.get("ok") is True
+    _, answers, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
+    rid = conn.execute("SELECT registration_id FROM assist_quick_card WHERE id=?", (cid,)).fetchone()[
+        "registration_id"
+    ]
+    assert rid
+    assert conn.execute("SELECT COUNT(*) c FROM assist_quick_registration").fetchone()["c"] == 1
+    assert answers == [None]
+    assert out == {"ok": True, "registration_id": rid}
     conn.close()
-    conn2.close()
 
 
 def test_s25_qk_rg_success_dict_and_qk_zz_bad_op(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -542,7 +599,39 @@ def test_s27_qk_x_edit_fallback_without_chat_or_mid(tmp_path: Any, monkeypatch: 
     assert out2.get("idempotent") is True
     assert answers == [None, MSG_ALREADY_REGISTERED]
     assert not sends
+
+    conn2 = open_db(tmp_path / "s27c.db")
+    _seed_settings(conn2)
+    cid3 = _flow_to_quoted(conn2, fake)
+    edits3: list[dict[str, Any]] = []
+    sends3: list[dict[str, Any]] = []
+
+    def send3(t: str, **kw: Any) -> int:
+        mid = 400 + len(sends3)
+        sends3.append({"text": t, **kw})
+        return mid
+
+    def edit3(*_a: Any, **_k: Any) -> bool:
+        edits3.append(dict(_k, text=_a[1] if len(_a) > 1 else ""))
+        return False
+
+    answers3, answer3 = _answer_capture()
+    out3 = handle_quick_trade_callback(
+        conn2,
+        f"qk:x:{cid3}",
+        futures=fake,
+        send=send3,
+        answer=lambda t: answer3("cq3", text=t),
+        edit=edit3,
+        message={"message_id": 5, "chat": {}},
+        now_ms=T3,
+    )
+    assert out3 == {"ok": True, "cancelled": True}
+    assert edits3 == []
+    assert sends3 == [{"text": "ยกเลิกแล้ว", "reply_markup": {"inline_keyboard": []}}]
+    assert answers3 == [None]
     conn.close()
+    conn2.close()
 
 
 # --- S28: _edit_draft_message -------------------------------------------------
@@ -552,6 +641,7 @@ def test_s28_edit_draft_message_paths(tmp_path: Any) -> None:
     """S28: _edit_draft_message edit vs send branches."""
     conn = open_db(tmp_path / "s28.db")
     cid = "cafebabe"
+    markup_b = _stop_step_markup(cid)
     edits: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
 
@@ -573,19 +663,20 @@ def test_s28_edit_draft_message_paths(tmp_path: Any) -> None:
         send=send,
         edit=edit_ok,
     )
-    assert edits and not sends
+    assert edits == [{"mid": 10, "text": "a", "reply_markup": None}]
+    assert sends == []
 
     _edit_draft_message(
         conn,
         card_id=cid,
         message_id=10,
         text="b",
-        markup=_stop_step_markup(cid),
+        markup=markup_b,
         send=send,
         edit=lambda *_a, **_k: False,
     )
-    assert sends[-1]["text"] == "b"
-    assert conn.execute("SELECT id FROM assist_quick_card WHERE id=?", (cid,)).fetchone() is None
+    assert edits == [{"mid": 10, "text": "a", "reply_markup": None}]
+    assert sends == [{"text": "b", "reply_markup": markup_b}]
 
     conn.execute(
         "INSERT INTO assist_quick_card (id, side, status, created_at_ms, updated_at_ms) VALUES (?, 'long', 'pick_symbol', ?, ?)",
@@ -601,6 +692,8 @@ def test_s28_edit_draft_message_paths(tmp_path: Any) -> None:
         send=lambda *_a, **_k: None,
         edit=edit_ok,
     )
+    assert edits == [{"mid": 10, "text": "a", "reply_markup": None}]
+    assert sends == [{"text": "b", "reply_markup": markup_b}]
     mid = conn.execute("SELECT message_id FROM assist_quick_card WHERE id=?", (cid,)).fetchone()[0]
     assert mid is None
     conn.close()
@@ -610,15 +703,19 @@ def test_s28_edit_draft_message_paths(tmp_path: Any) -> None:
 
 
 def test_s29_typed_draft_pct_and_price_paths(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """S29: invalid % re-shows stop step; far price sends MSG_STOP_FAR."""
+    """S29: 0.5% and price 99000 with low balance → exact refusal card text."""
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    low = QuickFake(balance=Decimal("1"), available=Decimal("1"), marks={"BTCUSDT": Decimal("100000")})
     conn = open_db(tmp_path / "s29a.db")
     _seed_settings(conn)
-    fake = _happy_fake()
-    _run_qk(conn, "qk:sd:l", fake)
+    _run_qk(conn, "qk:sd:l", low)
     cid = conn.execute("SELECT id FROM assist_quick_card LIMIT 1").fetchone()["id"]
-    _run_qk(conn, f"qk:sy:{cid}:BTCUSDT", fake)
+    _run_qk(conn, f"qk:sy:{cid}:BTCUSDT", low)
+    row = dict(conn.execute("SELECT * FROM assist_quick_card WHERE id=?", (cid,)).fetchone())
+    row["stop_kind"] = "pct"
+    row["stop_value"] = "0.5"
+    expect_pct = build_card_for_row(conn, low, row, now_ms=T1)
     edits: list[dict[str, Any]] = []
 
     def cap_edit(mid: int, text: str, **kw: Any) -> bool:
@@ -628,33 +725,36 @@ def test_s29_typed_draft_pct_and_price_paths(tmp_path: Any, monkeypatch: pytest.
     sent, send = _send_capture()
     out = process_update(
         conn,
-        _msg("25%"),
+        _msg("0.5%"),
         send=send,
         edit=cap_edit,
-        futures=fake,
+        futures=low,
         now_ms_value=T1,
     )
-    assert out.get("rejected") is True
-    assert STOP_STEP_HINT in edits[-1]["text"]
+    assert out.get("ok") is False
+    assert edits[-1]["text"] == _decorate_card_text(str(expect_pct["text"]))
     assert edits[-1]["reply_markup"] == _stop_step_markup(cid)
 
     conn2 = open_db(tmp_path / "s29b.db")
     _seed_settings(conn2)
-    fake2 = _happy_fake(marks={"BTCUSDT": Decimal("100000")})
-    _run_qk(conn2, "qk:sd:l", fake2)
+    _run_qk(conn2, "qk:sd:l", low)
     cid2 = conn2.execute("SELECT id FROM assist_quick_card LIMIT 1").fetchone()["id"]
-    _run_qk(conn2, f"qk:sy:{cid2}:BTCUSDT", fake2)
+    _run_qk(conn2, f"qk:sy:{cid2}:BTCUSDT", low)
+    row2 = dict(conn2.execute("SELECT * FROM assist_quick_card WHERE id=?", (cid2,)).fetchone())
+    row2["stop_kind"] = "price"
+    row2["stop_value"] = "99000"
+    expect_price = build_card_for_row(conn2, low, row2, now_ms=T2)
     sent2, send2 = _send_capture()
     out2 = process_update(
         conn2,
-        _msg("67000"),
+        _msg("99000"),
         send=send2,
         edit=cap_edit,
-        futures=fake2,
+        futures=low,
         now_ms_value=T2,
     )
-    assert out2.get("rejected") is True
-    assert sent2 and MSG_STOP_FAR in sent2[0]["text"]
+    assert out2.get("ok") is False
+    assert edits[-1]["text"] == _decorate_card_text(str(expect_price["text"]))
     assert (
         conn2.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid2,)).fetchone()["status"]
         == "pick_stop"
@@ -690,92 +790,19 @@ def test_s30_tag_notice_null_risk_and_qty_lines(tmp_path: Path) -> None:
     )
     conn.commit()
     sent: list[str] = []
+    expected = "\n".join(
+        [
+            (
+                "✅ จับไม้ quick ได้แล้ว — BTCUSDT LONG "
+                f"เข้า {fmt_price(Decimal('100'))} · qty {fmt_qty(Decimal('0'))} · "
+                f"stop ที่ลงทะเบียน {fmt_price(Decimal('90'))}"
+            ),
+            f"ความเสี่ยงจริง ≈ {fmt_price(Decimal('0'))} USDT · บอทไม่ได้วาง stop — ตั้ง stop ในแอปเอง",
+            quick_mode_tag(),
+        ]
+    )
     _send_tag_notice(conn, lambda t, **_k: sent.append(t), registration_id="r1", client=None, now_ms=t0)
-    assert len(sent) == 1
-    lines = sent[0].split("\n")
-    assert lines[1].startswith("ความเสี่ยงจริง ≈")
-    assert "qty" in lines[0]
-    assert fmt_qty(Decimal("0")) in lines[0]
-    conn.close()
-
-
-# --- S31: two open trades — tag first, rebuild second -------------------------
-
-
-def test_s31_two_open_trades_tag_first_rebuild_second(tmp_path: Path) -> None:
-    """S31: newly tagged T1 skipped in rebuild pass; existing open T2 still rebuilds."""
-    conn = open_db(tmp_path / "s31.db")
-    t0 = T0
-    rid1, _ = create_quick_registration(
-        conn, symbol="BTCUSDT", side="long", planned_entry=100, planned_stop=90, qty=1.0, now_ms=t0
-    )
-    rid2, _ = create_quick_registration(
-        conn, symbol="ETHUSDT", side="long", planned_entry=100, planned_stop=90, qty=1.0, now_ms=t0
-    )
-    buy1 = t0 + 30_000
-    buy2 = t0 + 40_000
-    fake = FakeFutures(
-        trades=[
-            _fill(tid=1, symbol="BTCUSDT", side="BUY", price=100, qty=1, time_ms=buy1),
-            _fill(tid=2, symbol="ETHUSDT", side="BUY", price=100, qty=1, time_ms=buy2),
-        ]
-    )
-    sent: list[str] = []
-
-    def send(msg: str, **_kw: Any) -> bool:
-        sent.append(msg)
-        return True
-
-    info = sync_quick_trades(conn, fake, now_ms=buy2 + 1000, send=send)
-    assert info.get("tagged") == 2
-    assert len(sent) == 2
-    t_eth = conn.execute("SELECT * FROM assist_quick_trade WHERE registration_id=?", (rid2,)).fetchone()
-    sell_t = buy2 + 60_000
-    fake2 = FakeFutures(
-        trades=[
-            _fill(tid=1, symbol="BTCUSDT", side="BUY", price=100, qty=1, time_ms=buy1),
-            _fill(tid=2, symbol="ETHUSDT", side="BUY", price=100, qty=1, time_ms=buy2),
-            _fill(tid=3, symbol="ETHUSDT", side="SELL", price=110, qty=1, time_ms=sell_t, realized=10),
-        ]
-    )
-    sent.clear()
-    info2 = sync_quick_trades(conn, fake2, now_ms=sell_t + 1000, send=send)
-    assert info2.get("updated", 0) >= 1
-    row = conn.execute(
-        "SELECT status, exit_trade_ids FROM assist_quick_trade WHERE id=?", (t_eth["id"],)
-    ).fetchone()
-    assert row["status"] == "closed"
-    conn.close()
-
-
-# --- S32: menu label with active quoted draft ---------------------------------
-
-
-def test_s32_menu_label_leaves_quoted_card_rows(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """S32: ⚡ Quick menu with quoted draft does not delete the quoted card row."""
-    _forbid_trade_client(monkeypatch)
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-    conn = open_db(tmp_path / "s32.db")
-    _seed_settings(conn)
-    fake = _happy_fake()
-    cid = _flow_to_quoted(conn, fake)
-    before = _rows(conn)
-    label = match_menu_label(BTN_QUICK)
-    assert label == "quick"
-    process_update(
-        conn,
-        _msg(label),
-        send=lambda *_a, **_k: 1,
-        edit=lambda *_a, **_k: True,
-        futures=fake,
-        now_ms_value=T1,
-    )
-    after = _rows(conn)
-    assert before == after
-    assert (
-        conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()["status"]
-        == "quoted"
-    )
+    assert sent == [expected]
     conn.close()
 
 
@@ -783,7 +810,7 @@ def test_s32_menu_label_leaves_quoted_card_rows(tmp_path: Any, monkeypatch: pyte
 
 
 def test_s33_first_fill_fallback_two_cases(tmp_path: Path) -> None:
-    """S33: open-trade rebuild falls back when stored entry id missing."""
+    """S33: first_fill fallback, fill id ordering, and no-candidate break."""
     conn = open_db(tmp_path / "s33.db")
     t0 = T0
     buy_t = t0 + 10_000
@@ -844,15 +871,66 @@ def test_s33_first_fill_fallback_two_cases(tmp_path: Path) -> None:
     ).fetchone()
     assert row2["status"] == "closed"
     assert "20" in (row2["entry_trade_ids"] or "")
+
+    conn3 = open_db(tmp_path / "s33c.db")
+    t_same = t0 + 30_000
+    rid3, _ = create_quick_registration(
+        conn3, symbol="BTCUSDT", side="long", planned_entry=100, planned_stop=90, qty=1.0, now_ms=t0
+    )
+    fake5 = FakeFutures(
+        trades=[
+            _fill(tid=50, symbol="BTCUSDT", side="BUY", price=100, qty=0.5, time_ms=t_same),
+            _fill(tid=51, symbol="BTCUSDT", side="BUY", price=101, qty=0.5, time_ms=t_same),
+        ]
+    )
+    sync_quick_trades(conn3, fake5, now_ms=t_same + 1000, send=lambda *_a, **_k: True)
+    trade3 = conn3.execute(
+        "SELECT entry_trade_ids, entry_avg FROM assist_quick_trade WHERE registration_id=?", (rid3,)
+    ).fetchone()
+    assert trade3["entry_trade_ids"] == "[50, 51]"
+    assert float(trade3["entry_avg"]) == pytest.approx(100.5)
+
+    conn4 = open_db(tmp_path / "s33d.db")
+    rid4, _ = create_quick_registration(
+        conn4, symbol="BNBUSDT", side="long", planned_entry=100, planned_stop=90, qty=1.0, now_ms=t0
+    )
+    t_open = t0 + 5_000
+    fake6 = FakeFutures(trades=[_fill(tid=1, symbol="BNBUSDT", side="BUY", price=100, qty=1, time_ms=t_open)])
+    sync_quick_trades(conn4, fake6, now_ms=t_open + 1000, send=lambda *_a, **_k: True)
+    trade4 = conn4.execute("SELECT id FROM assist_quick_trade WHERE registration_id=?", (rid4,)).fetchone()
+    conn4.execute(
+        "UPDATE assist_quick_trade SET entry_trade_ids='[]', status='open' WHERE id=?",
+        (trade4["id"],),
+    )
+    conn4.commit()
+    fake7 = FakeFutures(
+        trades=[_fill(tid=99, symbol="BNBUSDT", side="SELL", price=100, qty=1, time_ms=t_open + 10_000)]
+    )
+    info = sync_quick_trades(conn4, fake7, now_ms=t_open + 20_000, send=lambda *_a, **_k: True)
+    assert info.get("updated", 0) == 0
+    assert (
+        conn4.execute("SELECT status FROM assist_quick_trade WHERE id=?", (trade4["id"],)).fetchone()[
+            "status"
+        ]
+        == "open"
+    )
     conn.close()
     conn2.close()
+    conn3.close()
+    conn4.close()
 
 
 # --- S34: _send_close_notice direct -------------------------------------------
 
 
 def test_s34_send_close_notice_direct_variants(tmp_path: Path) -> None:
-    """S34: _send_close_notice mark-once, skip_reason, R lines."""
+    """S34: _send_close_notice whole messages — BNB, zero risk, idempotent mark."""
+    tag = quick_mode_tag()
+
+    def _close_msg(sym: str, side: str, net_usdt: float, r_line: str) -> str:
+        label = _side_label(side)
+        return f"🏁 ไม้ quick {sym} {label} ปิดแล้ว (ปิดใน Binance) — สุทธิ {net_usdt:+.2f} USDT · {r_line}\n{tag}"
+
     conn = open_db(tmp_path / "s34.db")
     conn.execute(
         """
@@ -883,8 +961,14 @@ def test_s34_send_close_notice_direct_variants(tmp_path: Path) -> None:
         },
         now_ms=T0,
     )
-    assert len(sent) == 1
-    assert "+0.50R" in sent[0]
+    assert sent == [
+        _close_msg(
+            "BTCUSDT",
+            "long",
+            5.0,
+            "+0.50R (รวมค่าธรรมเนียมจริง + funding)",
+        )
+    ]
     _send_close_notice(
         conn,
         send,
@@ -895,7 +979,6 @@ def test_s34_send_close_notice_direct_variants(tmp_path: Path) -> None:
     )
     assert len(sent) == 1
 
-    sent.clear()
     _send_close_notice(
         conn,
         send,
@@ -905,7 +988,7 @@ def test_s34_send_close_notice_direct_variants(tmp_path: Path) -> None:
         now_ms=T2,
         skip_reason="bot",
     )
-    assert sent == []
+    assert len(sent) == 1
 
     conn.execute(
         """
@@ -913,6 +996,22 @@ def test_s34_send_close_notice_direct_variants(tmp_path: Path) -> None:
             id, registration_id, symbol, side, status, net_usdt, net_r,
             risk_usdt, commission_other_asset, close_notice_at_ms, updated_at_ms
         ) VALUES ('t2', 'r2', 'ETHUSDT', 'short', 'closed', 1, NULL, 8, 'BNB', NULL, 1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_quick_trade (
+            id, registration_id, symbol, side, status, net_usdt, net_r,
+            risk_usdt, commission_other_asset, close_notice_at_ms, updated_at_ms
+        ) VALUES ('t3', 'r3', 'SOLUSDT', 'long', 'closed', 2, NULL, 0, NULL, NULL, 1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_quick_trade (
+            id, registration_id, symbol, side, status, net_usdt, net_r,
+            risk_usdt, commission_other_asset, close_notice_at_ms, updated_at_ms
+        ) VALUES ('t4', 'r4', 'XRPUSDT', 'long', 'closed', 3, NULL, 5, NULL, NULL, 1)
         """
     )
     conn.commit()
@@ -931,8 +1030,41 @@ def test_s34_send_close_notice_direct_variants(tmp_path: Path) -> None:
         },
         now_ms=T3,
     )
-    assert sent
-    assert "ค่าธรรมเนียมเป็น BNB" in sent[-1]
+    _send_close_notice(
+        conn,
+        send,
+        trade_id="t3",
+        client=None,
+        payload={
+            "symbol": "SOLUSDT",
+            "side": "long",
+            "net_usdt": 2.0,
+            "net_r": None,
+            "risk_usdt": 0.0,
+            "commission_other_asset": None,
+        },
+        now_ms=T3,
+    )
+    _send_close_notice(
+        conn,
+        send,
+        trade_id="t4",
+        client=None,
+        payload={
+            "symbol": "XRPUSDT",
+            "side": "long",
+            "net_usdt": 3.0,
+            "net_r": None,
+            "risk_usdt": 5.0,
+            "commission_other_asset": None,
+        },
+        now_ms=T3,
+    )
+    assert sent[1:] == [
+        _close_msg("ETHUSDT", "short", 1.0, "R คำนวณไม่ได้ (ค่าธรรมเนียมเป็น BNB)"),
+        _close_msg("SOLUSDT", "long", 2.0, "R คำนวณไม่ได้"),
+        _close_msg("XRPUSDT", "long", 3.0, "R คำนวณไม่ได้"),
+    ]
     conn.close()
 
 
@@ -954,9 +1086,79 @@ def test_optional_recent_quick_symbols_and_side_label(tmp_path: Any) -> None:
             (f"r-{sym}", sym, now + off, now + off + 60_000, now + off),
         )
     conn.commit()
-    got = _recent_quick_symbols(conn, limit=6)
-    assert got[:3] == ["XRPUSDT", "ADAUSDT", "SOLUSDT"]
-    assert "BTCUSDT" in got
+    assert _recent_quick_symbols(conn, limit=6) == [
+        "XRPUSDT",
+        "ADAUSDT",
+        "SOLUSDT",
+        "BTCUSDT",
+        "ETHUSDT",
+    ]
+    assert _recent_quick_symbols(conn, limit=2) == ["XRPUSDT", "ADAUSDT"]
     assert _side_label("long") == "LONG"
     assert _side_label("short") == "SHORT"
     conn.close()
+
+
+# --- S35: quote expiry / clock skew -------------------------------------------
+
+
+def test_s35a_quote_is_expired_skew_and_ttl() -> None:
+    """S35a: _quote_is_expired respects TTL and future clock skew."""
+    base = T0
+    assert not _quote_is_expired(base, base + QUICK_CARD_TTL_MS)
+    assert _quote_is_expired(base, base + QUICK_CARD_TTL_MS + 1)
+    assert _quote_is_expired(0, base)
+    assert _quote_is_expired(base, base - QUOTE_CLOCK_SKEW_MS - 1)
+
+
+def test_s35b_qk_rg_quote_expired_exact_body(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S35b: expired quote on register → exact edit body and no registration."""
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    conn = open_db(tmp_path / "s35b.db")
+    _seed_settings(conn)
+    fake = _happy_fake()
+    cid = _flow_to_quoted(conn, fake)
+    row = conn.execute("SELECT quoted_at_ms FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    late = int(row["quoted_at_ms"]) + QUICK_CARD_TTL_MS + 1
+    _, answers, out, edits = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=late)
+    expected = _decorate_card_text("\n".join([MSG_CARD_QUOTE_EXPIRED, quick_mode_tag()]))
+    assert out == {"ok": False, "quote_expired": True}
+    assert answers == [MSG_CARD_QUOTE_EXPIRED]
+    assert edits[-1]["text"] == expected
+    assert edits[-1]["reply_markup"] == _refresh_only_markup(cid)
+    assert conn.execute("SELECT COUNT(*) c FROM assist_quick_registration").fetchone()["c"] == 0
+    conn.close()
+
+
+def test_s35c_registered_without_rid_recovers_then_rg(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S35c: registered row without registration_id reverts to quoted and can register."""
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    conn = open_db(tmp_path / "s35c.db")
+    _seed_settings(conn)
+    fake = _happy_fake()
+    cid = _flow_to_quoted(conn, fake)
+    conn.execute(
+        "UPDATE assist_quick_card SET status='registered', registration_id=NULL WHERE id=?",
+        (cid,),
+    )
+    conn.commit()
+    _, answers, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
+    assert answers == [None]
+    assert out.get("ok") is True
+    assert out.get("registration_id")
+    row = conn.execute("SELECT status, registration_id FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "registered"
+    assert row["registration_id"] == out["registration_id"]
+    conn.close()
+
+
+# --- S36: callback_data guard on quoted markup --------------------------------
+
+
+def test_s36_quoted_markup_rejects_oversized_card_id() -> None:
+    """S36: _quoted_markup raises when any callback_data would exceed 64 bytes."""
+    long_id = "q" * 60
+    with pytest.raises(ValueError, match="callback_data exceeds 64 bytes"):
+        _quoted_markup(long_id)

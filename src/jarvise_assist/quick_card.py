@@ -49,6 +49,7 @@ SendFn = Callable[..., Any]
 
 QUICK_FEE_BPS_PER_SIDE = Decimal("6")
 QUICK_CARD_TTL_MS = 120_000
+CARD_TTL_PREFIX = "การ์ดนี้ใช้ได้ถึง"
 QUICK_REGISTER_PREFIX = "qr:"
 BTN_QUICK_REGISTER = "⚡ เริ่มไม้ quick"
 
@@ -506,7 +507,7 @@ def build_quick_card(
         f"(เพดาน quick {fmt_price(cap_pct)}% · รวม {fmt_price(portfolio_cap_pct)}%)"
     )
     lines.append(
-        f"การ์ดนี้ใช้ได้ถึง {_hhmmss(card_until)} (หมดแล้วกด 🔄 อัปเดตราคา) · "
+        f"{CARD_TTL_PREFIX} {_hhmmss(card_until)} (หมดแล้วกด 🔄 อัปเดตราคา) · "
         "บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน 10 นาที"
     )
     lines.append(STOP_INSTRUCTION)

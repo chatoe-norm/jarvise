@@ -101,7 +101,12 @@ def edit_message(
     http = client or httpx.Client(timeout=15.0)
     try:
         resp = http.post(url, json=body)
-        return resp.status_code == 200 and bool((resp.json() or {}).get("ok"))
+        payload = resp.json() or {}
+        if resp.status_code == 400:
+            desc = str(payload.get("description") or "").lower()
+            if "message is not modified" in desc:
+                return True
+        return resp.status_code == 200 and bool(payload.get("ok"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("telegram edit soft-fail: %s", type(exc).__name__)
         return False

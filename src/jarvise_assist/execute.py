@@ -40,6 +40,7 @@ from jarvise_assist.futures import (
     find_protective_stop,
     is_protective_stop,
     order_stop_price,
+    order_type,
     protective_stop_coverage,
 )
 from jarvise_assist.keyboard import (
@@ -57,13 +58,6 @@ from jarvise_assist.messages import (
     format_move_stop_advice,
     format_signal_message,
     progress_alert_after_tap,
-)
-from jarvise_assist.order_lines import (
-    close_position_flag,
-    format_closing_order_line,
-    is_owner_reducing_order,
-    order_list_price,
-    owner_closing_orders,
 )
 from jarvise_assist.pause import is_paused
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN, quick_symbols
@@ -3076,7 +3070,10 @@ def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> tuple
 
 
 def _close_position_flag(order: dict[str, Any]) -> bool:
-    return close_position_flag(order)
+    raw = order.get("closePosition")
+    if raw is True:
+        return True
+    return str(raw or "").lower() in {"true", "1"}
 
 
 def _is_owner_reducing_order(
@@ -3085,7 +3082,20 @@ def _is_owner_reducing_order(
     position_side: str,
     trade_side: str,
 ) -> bool:
-    return is_owner_reducing_order(order, position_side=position_side, trade_side=trade_side)
+    cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
+    if cid.startswith("jv-"):
+        return False
+    reduce_only = bool(order.get("reduceOnly")) or _close_position_flag(order)
+    if not reduce_only:
+        return False
+    close_side = "SELL" if trade_side == "long" else "BUY"
+    if str(order.get("side") or "").upper() != close_side:
+        return False
+    ops = str(order.get("positionSide") or "BOTH").upper()
+    pos_side = position_side.upper()
+    if ops in {"LONG", "SHORT"}:
+        return ops == pos_side
+    return ops in {"BOTH", pos_side}
 
 
 def _owner_closing_orders(
@@ -3095,20 +3105,44 @@ def _owner_closing_orders(
     position_side: str,
     trade_side: str,
 ) -> list[dict[str, Any]]:
-    return owner_closing_orders(
-        orders,
-        symbol=symbol,
-        position_side=position_side,
-        trade_side=trade_side,
-    )
+    out: list[dict[str, Any]] = []
+    for order in orders:
+        if str(order.get("symbol") or "").upper() != symbol.upper():
+            continue
+        if _is_owner_reducing_order(order, position_side=position_side, trade_side=trade_side):
+            out.append(order)
+    return out
 
 
 def _order_list_price(order: dict[str, Any]) -> Decimal | None:
-    return order_list_price(order)
+    px = order_stop_price(order)
+    if px is not None:
+        return px
+    raw = order.get("price")
+    if raw in (None, "", "0", "0.0", "0.00000000"):
+        return None
+    try:
+        dec = Decimal(str(raw))
+    except Exception:  # noqa: BLE001
+        return None
+    return dec if dec > 0 else None
 
 
 def _format_owner_order_line(order: dict[str, Any], *, tick: Decimal | None) -> str:
-    return format_closing_order_line(order, tick=tick, note=OWNER_CLOSING_ORDER_NOTE)
+    otype = order_type(order)
+    side = str(order.get("side") or "").upper()
+    px = _order_list_price(order)
+    px_s = (
+        _fmt_price_tick(px, tick)
+        if px is not None and tick is not None and tick > 0
+        else (fmt_price(px) if px is not None else "?")
+    )
+    if _close_position_flag(order):
+        qty_s = "closePosition"
+    else:
+        raw_qty = order.get("origQty") or order.get("quantity")
+        qty_s = fmt_qty(Decimal(str(raw_qty))) if raw_qty not in (None, "") else "?"
+    return f"• {otype} {side} {px_s} · {qty_s} · {OWNER_CLOSING_ORDER_NOTE}"
 
 
 def _exit_advice_active(

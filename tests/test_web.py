@@ -1182,7 +1182,15 @@ def test_api_rag_sync(monkeypatch) -> None:
 
 
 def test_api_paper_auto_decide_config(monkeypatch) -> None:
+    import os
+
     _stub_control_deps(monkeypatch)
+    auto_key = "JARVISE_PAPER_AUTO_DECIDE"
+    auto_before = os.environ.get(auto_key)
+    if auto_before is None:
+        monkeypatch.delenv(auto_key, raising=False)
+    else:
+        monkeypatch.setenv(auto_key, auto_before)
     client = TestClient(app)
 
     # 1. GET config
@@ -1222,6 +1230,13 @@ def test_api_paper_auto_decide_config(monkeypatch) -> None:
     assert resp.json()["ok"] is True
     assert resp.json()["enabled"] is False
     assert resp.json()["max_risk_per_trade_pct"] == 1.0
+    try:
+        pass
+    finally:
+        if auto_before is None:
+            os.environ.pop(auto_key, None)
+        else:
+            os.environ[auto_key] = auto_before
 
 
 def test_api_paper_auto_decide_run(monkeypatch) -> None:
@@ -1265,6 +1280,11 @@ def test_api_risk_caps_get_and_save(monkeypatch) -> None:
         "JARVISE_MAX_CORRELATED_BUCKET_PCT",
     )
     cap_env_before = {key: os.environ.get(key) for key in cap_env_keys}
+    for key in cap_env_keys:
+        if key in os.environ:
+            monkeypatch.setenv(key, os.environ[key])
+        else:
+            monkeypatch.delenv(key, raising=False)
     client = TestClient(app)
 
     # GET /api/risk/caps
@@ -1284,11 +1304,14 @@ def test_api_risk_caps_get_and_save(monkeypatch) -> None:
     assert data["ok"] is True
     assert data["risk_caps"]["max_notional_per_order"] == 2500.0
     assert data["risk_caps"]["drawdown_lock_pct"] == 6.0
-    for key, prev in cap_env_before.items():
-        if prev is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = prev
+    try:
+        pass
+    finally:
+        for key, prev in cap_env_before.items():
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
 
 
 def test_api_risk_caps_rejects_zero_and_negative(monkeypatch) -> None:

@@ -102,6 +102,7 @@ def create_quick_registration_from_card(
     side: str,
     card: dict[str, Any],
     now_ms: int,
+    commit: bool = True,
 ) -> tuple[str | None, str | None]:
     return create_quick_registration(
         conn,
@@ -112,23 +113,27 @@ def create_quick_registration_from_card(
         qty=float(card["qty"]),
         now_ms=now_ms,
         live_positions=list(card.get("positions") or []),
+        commit=commit,
     )
 
 
-def _rollback_registered_to_quoted(conn: Any, card_id: str, *, now_ms: int) -> None:
-    conn.execute(
-        """
-        UPDATE assist_quick_card
-        SET status='quoted', updated_at_ms=?
-        WHERE id=? AND status='registered' AND registration_id IS NULL
-        """,
-        (int(now_ms), card_id),
-    )
-    conn.commit()
+QUOTE_CLOCK_SKEW_MS = 60_000
+
+
+def _quote_is_expired(quoted_at_ms: int, now_ms: int) -> bool:
+    qa = int(quoted_at_ms or 0)
+    if qa <= 0:
+        return True
+    age = int(now_ms) - qa
+    if age < -QUOTE_CLOCK_SKEW_MS:
+        return True
+    return age > QUICK_CARD_TTL_MS
 
 
 def _card_text_after_registration(card_text: str) -> str:
-    lines = [ln for ln in card_text.split("\n") if not ln.startswith("การ์ดนี้ใช้ได้ถึง")]
+    from jarvise_assist.quick_card import CARD_TTL_PREFIX
+
+    lines = [ln for ln in card_text.split("\n") if not ln.startswith(CARD_TTL_PREFIX)]
     lines.append("✅ ลงทะเบียนแล้ว")
     return "\n".join(lines)
 
@@ -212,7 +217,9 @@ def _quoted_markup(card_id: str) -> dict[str, Any]:
     rg = f"qk:rg:{card_id}"
     rf = f"qk:rf:{card_id}"
     xb = f"qk:x:{card_id}"
-    assert len(rg.encode()) <= 64 and len(rf.encode()) <= 64 and len(xb.encode()) <= 64
+    for cb in (rg, rf, xb):
+        if len(cb.encode("utf-8")) > 64:
+            raise ValueError(f"callback_data exceeds 64 bytes: {cb!r}")
     return {
         "inline_keyboard": [
             [{"text": _BTN_REGISTER, "callback_data": rg}],
@@ -373,6 +380,182 @@ def registration_success_message(
     )
 
 
+def _render_registered_card_edit(
+    conn: Any,
+    futures: Any,
+    row: dict[str, Any],
+    *,
+    now_ms: int,
+    edit: Callable[[str, dict[str, Any] | None], bool],
+) -> None:
+    try:
+        card = build_card_at_quoted_stop(conn, futures, row, now_ms=now_ms)
+        if card.get("ok"):
+            body = _decorate_card_text(_card_text_after_registration(str(card["text"])))
+            edit(body, {"inline_keyboard": []})
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:rg idempotent re-render failed card_id=%s", row.get("id"))
+
+
+def _handle_qk_register(
+    conn: Any,
+    card_id: str,
+    row: dict[str, Any],
+    st: str,
+    *,
+    futures: Any,
+    send: SendFn,
+    answer: Callable[[str | None], None],
+    edit: Callable[[str, dict[str, Any] | None], bool],
+    now_ms: int,
+) -> dict[str, Any]:
+    if st == "registered":
+        rid_existing = row.get("registration_id")
+        if rid_existing:
+            _render_registered_card_edit(conn, futures, row, now_ms=now_ms, edit=edit)
+            answer(MSG_ALREADY_REGISTERED)
+            return {"ok": True, "idempotent": True}
+        conn.execute(
+            """
+            UPDATE assist_quick_card
+            SET status='quoted', updated_at_ms=?
+            WHERE id=? AND status='registered' AND registration_id IS NULL
+            """,
+            (int(now_ms), card_id),
+        )
+        conn.commit()
+        row = _load_card(conn, card_id) or row
+        st = str(row["status"])
+
+    if st != "quoted":
+        answer(MSG_BAD_BUTTON)
+        return {"ok": False}
+
+    quoted_at = int(row.get("quoted_at_ms") or 0)
+    if _quote_is_expired(quoted_at, now_ms):
+        body = _decorate_card_text("\n".join([MSG_CARD_QUOTE_EXPIRED, _mode_tag()]))
+        edit(body, _refresh_only_markup(card_id))
+        answer(MSG_CARD_QUOTE_EXPIRED)
+        return {"ok": False, "quote_expired": True}
+
+    sym = str(row["symbol"]).upper()
+    side = str(row["side"])
+
+    try:
+        card = build_card_at_quoted_stop(conn, futures, row, now_ms=now_ms)
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:rg build card failed card_id=%s", card_id)
+        answer(MSG_REGISTER_FAILED)
+        return {"ok": False, "reason": "read_failed"}
+
+    if not card.get("ok"):
+        send(str(card.get("text") or REFUSAL.get("read_failed", "")))
+        try:
+            answer(None)
+        except Exception:  # noqa: BLE001
+            logger.exception("qk:rg refusal answer failed card_id=%s", card_id)
+        return {"ok": False, "reason": card.get("reason")}
+
+    rid: str | None = None
+    try:
+        claim = conn.execute(
+            """
+            UPDATE assist_quick_card SET status='registered', updated_at_ms=?
+            WHERE id=? AND status='quoted'
+            """,
+            (int(now_ms), card_id),
+        )
+        if claim.rowcount == 0:
+            conn.rollback()
+            answer(MSG_ALREADY_REGISTERED)
+            return {"ok": True, "idempotent": True}
+        if not conn.in_transaction:
+            raise RuntimeError("qk:rg expected an open transaction after claim")
+
+        week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
+        if week_until is not None:
+            conn.rollback()
+            send(_refusal_week_loss(week_until, now_ms=now_ms))
+            try:
+                answer(None)
+            except Exception:  # noqa: BLE001
+                logger.exception("qk:rg week-loss answer failed card_id=%s", card_id)
+            return {"ok": False, "reason": "week_loss_pause"}
+
+        rid, reason = create_quick_registration_from_card(
+            conn,
+            symbol=sym,
+            side=side,
+            card=card,
+            now_ms=now_ms,
+            commit=False,
+        )
+        if rid is None:
+            conn.rollback()
+            send(_registration_refusal_text(str(reason)))
+            try:
+                answer(None)
+            except Exception:  # noqa: BLE001
+                logger.exception("qk:rg registration refusal answer failed card_id=%s", card_id)
+            return {"ok": False, "reason": reason}
+
+        link = conn.execute(
+            """
+            UPDATE assist_quick_card SET registration_id=?, updated_at_ms=?
+            WHERE id=? AND status='registered' AND registration_id IS NULL
+            """,
+            (rid, int(now_ms), card_id),
+        )
+        if link.rowcount != 1:
+            conn.rollback()
+            answer(MSG_REGISTER_FAILED)
+            return {"ok": False, "reason": "read_failed"}
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:rg registration failed card_id=%s", card_id)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            logger.exception("qk:rg rollback failed card_id=%s", card_id)
+        try:
+            answer(MSG_REGISTER_FAILED)
+        except Exception:  # noqa: BLE001
+            logger.exception("qk:rg answer failed card_id=%s", card_id)
+        return {"ok": False, "reason": "read_failed"}
+    except BaseException:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            logger.exception("qk:rg base rollback failed card_id=%s", card_id)
+        raise
+
+    tick = Decimal(str(card.get("tick") or "0.0001"))
+    try:
+        edited = _card_text_after_registration(str(card["text"]))
+        edit(_decorate_card_text(edited), {"inline_keyboard": []})
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:rg post-commit edit failed card_id=%s", card_id)
+    try:
+        send(
+            registration_success_message(
+                sym=sym,
+                side=side,
+                entry=Decimal(str(card["entry"])),
+                stop=Decimal(str(card["stop"])),
+                qty=Decimal(str(card["qty"])),
+                tick=tick,
+                now_ms=now_ms,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:rg post-commit send failed card_id=%s", card_id)
+    try:
+        answer(None)
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:rg post-commit answer failed card_id=%s", card_id)
+    return {"ok": True, "registration_id": rid}
+
+
 def handle_quick_trade_callback(
     conn: Any,
     data: str,
@@ -499,6 +682,19 @@ def handle_quick_trade_callback(
         answer(None)
         return {"ok": True, "cancelled": True}
 
+    if op == "rg":
+        return _handle_qk_register(
+            conn,
+            card_id,
+            row,
+            st,
+            futures=futures,
+            send=send,
+            answer=answer,
+            edit=_edit,
+            now_ms=now_ms,
+        )
+
     if st in {"registered", "cancelled", "expired"}:
         answer(_terminal_status_answer(st))
         return {"ok": st == "registered", "idempotent": st == "registered"}
@@ -613,119 +809,6 @@ def handle_quick_trade_callback(
         _edit(body, _quoted_markup(card_id))
         answer(None)
         return {"ok": True, "refreshed": True}
-
-    if op == "rg":
-        if st != "quoted":
-            answer(MSG_BAD_BUTTON)
-            return {"ok": False}
-        quoted_at = int(row.get("quoted_at_ms") or 0)
-        if quoted_at and int(now_ms) - quoted_at > QUICK_CARD_TTL_MS:
-            body = _decorate_card_text("\n".join([MSG_CARD_QUOTE_EXPIRED, _mode_tag()]))
-            _edit(body, _refresh_only_markup(card_id))
-            answer(MSG_CARD_QUOTE_EXPIRED)
-            return {"ok": False, "quote_expired": True}
-        claim = conn.execute(
-            """
-            UPDATE assist_quick_card SET status='registered', updated_at_ms=?
-            WHERE id=? AND status='quoted'
-            """,
-            (int(now_ms), card_id),
-        )
-        if claim.rowcount == 0:
-            conn.rollback()
-            answer(MSG_ALREADY_REGISTERED)
-            return {"ok": True, "idempotent": True}
-        conn.commit()
-        sym = str(row["symbol"]).upper()
-        side = str(row["side"])
-        rid: str | None = None
-        answered = False
-
-        def _mark_answer(text: str | None = None) -> None:
-            nonlocal answered
-            try:
-                answer(text)
-            except Exception:  # noqa: BLE001
-                logger.exception("qk:rg answer failed card_id=%s", card_id)
-            answered = True
-
-        try:
-            card = build_card_at_quoted_stop(conn, futures, row, now_ms=now_ms)
-            if not card.get("ok"):
-                _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
-                send(str(card.get("text") or REFUSAL.get("read_failed", "")))
-                _mark_answer(None)
-                return {"ok": False, "reason": card.get("reason")}
-            week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
-            if week_until is not None:
-                _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
-                send(_refusal_week_loss(week_until, now_ms=now_ms))
-                _mark_answer(None)
-                return {"ok": False, "reason": "week_loss_pause"}
-            rid, reason = create_quick_registration_from_card(
-                conn,
-                symbol=sym,
-                side=side,
-                card=card,
-                now_ms=now_ms,
-            )
-            if rid is None:
-                _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
-                send(_registration_refusal_text(str(reason)))
-                _mark_answer(None)
-                return {"ok": False, "reason": reason}
-            conn.execute(
-                """
-                UPDATE assist_quick_card SET registration_id=?, updated_at_ms=?
-                WHERE id=? AND status='registered'
-                """,
-                (rid, int(now_ms), card_id),
-            )
-            conn.commit()
-            tick = Decimal(str(card.get("tick") or "0.0001"))
-            edited = _card_text_after_registration(str(card["text"]))
-            _edit(_decorate_card_text(edited), {"inline_keyboard": []})
-            send(
-                registration_success_message(
-                    sym=sym,
-                    side=side,
-                    entry=Decimal(str(card["entry"])),
-                    stop=Decimal(str(card["stop"])),
-                    qty=Decimal(str(card["qty"])),
-                    tick=tick,
-                    now_ms=now_ms,
-                )
-            )
-            _mark_answer(None)
-            return {"ok": True, "registration_id": rid}
-        except Exception:  # noqa: BLE001
-            logger.exception("qk:rg registration failed card_id=%s", card_id)
-            try:
-                conn.rollback()
-            except Exception:  # noqa: BLE001
-                logger.exception("qk:rg rollback failed card_id=%s", card_id)
-            reply = MSG_REGISTER_FAILED
-            out: dict[str, Any] = {"ok": False, "reason": "read_failed"}
-            if rid is not None:
-                reply = MSG_ALREADY_REGISTERED
-                out = {"ok": True, "registration_id": rid}
-            if not answered:
-                try:
-                    if rid is None:
-                        _rollback_registered_to_quoted(conn, card_id, now_ms=now_ms)
-                    else:
-                        conn.execute(
-                            """
-                            UPDATE assist_quick_card SET registration_id=?, updated_at_ms=?
-                            WHERE id=? AND status='registered' AND registration_id IS NULL
-                            """,
-                            (rid, int(now_ms), card_id),
-                        )
-                        conn.commit()
-                except Exception:  # noqa: BLE001
-                    logger.exception("qk:rg except recovery failed card_id=%s", card_id)
-                _mark_answer(reply)
-            return out
 
     answer(MSG_BAD_BUTTON)
     return {"ok": False}

@@ -21,7 +21,6 @@ from jarvise_assist.messages import fmt_price
 from jarvise_assist.quick import REG_EXPIRE_GRACE_MS, render_quick_menu
 from jarvise_assist.quick_card import REFUSAL, quick_mode_tag
 from jarvise_assist.quick_m1a1 import (
-    MSG_ALREADY_REGISTERED,
     MSG_BAD_BUTTON,
     MSG_CARD_TOO_OLD,
     QUICK_CARD_MAX_AGE_MS,
@@ -173,8 +172,8 @@ def test_qk_rg_success_message_raises_still_registered(
     row = conn.execute("SELECT status, registration_id FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
     assert row["status"] == "registered"
     assert row["registration_id"] is not None
-    assert answers == [MSG_ALREADY_REGISTERED]
-    assert out.get("ok") is True
+    assert answers == [None]
+    assert out == {"ok": True, "registration_id": row["registration_id"]}
     conn.close()
 
 
