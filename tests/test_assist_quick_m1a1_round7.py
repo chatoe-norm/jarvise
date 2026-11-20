@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from tests.test_assist_execute import _forbid_trade_client
 from tests.test_assist_quick import _fill
+from tests.test_assist_quick_m1a1_round1 import _answer_capture
 from tests.test_assist_quick_m1a1_round4 import (
     MSG_ALREADY_REGISTERED,
     MSG_BAD_BUTTON,
@@ -21,13 +22,14 @@ from tests.test_assist_quick_m1a1_round4 import (
 )
 from tests.test_assist_real_trades import FakeFutures
 
+from jarvise_assist.listen import process_update
 from jarvise_assist.messages import fmt_price, fmt_qty
 from jarvise_assist.quick import create_quick_registration, sync_quick_trades
 from jarvise_assist.quick_card import quick_mode_tag
 from jarvise_assist.quick_m1a1 import (
     _decorate_card_text,
     _registered_idempotent_card_text,
-    _side_label,
+    _render_registered_card_edit,
 )
 from jarvise_ingest.db import open_db
 
@@ -86,6 +88,123 @@ def test_qk_rg_replay_clears_keyboard_after_failed_first_edit(
     assert out2 == {"ok": True, "idempotent": True}
     assert len(edits2) == 1
     assert edits2[0]["reply_markup"] == {"inline_keyboard": []}
+    conn.close()
+
+
+def test_qk_rg_replay_render_edit_raises_is_swallowed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """C1: direct idempotent render swallows edit Exception so callers can still answer."""
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    conn = open_db(tmp_path / "c1a.db")
+    _seed_settings(conn)
+    fake = _happy_fake()
+    cid = _flow_to_quoted(conn, fake)
+    _, _, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
+    assert out.get("registration_id")
+    card_row = dict(conn.execute("SELECT * FROM assist_quick_card WHERE id=?", (cid,)).fetchone())
+    calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    def boom(text: str, markup: dict[str, Any] | None) -> bool:
+        calls.append((text, markup))
+        raise RuntimeError("edit boom")
+
+    _render_registered_card_edit(conn, card_row, edit=boom)
+    assert len(calls) == 1
+    assert calls[0][0] == _registered_idempotent_card_text(conn, card_row)
+    assert calls[0][1] == {"inline_keyboard": []}
+    conn.close()
+
+
+def test_qk_rg_replay_edit_and_send_raise_still_answers(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1: edit+send both fail on replay — still MSG_ALREADY_REGISTERED (not lost in _edit fallback)."""
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    conn = open_db(tmp_path / "c1b.db")
+    _seed_settings(conn)
+    fake = _happy_fake()
+    cid = _flow_to_quoted(conn, fake)
+    _, _, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
+    rid = out["registration_id"]
+    reg_before = dict(conn.execute("SELECT * FROM assist_quick_registration WHERE id=?", (rid,)).fetchone())
+    answer_texts, answer = _answer_capture()
+    chat_id = int((__import__("os").environ.get("TELEGRAM_CHAT_ID") or "1").strip())
+
+    def edit_boom(_mid: int, _text: str, **_kw: Any) -> bool:
+        raise RuntimeError("edit boom")
+
+    def send_boom(_text: str, **_kw: Any) -> int:
+        raise RuntimeError("send boom")
+
+    upd = {
+        "callback_query": {
+            "id": "cq-replay",
+            "data": f"qk:rg:{cid}",
+            "message": {"chat": {"id": chat_id}, "message_id": 1},
+        }
+    }
+    out2 = process_update(
+        conn,
+        upd,
+        send=send_boom,
+        answer=answer,
+        edit=edit_boom,
+        futures=fake,
+        now_ms_value=T0,
+    )
+    assert answer_texts == [MSG_ALREADY_REGISTERED]
+    assert out2 == {"ok": True, "idempotent": True}
+    reg_after = conn.execute("SELECT * FROM assist_quick_registration WHERE id=?", (rid,)).fetchone()
+    assert float(reg_after["planned_entry"]) == float(reg_before["planned_entry"])
+    conn.close()
+
+
+def test_render_idempotent_keyboard_interrupt_propagates(tmp_path: Path) -> None:
+    """C1 does not swallow BaseException on direct render."""
+
+    def edit_interrupt(_text: str, _markup: dict[str, Any] | None) -> bool:
+        raise KeyboardInterrupt
+
+    conn = open_db(tmp_path / "c1c.db")
+    with pytest.raises(KeyboardInterrupt):
+        _render_registered_card_edit(conn, {"registration_id": None}, edit=edit_interrupt)
+    conn.close()
+
+
+def test_qk_rg_replay_keyboard_interrupt_skips_answer(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """C1 does not swallow BaseException on process_update replay path."""
+    _forbid_trade_client(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    conn = open_db(tmp_path / "c1d.db")
+    _seed_settings(conn)
+    fake = _happy_fake()
+    cid = _flow_to_quoted(conn, fake)
+    _run_qk(conn, f"qk:rg:{cid}", fake)
+    answer_texts, answer = _answer_capture()
+    chat_id = int((__import__("os").environ.get("TELEGRAM_CHAT_ID") or "1").strip())
+
+    def edit_interrupt(_mid: int, _text: str, **_kw: Any) -> bool:
+        raise KeyboardInterrupt
+
+    upd = {
+        "callback_query": {
+            "id": "cq-ki",
+            "data": f"qk:rg:{cid}",
+            "message": {"chat": {"id": chat_id}, "message_id": 1},
+        }
+    }
+    with pytest.raises(KeyboardInterrupt):
+        process_update(
+            conn,
+            upd,
+            send=lambda *_a, **_k: 1,
+            answer=answer,
+            edit=edit_interrupt,
+            futures=fake,
+            now_ms_value=T0,
+        )
+    assert answer_texts == []
     conn.close()
 
 
@@ -247,6 +366,7 @@ def test_s33_same_time_opening_fill_lower_id_wins(tmp_path: Path) -> None:
 def test_s33d_continue_after_no_opening_candidate(tmp_path: Path) -> None:
     """S33d: first open trade has no opening-side cand → second trade still rebuilds."""
     conn = open_db(tmp_path / "s33d.db")
+    # sync_quick_trades loops open rows without ORDER BY — BTC (empty cand) must precede ETH.
     t0 = T0
     rid_btc, _ = create_quick_registration(
         conn, symbol="BTCUSDT", side="long", planned_entry=100, planned_stop=90, qty=1.0, now_ms=t0
@@ -293,6 +413,11 @@ def test_s33d_continue_after_no_opening_candidate(tmp_path: Path) -> None:
         (t_eth, trade_eth["id"]),
     )
     conn.commit()
+
+    open_symbols = [
+        str(r["symbol"]) for r in conn.execute("SELECT symbol FROM assist_quick_trade WHERE status='open'")
+    ]
+    assert open_symbols[0] == "BTCUSDT"
 
     fake = FakeFutures(
         trades=[
@@ -480,7 +605,7 @@ def test_registered_idempotent_text_helper(tmp_path: Path) -> None:
     text = _registered_idempotent_card_text(conn, row)
     expected_body = "\n".join(
         [
-            f"⚡ Quick · SUIUSDT · {_side_label('long')}",
+            "⚡ Quick · SUIUSDT · LONG",
             f"เข้า {fmt_price(Decimal('2.0'))} · stop {fmt_price(Decimal('1.99'))} · qty {fmt_qty(Decimal('500'))}",
             "✅ ลงทะเบียนแล้ว",
         ]
