@@ -264,6 +264,7 @@ def test_card_happy_path_sui(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     conn = open_db(tmp_path / "happy.db")
     _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=0.5)
     before_s = _table_rows(conn, "assist_settings")
     before_e = _table_rows(conn, "assist_edge")
     before_sig = _table_rows(conn, "assist_signal")
@@ -827,6 +828,7 @@ def test_card_ok_available_340_lone_survivor_5x(tmp_path: Path, monkeypatch: pyt
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "ok340.db")
     _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=0.5)
     card = build_quick_card(
         conn,
         _happy_fake(available=Decimal("340")),
@@ -874,6 +876,7 @@ def test_happy_sui_fee_and_target_lines(tmp_path: Path, monkeypatch: pytest.Monk
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "lines_e.db")
     _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=0.5)
     card = build_quick_card(
         conn, _happy_fake(), symbol="SUIUSDT", side="long", stop=Decimal("1.994"), now_ms=NOW
     )
@@ -891,6 +894,7 @@ def test_sui_stop_1993_fee_and_target_lines(tmp_path: Path, monkeypatch: pytest.
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "lines_f.db")
     _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=0.5)
     card = build_quick_card(
         conn, _happy_fake(), symbol="SUIUSDT", side="long", stop=Decimal("1.993"), now_ms=NOW
     )
@@ -1036,6 +1040,7 @@ def test_fmt_r_signed_no_ascii_neg_zero(tmp_path: Path, monkeypatch: pytest.Monk
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "negzero.db")
     _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=0.5)
     card = build_quick_card(
         conn,
         _happy_fake(marks={"SUIUSDT": Decimal("2.0003")}),

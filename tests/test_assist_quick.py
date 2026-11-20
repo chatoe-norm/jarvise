@@ -104,8 +104,8 @@ def _income(
 
 def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     fresh = open_db(tmp_path / "fresh.db")
-    assert SCHEMA_VERSION == 35
-    assert schema_version(fresh) == 35
+    assert SCHEMA_VERSION == 36
+    assert schema_version(fresh) == 36
     for table in (
         "assist_quick_settings",
         "assist_quick_registration",
@@ -116,7 +116,7 @@ def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
             (table,),
         ).fetchone()
     qs = get_quick_settings(fresh)
-    assert qs["risk_pct"] == 0.5
+    assert qs["risk_pct"] == 1.0
     assert qs["day_max_loss_r"] == 2
     assert qs["streak_lock_n"] == 3
     assert qs["cap_pct"] == 1.0
@@ -149,14 +149,34 @@ def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path26)
-    assert schema_version(conn) == 35
+    assert schema_version(conn) == 36
     row = conn.execute("SELECT qty FROM assist_signal WHERE id='old'").fetchone()
     assert row["qty"] == 2
     qs = get_quick_settings(conn)
-    assert qs["risk_pct"] == 0.5
+    assert qs["risk_pct"] == 1.0
     assert qs["day_max_loss_r"] == 2.0
     assert qs["streak_lock_n"] == 3
     assert qs["cap_pct"] == 1.0
+    conn.close()
+
+
+def test_quick_default_risk_fresh_seeds_1pct(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "q1.db")
+    qs = get_quick_settings(conn)
+    assert qs["risk_pct"] == 1.0
+    conn.close()
+
+
+def test_quick_existing_risk_05_unchanged_after_migrate(tmp_path: Path) -> None:
+    path = tmp_path / "q05.db"
+    conn = open_db(path)
+    write_quick_settings(conn, risk_pct=0.5)
+    conn.execute("PRAGMA user_version = 35")
+    conn.commit()
+    conn.close()
+    conn = open_db(path)
+    assert schema_version(conn) == SCHEMA_VERSION
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
     conn.close()
 
 

@@ -328,10 +328,23 @@ def test_s22_rf_low_balance_refusal_markup_and_answer_none(
     _, answers, out, edits = _run_qk(conn, f"qk:rf:{cid}", low, now_ms=T1)
     assert answers == [None]
     assert out.get("ok") is False
-    assert out.get("reason") in {"margin_cap", "below_min_notional", "size_failed", "read_failed"}
+    assert out.get("reason") in {
+        "margin_cap",
+        "below_min_notional",
+        "size_failed",
+        "read_failed",
+        "leverage_over_5x",
+        "risk_over_1pct",
+    }
     assert edits[-1]["reply_markup"] == _refresh_only_markup(cid)
     reason = str(out.get("reason"))
-    assert edits[-1]["text"] == _decorate_card_text(REFUSAL.get(reason, reason))
+    expect = build_card_for_row(
+        conn,
+        low,
+        dict(conn.execute("SELECT * FROM assist_quick_card WHERE id=?", (cid,)).fetchone()),
+        now_ms=T1,
+    )
+    assert edits[-1]["text"] == _decorate_card_text(str(expect.get("text") or REFUSAL.get(reason, reason)))
     assert (
         conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()["status"]
         == "quoted"
