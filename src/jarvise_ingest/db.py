@@ -668,7 +668,7 @@ def _migrate_assist_quick(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS assist_quick_settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            risk_pct REAL NOT NULL DEFAULT 0.5,
+            risk_pct REAL NOT NULL DEFAULT 1.0,
             day_max_loss_r REAL NOT NULL DEFAULT 2,
             streak_lock_n INTEGER NOT NULL DEFAULT 3,
             cap_pct REAL NOT NULL DEFAULT 1.0,
@@ -683,7 +683,7 @@ def _migrate_assist_quick(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT OR IGNORE INTO assist_quick_settings (id, risk_pct, day_max_loss_r, streak_lock_n, cap_pct)
-            VALUES (1, 0.5, 2, 3, 1.0)
+            VALUES (1, 1.0, 2, 3, 1.0)
             """
         )
     conn.execute(
@@ -780,6 +780,11 @@ def _migrate_assist_quick_m1a1(conn: sqlite3.Connection) -> None:
     )
     _add_column_if_missing(conn, "assist_quick_registration", "notice_sent_at_ms", "INTEGER")
     _add_column_if_missing(conn, "assist_quick_trade", "close_notice_at_ms", "INTEGER")
+
+
+def _migrate_assist_quick_p1a(conn: sqlite3.Connection) -> None:
+    """Quick P1a: card size_mode for min-lot / fit-margin offers."""
+    _add_column_if_missing(conn, "assist_quick_card", "size_mode", "TEXT")
 
 
 def _migrate_assist_income_status(conn: sqlite3.Connection) -> None:
@@ -1872,6 +1877,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (33, "partner_kyc", _migrate_partner_kyc, True),
     (34, "partner_payout_fx", _migrate_partner_payout_fx, True),
     (35, "assist_quick_m1a1", _migrate_assist_quick_m1a1, True),
+    (36, "assist_quick_p1a", _migrate_assist_quick_p1a, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

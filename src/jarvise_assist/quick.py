@@ -48,7 +48,7 @@ def get_quick_settings(conn: Any) -> dict[str, Any]:
             """
             INSERT OR IGNORE INTO assist_quick_settings
             (id, risk_pct, day_max_loss_r, streak_lock_n, cap_pct)
-            VALUES (1, 0.5, 2, 3, 1.0)
+            VALUES (1, 1.0, 2, 3, 1.0)
             """
         )
         conn.commit()

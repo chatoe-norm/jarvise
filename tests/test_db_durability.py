@@ -136,7 +136,7 @@ def test_repair_backfills_still_apply(tmp_path: Path) -> None:
             """
         ).fetchone()
         assert quick is not None
-        assert quick["risk_pct"] == 0.5
+        assert quick["risk_pct"] == 1.0
         assert quick["day_max_loss_r"] == 2
         assert quick["streak_lock_n"] == 3
         assert quick["cap_pct"] == 1.0
@@ -150,6 +150,7 @@ def test_migrations_are_numbered_and_idempotent(tmp_path: Path) -> None:
     # Only the destructive bitemporal rebuild is version-gated; additive steps self-heal.
     assert [repair for _, _, _, repair in MIGRATIONS] == [
         False,
+        True,
         True,
         True,
         True,

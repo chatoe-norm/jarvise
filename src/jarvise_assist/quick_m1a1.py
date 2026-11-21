@@ -37,6 +37,7 @@ _BTN_LONG = "🟢 LONG"
 _BTN_SHORT = "🔴 SHORT"
 _BTN_REFRESH = "🔄 อัปเดตราคา"
 _BTN_REGISTER = "⚡ เริ่มไม้ quick"
+_BTN_REGISTER_OFFER = "⚡ ยืนยันขนาดที่เสนอ"
 _BTN_CANCEL = "✖️ ยกเลิก"
 
 MSG_DRAFT_EXPIRED = "หมดเวลา — เริ่มใหม่จากเมนู ⚡ Quick"
@@ -45,6 +46,7 @@ MSG_CARD_TOO_OLD = "การ์ดเก่าเกิน 30 นาที — 
 MSG_ALREADY_REGISTERED = "ลงทะเบียนไปแล้ว — ดูสถานะในเมนู ⚡ Quick"
 MSG_CARD_QUOTE_EXPIRED = "การ์ดหมดอายุ — กด 🔄 อัปเดตราคา ก่อนลงทะเบียน"
 MSG_REGISTER_FAILED = "ลงทะเบียนไม่สำเร็จ — ยังไม่ได้ลงทะเบียน · ดูสถานะในเมนู ⚡ Quick"
+MSG_SIZE_CHANGED = "ขนาดเปลี่ยนจากการ์ด — ยังไม่ได้ลงทะเบียน · กด 🔄 อัปเดตราคา"
 MSG_STOP_FAR = "stop ห่างเกิน 20% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 STOP_STEP_HINT = "เลือก stop หรือพิมพ์ราคา/เปอร์เซ็นต์ (เช่น 67000 หรือ 0.4%)"
 
@@ -92,6 +94,8 @@ _QUICK_REG_REFUSAL_MAP = {
 
 
 def _registration_refusal_text(reason: str) -> str:
+    if reason == "same_side_cap":
+        return "ไม่ลงทะเบียน — ฝั่งนี้เปิดอยู่ครบเพดานแล้ว (เพดานฝั่งละ 2) · ปิดหรือให้ทะเบียนหมดอายุก่อน"
     mapped = _QUICK_REG_REFUSAL_MAP.get(str(reason), str(reason))
     return REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
 
@@ -105,6 +109,10 @@ def create_quick_registration_from_card(
     now_ms: int,
     commit: bool = True,
 ) -> tuple[str | None, str | None]:
+    from jarvise_assist.quick_cap import count_open_same_side, same_side_cap_reached
+
+    if same_side_cap_reached(count_open_same_side(conn, side)):
+        return None, "same_side_cap"
     return create_quick_registration(
         conn,
         symbol=symbol,
@@ -213,15 +221,21 @@ def _refresh_only_markup(card_id: str) -> dict[str, Any]:
 
 
 def _quoted_markup(card_id: str) -> dict[str, Any]:
+    return _quoted_markup_for(card_id, "risk")
+
+
+def _quoted_markup_for(card_id: str, size_mode: str) -> dict[str, Any]:
     rg = f"qk:rg:{card_id}"
     rf = f"qk:rf:{card_id}"
     xb = f"qk:x:{card_id}"
     for cb in (rg, rf, xb):
         if len(cb.encode("utf-8")) > 64:
             raise ValueError(f"callback_data exceeds 64 bytes: {cb!r}")
+    mode = str(size_mode or "risk")
+    reg_label = _BTN_REGISTER_OFFER if mode in {"min_lot", "fit_margin"} else _BTN_REGISTER
     return {
         "inline_keyboard": [
-            [{"text": _BTN_REGISTER, "callback_data": rg}],
+            [{"text": reg_label, "callback_data": rg}],
             [{"text": _BTN_REFRESH, "callback_data": rf}, {"text": _BTN_CANCEL, "callback_data": xb}],
         ]
     }
@@ -262,6 +276,7 @@ def _persist_quote(
             quote_entry=?,
             quote_stop=?,
             quote_qty=?,
+            size_mode=?,
             updated_at_ms=?
         WHERE id=? AND status IN ('pick_stop', 'quoted')
         """,
@@ -272,6 +287,7 @@ def _persist_quote(
             float(card["entry"]),
             float(card["stop"]),
             float(card["qty"]),
+            str(card.get("size_mode") or "risk"),
             int(now_ms),
             card_id,
         ),
@@ -299,6 +315,7 @@ def build_card_for_row(
         kw["stop"] = Decimal(str(stop_value))
     else:
         return _fail("bad_data")
+    kw["allow_offer"] = True
     return build_quick_card(conn, futures, **kw)
 
 
@@ -322,6 +339,7 @@ def build_card_at_quoted_stop(
             side=side,
             stop=Decimal(str(qs)),
             now_ms=now_ms,
+            allow_offer=True,
         )
     return build_card_for_row(conn, futures, row, now_ms=now_ms)
 
@@ -476,6 +494,20 @@ def _handle_qk_register(
             logger.exception("qk:rg refusal answer failed card_id=%s", card_id)
         return {"ok": False, "reason": card.get("reason")}
 
+    stored_mode = str(row.get("size_mode") or "risk")
+    rebuilt_mode = str(card.get("size_mode") or "risk")
+    quote_qty = Decimal(str(row.get("quote_qty") or 0))
+    rebuilt_qty = Decimal(str(card.get("qty") or 0))
+    mode_mismatch = stored_mode != rebuilt_mode
+    qty_mismatch = stored_mode in {"min_lot", "fit_margin"} and rebuilt_qty != quote_qty
+    if mode_mismatch or qty_mismatch:
+        send(MSG_SIZE_CHANGED)
+        try:
+            answer(None)
+        except Exception:  # noqa: BLE001
+            logger.exception("qk:rg size-changed answer failed card_id=%s", card_id)
+        return {"ok": False, "reason": "size_changed"}
+
     rid: str | None = None
     try:
         claim = conn.execute(
@@ -511,8 +543,14 @@ def _handle_qk_register(
             commit=False,
         )
         if rid is None:
+            from jarvise_assist.quick_cap import count_open_same_side, same_side_cap_text
+
+            side_cap_count = count_open_same_side(conn, side) if reason == "same_side_cap" else 0
             conn.rollback()
-            send(_registration_refusal_text(str(reason)))
+            if reason == "same_side_cap":
+                send(same_side_cap_text(side, side_cap_count))
+            else:
+                send(_registration_refusal_text(str(reason)))
             try:
                 answer(None)
             except Exception:  # noqa: BLE001
@@ -826,7 +864,7 @@ def handle_quick_trade_callback(
             now_ms=now_ms,
         )
         body = _decorate_card_text(str(rebuilt["text"]))
-        _edit(body, _quoted_markup(card_id))
+        _edit(body, _quoted_markup_for(card_id, str(rebuilt.get("size_mode") or "risk")))
         answer(None)
         return {"ok": True, "refreshed": True}
 
@@ -854,7 +892,10 @@ def _finalize_quoted_card(
     stop_kind = str(row.get("stop_kind") or "pct")
     stop_value = str(row.get("stop_value") or "")
     _persist_quote(conn, card_id, card, stop_kind=stop_kind, stop_value=stop_value, now_ms=now_ms)
-    edit(_decorate_card_text(str(card["text"])), _quoted_markup(card_id))
+    edit(
+        _decorate_card_text(str(card["text"])),
+        _quoted_markup_for(card_id, str(card.get("size_mode") or "risk")),
+    )
     answer(None)
     return {"ok": True, "quoted": True}
 
@@ -1010,7 +1051,7 @@ def handle_quick_draft_text(
                 card_id=card_id,
                 message_id=int(draft["message_id"]) if draft.get("message_id") else None,
                 text=_decorate_card_text(str(card["text"])),
-                markup=_quoted_markup(card_id),
+                markup=_quoted_markup_for(card_id, str(card.get("size_mode") or "risk")),
                 send=send,
                 edit=edit,
             )
@@ -1062,7 +1103,7 @@ def handle_quick_draft_text(
             card_id=card_id,
             message_id=int(draft["message_id"]) if draft.get("message_id") else None,
             text=_decorate_card_text(str(card["text"])),
-            markup=_quoted_markup(card_id),
+            markup=_quoted_markup_for(card_id, str(card.get("size_mode") or "risk")),
             send=send,
             edit=edit,
         )
@@ -1098,9 +1139,9 @@ def create_card_from_typed_command(
         """
         INSERT INTO assist_quick_card (
             id, side, symbol, stop_kind, stop_value, status,
-            quoted_at_ms, quote_entry, quote_stop, quote_qty,
+            quoted_at_ms, quote_entry, quote_stop, quote_qty, size_mode,
             created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, 'quoted', ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, 'quoted', ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             card_id,
@@ -1112,6 +1153,7 @@ def create_card_from_typed_command(
             float(card["entry"]),
             float(card["stop"]),
             float(card["qty"]),
+            str(card.get("size_mode") or "risk"),
             int(now_ms),
             int(now_ms),
         ),

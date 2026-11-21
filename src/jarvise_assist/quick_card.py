@@ -12,6 +12,7 @@ import math
 import os
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -31,10 +32,18 @@ from jarvise_assist.quick import (
     QUICK_USAGE,
     get_quick_settings,
 )
+from jarvise_assist.quick_minlot import (
+    SizeOfferResult,
+    fmt_pct,
+    min_lot_stop_max,
+    size_offer,
+)
 from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.signals import build_existing_ideas
 from jarvise_assist.sizing import (
+    TARGET_R,
     SignalCandidate,
+    SizedSignal,
     assign_shared_leverage,
     below_min_notional,
     portfolio_risk_cap_pct,
@@ -49,6 +58,7 @@ SendFn = Callable[..., Any]
 
 QUICK_FEE_BPS_PER_SIDE = Decimal("6")
 QUICK_CARD_TTL_MS = 120_000
+VALID_SIZE_MODES = frozenset({"risk", "min_lot", "fit_margin"})
 CARD_TTL_PREFIX = "การ์ดนี้ใช้ได้ถึง"
 QUICK_REGISTER_PREFIX = "qr:"
 BTN_QUICK_REGISTER = "⚡ เริ่มไม้ quick"
@@ -90,7 +100,7 @@ def _refusal_contract() -> str:
 
 
 def _refusal_read_failed() -> str:
-    return "อ่านข้อมูลจาก Binance ไม่ได้ — ลองใหม่"
+    return "อ่านข้อมูลจาก Binance ไม่ได้ — ยังไม่ได้ลงทะเบียน"
 
 
 def _refusal_stop_wrong_side() -> str:
@@ -271,6 +281,184 @@ def _fail(reason: str, text: str | None = None) -> dict[str, Any]:
     return {"ok": False, "reason": reason, "text": text or REFUSAL.get(reason, reason)}
 
 
+def _sized_stub(
+    *,
+    sym: str,
+    side_l: str,
+    mark: Decimal,
+    stop_level: Decimal,
+    risk_pct: Decimal,
+    step: Decimal,
+    balance: Decimal,
+) -> SizedSignal:
+    r = abs(mark - stop_level)
+    if side_l == "long":
+        target = mark + TARGET_R * r
+    else:
+        target = mark - TARGET_R * r
+    budget = balance * (risk_pct / Decimal("100"))
+    return SizedSignal(
+        symbol=sym,
+        side=side_l,
+        entry=mark,
+        stop=stop_level,
+        target=target,
+        qty=Decimal("0"),
+        notional=Decimal("0"),
+        leverage=1,
+        loss_at_stop=Decimal("0"),
+        risk_pct=risk_pct,
+        r_distance=r,
+        leverage_capped=False,
+        uncapped_leverage=1,
+        analysis_id=None,
+        step_size=step,
+        balance_usdt=balance,
+        budget_usdt=budget,
+        reduce_reasons=(),
+    )
+
+
+def _apply_size_offer(
+    sized: SizedSignal | None,
+    *,
+    stub: SizedSignal,
+    offer: Any,
+) -> SizedSignal:
+    base = sized if sized is not None else stub
+    return replace(
+        base,
+        qty=offer.qty,
+        notional=offer.notional,
+        leverage=offer.leverage,
+        loss_at_stop=offer.risk_usdt,
+    )
+
+
+def _format_size_offer_refusal(
+    result: SizeOfferResult,
+    *,
+    mark: Decimal,
+    stop: Decimal,
+    wallet_balance: Decimal,
+    available: Decimal,
+    base: str,
+    tick: Decimal,
+) -> str:
+    reason = result.reason or ""
+    cap_usdt = wallet_balance * Decimal("1") / Decimal("100")
+    cap_s = _fmt_usdt(cap_usdt)
+    wallet_s = fmt_price(wallet_balance)
+    if reason == "leverage_over_5x" and result.candidate is None:
+        return "❌ margin ไม่พอ — มีให้ใช้ 0 USDT ใน Futures · 👉 โอน USDT เข้า Futures หรือปิดไม้อื่น"
+    cand = result.candidate
+    if cand is None:
+        return REFUSAL["size_failed"]
+    risk_total = _fmt_usdt(cand.risk_usdt + cand.fee_usdt)
+    risk_price = _fmt_usdt(cand.risk_usdt)
+    fee_s = _fmt_usdt(cand.fee_usdt)
+    qty_s = fmt_qty(cand.qty)
+    if reason == "risk_over_1pct" and cand.kind == "min_lot":
+        pct = fmt_pct(cand.real_risk_pct, mode="failed_limit", limit=Decimal("1"))
+        stop_pct = fmt_pct(abs(stop - mark) / mark * Decimal("100"))
+        _dist, stop_max_pct, stop_max_price = min_lot_stop_max(
+            candidate=cand,
+            mark=mark,
+            stop=stop,
+            wallet_balance=wallet_balance,
+            tick=tick,
+        )
+        tail = (
+            f"👉 ไม้ขั้นต่ำรับ stop ได้ไกลสุด ≈ {fmt_pct(stop_max_pct, mode='floor')}% ({_fmt_price_tick(stop_max_price, tick)})"
+            if stop_max_price is not None
+            else "👉 ขั้นต่ำของสัญญาใหญ่เกินสำหรับ wallet นี้"
+        )
+        return (
+            f"❌ ไม่เปิด — ขั้นต่ำ {qty_s} {base} เสี่ยง {risk_total} USDT ({pct}%) "
+            f"(ราคา {risk_price} + ค่าธรรมเนียม {fee_s}) เกินเพดาน {cap_s} USDT (1% ของ wallet {wallet_s}) "
+            f"· stop ห่าง {stop_pct}% กว้างเกินไปสำหรับ Quick · {tail}"
+        )
+    if reason == "risk_over_1pct" and cand.kind == "fit_margin":
+        pct = fmt_pct(cand.real_risk_pct, mode="failed_limit", limit=Decimal("1"))
+        return (
+            f"❌ ไม่เปิด — margin ไม่พอสำหรับขนาดตาม risk · ขนาดที่ margin พอ {qty_s} {base} "
+            f"เสี่ยง {risk_total} USDT ({pct}%) (ราคา {risk_price} + ค่าธรรมเนียม {fee_s}) "
+            f"เกินเพดาน {cap_s} USDT (1% ของ wallet {wallet_s}) · "
+            f"👉 ลดความเสี่ยงในเมนู ⚡ Quick หรือโอน USDT เข้า Futures"
+        )
+    if reason == "leverage_over_5x" and cand is not None and result.need_margin is not None:
+        need_s = _fmt_usdt(result.need_margin)
+        avail_s = _fmt_usdt(available)
+        q_fit_s = fmt_qty(result.q_fit or Decimal("0"))
+        q_min_s = fmt_qty(result.q_min or Decimal("0"))
+        return (
+            f"❌ margin ไม่พอแม้ใช้ 5x — ต้องใช้ ≈ {need_s} USDT (รวมค่าธรรมเนียม + กันไว้ 2%) มี {avail_s} USDT · "
+            f"ขนาดใหญ่สุดที่พอ {q_fit_s} < ขั้นต่ำ {q_min_s} {base} · 👉 โอนเข้า Futures หรือปิดไม้อื่น"
+        )
+    return REFUSAL["size_failed"]
+
+
+def _try_quick_size_offer(
+    *,
+    allow_offer: bool,
+    sym: str,
+    side_l: str,
+    mark: Decimal,
+    stop_level: Decimal,
+    balance: Decimal,
+    available: Decimal,
+    risk_pct: Decimal,
+    step: Decimal,
+    filters: Any,
+    sized: SizedSignal | None,
+    risk_qty: Decimal,
+) -> tuple[SizedSignal | None, str, dict[str, Any] | None, str | None]:
+    """Return (sized, size_mode, fail_dict, offer_bound). size_mode stays 'risk' when unchanged."""
+    if not allow_offer:
+        return sized, "risk", None, None
+    base = sym[:-4] if sym.endswith("USDT") else sym
+    min_qty = Decimal(str(filters.min_qty))
+    min_notional = Decimal(str(filters.min_notional))
+    tick = Decimal(str(filters.tick_size))
+    result = size_offer(
+        mark=mark,
+        stop=stop_level,
+        wallet_balance=balance,
+        available=available,
+        min_qty=min_qty,
+        min_notional=min_notional,
+        step=step,
+        risk_qty=risk_qty,
+    )
+    offer = result.offer
+    reason = result.reason
+    if offer is not None:
+        stub = _sized_stub(
+            sym=sym,
+            side_l=side_l,
+            mark=mark,
+            stop_level=stop_level,
+            risk_pct=risk_pct,
+            step=step,
+            balance=balance,
+        )
+        return _apply_size_offer(sized, stub=stub, offer=offer), offer.kind, None, offer.bound
+    if reason is None:
+        return sized, "risk", None, None
+    if reason in {"risk_over_1pct", "leverage_over_5x"}:
+        text = _format_size_offer_refusal(
+            result,
+            mark=mark,
+            stop=stop_level,
+            wallet_balance=balance,
+            available=available,
+            base=base,
+            tick=tick,
+        )
+        return sized, "risk", _fail(reason, text), None
+    return sized, "risk", _fail("size_failed"), None
+
+
 def build_quick_card(
     conn: Any,
     futures: Any,
@@ -280,6 +468,7 @@ def build_quick_card(
     stop: Decimal | None = None,
     stop_pct: Decimal | None = None,
     now_ms: int,
+    allow_offer: bool = False,
 ) -> dict[str, Any]:
     """Build the on-demand sizing card. Read-only."""
     sym = str(symbol).upper()
@@ -362,6 +551,8 @@ def build_quick_card(
     risk_pct = Decimal(str(qs["risk_pct"]))
     cap_pct = Decimal(str(qs["cap_pct"]))
 
+    size_mode = "risk"
+    offer_bound: str | None = None
     sized = size_signal(
         symbol=sym,
         side=side_l,
@@ -372,31 +563,130 @@ def build_quick_card(
         step_size=step,
     )
     if sized is None:
-        return _fail("size_failed")
-    if "leverage_cap" in sized.reduce_reasons:
+        sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
+            allow_offer=allow_offer,
+            sym=sym,
+            side_l=side_l,
+            mark=mark,
+            stop_level=stop_level,
+            balance=balance,
+            available=available,
+            risk_pct=risk_pct,
+            step=step,
+            filters=filters,
+            sized=None,
+            risk_qty=Decimal("0"),
+        )
+        if offer_fail is not None:
+            return offer_fail
+        if sized is None:
+            return _fail("size_failed")
+    elif "leverage_cap" in sized.reduce_reasons:
         return _fail("leverage_cap")
-    if below_min_notional(
-        qty=sized.qty,
-        notional=sized.notional,
-        min_qty=Decimal(str(filters.min_qty)),
-        min_notional=Decimal(str(filters.min_notional)),
-    ):
-        return _fail("below_min_notional")
+    else:
+        if below_min_notional(
+            qty=sized.qty,
+            notional=sized.notional,
+            min_qty=Decimal(str(filters.min_qty)),
+            min_notional=Decimal(str(filters.min_notional)),
+        ):
+            if not allow_offer:
+                return _fail("below_min_notional")
+            sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
+                allow_offer=True,
+                sym=sym,
+                side_l=side_l,
+                mark=mark,
+                stop_level=stop_level,
+                balance=balance,
+                available=available,
+                risk_pct=risk_pct,
+                step=step,
+                filters=filters,
+                sized=sized,
+                risk_qty=sized.qty,
+            )
+            if offer_fail is not None:
+                return offer_fail
+            if sized is None:
+                return _fail("size_failed")
 
-    survivors, _dropped = assign_shared_leverage(
-        [SignalCandidate(sized=sized, confidence=0.0, symbol_rank=0)],
-        available_balance=available,
-    )
-    if not survivors or "margin_cap" in survivors[0].sized.reduce_reasons:
-        return _fail("margin_cap")
-    sized = survivors[0].sized
-    if below_min_notional(
-        qty=sized.qty,
-        notional=sized.notional,
-        min_qty=Decimal(str(filters.min_qty)),
-        min_notional=Decimal(str(filters.min_notional)),
-    ):
-        return _fail("below_min_notional")
+        if size_mode == "risk":
+            assert sized is not None
+            risk_qty_pre = sized.qty
+            survivors, _dropped = assign_shared_leverage(
+                [SignalCandidate(sized=sized, confidence=0.0, symbol_rank=0)],
+                available_balance=available,
+            )
+            if not survivors or "margin_cap" in survivors[0].sized.reduce_reasons:
+                if not allow_offer:
+                    return _fail("margin_cap")
+                sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
+                    allow_offer=True,
+                    sym=sym,
+                    side_l=side_l,
+                    mark=mark,
+                    stop_level=stop_level,
+                    balance=balance,
+                    available=available,
+                    risk_pct=risk_pct,
+                    step=step,
+                    filters=filters,
+                    sized=sized,
+                    risk_qty=risk_qty_pre,
+                )
+                if offer_fail is not None:
+                    return offer_fail
+            else:
+                sized = survivors[0].sized
+                fee_rt = Decimal("2") * QUICK_FEE_BPS_PER_SIDE / Decimal("10000")
+                margin_need = (sized.notional / Decimal(sized.leverage) + fee_rt * sized.notional) / Decimal(
+                    "0.98"
+                )
+                if allow_offer and margin_need > available:
+                    sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
+                        allow_offer=True,
+                        sym=sym,
+                        side_l=side_l,
+                        mark=mark,
+                        stop_level=stop_level,
+                        balance=balance,
+                        available=available,
+                        risk_pct=risk_pct,
+                        step=step,
+                        filters=filters,
+                        sized=sized,
+                        risk_qty=risk_qty_pre,
+                    )
+                    if offer_fail is not None:
+                        return offer_fail
+                elif below_min_notional(
+                    qty=sized.qty,
+                    notional=sized.notional,
+                    min_qty=Decimal(str(filters.min_qty)),
+                    min_notional=Decimal(str(filters.min_notional)),
+                ):
+                    if not allow_offer:
+                        return _fail("below_min_notional")
+                    sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
+                        allow_offer=True,
+                        sym=sym,
+                        side_l=side_l,
+                        mark=mark,
+                        stop_level=stop_level,
+                        balance=balance,
+                        available=available,
+                        risk_pct=risk_pct,
+                        step=step,
+                        filters=filters,
+                        sized=sized,
+                        risk_qty=risk_qty_pre,
+                    )
+                    if offer_fail is not None:
+                        return offer_fail
+
+    if sized is None:
+        return _fail("size_failed")
 
     main_risk_pct = Decimal(str(ensure_settings(conn)["risk_pct"]))
     portfolio_cap_pct = portfolio_risk_cap_pct(main_risk_pct)
@@ -429,6 +719,9 @@ def build_quick_card(
     if main_open + quick_open + new_risk > balance * (portfolio_cap_pct / Decimal("100")):
         return _fail("portfolio_cap", _refusal_portfolio_cap(portfolio_cap_pct))
 
+    if size_mode not in VALID_SIZE_MODES:
+        size_mode = "risk"
+
     fees = fee_breakdown(mark, stop_level)
     f = fees["f"]
     r_dist = abs(mark - stop_level)
@@ -448,6 +741,7 @@ def build_quick_card(
     notional_s = fmt_price(sized.notional.quantize(Decimal("0.01")))
     fee_usdt = (Decimal("2") * QUICK_FEE_BPS_PER_SIDE / Decimal("10000")) * sized.notional
     loss_total = sized.loss_at_stop + fee_usdt
+    real_risk_pct = (loss_total / balance * Decimal("100")) if balance > 0 else Decimal("0")
     loss_total_s = _fmt_usdt(loss_total)
     loss_price_s = _fmt_usdt(sized.loss_at_stop)
     fee_usdt_s = _fmt_usdt(fee_usdt)
@@ -476,22 +770,67 @@ def build_quick_card(
 
     card_until = int(now_ms) + QUICK_CARD_TTL_MS
     side_label = "LONG" if side_l == "long" else "SHORT"
+    if size_mode == "min_lot":
+        size_head = f"⚠️ ขนาดตาม risk {fmt_price(risk_pct)}% ต่ำกว่าขั้นต่ำ"
+        size_detail = f"ขนาดที่เสนอ: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT (ขั้นต่ำของสัญญา)"
+    elif size_mode == "fit_margin":
+        bound = offer_bound or "margin"
+        if bound == "risk":
+            size_head = "ขนาดเต็มตาม risk · ใช้ margin กันไว้ 2% (ระบบหลักกัน 5%)"
+            size_detail = f"ขนาดที่เสนอ: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT (ขนาดเต็มตาม risk)"
+        else:
+            size_head = "⚠️ margin ไม่พอสำหรับขนาดเต็ม"
+            if bound == "risk_1pct":
+                size_detail = (
+                    f"ขนาดที่เสนอ: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT "
+                    f"(ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ 1%)"
+                )
+            else:
+                size_detail = (
+                    f"ขนาดที่เสนอ: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT (ใหญ่สุดที่ margin พอที่ 5x)"
+                )
+    else:
+        size_head = f"ขนาด: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT"
+        size_detail = f"ฐาน: Futures {bal_s} USDT × {fmt_price(risk_pct)}% = งบ {budget_s} USDT"
+
+    lev_line = (
+        f"Leverage ที่ต้องใช้: {lev}x isolated · margin ≈ {fmt_price(margin)} USDT "
+        f"— ตั้งใน Binance เองก่อนเปิด · บอทไม่เปลี่ยนให้"
+        if size_mode in {"min_lot", "fit_margin"}
+        else f"Leverage ที่ต้องใช้: {lev}x · margin ≈ {fmt_price(margin)} USDT"
+    )
+
     lines = [
         f"⚡ Quick · {sym} · {side_label}",
         quick_mode_tag(),
         f"เข้า (mark ตอนนี้): {entry_s}",
         f"Stop: {stop_s} ({float(stop_pct_shown):+.2f}%)",
-        f"ขนาด: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT",
-        f"ฐาน: Futures {bal_s} USDT × {fmt_price(risk_pct)}% = งบ {budget_s} USDT",
-        f"Leverage ที่ต้องใช้: {lev}x · margin ≈ {fmt_price(margin)} USDT",
-        (
-            f"ถ้าชน stop: −{loss_total_s} USDT ≈ −{loss_r_s}R รวมค่าธรรมเนียม "
-            f"(ราคา −{loss_price_s} USDT = 1R · ค่าธรรมเนียม ≈ {fee_usdt_s} USDT)"
-        ),
-        (f"ค่าธรรมเนียมไป-กลับ ≈ {f_r_s}R ≈ {fee_usdt_s} USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)"),
-        _target_line("1R", t1_s, fees["net_1r"], int(fees["be_1r_pct"])),
-        _target_line("1.5R", t15_s, fees["net_1_5r"], int(fees["be_1_5r_pct"])),
     ]
+    if size_mode in {"min_lot", "fit_margin"}:
+        lines.extend(
+            [
+                size_head,
+                size_detail,
+                (
+                    f"risk จริง: −{loss_total_s} USDT = {fmt_pct(real_risk_pct)}% "
+                    f"ของ Futures {bal_s} USDT (เป้า {fmt_price(risk_pct)}% · เพดาน 1%)"
+                ),
+                lev_line,
+            ]
+        )
+    else:
+        lines.extend([size_head, size_detail, lev_line])
+    lines.extend(
+        [
+            (
+                f"ถ้าชน stop: −{loss_total_s} USDT ≈ −{loss_r_s}R รวมค่าธรรมเนียม "
+                f"(ราคา −{loss_price_s} USDT = 1R · ค่าธรรมเนียม ≈ {fee_usdt_s} USDT)"
+            ),
+            (f"ค่าธรรมเนียมไป-กลับ ≈ {f_r_s}R ≈ {fee_usdt_s} USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)"),
+            _target_line("1R", t1_s, fees["net_1r"], int(fees["be_1r_pct"])),
+            _target_line("1.5R", t15_s, fees["net_1_5r"], int(fees["be_1_5r_pct"])),
+        ]
+    )
     if fees["warn"]:
         lines.append("⚠ ค่าธรรมเนียมสูงเทียบระยะ stop — reward < 3× ค่าไป-กลับ")
     if leftover_orders:
@@ -535,6 +874,7 @@ def build_quick_card(
         "positions": positions,
         "fees": fees,
         "callback_data": cb if reply_markup is not None else None,
+        "size_mode": size_mode,
     }
 
 
@@ -547,7 +887,7 @@ def handle_quick_text(
     now_ms: int,
 ) -> dict[str, Any] | None:
     from jarvise_assist.quick_m1a1 import (
-        _quoted_markup,
+        _quoted_markup_for,
         create_card_from_typed_command,
     )
 
@@ -560,7 +900,7 @@ def handle_quick_text(
     card_id, card = create_card_from_typed_command(conn, futures, parsed, now_ms=now_ms)
     markup = card.get("reply_markup")
     if card.get("ok") and card_id:
-        markup = _quoted_markup(card_id)
+        markup = _quoted_markup_for(card_id, str(card.get("size_mode") or "risk"))
     elif not card.get("ok"):
         markup = None
     send(card["text"], reply_markup=markup)
@@ -639,7 +979,12 @@ def handle_quick_register_callback(
         now_ms=now_ms,
     )
     if rid is None:
-        send(_registration_refusal_text(str(reason)))
+        if reason == "same_side_cap":
+            from jarvise_assist.quick_cap import count_open_same_side, same_side_cap_text
+
+            send(same_side_cap_text(side, count_open_same_side(conn, side)))
+        else:
+            send(_registration_refusal_text(str(reason)))
         return {"ok": False, "reason": reason}
 
     tick = Decimal(str(card.get("tick") or "0.0001"))
