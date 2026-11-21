@@ -46,9 +46,7 @@ MSG_QUICK_LOCK_REMOVED = "ตั้งค่านี้ถูกยกเลิ
 MSG_QUICK_SETTING_REJECT = "ค่าต้องมากกว่า 0 และไม่เกิน 100"
 MSG_QUICK_SETTING_HINT_RISK = "พิมพ์ค่าเอง: q risk 0.6"
 MSG_QUICK_SETTING_HINT_CAP = "พิมพ์ค่าเอง: q cap 1.2"
-MSG_QUICK_SETTING_RISK_OVER_CAP = (
-    "⚠️ risk ต่อไม้มากกว่าเพดาน — ไม้ quick จะถูกปฏิเสธ (quick_cap)"
-)
+MSG_QUICK_SETTING_RISK_OVER_CAP = "⚠️ risk ต่อไม้มากกว่าเพดาน — ไม้ quick จะถูกปฏิเสธ (quick_cap)"
 
 
 def get_quick_settings(conn: Any) -> dict[str, Any]:
@@ -799,11 +797,7 @@ def handle_quick_setting_text(
     now_ms: int,
 ) -> dict[str, Any]:
     if parsed.get("action") == "hint":
-        send(
-            MSG_QUICK_SETTING_HINT_RISK
-            if parsed["key"] == "risk"
-            else MSG_QUICK_SETTING_HINT_CAP
-        )
+        send(MSG_QUICK_SETTING_HINT_RISK if parsed["key"] == "risk" else MSG_QUICK_SETTING_HINT_CAP)
         return {"ok": True, "hint": True}
     return _apply_quick_setting(
         conn,
@@ -816,7 +810,9 @@ def handle_quick_setting_text(
     )
 
 
-def _quick_settings_saved_lines(conn: Any, *, key: str, val: float, now_ms: int) -> tuple[str, dict[str, Any]]:
+def _quick_settings_saved_lines(
+    conn: Any, *, key: str, val: float, now_ms: int
+) -> tuple[str, dict[str, Any]]:
     settings = get_quick_settings(conn)
     risk = float(settings["risk_pct"])
     cap = float(settings["cap_pct"])
