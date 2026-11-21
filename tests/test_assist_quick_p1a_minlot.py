@@ -34,6 +34,7 @@ from jarvise_assist.quick_m1a1 import (
     MSG_SIZE_CHANGED,
     _quoted_markup_for,
     _refresh_only_markup,
+    _registration_refusal_text,
     create_card_from_typed_command,
 )
 from jarvise_assist.quick_minlot import (
@@ -115,27 +116,34 @@ def _must1_fake(**kw: Any) -> QuickFake:
 
 
 def _assert_module_forbids(path: Path) -> None:
+    def hit(name: str) -> bool:
+        return any(name == b or name.startswith(b + ".") for b in _QUICK_FORBIDDEN_IMPORTS)
+
     src = path.read_text(encoding="utf-8")
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                assert not any(
-                    alias.name == b or alias.name.startswith(b + ".") for b in _QUICK_FORBIDDEN_IMPORTS
-                ), alias.name
+                assert not hit(alias.name), alias.name
         elif isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            pkg = "." * (node.level or 0)
-            full = pkg + (mod or "")
-            resolved = f"jarvise_assist.{mod}" if mod and node.level else mod
-            for target in (mod, full, resolved):
-                assert not any(
-                    target == b
-                    or target.startswith(b + ".")
-                    or mod == b
-                    or (mod and mod.split(".")[0] == b.split(".")[-1])
-                    for b in _QUICK_FORBIDDEN_IMPORTS
-                ), mod or full or resolved
+            level = node.level or 0
+            module = node.module or ""
+            if level >= 3:
+                raise AssertionError("relative import level >= 3")
+            if level == 0:
+                base = module
+            elif level == 1:
+                base = "jarvise_assist" + ("." + module if module else "")
+            else:
+                base = module or ""
+            for alias in node.names:
+                candidates: list[str] = []
+                if base:
+                    candidates.extend([base, f"{base}.{alias.name}"])
+                else:
+                    candidates.append(alias.name)
+                for resolved in candidates:
+                    assert not hit(resolved), resolved
 
 
 def _sui_card_conn(tmp_path: Path, *, risk_pct: float, cap_pct: float = 10.0) -> Any:
@@ -324,7 +332,7 @@ def test_size_offer_available_zero_no_candidate() -> None:
             id="near_1pct",
         ),
         pytest.param(
-            "risk_bound_full_size",
+            "risk_bound",
             dict(
                 mark=Decimal("100"),
                 stop=Decimal("95"),
@@ -645,6 +653,22 @@ def test_size_offer_guards_step_mark_stop_and_negative_risk() -> None:
     )
 
 
+def test_size_offer_guard_stop_equals_mark() -> None:
+    assert (
+        size_offer(
+            mark=Decimal("100"),
+            stop=Decimal("100"),
+            wallet_balance=Decimal("1000"),
+            available=Decimal("500"),
+            min_qty=Decimal("1"),
+            min_notional=Decimal("5"),
+            step=Decimal("1"),
+            risk_qty=Decimal("0"),
+        ).reason
+        == "bad_input"
+    )
+
+
 def test_size_offer_guards_wallet_zero_and_available_zero() -> None:
     r0 = size_offer(
         mark=Decimal("1"),
@@ -783,6 +807,7 @@ def test_card_bug3_short_text_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62000"), now_ms=NOW, allow_offer=True
     )
     assert card["text"] == BUG3_SHORT
+    assert "ลองใหม่" not in card["text"]
     conn.close()
 
 
@@ -857,6 +882,7 @@ def test_card_stop_max_dist_zero_n2(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert card["reason"] == "risk_over_1pct"
     assert "(9.33%)" in card["text"]
     assert card["text"].endswith("👉 ขั้นต่ำของสัญญาใหญ่เกินสำหรับ wallet นี้")
+    assert "ลองใหม่" not in card["text"]
     cand = size_offer(
         mark=Decimal("100"),
         stop=Decimal("101"),
@@ -901,6 +927,40 @@ def test_card_fee_fit_refusal_o(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     )
     assert card["reason"] == "leverage_over_5x"
     assert card["text"] == FEE_FIT_TEXT
+    assert "ลองใหม่" not in card["text"]
+    conn.close()
+
+
+MUST1_LEV_LINE = "Leverage ที่ต้องใช้: 5x isolated · margin ≈ 34.78 USDT — ตั้งใน Binance เองก่อนเปิด · บอทไม่เปลี่ยนให้"
+MIN_LOT_LEV_LINE = "Leverage ที่ต้องใช้: 1x isolated · margin ≈ 300 USDT — ตั้งใน Binance เองก่อนเปิด · บอทไม่เปลี่ยนให้"
+AVAILABLE_ZERO_OFFER_TEXT = "❌ margin ไม่พอ — มีให้ใช้ 0 USDT ใน Futures · 👉 โอน USDT เข้า Futures หรือปิดไม้อื่น"
+
+
+def test_card_available_zero_refusal_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "x5.db")
+    _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=1.0)
+    fake = QuickFake(
+        balance=Decimal("120"),
+        available=Decimal("0"),
+        marks={"BTCUSDT": Decimal("62100")},
+        ticks={"BTCUSDT": Decimal("0.1")},
+        steps={"BTCUSDT": Decimal("0.001")},
+        min_qty={"BTCUSDT": Decimal("0.001")},
+        min_notional={"BTCUSDT": Decimal("100")},
+    )
+    offered = build_quick_card(
+        conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62300"), now_ms=NOW, allow_offer=True
+    )
+    assert offered["reason"] == "leverage_over_5x"
+    assert offered["text"] == AVAILABLE_ZERO_OFFER_TEXT
+    legacy = build_quick_card(
+        conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62300"), now_ms=NOW, allow_offer=False
+    )
+    assert legacy["reason"] == "margin_cap"
+    assert legacy["text"] == "margin ไม่พอ (available balance) — บอทไม่ย่อขนาดให้"
+    assert "ลองใหม่" not in "\n".join([offered["text"], legacy["text"]])
     conn.close()
 
 
@@ -920,6 +980,7 @@ def test_card_must1_offer_and_legacy_p(tmp_path: Path, monkeypatch: pytest.Monke
     assert "= 0.97%" in offered["text"]
     assert "margin ≈ 34.78" in offered["text"]
     assert offered["qty"] < Decimal("0.0035")
+    assert MUST1_LEV_LINE in offered["text"].splitlines()
     legacy = build_quick_card(
         conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62440"), now_ms=NOW, allow_offer=False
     )
@@ -929,6 +990,7 @@ def test_card_must1_offer_and_legacy_p(tmp_path: Path, monkeypatch: pytest.Monke
     assert "ขนาด: 0.0035 BTC ≈ 217.35 USDT" in legacy["text"]
     assert "Leverage ที่ต้องใช้: 5x · margin ≈ 43.47 USDT" in legacy["text"]
     assert "risk จริง" not in legacy["text"]
+    assert "ตั้งใน Binance" not in legacy["text"]
     conn.close()
 
 
@@ -1072,7 +1134,9 @@ def test_card_real_risk_percent_pins_s(tmp_path: Path, monkeypatch: pytest.Monke
     c1 = build_quick_card(
         conn, fake, symbol="BTCUSDT", side="long", stop=Decimal("99.12"), now_ms=NOW, allow_offer=True
     )
+    assert c1["size_mode"] == "min_lot"
     assert "risk จริง: −3 USDT = 0.50% ของ Futures 600 USDT" in c1["text"]
+    assert MIN_LOT_LEV_LINE in c1["text"].splitlines()
     write_quick_settings(conn, risk_pct=0.5)
     fake2 = QuickFake(
         balance=Decimal("100"),
@@ -1109,6 +1173,7 @@ def test_card_failed_limit_ceiling_s3(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     assert card["reason"] == "risk_over_1pct"
     assert "(1.01%)" in card["text"]
+    assert "ลองใหม่" not in card["text"]
     conn.close()
 
 
@@ -1131,6 +1196,7 @@ def test_card_wallet_zero_maps_no_balance(tmp_path: Path, monkeypatch: pytest.Mo
     )
     assert card["reason"] == "size_failed"
     assert card["text"] == REFUSAL["size_failed"]
+    assert "ลองใหม่" not in card["text"]
     pure = size_offer(
         mark=BTC_MARK,
         stop=BTC_STOP_SHORT,
@@ -1202,6 +1268,7 @@ def test_flow_mark_move_min_lot_refusal_u(tmp_path: Path, monkeypatch: pytest.Mo
     assert out.get("reason") == "risk_over_1pct"
     assert answers == [None]
     assert "(1.01%)" in sent[0]["text"]
+    assert "ลองใหม่" not in "\n".join(m["text"] for m in sent)
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
     conn.close()
 
@@ -1222,6 +1289,7 @@ def test_flow_mark_move_fit_margin_u2(tmp_path: Path, monkeypatch: pytest.Monkey
     assert out.get("reason") == "size_changed"
     assert sent[0]["text"] == MSG_SIZE_CHANGED
     assert answers == [None]
+    assert "ลองใหม่" not in "\n".join(m["text"] for m in sent)
     conn.close()
 
 
@@ -1306,15 +1374,17 @@ def test_flow_qk_rf_after_available_grows_x(tmp_path: Path, monkeypatch: pytest.
     fake = _must1_fake(available=Decimal("43.5"))
     cid, card = create_card_from_typed_command(conn, fake, parsed, now_ms=NOW)
     fake.available = Decimal("100")
-    _, _, out, _ = _run_qk(conn, f"qk:rf:{cid}", fake)
+    _, _, out, edits = _run_qk(conn, f"qk:rf:{cid}", fake)
     assert out.get("ok") is True
     row = conn.execute(
         "SELECT size_mode, quote_qty, registration_id FROM assist_quick_card WHERE id=?", (cid,)
     ).fetchone()
     assert row["size_mode"] in (None, "risk")
     assert Decimal(str(row["quote_qty"])) == Decimal("0.0035")
-    mk = _quoted_markup_for(cid, "risk")
-    assert mk["inline_keyboard"]
+    assert row["registration_id"] is None
+    assert edits
+    assert edits[-1]["reply_markup"] == _quoted_markup_for(cid, "risk")
+    assert edits[-1]["reply_markup"] != _quoted_markup_for(cid, "fit_margin")
     conn.close()
 
 
@@ -1377,7 +1447,11 @@ def test_legacy_qr_margin_below_min_same_side_y(tmp_path: Path, monkeypatch: pyt
         conn, card_cap["callback_data"], futures=_happy_fake(), send=send3, now_ms=NOW
     )
     assert out3["reason"] == "same_side_cap"
+    assert len(sent3) == 1
     assert sent3[0]["text"] == same_side_cap_text("long", 2)
+    assert "ลองใหม่" not in "\n".join(
+        [card_m["text"], card_b["text"], card_cap["text"], *(m["text"] for m in sent3)]
+    )
     after = conn.execute("SELECT COUNT(*) FROM assist_quick_registration WHERE status='open'").fetchone()[0]
     assert after == before
     conn.close()
@@ -1580,15 +1654,53 @@ def test_quick_modules_ast_safety() -> None:
     _assert_module_forbids(SRC / "quick_cap.py")
 
 
-def test_quick_modules_ast_negative_absolute_and_relative(tmp_path: Path) -> None:
-    bad_abs = tmp_path / "bad_abs.py"
-    bad_abs.write_text("from jarvise_assist.execute import x\n", encoding="utf-8")
-    with pytest.raises(AssertionError, match="jarvise_assist.execute"):
-        _assert_module_forbids(bad_abs)
-    bad_rel = tmp_path / "bad_rel.py"
-    bad_rel.write_text("from .execute import x\n", encoding="utf-8")
-    with pytest.raises(AssertionError, match="execute"):
-        _assert_module_forbids(bad_rel)
+@pytest.mark.parametrize(
+    ("source", "match"),
+    [
+        ("from jarvise_assist.execute import x", "jarvise_assist.execute"),
+        ("from .execute import x", "jarvise_assist.execute"),
+        ("from . import execute", "jarvise_assist.execute"),
+        ("from jarvise_assist import execute", "jarvise_assist.execute"),
+        ("from jarvise_assist import messages as m", "jarvise_assist.messages"),
+        ("from .futures import UMFutures", "jarvise_assist.futures"),
+        ("from .. import jarvise_trade", "jarvise_trade"),
+        ("from ..jarvise_trade.x import y", "jarvise_trade"),
+        ("from jarvise_notify import quiet", "jarvise_notify.quiet"),
+        ("import redis", "redis"),
+        ("from ... import x", "level >= 3"),
+    ],
+)
+def test_quick_modules_ast_negative_absolute_and_relative(tmp_path: Path, source: str, match: str) -> None:
+    path = tmp_path / "bad.py"
+    path.write_text(source + "\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match=match):
+        _assert_module_forbids(path)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from jarvise_assist.sizing import floor_to_step",
+        "from . import sizing",
+        "from .sizing import floor_to_step",
+        "from jarvise_assist import sizing, quick_cap",
+        "from ..jarvise_assist import sizing",
+        "from decimal import Decimal",
+        "from typing import Any",
+        "from __future__ import annotations",
+    ],
+)
+def test_quick_modules_ast_allows_safe_imports(tmp_path: Path, source: str) -> None:
+    path = tmp_path / "ok.py"
+    path.write_text(source + "\n", encoding="utf-8")
+    _assert_module_forbids(path)
+
+
+def test_registration_refusal_same_side_cap_text() -> None:
+    assert (
+        _registration_refusal_text("same_side_cap")
+        == "ไม่ลงทะเบียน — ฝั่งนี้เปิดอยู่ครบเพดานแล้ว (เพดานฝั่งละ 2) · ปิดหรือให้ทะเบียนหมดอายุก่อน"
+    )
 
 
 def test_same_side_cap_helpers() -> None:
