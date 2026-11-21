@@ -35,7 +35,7 @@ from jarvise_assist.partner_admin import (
     parse_partner_command,
 )
 from jarvise_assist.partner_portal import handle_portal_callback, handle_portal_text
-from jarvise_assist.quick import handle_quick_callback
+from jarvise_assist.quick import handle_quick_callback, handle_quick_setting_text, parse_quick_setting_command
 from jarvise_assist.quick_card import (
     QUICK_REGISTER_PREFIX,
     handle_quick_register_callback,
@@ -268,6 +268,9 @@ def process_update(
     risk_num = handle_risk_number(conn, text, send=send_fn)
     if risk_num.get("handled"):
         return risk_num
+    qs_parsed = parse_quick_setting_command(text)
+    if qs_parsed is not None:
+        return handle_quick_setting_text(conn, qs_parsed, send=send_fn, now_ms=ts)
     if parse_quick_command(text) is not None:
         client = futures if futures is not None else build_futures_client()
         quick_out = handle_quick_text(conn, text, futures=client, send=send_fn, now_ms=ts)
