@@ -324,20 +324,17 @@ def test_s22_rf_low_balance_refusal_markup_and_answer_none(
     conn = open_db(tmp_path / "s22.db")
     _seed_settings(conn)
     cid = _flow_to_quoted(conn, _happy_fake())
-    low = QuickFake(balance=Decimal("1"), available=Decimal("1"))
+    low = _happy_fake(available=Decimal("1"))
     _, answers, out, edits = _run_qk(conn, f"qk:rf:{cid}", low, now_ms=T1)
     assert answers == [None]
     assert out.get("ok") is False
     assert out.get("reason") == "leverage_over_5x"
     assert edits[-1]["reply_markup"] == _refresh_only_markup(cid)
-    expected_text = _decorate_card_text(
-        "\n".join(
-            [
-                "❌ margin ไม่พอ — มีให้ใช้ 0 USDT ใน Futures · 👉 โอน USDT เข้า Futures หรือปิดไม้อื่น",
-                quick_mode_tag(),
-            ]
-        )
+    EXPECTED = (
+        "❌ margin ไม่พอแม้ใช้ 5x — ต้องใช้ ≈ 1.03 USDT (รวมค่าธรรมเนียม + กันไว้ 2%) มี 1 USDT · "
+        "ขนาดใหญ่สุดที่พอ 2.4 < ขั้นต่ำ 2.5 SUI · 👉 โอนเข้า Futures หรือปิดไม้อื่น"
     )
+    expected_text = _decorate_card_text("\n".join([EXPECTED, quick_mode_tag()]))
     assert edits[-1]["text"] == expected_text
     assert (
         conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()["status"]
