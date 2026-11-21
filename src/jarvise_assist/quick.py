@@ -12,7 +12,7 @@ import re
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from jarvise_assist.futures import FuturesPosition
@@ -40,7 +40,7 @@ RISK_CONFIRM_AT = 1.0
 CAP_CONFIRM_ABOVE = 1.0
 
 _QUICK_SETTING_SIDE = frozenset({"long", "short", "l", "s", "buy", "sell"})
-_QUICK_SETTING_VALUE_RE = re.compile(r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")
+_QUICK_SETTING_VALUE_RE = re.compile(r"(?:[0-9]{1,3}(?:\.[0-9]+)?|\.[0-9]+)")
 
 MSG_QUICK_LOCK_REMOVED = "ตั้งค่านี้ถูกยกเลิกแล้ว — quick ไม่มีล็อกรายวัน/แพ้ติดกัน (ยังหยุดเมื่อขาดทุนสัปดาห์เกิน 4R)"
 MSG_QUICK_SETTING_REJECT = "ค่าต้องมากกว่า 0 และไม่เกิน 100"
@@ -755,7 +755,10 @@ def _parse_quick_setting_value(raw: str, *, allow_trailing_pct: bool = False) ->
         s = s[:-1].strip()
     if not _QUICK_SETTING_VALUE_RE.fullmatch(s):
         return None
-    val = Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    try:
+        val = Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
     if val <= 0 or val > 100:
         return None
     return val
@@ -1009,7 +1012,14 @@ def _apply_quick_setting(
     confirmed: bool,
     allow_trailing_pct: bool = False,
 ) -> dict[str, Any]:
+    if key in ("dl", "st"):
+        send(MSG_QUICK_LOCK_REMOVED)
+        return {"ok": True}
+
     if raw == "m":
+        if key not in ("risk", "cap"):
+            send("คำสั่งไม่รู้จัก")
+            return {"ok": False}
         if confirmed:
             send(MSG_QUICK_SETTING_REJECT)
             return {"ok": False, "rejected": True}
@@ -1065,10 +1075,6 @@ def _apply_quick_setting(
         msg, kb = _quick_settings_saved_lines(conn, key="cap", val=val, now_ms=now_ms)
         send(msg, reply_markup=kb)
         return {"ok": True, "cap_pct": val}
-
-    if key in ("dl", "st"):
-        send(MSG_QUICK_LOCK_REMOVED)
-        return {"ok": True}
 
     send("คำสั่งไม่รู้จัก")
     return {"ok": False}
