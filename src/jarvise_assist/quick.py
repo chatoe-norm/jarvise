@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jarvise_assist.futures import FuturesPosition
@@ -33,12 +34,21 @@ QUICK_SAMPLE_TARGET = 25
 
 QUICK_USAGE = "พิมพ์: q BTC long 67000 (stop เป็นราคา) หรือ q BTC short 0.4% (stop ห่างจากราคา %)"
 
-RISK_ALLOWED = (0.25, 0.5, 0.75, 1.0)
-CAP_ALLOWED = (0.5, 1.0, 1.5, 2.0)
+RISK_ALLOWED = (0.5, 0.75, 1.0)
+CAP_ALLOWED = (1.0, 1.5, 2.0)
 RISK_CONFIRM_AT = 1.0
 CAP_CONFIRM_ABOVE = 1.0
 
+_QUICK_SETTING_SIDE = frozenset({"long", "short", "l", "s", "buy", "sell"})
+_QUICK_SETTING_VALUE_RE = re.compile(r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")
+
 MSG_QUICK_LOCK_REMOVED = "ตั้งค่านี้ถูกยกเลิกแล้ว — quick ไม่มีล็อกรายวัน/แพ้ติดกัน (ยังหยุดเมื่อขาดทุนสัปดาห์เกิน 4R)"
+MSG_QUICK_SETTING_REJECT = "ค่าต้องมากกว่า 0 และไม่เกิน 100"
+MSG_QUICK_SETTING_HINT_RISK = "พิมพ์ค่าเอง: q risk 0.6"
+MSG_QUICK_SETTING_HINT_CAP = "พิมพ์ค่าเอง: q cap 1.2"
+MSG_QUICK_SETTING_RISK_OVER_CAP = (
+    "⚠️ risk ต่อไม้มากกว่าเพดาน — ไม้ quick จะถูกปฏิเสธ (quick_cap)"
+)
 
 
 def get_quick_settings(conn: Any) -> dict[str, Any]:
@@ -736,6 +746,91 @@ def _fmt_pct(v: float) -> str:
     return f"{v:g}"
 
 
+def _fmt_fixed(v: float | Decimal) -> str:
+    s = f"{float(v):.2f}"
+    return s.rstrip("0").rstrip(".")
+
+
+def _parse_quick_setting_value(raw: str, *, allow_trailing_pct: bool = False) -> Decimal | None:
+    s = raw.strip()
+    if allow_trailing_pct and s.endswith("%"):
+        s = s[:-1].strip()
+    if not _QUICK_SETTING_VALUE_RE.fullmatch(s):
+        return None
+    val = Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if val <= 0 or val > 100:
+        return None
+    return val
+
+
+def _is_quick_setting_preset(key: str, val: float) -> bool:
+    allowed = RISK_ALLOWED if key == "risk" else CAP_ALLOWED if key == "cap" else ()
+    return any(abs(val - float(p)) < 1e-9 for p in allowed)
+
+
+def parse_quick_setting_command(text: str) -> dict[str, Any] | None:
+    """Parse ``q risk …`` / ``q cap …`` for manual quick settings. None → other ``q`` handlers."""
+    if not re.match(r"^\s*q(?:uick)?\s+(risk|cap)\b", text or "", re.I):
+        return None
+    parts = (text or "").strip().split()
+    if len(parts) < 2:
+        return None
+    head = parts[0].lower()
+    if head not in {"q", "quick"}:
+        return None
+    tokens = parts[1:]
+    key = tokens[0].lower()
+    if key not in {"risk", "cap"}:
+        return None
+    if len(tokens) == 1:
+        return {"action": "hint", "key": key}
+    if len(tokens) == 2:
+        return {"action": "apply", "key": key, "raw": tokens[1]}
+    if tokens[1].lower() not in _QUICK_SETTING_SIDE:
+        return {"action": "hint", "key": key}
+    return None
+
+
+def handle_quick_setting_text(
+    conn: Any,
+    parsed: dict[str, Any],
+    *,
+    send: SendFn,
+    now_ms: int,
+) -> dict[str, Any]:
+    if parsed.get("action") == "hint":
+        send(
+            MSG_QUICK_SETTING_HINT_RISK
+            if parsed["key"] == "risk"
+            else MSG_QUICK_SETTING_HINT_CAP
+        )
+        return {"ok": True, "hint": True}
+    return _apply_quick_setting(
+        conn,
+        str(parsed["key"]),
+        str(parsed["raw"]),
+        send=send,
+        now_ms=now_ms,
+        confirmed=False,
+        allow_trailing_pct=True,
+    )
+
+
+def _quick_settings_saved_lines(conn: Any, *, key: str, val: float, now_ms: int) -> tuple[str, dict[str, Any]]:
+    settings = get_quick_settings(conn)
+    risk = float(settings["risk_pct"])
+    cap = float(settings["cap_pct"])
+    warn = ""
+    if risk > cap:
+        warn = f"{MSG_QUICK_SETTING_RISK_OVER_CAP}\n"
+    text, kb = render_quick_menu(conn, now_ms=now_ms)
+    if key == "risk":
+        head = f"บันทึกความเสี่ยง {_fmt_fixed(val)}% แล้ว\n{warn}{text}"
+    else:
+        head = f"บันทึกเพดาน {_fmt_fixed(val)}% แล้ว\n{warn}{text}"
+    return head, kb
+
+
 def _menu_hhmm(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000.0, tz=_BANGKOK).strftime("%H:%M")
 
@@ -837,24 +932,48 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
         lines.append(f"ยังไม่พิสูจน์ edge — ตัวอย่าง {n}/{QUICK_SAMPLE_TARGET} ไม้")
     lines.append(QUICK_USAGE)
 
+    risk_row: list[dict[str, str]] = []
+    for v in RISK_ALLOWED:
+        fmt = _fmt_fixed(v)
+        if abs(risk - v) < 1e-9:
+            risk_row.append({"text": f"✓ risk {fmt}%", "callback_data": f"qs:risk:{fmt}"})
+        else:
+            risk_row.append({"text": f"risk {fmt}%", "callback_data": f"qs:risk:{fmt}"})
+    if _is_quick_setting_preset("risk", risk):
+        risk_row.append({"text": "✏️ risk", "callback_data": "qs:risk:m"})
+    else:
+        risk_row.append(
+            {
+                "text": f"✓ ✏️ risk {_fmt_fixed(risk)}%",
+                "callback_data": "qs:risk:m",
+            }
+        )
+
+    cap_row: list[dict[str, str]] = []
+    for v in CAP_ALLOWED:
+        fmt = _fmt_fixed(v)
+        if abs(cap - v) < 1e-9:
+            cap_row.append({"text": f"✓ cap {fmt}%", "callback_data": f"qs:cap:{fmt}"})
+        else:
+            cap_row.append({"text": f"cap {fmt}%", "callback_data": f"qs:cap:{fmt}"})
+    if _is_quick_setting_preset("cap", cap):
+        cap_row.append({"text": "✏️ cap", "callback_data": "qs:cap:m"})
+    else:
+        cap_row.append(
+            {
+                "text": f"✓ ✏️ cap {_fmt_fixed(cap)}%",
+                "callback_data": "qs:cap:m",
+            }
+        )
+
     keyboard = {
         "inline_keyboard": [
             [
                 {"text": "🟢 LONG", "callback_data": "qk:sd:l"},
                 {"text": "🔴 SHORT", "callback_data": "qk:sd:s"},
             ],
-            [
-                {"text": f"risk {_fmt_pct(v)}%", "callback_data": f"qs:risk:{_fmt_pct(v)}"}
-                if abs(risk - v) >= 1e-9
-                else {"text": f"✓ risk {_fmt_pct(v)}%", "callback_data": f"qs:risk:{_fmt_pct(v)}"}
-                for v in RISK_ALLOWED
-            ],
-            [
-                {"text": f"cap {_fmt_pct(v)}%", "callback_data": f"qs:cap:{_fmt_pct(v)}"}
-                if abs(cap - v) >= 1e-9
-                else {"text": f"✓ cap {_fmt_pct(v)}%", "callback_data": f"qs:cap:{_fmt_pct(v)}"}
-                for v in CAP_ALLOWED
-            ],
+            risk_row,
+            cap_row,
         ]
     }
     return "\n".join(lines), keyboard
@@ -892,24 +1011,30 @@ def _apply_quick_setting(
     send: SendFn,
     now_ms: int,
     confirmed: bool,
+    allow_trailing_pct: bool = False,
 ) -> dict[str, Any]:
-    try:
-        val = float(raw)
-    except ValueError:
-        send("ค่าไม่ถูกต้อง")
+    if raw == "m":
+        if confirmed:
+            send(MSG_QUICK_SETTING_REJECT)
+            return {"ok": False, "rejected": True}
+        send(MSG_QUICK_SETTING_HINT_RISK if key == "risk" else MSG_QUICK_SETTING_HINT_CAP)
+        return {"ok": True, "hint": True}
+
+    parsed = _parse_quick_setting_value(raw, allow_trailing_pct=allow_trailing_pct)
+    if parsed is None:
+        send(MSG_QUICK_SETTING_REJECT)
         return {"ok": False, "rejected": True}
+    val = float(parsed)
 
     if key == "risk":
-        if val not in RISK_ALLOWED:
-            send("รับได้แค่ 0.25 / 0.5 / 0.75 / 1")
-            return {"ok": False, "rejected": True}
         if val >= RISK_CONFIRM_AT and not confirmed:
+            fmt = _fmt_fixed(val)
             send(
-                f"ยืนยันความเสี่ยงต่อไม้ {_fmt_pct(val)}%?",
+                f"ยืนยันความเสี่ยงต่อไม้ {fmt}%?",
                 reply_markup={
                     "inline_keyboard": [
                         [
-                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:risk:{_fmt_pct(val)}"},
+                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:risk:{fmt}"},
                             {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"},
                         ]
                     ]
@@ -917,25 +1042,23 @@ def _apply_quick_setting(
             )
             return {"ok": True, "confirm": True}
         write_quick_settings(conn, risk_pct=val, updated_at_ms=now_ms)
-        text, kb = render_quick_menu(conn, now_ms=now_ms)
-        send(f"บันทึกความเสี่ยง {_fmt_pct(val)}% แล้ว\n{text}", reply_markup=kb)
+        msg, kb = _quick_settings_saved_lines(conn, key="risk", val=val, now_ms=now_ms)
+        send(msg, reply_markup=kb)
         return {"ok": True, "risk_pct": val}
 
     if key == "cap":
-        if val not in CAP_ALLOWED:
-            send("รับได้แค่ 0.5 / 1 / 1.5 / 2")
-            return {"ok": False, "rejected": True}
         if val > CAP_CONFIRM_ABOVE and not confirmed:
             main_cap = float(portfolio_risk_cap_pct(Decimal(str(ensure_settings(conn)["risk_pct"]))))
             total = main_cap + val
+            fmt = _fmt_fixed(val)
             send(
-                f"ยืนยันเพดาน {_fmt_pct(val)}%? "
-                f"ความเสี่ยงรวมสูงสุด {_fmt_pct(total)}% "
-                f"(หลัก {_fmt_pct(main_cap)}% + quick {_fmt_pct(val)}%)",
+                f"ยืนยันเพดาน {fmt}%? "
+                f"ความเสี่ยงรวมสูงสุด {_fmt_fixed(total)}% "
+                f"(หลัก {_fmt_fixed(main_cap)}% + quick {fmt}%)",
                 reply_markup={
                     "inline_keyboard": [
                         [
-                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:cap:{_fmt_pct(val)}"},
+                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:cap:{fmt}"},
                             {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"},
                         ]
                     ]
@@ -943,8 +1066,8 @@ def _apply_quick_setting(
             )
             return {"ok": True, "confirm": True}
         write_quick_settings(conn, cap_pct=val, updated_at_ms=now_ms)
-        text, kb = render_quick_menu(conn, now_ms=now_ms)
-        send(f"บันทึกเพดาน {_fmt_pct(val)}% แล้ว\n{text}", reply_markup=kb)
+        msg, kb = _quick_settings_saved_lines(conn, key="cap", val=val, now_ms=now_ms)
+        send(msg, reply_markup=kb)
         return {"ok": True, "cap_pct": val}
 
     if key in ("dl", "st"):
