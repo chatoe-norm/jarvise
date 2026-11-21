@@ -94,6 +94,8 @@ _QUICK_REG_REFUSAL_MAP = {
 
 
 def _registration_refusal_text(reason: str) -> str:
+    if reason == "same_side_cap":
+        return "ไม่ลงทะเบียน — ฝั่งนี้เปิดอยู่ครบเพดานแล้ว (เพดานฝั่งละ 2) · ปิดหรือให้ทะเบียนหมดอายุก่อน"
     mapped = _QUICK_REG_REFUSAL_MAP.get(str(reason), str(reason))
     return REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
 

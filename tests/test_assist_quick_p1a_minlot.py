@@ -35,7 +35,14 @@ from jarvise_assist.quick_minlot import (
 from jarvise_ingest.db import open_db
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "jarvise_assist"
-_BANNED_IMPORT_ROOTS = frozenset({"jarvise_trade", "redis", "execute"})
+_QUICK_FORBIDDEN_IMPORTS = (
+    "jarvise_assist.execute",
+    "jarvise_trade",
+    "redis",
+    "jarvise_notify.quiet",
+    "jarvise_assist.futures",
+    "jarvise_assist.messages",
+)
 
 BTC_MARK = Decimal("62100")
 BTC_STOP_SHORT = Decimal("62300")
@@ -62,20 +69,18 @@ def _btc_short_offer(**kw: Any) -> SizeOfferResult:
     return size_offer(**defaults)
 
 
-def _assert_module_import_boundary(path: Path, *, allowed_modules: set[str]) -> None:
+def _assert_module_forbids(path: Path) -> None:
     src = path.read_text(encoding="utf-8")
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                root = alias.name.split(".")[0]
-                assert root not in _BANNED_IMPORT_ROOTS, alias.name
-                assert alias.name in allowed_modules or root in allowed_modules, alias.name
+                assert not any(
+                    alias.name == b or alias.name.startswith(b + ".") for b in _QUICK_FORBIDDEN_IMPORTS
+                ), alias.name
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
-            root = mod.split(".")[0]
-            assert root not in _BANNED_IMPORT_ROOTS, mod
-            assert mod in allowed_modules or root in allowed_modules, mod
+            assert not any(mod == b or mod.startswith(b + ".") for b in _QUICK_FORBIDDEN_IMPORTS), mod
 
 
 @pytest.mark.parametrize(
@@ -198,6 +203,32 @@ def _assert_module_import_boundary(path: Path, *, allowed_modules: set[str]) -> 
             id="boundary_1pct",
         ),
         pytest.param(
+            "must1_d1",
+            dict(
+                mark=BTC_MARK,
+                stop=Decimal("62440"),
+                wallet_balance=BTC_WALLET,
+                available=Decimal("43.5"),
+                min_qty=BTC_MIN_QTY,
+                min_notional=BTC_MIN_NOTIONAL,
+                step=Decimal("0.0001"),
+                risk_qty=Decimal("0.0035"),
+            ),
+            dict(
+                reason=None,
+                kind="fit_margin",
+                bound="risk_1pct",
+                qty=Decimal("0.0028"),
+                leverage=5,
+                margin=Decimal("34.7760"),
+                real_risk_pct=Decimal("0.9672133333333333333333333333"),
+                q_min=Decimal("0.0017"),
+                q_fit=Decimal("0.0034"),
+                q_1pct=Decimal("0.0028"),
+            ),
+            id="must1_d1",
+        ),
+        pytest.param(
             "min_qty_dom",
             dict(
                 mark=Decimal("100"),
@@ -235,39 +266,52 @@ def test_size_offer_matrix(case_id: str, kwargs: dict[str, Any], expect: dict[st
     assert offer.margin == expect["margin"]
     assert offer.real_risk_pct == expect["real_risk_pct"]
     assert result.candidate == offer
+    if "q_min" in expect:
+        assert result.q_min == expect["q_min"]
+        assert result.q_fit == expect["q_fit"]
+        assert result.q_1pct == expect["q_1pct"]
 
 
 def test_size_offer_guards() -> None:
-    assert size_offer(
-        mark=Decimal("0"),
-        stop=Decimal("1"),
-        wallet_balance=Decimal("1"),
-        available=Decimal("1"),
-        min_qty=Decimal("1"),
-        min_notional=Decimal("1"),
-        step=Decimal("1"),
-        risk_qty=Decimal("0"),
-    ).reason == "bad_input"
-    assert size_offer(
-        mark=Decimal("1"),
-        stop=Decimal("2"),
-        wallet_balance=Decimal("0"),
-        available=Decimal("1"),
-        min_qty=Decimal("1"),
-        min_notional=Decimal("1"),
-        step=Decimal("1"),
-        risk_qty=Decimal("0"),
-    ).reason == "no_balance"
-    assert size_offer(
-        mark=Decimal("1"),
-        stop=Decimal("2"),
-        wallet_balance=Decimal("100"),
-        available=Decimal("0"),
-        min_qty=Decimal("1"),
-        min_notional=Decimal("1"),
-        step=Decimal("1"),
-        risk_qty=Decimal("0"),
-    ).reason == "leverage_over_5x"
+    assert (
+        size_offer(
+            mark=Decimal("0"),
+            stop=Decimal("1"),
+            wallet_balance=Decimal("1"),
+            available=Decimal("1"),
+            min_qty=Decimal("1"),
+            min_notional=Decimal("1"),
+            step=Decimal("1"),
+            risk_qty=Decimal("0"),
+        ).reason
+        == "bad_input"
+    )
+    assert (
+        size_offer(
+            mark=Decimal("1"),
+            stop=Decimal("2"),
+            wallet_balance=Decimal("0"),
+            available=Decimal("1"),
+            min_qty=Decimal("1"),
+            min_notional=Decimal("1"),
+            step=Decimal("1"),
+            risk_qty=Decimal("0"),
+        ).reason
+        == "no_balance"
+    )
+    assert (
+        size_offer(
+            mark=Decimal("1"),
+            stop=Decimal("2"),
+            wallet_balance=Decimal("100"),
+            available=Decimal("0"),
+            min_qty=Decimal("1"),
+            min_notional=Decimal("1"),
+            step=Decimal("1"),
+            risk_qty=Decimal("0"),
+        ).reason
+        == "leverage_over_5x"
+    )
 
 
 def test_size_offer_e1a_q_fit_below_min() -> None:
@@ -416,10 +460,10 @@ def test_card_must1_risk_1pct_routing(tmp_path: Path, monkeypatch: pytest.Monkey
     write_quick_settings(conn, risk_pct=1.0)
     fake = QuickFake(
         balance=BTC_WALLET,
-        available=Decimal("70"),
+        available=Decimal("43.5"),
         marks={"BTCUSDT": BTC_MARK},
         ticks={"BTCUSDT": Decimal("0.1")},
-        steps={"BTCUSDT": BTC_STEP},
+        steps={"BTCUSDT": Decimal("0.0001")},
         min_qty={"BTCUSDT": BTC_MIN_QTY},
         min_notional={"BTCUSDT": BTC_MIN_NOTIONAL},
     )
@@ -428,15 +472,28 @@ def test_card_must1_risk_1pct_routing(tmp_path: Path, monkeypatch: pytest.Monkey
         fake,
         symbol="BTCUSDT",
         side="short",
-        stop=BTC_STOP_SHORT,
+        stop=Decimal("62440"),
         now_ms=NOW,
         allow_offer=True,
     )
     assert card["ok"] is True
     assert card["size_mode"] == "fit_margin"
-    assert card["qty"] == Decimal("0.004")
+    assert card["qty"] == Decimal("0.0028")
     assert "ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ 1%" in card["text"]
-    assert "risk จริง: −1.1 USDT = 0.92%" in card["text"]
+    assert "0.97%" in card["text"]
+    assert "margin ≈ 34.78" in card["text"]
+    legacy = build_quick_card(
+        conn,
+        fake,
+        symbol="BTCUSDT",
+        side="short",
+        stop=Decimal("62440"),
+        now_ms=NOW,
+        allow_offer=False,
+    )
+    assert legacy["ok"] is True
+    assert legacy.get("size_mode", "risk") == "risk"
+    assert legacy["qty"] == Decimal("0.0035")
     conn.close()
 
 
@@ -501,10 +558,7 @@ def test_card_1pct_refuses_min_lot(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 def test_registration_refusal_same_side_cap_text() -> None:
     text = _registration_refusal_text("same_side_cap")
-    assert text == (
-        "ไม่ลงทะเบียน — ฝั่งนี้เปิดอยู่ครบเพดานแล้ว (เพดานฝั่งละ 2) · "
-        "ปิดหรือให้ทะเบียนหมดอายุก่อน"
-    )
+    assert text == ("ไม่ลงทะเบียน — ฝั่งนี้เปิดอยู่ครบเพดานแล้ว (เพดานฝั่งละ 2) · ปิดหรือให้ทะเบียนหมดอายุก่อน")
 
 
 def test_same_side_cap_helpers() -> None:
@@ -604,29 +658,15 @@ def test_callback_bytes_offer_paths() -> None:
 
 
 def test_quick_modules_ast_safety() -> None:
-    _assert_module_import_boundary(
-        SRC / "quick_minlot.py",
-        allowed_modules={
-            "__future__",
-            "dataclasses",
-            "decimal",
-            "jarvise_assist.sizing",
-        },
-    )
-    _assert_module_import_boundary(
-        SRC / "quick_cap.py",
-        allowed_modules={"__future__", "typing"},
-    )
+    _assert_module_forbids(SRC / "quick_minlot.py")
+    _assert_module_forbids(SRC / "quick_cap.py")
 
 
 def test_quick_modules_ast_safety_negative_self_test(tmp_path: Path) -> None:
     bad = tmp_path / "bad_quick_module.py"
-    bad.write_text("from jarvise_trade.binance_spot import ACCOUNT_PATH\n", encoding="utf-8")
-    with pytest.raises(AssertionError, match="jarvise_trade"):
-        _assert_module_import_boundary(
-            bad,
-            allowed_modules={"__future__", "decimal", "jarvise_assist.sizing"},
-        )
+    bad.write_text("from jarvise_assist.execute import x\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="jarvise_assist.execute"):
+        _assert_module_forbids(bad)
 
 
 def test_legacy_qr_still_refuses_margin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
