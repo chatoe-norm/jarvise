@@ -100,7 +100,7 @@ def fmt_pct(value: Decimal, *, mode: str = "half_up", limit: Decimal | None = No
     raise ValueError(f"unknown fmt_pct mode: {mode}")
 
 
-def _round_price_to_tick(value: Decimal, tick: Decimal, *, toward_mark: bool, short: bool) -> Decimal:
+def _round_price_to_tick(value: Decimal, tick: Decimal, *, short: bool) -> Decimal:
     if tick <= 0:
         return value
     if short:
@@ -131,7 +131,7 @@ def min_lot_stop_max(
         raw_price = mark + stop_max_dist
     else:
         raw_price = mark - stop_max_dist
-    stop_max_price = _round_price_to_tick(raw_price, tick, toward_mark=True, short=short)
+    stop_max_price = _round_price_to_tick(raw_price, tick, short=short)
     return stop_max_dist, stop_max_pct, stop_max_price
 
 
@@ -165,7 +165,16 @@ def size_offer(
     )
     if not _finite_decimals(*dec_params):
         return _bad_input()
-    if mark <= 0 or step <= 0 or stop == mark or risk_qty < 0:
+    if (
+        mark <= 0
+        or step <= 0
+        or stop == mark
+        or risk_qty < 0
+        or min_qty < 0
+        or min_notional < 0
+        or margin_buffer <= 0
+        or max_leverage <= 0
+    ):
         return _bad_input()
     if wallet_balance <= 0:
         return _no_balance()
@@ -173,6 +182,8 @@ def size_offer(
     q_from_min_qty = ceil_to_step(min_qty, step)
     q_from_notional = ceil_to_step(min_notional / mark, step)
     q_min = max(q_from_min_qty, q_from_notional)
+    if q_min <= 0:
+        return _bad_input()
 
     fee_rt = Decimal("2") * fee_bps_per_side / Decimal("10000")
     dist = abs(mark - stop)
@@ -214,17 +225,6 @@ def size_offer(
         kind = "min_lot"
         qty = q_min
         bound = "min_lot"
-
-    if qty <= 0:
-        return SizeOfferResult(
-            offer=None,
-            reason="leverage_over_5x",
-            candidate=None,
-            q_min=q_min,
-            q_fit=q_fit,
-            q_1pct=q_1pct,
-            need_margin=None,
-        )
 
     notional = qty * mark
     risk_usdt = dist * qty

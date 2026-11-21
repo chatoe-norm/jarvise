@@ -1,4 +1,3 @@
-
 """Quick P1a fix round 3 Step A — size_offer, cards, flows, same-side cap."""
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.test_assist import FakeFutures
 from tests.test_assist_execute import _forbid_trade_client
 from tests.test_assist_quick_card import (
     QuickFake,
@@ -28,6 +26,7 @@ from jarvise_assist.quick import write_quick_settings
 from jarvise_assist.quick_cap import same_side_cap_reached, same_side_cap_text
 from jarvise_assist.quick_card import (
     REFUSAL,
+    _format_size_offer_refusal,
     build_quick_card,
     handle_quick_register_callback,
 )
@@ -98,7 +97,6 @@ def _btc_fake(**kw: Any) -> QuickFake:
         available=BTC_AVAILABLE,
         marks={"BTCUSDT": BTC_MARK},
         ticks={"BTCUSDT": Decimal("0.1")},
-        
     )
     defaults["steps"] = {"BTCUSDT": kw.pop("step", BTC_STEP)}
     defaults.update(
@@ -132,7 +130,10 @@ def _assert_module_forbids(path: Path) -> None:
             resolved = f"jarvise_assist.{mod}" if mod and node.level else mod
             for target in (mod, full, resolved):
                 assert not any(
-                    target == b or target.startswith(b + ".") or mod == b or (mod and mod.split(".")[0] == b.split(".")[-1])
+                    target == b
+                    or target.startswith(b + ".")
+                    or mod == b
+                    or (mod and mod.split(".")[0] == b.split(".")[-1])
                     for b in _QUICK_FORBIDDEN_IMPORTS
                 ), mod or full or resolved
 
@@ -150,6 +151,7 @@ def _a4_fixture(conn: Any, fake: QuickFake) -> tuple[str, dict[str, Any]]:
 
 
 # --- A1: pure size_offer -------------------------------------------------------
+
 
 def test_size_offer_today_like_min_notional_100_and_5() -> None:
     for mn, q_min in ((BTC_MIN_NOTIONAL, Decimal("0.002")), (Decimal("5"), Decimal("0.001"))):
@@ -602,36 +604,45 @@ def test_size_offer_guards_non_finite(field: str, bad: Decimal) -> None:
 
 
 def test_size_offer_guards_step_mark_stop_and_negative_risk() -> None:
-    assert size_offer(
-        mark=Decimal("0"),
-        stop=Decimal("1"),
-        wallet_balance=Decimal("1"),
-        available=Decimal("1"),
-        min_qty=Decimal("1"),
-        min_notional=Decimal("1"),
-        step=Decimal("1"),
-        risk_qty=Decimal("0"),
-    ).reason == "bad_input"
-    assert size_offer(
-        mark=Decimal("1"),
-        stop=Decimal("1"),
-        wallet_balance=Decimal("1"),
-        available=Decimal("1"),
-        min_qty=Decimal("1"),
-        min_notional=Decimal("1"),
-        step=Decimal("0"),
-        risk_qty=Decimal("0"),
-    ).reason == "bad_input"
-    assert size_offer(
-        mark=Decimal("1"),
-        stop=Decimal("2"),
-        wallet_balance=Decimal("100"),
-        available=Decimal("1"),
-        min_qty=Decimal("1"),
-        min_notional=Decimal("1"),
-        step=Decimal("1"),
-        risk_qty=Decimal("-1"),
-    ).reason == "bad_input"
+    assert (
+        size_offer(
+            mark=Decimal("0"),
+            stop=Decimal("1"),
+            wallet_balance=Decimal("1"),
+            available=Decimal("1"),
+            min_qty=Decimal("1"),
+            min_notional=Decimal("1"),
+            step=Decimal("1"),
+            risk_qty=Decimal("0"),
+        ).reason
+        == "bad_input"
+    )
+    assert (
+        size_offer(
+            mark=Decimal("1"),
+            stop=Decimal("1"),
+            wallet_balance=Decimal("1"),
+            available=Decimal("1"),
+            min_qty=Decimal("1"),
+            min_notional=Decimal("1"),
+            step=Decimal("0"),
+            risk_qty=Decimal("0"),
+        ).reason
+        == "bad_input"
+    )
+    assert (
+        size_offer(
+            mark=Decimal("1"),
+            stop=Decimal("2"),
+            wallet_balance=Decimal("100"),
+            available=Decimal("1"),
+            min_qty=Decimal("1"),
+            min_notional=Decimal("1"),
+            step=Decimal("1"),
+            risk_qty=Decimal("-1"),
+        ).reason
+        == "bad_input"
+    )
 
 
 def test_size_offer_guards_wallet_zero_and_available_zero() -> None:
@@ -734,19 +745,25 @@ def test_min_lot_stop_max_tick_short_and_long() -> None:
     ).candidate
     assert cand is not None
     _, _, short_p = min_lot_stop_max(
-        candidate=cand, mark=Decimal("59330.1"), stop=Decimal("62000"),
-        wallet_balance=Decimal("142"), tick=Decimal("0.1"),
+        candidate=cand,
+        mark=Decimal("59330.1"),
+        stop=Decimal("62000"),
+        wallet_balance=Decimal("142"),
+        tick=Decimal("0.1"),
     )
     assert short_p == Decimal("60678.9")
     _, _, long_p = min_lot_stop_max(
-        candidate=cand, mark=Decimal("59330.1"), stop=Decimal("56660.2"),
-        wallet_balance=Decimal("142"), tick=Decimal("0.1"),
+        candidate=cand,
+        mark=Decimal("59330.1"),
+        stop=Decimal("56660.2"),
+        wallet_balance=Decimal("142"),
+        tick=Decimal("0.1"),
     )
     assert long_p == Decimal("57981.3")
 
 
-
 # --- A2: build_quick_card ------------------------------------------------------
+
 
 def test_card_bug3_short_text_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_trade_client(monkeypatch)
@@ -784,12 +801,22 @@ def test_card_bug3_long_and_wallet_five(tmp_path: Path, monkeypatch: pytest.Monk
         min_notional={"BTCUSDT": Decimal("5")},
     )
     card = build_quick_card(
-        conn, QuickFake(**base), symbol="BTCUSDT", side="long", stop=Decimal("56660.2"), now_ms=NOW, allow_offer=True
+        conn,
+        QuickFake(**base),
+        symbol="BTCUSDT",
+        side="long",
+        stop=Decimal("56660.2"),
+        now_ms=NOW,
+        allow_offer=True,
     )
     assert card["text"].endswith("≈ 2.27% (57981.3)")
     card5 = build_quick_card(
         conn,
-        QuickFake(balance=Decimal("5"), available=Decimal("5"), **{k: v for k, v in base.items() if k not in {"balance", "available"}}),
+        QuickFake(
+            balance=Decimal("5"),
+            available=Decimal("5"),
+            **{k: v for k, v in base.items() if k not in {"balance", "available"}},
+        ),
         symbol="BTCUSDT",
         side="short",
         stop=Decimal("62000"),
@@ -798,7 +825,13 @@ def test_card_bug3_long_and_wallet_five(tmp_path: Path, monkeypatch: pytest.Monk
     )
     assert card5["text"].endswith("👉 ขั้นต่ำของสัญญาใหญ่เกินสำหรับ wallet นี้")
     card57 = build_quick_card(
-        conn, QuickFake(**base), symbol="BTCUSDT", side="short", stop=Decimal("62040"), now_ms=NOW, allow_offer=True
+        conn,
+        QuickFake(**base),
+        symbol="BTCUSDT",
+        side="short",
+        stop=Decimal("62040"),
+        now_ms=NOW,
+        allow_offer=True,
     )
     assert "4.57%" in card57["text"]
     conn.close()
@@ -837,7 +870,11 @@ def test_card_stop_max_dist_zero_n2(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     ).candidate
     assert cand is not None
     dist, pct, price = min_lot_stop_max(
-        candidate=cand, mark=Decimal("100"), stop=Decimal("101"), wallet_balance=Decimal("12"), tick=Decimal("0.01")
+        candidate=cand,
+        mark=Decimal("100"),
+        stop=Decimal("101"),
+        wallet_balance=Decimal("12"),
+        tick=Decimal("0.01"),
     )
     assert dist == Decimal("0")
     assert pct == Decimal("0")
@@ -913,24 +950,48 @@ def test_card_e1_sui_offer_and_legacy(tmp_path: Path, monkeypatch: pytest.Monkey
     _seed_settings(conn)
     write_quick_settings(conn, risk_pct=0.5)
     c_a = build_quick_card(
-        conn, _sui_fake(Decimal("50")), symbol="SUIUSDT", side="short", stop=Decimal("10.2004"), now_ms=NOW, allow_offer=True
+        conn,
+        _sui_fake(Decimal("50")),
+        symbol="SUIUSDT",
+        side="short",
+        stop=Decimal("10.2004"),
+        now_ms=NOW,
+        allow_offer=True,
     )
     assert c_a["size_mode"] == "fit_margin"
     assert c_a["qty"] == Decimal("24.3")
     write_quick_settings(conn, risk_pct=1.0)
     c_b = build_quick_card(
-        conn, _sui_fake(Decimal("100")), symbol="SUIUSDT", side="short", stop=Decimal("10.2004"), now_ms=NOW, allow_offer=True
+        conn,
+        _sui_fake(Decimal("100")),
+        symbol="SUIUSDT",
+        side="short",
+        stop=Decimal("10.2004"),
+        now_ms=NOW,
+        allow_offer=True,
     )
     assert c_b["qty"] == Decimal("47.0")
     assert "(ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ 1%)" in c_b["text"]
     assert "= 1.00%" in c_b["text"]
     write_quick_settings(conn, risk_pct=0.5)
     leg_a = build_quick_card(
-        conn, _sui_fake(Decimal("50")), symbol="SUIUSDT", side="short", stop=Decimal("10.2004"), now_ms=NOW, allow_offer=False
+        conn,
+        _sui_fake(Decimal("50")),
+        symbol="SUIUSDT",
+        side="short",
+        stop=Decimal("10.2004"),
+        now_ms=NOW,
+        allow_offer=False,
     )
     write_quick_settings(conn, risk_pct=1.0)
     leg_b = build_quick_card(
-        conn, _sui_fake(Decimal("100")), symbol="SUIUSDT", side="short", stop=Decimal("10.2004"), now_ms=NOW, allow_offer=False
+        conn,
+        _sui_fake(Decimal("100")),
+        symbol="SUIUSDT",
+        side="short",
+        stop=Decimal("10.2004"),
+        now_ms=NOW,
+        allow_offer=False,
     )
     assert leg_a["qty"] == Decimal("24.9")
     assert leg_b["qty"] == Decimal("49.9")
@@ -980,12 +1041,16 @@ def test_card_item2_margin_boundary_r(tmp_path: Path, monkeypatch: pytest.Monkey
         min_qty={"BTCUSDT": Decimal("1")},
         min_notional={"BTCUSDT": Decimal("5")},
     )
-    ok = build_quick_card(conn, fake, symbol="BTCUSDT", side="long", stop=Decimal("97"), now_ms=NOW, allow_offer=True)
+    ok = build_quick_card(
+        conn, fake, symbol="BTCUSDT", side="long", stop=Decimal("97"), now_ms=NOW, allow_offer=True
+    )
     assert ok["ok"] is True
     assert ok["size_mode"] == "risk"
     assert ok["qty"] == Decimal("1")
     fake.available = Decimal("20.11")
-    bad = build_quick_card(conn, fake, symbol="BTCUSDT", side="long", stop=Decimal("97"), now_ms=NOW, allow_offer=True)
+    bad = build_quick_card(
+        conn, fake, symbol="BTCUSDT", side="long", stop=Decimal("97"), now_ms=NOW, allow_offer=True
+    )
     assert bad["reason"] == "leverage_over_5x"
     conn.close()
 
@@ -1111,6 +1176,7 @@ def test_card_quick_cap_with_fit_margin_offer(tmp_path: Path, monkeypatch: pytes
 
 
 # --- A3: flows -----------------------------------------------------------------
+
 
 def test_flow_mark_move_min_lot_refusal_u(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_trade_client(monkeypatch)
@@ -1297,9 +1363,19 @@ def test_legacy_qr_margin_below_min_same_side_y(tmp_path: Path, monkeypatch: pyt
     _insert_quick_trade(conn, symbol="ETHUSDT", side="long", now_ms=NOW)
     _insert_quick_trade(conn, symbol="SOLUSDT", side="long", now_ms=NOW)
     before = conn.execute("SELECT COUNT(*) FROM assist_quick_registration WHERE status='open'").fetchone()[0]
-    card_cap = build_quick_card(conn, _happy_fake(), symbol="SUIUSDT", side="long", stop=Decimal("1.994"), now_ms=NOW, allow_offer=False)
+    card_cap = build_quick_card(
+        conn,
+        _happy_fake(),
+        symbol="SUIUSDT",
+        side="long",
+        stop=Decimal("1.994"),
+        now_ms=NOW,
+        allow_offer=False,
+    )
     sent3, send3 = _send_capture()
-    out3 = handle_quick_register_callback(conn, card_cap["callback_data"], futures=_happy_fake(), send=send3, now_ms=NOW)
+    out3 = handle_quick_register_callback(
+        conn, card_cap["callback_data"], futures=_happy_fake(), send=send3, now_ms=NOW
+    )
     assert out3["reason"] == "same_side_cap"
     assert sent3[0]["text"] == same_side_cap_text("long", 2)
     after = conn.execute("SELECT COUNT(*) FROM assist_quick_registration WHERE status='open'").fetchone()[0]
@@ -1308,6 +1384,7 @@ def test_legacy_qr_margin_below_min_same_side_y(tmp_path: Path, monkeypatch: pyt
 
 
 # --- A4: same-side cap ---------------------------------------------------------
+
 
 def test_same_side_cap_qk_rg_refused_at_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_trade_client(monkeypatch)
@@ -1365,7 +1442,9 @@ def test_same_side_cap_closed_trade_not_counted(tmp_path: Path, monkeypatch: pyt
     conn.close()
 
 
-def test_same_side_cap_expired_registration_not_counted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_same_side_cap_expired_registration_not_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     conn = _sui_card_conn(tmp_path, risk_pct=0.5)
@@ -1377,7 +1456,9 @@ def test_same_side_cap_expired_registration_not_counted(tmp_path: Path, monkeypa
     conn.close()
 
 
-def test_same_side_cap_tagged_registration_not_counted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_same_side_cap_tagged_registration_not_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     conn = _sui_card_conn(tmp_path, risk_pct=0.5)
@@ -1432,6 +1513,7 @@ def test_same_side_cap_uppercase_side_counts(tmp_path: Path, monkeypatch: pytest
 
 
 # --- A5: safety ----------------------------------------------------------------
+
 
 def test_callback_data_bytes_offer_and_refresh() -> None:
     cid = "abcd1234"
@@ -1517,6 +1599,7 @@ def test_same_side_cap_helpers() -> None:
 
 # --- A-T: bound risk guard (passes at d06a0e4) ---------------------------------
 
+
 def test_card_bound_risk_guard_head_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "at.db")
@@ -1577,3 +1660,132 @@ def test_typed_offer_register_qty(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert Decimal(str(reg["qty"])) == card["qty"]
     conn.close()
 
+
+# --- A-T: Step B tidies ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(margin_buffer=Decimal("0")),
+        dict(max_leverage=0),
+        dict(min_qty=Decimal("-1")),
+        dict(min_notional=Decimal("-1")),
+    ],
+)
+def test_size_offer_at_bad_config_returns_bad_input(kwargs: dict[str, Any]) -> None:
+    base = dict(
+        mark=BTC_MARK,
+        stop=BTC_STOP_SHORT,
+        wallet_balance=BTC_WALLET,
+        available=BTC_AVAILABLE,
+        min_qty=BTC_MIN_QTY,
+        min_notional=BTC_MIN_NOTIONAL,
+        step=BTC_STEP,
+        risk_qty=BTC_RISK_QTY,
+    )
+    base.update(kwargs)
+    assert size_offer(**base).reason == "bad_input"
+
+
+def test_size_offer_min_qty_zero_today_like_offer() -> None:
+    r = size_offer(
+        mark=BTC_MARK,
+        stop=BTC_STOP_SHORT,
+        wallet_balance=BTC_WALLET,
+        available=BTC_AVAILABLE,
+        min_qty=Decimal("0"),
+        min_notional=Decimal("5"),
+        step=BTC_STEP,
+        risk_qty=BTC_RISK_QTY,
+    )
+    assert r.reason is None
+    assert r.offer is not None
+    assert r.offer.qty == Decimal("0.003")
+
+
+def test_size_offer_both_minimums_zero_bad_input() -> None:
+    for risk_qty in (Decimal("0"), BTC_RISK_QTY):
+        r = size_offer(
+            mark=BTC_MARK,
+            stop=BTC_STOP_SHORT,
+            wallet_balance=BTC_WALLET,
+            available=BTC_AVAILABLE,
+            min_qty=Decimal("0"),
+            min_notional=Decimal("0"),
+            step=BTC_STEP,
+            risk_qty=risk_qty,
+        )
+        assert r.reason == "bad_input"
+
+
+def test_size_offer_min_notional_zero_leverage_boundary() -> None:
+    r = size_offer(
+        mark=Decimal("100"),
+        stop=Decimal("99"),
+        wallet_balance=Decimal("1000"),
+        available=Decimal("20"),
+        min_qty=Decimal("1"),
+        min_notional=Decimal("0"),
+        step=Decimal("1"),
+        risk_qty=Decimal("0"),
+    )
+    assert r.reason == "leverage_over_5x"
+    assert r.candidate is not None
+    assert r.candidate.leverage == 6
+
+
+def test_format_size_offer_refusal_unknown_reason_never_raw_code() -> None:
+    cand = SizeOffer(
+        qty=Decimal("1"),
+        notional=Decimal("100"),
+        risk_usdt=Decimal("1"),
+        fee_usdt=Decimal("0.1"),
+        real_risk_pct=Decimal("1.1"),
+        leverage=5,
+        margin=Decimal("20"),
+        kind="min_lot",
+        bound="min_lot",
+    )
+    with_candidate = SizeOfferResult(
+        offer=None,
+        reason="unknown_reason_xyz",
+        candidate=cand,
+        q_min=Decimal("1"),
+        q_fit=None,
+        q_1pct=Decimal("1"),
+        need_margin=Decimal("25"),
+    )
+    assert (
+        _format_size_offer_refusal(
+            with_candidate,
+            mark=Decimal("100"),
+            stop=Decimal("101"),
+            wallet_balance=Decimal("100"),
+            available=Decimal("50"),
+            base="BTC",
+            tick=Decimal("0.1"),
+        )
+        == REFUSAL["size_failed"]
+    )
+    no_cand = SizeOfferResult(
+        offer=None,
+        reason="unknown_reason_xyz",
+        candidate=None,
+        q_min=Decimal("1"),
+        q_fit=None,
+        q_1pct=Decimal("1"),
+        need_margin=None,
+    )
+    assert (
+        _format_size_offer_refusal(
+            no_cand,
+            mark=Decimal("100"),
+            stop=Decimal("101"),
+            wallet_balance=Decimal("100"),
+            available=Decimal("50"),
+            base="BTC",
+            tick=Decimal("0.1"),
+        )
+        == REFUSAL["size_failed"]
+    )

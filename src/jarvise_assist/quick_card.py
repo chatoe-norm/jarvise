@@ -349,13 +349,11 @@ def _format_size_offer_refusal(
     cap_usdt = wallet_balance * Decimal("1") / Decimal("100")
     cap_s = _fmt_usdt(cap_usdt)
     wallet_s = fmt_price(wallet_balance)
-    if reason in {"bad_input", "no_balance"}:
-        return REFUSAL["size_failed"]
     if reason == "leverage_over_5x" and result.candidate is None:
         return "❌ margin ไม่พอ — มีให้ใช้ 0 USDT ใน Futures · 👉 โอน USDT เข้า Futures หรือปิดไม้อื่น"
     cand = result.candidate
     if cand is None:
-        return REFUSAL.get(reason, reason)
+        return REFUSAL["size_failed"]
     risk_total = _fmt_usdt(cand.risk_usdt + cand.fee_usdt)
     risk_price = _fmt_usdt(cand.risk_usdt)
     fee_s = _fmt_usdt(cand.fee_usdt)
@@ -397,7 +395,7 @@ def _format_size_offer_refusal(
             f"❌ margin ไม่พอแม้ใช้ 5x — ต้องใช้ ≈ {need_s} USDT (รวมค่าธรรมเนียม + กันไว้ 2%) มี {avail_s} USDT · "
             f"ขนาดใหญ่สุดที่พอ {q_fit_s} < ขั้นต่ำ {q_min_s} {base} · 👉 โอนเข้า Futures หรือปิดไม้อื่น"
         )
-    return REFUSAL.get(reason, reason)
+    return REFUSAL["size_failed"]
 
 
 def _try_quick_size_offer(
@@ -458,8 +456,6 @@ def _try_quick_size_offer(
             tick=tick,
         )
         return sized, "risk", _fail(reason, text), None
-    if reason in {"no_balance", "bad_input"}:
-        return sized, "risk", _fail("size_failed"), None
     return sized, "risk", _fail("size_failed"), None
 
 
@@ -647,7 +643,7 @@ def build_quick_card(
                 margin_need = (sized.notional / Decimal(sized.leverage) + fee_rt * sized.notional) / Decimal(
                     "0.98"
                 )
-                if allow_offer and "margin_cap" not in sized.reduce_reasons and margin_need > available:
+                if allow_offer and margin_need > available:
                     sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
                         allow_offer=True,
                         sym=sym,
