@@ -122,7 +122,8 @@ def test_risk_save_markup_toggle_success_when_enabled(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "risk_style.db")
     sent, send = _send_capture()
     write_settings(conn, enabled=True, risk_pct=1.0)
-    out = _apply_or_confirm_risk(conn, 1.0, send=send)
+    now = _ms_bangkok(2026, 11, 22, 12, 0)
+    out = _apply_or_confirm_risk(conn, 1.0, send=send, now_ms=now)
     assert out.get("ok") is True
     assert out.get("risk_pct") == 1.0
     markup = sent[-1]["reply_markup"]
@@ -216,12 +217,16 @@ def test_risk_save_markup_plain_when_assistant_off(tmp_path: Path) -> None:
     sent, send = _send_capture()
     write_settings(conn, enabled=False, risk_pct=1.0)
 
-    out = _apply_or_confirm_risk(conn, 0.5, send=send)
+    now = _ms_bangkok(2026, 11, 22, 12, 0)
+    out = _apply_or_confirm_risk(conn, 0.5, send=send, now_ms=now)
     assert out.get("ok") is True
     assert "style" not in _toggle_btn(sent[-1]["reply_markup"])
     assert ensure_settings(conn)["enabled"] is False
 
-    out_yes = handle_risk_callback(conn, "risk_yes:2.5", send=send)
+    confirm = _apply_or_confirm_risk(conn, 2.5, send=send, now_ms=now)
+    assert confirm.get("confirm") is True
+    ts = now // 1000
+    out_yes = handle_risk_callback(conn, f"risk_yes:2.5:{ts}", send=send, now_ms=now)
     assert out_yes.get("ok") is True
     assert out_yes.get("risk_pct") == 2.5
     assert "style" not in _toggle_btn(sent[-1]["reply_markup"])
@@ -271,10 +276,11 @@ def test_risk_confirm_yes_markup_toggle_success_when_enabled(tmp_path: Path) -> 
     sent, send = _send_capture()
     write_settings(conn, enabled=True, risk_pct=1.0)
 
-    confirm = _apply_or_confirm_risk(conn, 2.5, send=send)
+    now = _ms_bangkok(2026, 11, 22, 12, 0)
+    confirm = _apply_or_confirm_risk(conn, 2.5, send=send, now_ms=now)
     assert confirm.get("confirm") is True
 
-    out = handle_risk_callback(conn, "risk_yes:2.5", send=send)
+    out = handle_risk_callback(conn, f"risk_yes:2.5:{now // 1000}", send=send, now_ms=now)
     assert out == {"ok": True, "risk_pct": 2.5}
     assert sent[-1]["text"] == "บันทึกความเสี่ยง 2.5% แล้ว · เพดานความเสี่ยงรวม 5%"
     markup = sent[-1]["reply_markup"]

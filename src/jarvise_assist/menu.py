@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 from decimal import ROUND_HALF_UP, Decimal
@@ -88,10 +89,10 @@ _NO_STOP_LINE = "⚠️ ยังไม่มี stop — ตั้ง Stop-Mark
 _MARGIN_LABEL = "margin"
 RISK_MIN_PCT = 0.5
 RISK_MAX_PCT = 3.0
-RISK_CONFIRM_ABOVE = 2.0
 TOGGLE_CONFIRM_TTL_S = 60
 TOGGLE_CONFIRM_FUTURE_S = 5
 _TOGGLE_CONFIRM_RE = re.compile(r"^at:(on|onp|off|no):([0-9]{10})$")
+_RISK_YES_RE = re.compile(r"^risk_yes:([^:]+):([0-9]{10})$")
 
 
 def _fmt_margin(value: Decimal) -> str:
@@ -820,6 +821,7 @@ def handle_risk_callback(
     data: str,
     *,
     send: SendFn,
+    now_ms: int,
 ) -> dict[str, Any]:
     """Inline risk:0.5|1|2|3|other or risk_yes:X / risk_no."""
     if data == "risk:other":
@@ -831,20 +833,38 @@ def handle_risk_callback(
             pct = float(data.split(":", 1)[1])
         except ValueError:
             return {"ok": False}
-        if pct < RISK_MIN_PCT or pct > RISK_MAX_PCT:
+        if not math.isfinite(pct) or pct < RISK_MIN_PCT or pct > RISK_MAX_PCT:
             send("รับได้แค่ 0.5–3 — ลองใหม่หรือยกเลิกด้วยเมนู")
-            return {"ok": False, "rejected": True}
-        return _apply_or_confirm_risk(conn, pct, send=send)
+            return {"ok": False, "rejected": True, "reason": "range"}
+        return _apply_or_confirm_risk(conn, pct, send=send, now_ms=now_ms)
     if data.startswith("risk_yes:"):
-        try:
-            pct = float(data.split(":", 1)[1])
-        except ValueError:
-            return {"ok": False}
-        if pct < RISK_MIN_PCT or pct > RISK_MAX_PCT:
-            send("รับได้แค่ 0.5–3 — ลองใหม่หรือยกเลิกด้วยเมนู")
+        settings = ensure_settings(conn)
+        cur = float(settings["risk_pct"])
+
+        def _reject_risk_yes(reason: str) -> dict[str, Any]:
             write_settings(conn, awaiting_risk=None, pending_risk_pct=None)
-            return {"ok": False, "rejected": True}
-        return _save_risk_pct(conn, pct, send=send)
+            if reason == "expired":
+                send(f"⌛ หมดเวลา — ไม่ได้เปลี่ยนอะไร · ความเสี่ยงยังเป็น {cur:g}%")
+            else:
+                send(f"ปุ่มนี้ใช้ไม่ได้แล้ว — ความเสี่ยงยังเป็น {cur:g}%")
+            return {"ok": False, "rejected": True, "reason": reason}
+
+        matched = _RISK_YES_RE.match(data or "")
+        if matched is None:
+            return _reject_risk_yes("legacy")
+        pct_token = matched.group(1)
+        ts_s = int(matched.group(2))
+        now_s = int(now_ms) // 1000
+        if now_s - ts_s > TOGGLE_CONFIRM_TTL_S or ts_s > now_s + TOGGLE_CONFIRM_FUTURE_S:
+            return _reject_risk_yes("expired")
+        if settings.get("awaiting_risk") != "confirm":
+            return _reject_risk_yes("not_pending")
+        pending = settings.get("pending_risk_pct")
+        if pending is None:
+            return _reject_risk_yes("not_pending")
+        if f"{float(pending):g}" != pct_token:
+            return _reject_risk_yes("mismatch")
+        return _save_risk_pct(conn, float(pending), send=send)
     if data == "risk_no":
         write_settings(conn, awaiting_risk=None, pending_risk_pct=None)
         settings = ensure_settings(conn)
@@ -858,6 +878,7 @@ def handle_risk_number(
     text: str,
     *,
     send: SendFn,
+    now_ms: int,
 ) -> dict[str, Any]:
     """Consume a bare number while awaiting_risk='number'."""
     settings = ensure_settings(conn)
@@ -868,11 +889,11 @@ def handle_risk_number(
         pct = float(raw)
     except ValueError:
         return {"handled": False}
-    if pct < RISK_MIN_PCT or pct > RISK_MAX_PCT:
+    if not math.isfinite(pct) or pct < RISK_MIN_PCT or pct > RISK_MAX_PCT:
         send("รับได้แค่ 0.5–3 — ลองใหม่หรือยกเลิกด้วยเมนู")
         return {"handled": True, "rejected": True}
     write_settings(conn, awaiting_risk=None)
-    return {**_apply_or_confirm_risk(conn, pct, send=send), "handled": True}
+    return {**_apply_or_confirm_risk(conn, pct, send=send, now_ms=now_ms), "handled": True}
 
 
 def _save_risk_pct(conn: Any, pct: float, *, send: SendFn) -> dict[str, Any]:
@@ -886,9 +907,14 @@ def _save_risk_pct(conn: Any, pct: float, *, send: SendFn) -> dict[str, Any]:
     return {"ok": True, "risk_pct": pct}
 
 
-def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn) -> dict[str, Any]:
-    if pct > RISK_CONFIRM_ABOVE:
+def _apply_or_confirm_risk(conn: Any, pct: float, *, send: SendFn, now_ms: int) -> dict[str, Any]:
+    current = float(ensure_settings(conn)["risk_pct"])
+    if Decimal(str(pct)) > Decimal(str(current)):
         write_settings(conn, awaiting_risk="confirm", pending_risk_pct=pct)
-        send(f"ยืนยัน {pct:g}%?", reply_markup=risk_confirm_keyboard(pct))
+        ts_s = int(now_ms) // 1000
+        send(
+            f"ยืนยัน {pct:g}%?\nกดยืนยันภายใน 60 วิ",
+            reply_markup=risk_confirm_keyboard(pct, ts_s),
+        )
         return {"ok": True, "confirm": True, "pending": pct}
     return _save_risk_pct(conn, pct, send=send)

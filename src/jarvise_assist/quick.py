@@ -36,14 +36,16 @@ QUICK_USAGE = "พิมพ์: q BTC long 67000 (stop เป็นราคา)
 
 RISK_ALLOWED = (0.5, 0.75, 1.0)
 CAP_ALLOWED = (1.0, 1.5, 2.0)
-RISK_CONFIRM_AT = 1.0
-CAP_CONFIRM_ABOVE = 1.0
+QUICK_CONFIRM_TTL_S = 60
+QUICK_CONFIRM_FUTURE_S = 5
+_QUICK_OK_RE = re.compile(r"^qs:ok:(risk|cap):([^:]+):([0-9]{10})$")
 
 _QUICK_SETTING_SIDE = frozenset({"long", "short", "l", "s", "buy", "sell"})
 _QUICK_SETTING_VALUE_RE = re.compile(r"(?:[0-9]{1,3}(?:\.[0-9]+)?|\.[0-9]+)")
 
 MSG_QUICK_LOCK_REMOVED = "ตั้งค่านี้ถูกยกเลิกแล้ว — quick ไม่มีล็อกรายวัน/แพ้ติดกัน (ยังหยุดเมื่อขาดทุนสัปดาห์เกิน 4R)"
 MSG_QUICK_SETTING_REJECT = "ค่าต้องมากกว่า 0 และไม่เกิน 100"
+MSG_QUICK_CONFIRM_STALE = "ปุ่มนี้หมดอายุแล้ว — ไม่ได้เปลี่ยนอะไร"
 MSG_QUICK_SETTING_HINT_RISK = "พิมพ์ค่าเอง: q risk 0.6"
 MSG_QUICK_SETTING_HINT_CAP = "พิมพ์ค่าเอง: q cap 1.2"
 MSG_QUICK_SETTING_RISK_OVER_CAP = "⚠️ risk ต่อไม้มากกว่าเพดาน — ไม้ quick จะถูกปฏิเสธ (quick_cap)"
@@ -987,14 +989,30 @@ def handle_quick_callback(
 ) -> dict[str, Any]:
     """Handle qs:* callbacks. Never calls answer (listen does that)."""
     if data == "qs:no":
+        write_quick_settings(conn, updated_at_ms=now_ms)
         send("ยกเลิก")
         return {"ok": True, "cancelled": True}
 
-    parts = data.split(":")
-    # qs:key:v or qs:ok:key:v
-    if len(parts) == 4 and parts[0] == "qs" and parts[1] == "ok":
-        key, raw = parts[2], parts[3]
+    matched_ok = _QUICK_OK_RE.match(data or "")
+    if matched_ok is not None:
+        key = matched_ok.group(1)
+        raw = matched_ok.group(2)
+        ts_s = int(matched_ok.group(3))
+        now_s = int(now_ms) // 1000
+        if now_s - ts_s > QUICK_CONFIRM_TTL_S or ts_s > now_s + QUICK_CONFIRM_FUTURE_S:
+            send(MSG_QUICK_CONFIRM_STALE)
+            return {"ok": False, "rejected": True, "reason": "stale"}
+        updated_at_ms = get_quick_settings(conn).get("updated_at_ms")
+        if updated_at_ms is not None and int(updated_at_ms) // 1000 > ts_s:
+            send(MSG_QUICK_CONFIRM_STALE)
+            return {"ok": False, "rejected": True, "reason": "stale"}
         return _apply_quick_setting(conn, key, raw, send=send, now_ms=now_ms, confirmed=True)
+
+    if data.startswith("qs:ok:"):
+        send(MSG_QUICK_CONFIRM_STALE)
+        return {"ok": False, "rejected": True, "reason": "stale"}
+
+    parts = data.split(":")
     if len(parts) == 3 and parts[0] == "qs":
         key, raw = parts[1], parts[2]
         return _apply_quick_setting(conn, key, raw, send=send, now_ms=now_ms, confirmed=False)
@@ -1033,14 +1051,16 @@ def _apply_quick_setting(
     val = float(parsed)
 
     if key == "risk":
-        if val >= RISK_CONFIRM_AT and not confirmed:
+        current_risk = float(get_quick_settings(conn)["risk_pct"])
+        if Decimal(str(val)) > Decimal(str(current_risk)) and not confirmed:
             fmt = _fmt_fixed(val)
+            ts_s = int(now_ms) // 1000
             send(
-                f"ยืนยันความเสี่ยงต่อไม้ {fmt}%?",
+                f"ยืนยันความเสี่ยงต่อไม้ {fmt}%?\nกดยืนยันภายใน 60 วิ",
                 reply_markup={
                     "inline_keyboard": [
                         [
-                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:risk:{fmt}"},
+                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:risk:{fmt}:{ts_s}"},
                             {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"},
                         ]
                     ]
@@ -1053,18 +1073,21 @@ def _apply_quick_setting(
         return {"ok": True, "risk_pct": val}
 
     if key == "cap":
-        if val > CAP_CONFIRM_ABOVE and not confirmed:
+        current_cap = float(get_quick_settings(conn)["cap_pct"])
+        if Decimal(str(val)) > Decimal(str(current_cap)) and not confirmed:
             main_cap = float(portfolio_risk_cap_pct(Decimal(str(ensure_settings(conn)["risk_pct"]))))
             total = main_cap + val
             fmt = _fmt_fixed(val)
+            ts_s = int(now_ms) // 1000
             send(
                 f"ยืนยันเพดาน {fmt}%? "
                 f"ความเสี่ยงรวมสูงสุด {_fmt_fixed(total)}% "
-                f"(หลัก {_fmt_fixed(main_cap)}% + quick {fmt}%)",
+                f"(หลัก {_fmt_fixed(main_cap)}% + quick {fmt}%)\n"
+                "กดยืนยันภายใน 60 วิ",
                 reply_markup={
                     "inline_keyboard": [
                         [
-                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:cap:{fmt}"},
+                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:cap:{fmt}:{ts_s}"},
                             {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"},
                         ]
                     ]

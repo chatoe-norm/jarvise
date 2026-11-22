@@ -181,11 +181,11 @@ def risk_choice_keyboard(*, balance: Decimal | None = None) -> dict[str, Any]:
     }
 
 
-def risk_confirm_keyboard(pct: float) -> dict[str, Any]:
+def risk_confirm_keyboard(pct: float, ts_s: int) -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "Yes", "callback_data": f"risk_yes:{pct:g}"},
+                {"text": "Yes", "callback_data": f"risk_yes:{pct:g}:{ts_s}"},
                 {"text": "No", "callback_data": "risk_no"},
             ]
         ]
