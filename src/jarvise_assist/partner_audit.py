@@ -91,7 +91,7 @@ class Transfer:
 @dataclass(frozen=True)
 class LedgerCash:
     ref: str  # "ev:<id>" | "pr:<id>"
-    kind: str  # "deposit" | "payout"
+    kind: str  # "deposit" | "payout" | "owner_redeem" | "owner_deposit"
     direction: int  # +1 in / -1 out
     partner_name: str
     amount: Decimal  # always > 0
@@ -367,6 +367,42 @@ def ledger_cash(conn: sqlite3.Connection, from_ms: int, now_ms: int) -> list[Led
                 t_hi_ms=hi_base + PAY_AFTER_MS,
                 payout_state=str(row["payout_state"]),
                 paid_at_ms=paid_at,
+            )
+        )
+
+    owner_rows = conn.execute(
+        """
+        SELECT e.id, e.kind, e.cash_micro,
+               COALESCE(e.effective_at_ms, e.created_at_ms) AS t_ref,
+               p.name AS partner_name
+        FROM partner_event e
+        JOIN partner p ON p.id = e.partner_id
+        WHERE e.kind IN ('owner_redeem', 'owner_deposit')
+          AND COALESCE(e.effective_at_ms, e.created_at_ms) >= ?
+          AND COALESCE(e.effective_at_ms, e.created_at_ms) <= ?
+        ORDER BY t_ref ASC, e.rowid ASC
+        """,
+        (int(from_ms), int(now_ms)),
+    ).fetchall()
+    for row in owner_rows:
+        amount = abs(usdt_from_micro(int(row["cash_micro"])))
+        if amount == 0:
+            continue
+        kind = str(row["kind"])
+        direction = -1 if kind == "owner_redeem" else 1
+        t_ref = int(row["t_ref"])
+        items.append(
+            LedgerCash(
+                ref=f"ev:{str(row['id'])}",
+                kind=kind,
+                direction=direction,
+                partner_name=str(row["partner_name"]),
+                amount=amount,
+                t_ref_ms=t_ref,
+                t_lo_ms=t_ref - DEP_BEFORE_MS,
+                t_hi_ms=t_ref + DEP_AFTER_MS,
+                payout_state=None,
+                paid_at_ms=None,
             )
         )
     return items
@@ -712,17 +748,13 @@ def format_alert_th(new_findings: list[Finding], still_open_n: int) -> str:
         x = _fmt_amt(f.amount)
         name = f.partner_name or "?"
         if f.code == "transfer_in_unrecorded":
-            bullets.append(f"• {dt} เงินเข้า +{x} USDT ไม่มีในสมุด — ถ้าเป็นเงินแอดมิน: p dep admin {x}")
+            bullets.append(f"• {dt} เงินเข้า +{x} USDT ไม่มีในสมุด — ยังไม่บันทึก รอจัดประเภท อย่าบันทึกเองด้วยคำสั่งฝาก/ถอน")
         elif f.code == "transfer_out_unrecorded":
-            bullets.append(
-                f"• {dt} เงินออก −{x} USDT ไม่มีในสมุด — ถ้าเป็นเงินต้นแอดมิน: p cost admin … แล้ว p wd admin"
-            )
+            bullets.append(f"• {dt} เงินออก −{x} USDT ไม่มีในสมุด — ยังไม่บันทึก รอจัดประเภท อย่าบันทึกเองด้วยคำสั่งฝาก/ถอน")
         elif f.code == "deposit_no_transfer":
             bullets.append(f"• {name}: บันทึกฝาก {x} แต่ไม่เห็นเงินเข้า futures")
         elif f.code == "paid_no_outflow":
-            bullets.append(
-                f"• {name}: กดโอนแล้ว {x} แต่ไม่เห็นเงินออกจาก futures — ถ้าจ่ายจากเงินนอกพอร์ต ต้อง p dep admin {x}"
-            )
+            bullets.append(f"• {name}: กดโอนแล้ว {x} แต่ไม่เห็นเงินออกจาก futures — ยังไม่บันทึก รอจัดประเภท")
         elif f.code == "due_but_paid_out":
             bullets.append(f"• {name}: ค้างจ่าย {x} แต่เงินออกแล้ว {f.detail} — กด “โอนแล้ว”")
         elif f.code == "near_amount":
@@ -1162,7 +1194,7 @@ def format_guard_th(result: GuardResult, *, last_ok_ms: int | None) -> str:
         bullets.append(f"และอีก {extra} รายการ")
     lines.extend(bullets)
     lines.append(
-        "ยืนยันตอนนี้ = ล็อกตัวเลขด้วยยอดพอร์ตที่รวมเงินก้อนนี้ · ควรบันทึกให้ครบก่อน · ดูทั้งหมด: jarvise assist partner-audit"
+        "ยืนยันตอนนี้ = ล็อกตัวเลขด้วยยอดพอร์ตที่รวมเงินก้อนนี้ · เงินที่ยังไม่อยู่ในสมุดรอจัดประเภท อย่าบันทึกเองด้วยคำสั่งฝาก/ถอน · ดูทั้งหมด: jarvise assist partner-audit"
     )
     return "\n".join(lines)
 

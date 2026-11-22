@@ -24,6 +24,8 @@ from jarvise_assist.partner_ledger import (
     ClosePlan,
     ConvertPlan,
     DepositPlan,
+    OwnerDepositPlan,
+    OwnerRedeemPlan,
     Refusal,
     WithdrawPlan,
     nav,
@@ -31,6 +33,8 @@ from jarvise_assist.partner_ledger import (
     plan_close,
     plan_convert,
     plan_deposit,
+    plan_owner_deposit,
+    plan_owner_redeem,
     plan_withdraw_profit,
     value_of,
 )
@@ -397,8 +401,9 @@ def list_pending_requests(conn: sqlite3.Connection, *, now_ms: int) -> list[sqli
     )
 
 
-def _pool_value(conn: sqlite3.Connection, account_value: Decimal) -> Decimal:
-    return Decimal(account_value) - payouts_due_total(conn)
+def _pool_value(account_value: Decimal, due: Decimal) -> Decimal:
+    """Pool value from a due figure already read. Does not query."""
+    return Decimal(account_value) - Decimal(due)
 
 
 def view_partner(conn: sqlite3.Connection, partner_id: str, account_value: Decimal) -> dict[str, Any]:
@@ -410,7 +415,8 @@ def view_partner(conn: sqlite3.Connection, partner_id: str, account_value: Decim
     if row is None:
         return {"ok": False, "reason": "not_found"}
     u_total = total_units(conn)
-    v_pool = _pool_value(conn, v_raw)
+    due = payouts_due_total(conn)
+    v_pool = _pool_value(v_raw, due)
     n = nav(v_pool, u_total)
     if isinstance(n, Refusal):
         return {"ok": False, "reason": n.reason}
@@ -461,6 +467,19 @@ def _has_pending_deposit(conn: sqlite3.Connection, now_ms: int) -> bool:
     return row is not None
 
 
+def _request_origin(source: object) -> str | None:
+    """Map a partner_request source onto partner_event.origin.
+
+    ``admin`` (Telegram owner command) is ``manual``. ``portal`` stays ``portal``.
+    NULL or any other source is left NULL.
+    """
+    if source == "admin":
+        return "manual"
+    if source == "portal":
+        return "portal"
+    return None
+
+
 def _insert_event(
     conn: sqlite3.Connection,
     *,
@@ -477,19 +496,24 @@ def _insert_event(
     units_after: Decimal,
     cost_after: Decimal,
     now_ms: int,
+    payouts_due: Decimal,
     request_id: str | None = None,
     related_event_id: str | None = None,
     note: str | None = None,
     actor: str = "admin",
+    effective_at_ms: int | None = None,
+    origin: str | None = None,
 ) -> None:
+    """Append one partner_event. ``payouts_due`` is required and is not re-read."""
     conn.execute(
         """
         INSERT INTO partner_event (
             id, partner_id, kind, request_id, related_event_id,
             account_value_micro, total_units_before_e8, nav,
             units_delta_e8, cost_delta_micro, cash_micro, fee_micro,
-            units_after_e8, cost_after_micro, actor, note, created_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            units_after_e8, cost_after_micro, actor, note, created_at_ms,
+            effective_at_ms, origin, payouts_due_micro
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_id,
@@ -509,6 +533,9 @@ def _insert_event(
             actor,
             note,
             int(now_ms),
+            None if effective_at_ms is None else int(effective_at_ms),
+            origin,
+            usdt_to_micro(payouts_due),
         ),
     )
 
@@ -554,6 +581,8 @@ def _credit_fee_to_admin(
     nav_value: Decimal,
     related_event_id: str,
     now_ms: int,
+    payouts_due: Decimal,
+    origin: str | None,
 ) -> str | None:
     if fee_units <= 0:
         return None
@@ -581,7 +610,9 @@ def _credit_fee_to_admin(
         units_after=new_units,
         cost_after=admin_cost,
         now_ms=now_ms,
+        payouts_due=payouts_due,
         related_event_id=related_event_id,
+        origin=origin,
     )
     return eid
 
@@ -648,6 +679,7 @@ def _apply_deposit_tx(
     now_ms: int,
     note: str | None = None,
     request_id: str | None = None,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     bad = _bad_number(amount) or _bad_number(account_value_incl_deposit)
     if bad:
@@ -663,7 +695,8 @@ def _apply_deposit_tx(
     if deposit_kyc_required(conn, row):
         return {"ok": False, "reason": "kyc_required"}
     u_before = total_units(conn)
-    v_pool = _pool_value(conn, v_raw)
+    due = payouts_due_total(conn)
+    v_pool = _pool_value(v_raw, due)
     partner_units = units_from_e8(int(row["units_e8"]))
     partner_cost = usdt_from_micro(int(row["cost_micro"]))
     plan = plan_deposit(
@@ -699,8 +732,10 @@ def _apply_deposit_tx(
         units_after=plan.units_after,
         cost_after=plan.cost_after,
         now_ms=now_ms,
+        payouts_due=due,
         request_id=request_id,
         note=note,
+        origin=origin,
     )
     return {
         "ok": True,
@@ -719,6 +754,7 @@ def _apply_convert_tx(
     account_value: Decimal,
     now_ms: int,
     request_id: str | None = None,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     bad = _bad_number(account_value)
     if bad:
@@ -736,7 +772,8 @@ def _apply_convert_tx(
     if no_admin:
         return no_admin
     u_before = total_units(conn)
-    v_pool = _pool_value(conn, v_raw)
+    due = payouts_due_total(conn)
+    v_pool = _pool_value(v_raw, due)
     n = nav(v_pool, u_before)
     if isinstance(n, Refusal):
         return {"ok": False, "reason": n.reason}
@@ -774,7 +811,9 @@ def _apply_convert_tx(
         units_after=plan.units_after,
         cost_after=plan.cost_after,
         now_ms=now_ms,
+        payouts_due=due,
         request_id=request_id,
+        origin=origin,
     )
     fee_eid = _credit_fee_to_admin(
         conn,
@@ -785,6 +824,8 @@ def _apply_convert_tx(
         nav_value=plan.nav,
         related_event_id=eid,
         now_ms=now_ms,
+        payouts_due=due,
+        origin=origin,
     )
     if fee_eid:
         event_ids.append(fee_eid)
@@ -805,6 +846,7 @@ def _apply_withdraw_profit_tx(
     account_value: Decimal,
     now_ms: int,
     request_id: str | None = None,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     bad = _bad_number(account_value)
     if bad:
@@ -822,7 +864,8 @@ def _apply_withdraw_profit_tx(
     if no_admin:
         return no_admin
     u_before = total_units(conn)
-    v_pool = _pool_value(conn, v_raw)
+    due = payouts_due_total(conn)
+    v_pool = _pool_value(v_raw, due)
     n = nav(v_pool, u_before)
     if isinstance(n, Refusal):
         return {"ok": False, "reason": n.reason}
@@ -861,7 +904,9 @@ def _apply_withdraw_profit_tx(
         units_after=plan.units_after,
         cost_after=plan.cost_after,
         now_ms=now_ms,
+        payouts_due=due,
         request_id=out_request_id,
+        origin=origin,
     )
     fee_eid = _credit_fee_to_admin(
         conn,
@@ -872,6 +917,8 @@ def _apply_withdraw_profit_tx(
         nav_value=plan.nav,
         related_event_id=eid,
         now_ms=now_ms,
+        payouts_due=due,
+        origin=origin,
     )
     if fee_eid:
         event_ids.append(fee_eid)
@@ -903,6 +950,7 @@ def _apply_close_tx(
     account_value: Decimal,
     now_ms: int,
     request_id: str | None = None,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     bad = _bad_number(account_value)
     if bad:
@@ -931,7 +979,8 @@ def _apply_close_tx(
         if other is not None:
             return {"ok": False, "reason": "admin_has_partners"}
     u_before = total_units(conn)
-    v_pool = _pool_value(conn, v_raw)
+    due = payouts_due_total(conn)
+    v_pool = _pool_value(v_raw, due)
     n = nav(v_pool, u_before)
     if isinstance(n, Refusal):
         return {"ok": False, "reason": n.reason}
@@ -972,7 +1021,9 @@ def _apply_close_tx(
         units_after=plan.units_after,
         cost_after=plan.cost_after,
         now_ms=now_ms,
+        payouts_due=due,
         request_id=out_request_id,
+        origin=origin,
     )
     fee_eid = _credit_fee_to_admin(
         conn,
@@ -983,6 +1034,8 @@ def _apply_close_tx(
         nav_value=plan.nav,
         related_event_id=eid,
         now_ms=now_ms,
+        payouts_due=due,
+        origin=origin,
     )
     if fee_eid:
         event_ids.append(fee_eid)
@@ -1014,6 +1067,7 @@ def _apply_adjust_cost_tx(
     reason: str,
     account_value: Decimal,
     now_ms: int,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     bad = _bad_number(new_cost) or _bad_number(account_value)
     if bad:
@@ -1037,7 +1091,8 @@ def _apply_adjust_cost_tx(
     if isinstance(plan, Refusal):
         return {"ok": False, "reason": plan.reason}
     u_before = total_units(conn)
-    v_pool = _pool_value(conn, v_raw)
+    due = payouts_due_total(conn)
+    v_pool = _pool_value(v_raw, due)
     n = nav(v_pool, u_before)
     if isinstance(n, Refusal):
         return {"ok": False, "reason": n.reason}
@@ -1064,7 +1119,9 @@ def _apply_adjust_cost_tx(
         units_after=plan.units_after,
         cost_after=plan.cost_after,
         now_ms=now_ms,
+        payouts_due=due,
         note=reason,
+        origin=origin,
     )
     return {
         "ok": True,
@@ -1090,6 +1147,7 @@ def apply_deposit(
             account_value_incl_deposit,
             now_ms,
             note=note,
+            origin="manual",
         )
 
 
@@ -1100,7 +1158,7 @@ def apply_convert(
     now_ms: int,
 ) -> dict[str, Any]:
     with transaction(conn):
-        return _apply_convert_tx(conn, partner_id, account_value, now_ms)
+        return _apply_convert_tx(conn, partner_id, account_value, now_ms, origin="manual")
 
 
 def apply_withdraw_profit(
@@ -1111,7 +1169,7 @@ def apply_withdraw_profit(
 ) -> dict[str, Any]:
     """Withdraw profit share. ``account_value`` is the raw wallet value."""
     with transaction(conn):
-        return _apply_withdraw_profit_tx(conn, partner_id, account_value, now_ms)
+        return _apply_withdraw_profit_tx(conn, partner_id, account_value, now_ms, origin="manual")
 
 
 def apply_close(
@@ -1122,7 +1180,7 @@ def apply_close(
 ) -> dict[str, Any]:
     """Close partner. ``account_value`` is the raw wallet value."""
     with transaction(conn):
-        return _apply_close_tx(conn, partner_id, account_value, now_ms)
+        return _apply_close_tx(conn, partner_id, account_value, now_ms, origin="manual")
 
 
 def apply_adjust_cost(
@@ -1134,7 +1192,9 @@ def apply_adjust_cost(
     now_ms: int,
 ) -> dict[str, Any]:
     with transaction(conn):
-        return _apply_adjust_cost_tx(conn, partner_id, new_cost, reason, account_value, now_ms)
+        return _apply_adjust_cost_tx(
+            conn, partner_id, new_cost, reason, account_value, now_ms, origin="manual"
+        )
 
 
 def create_request(
@@ -1268,6 +1328,7 @@ def confirm_request(
 
         kind = str(req["kind"])
         partner_id = str(req["partner_id"])
+        origin = _request_origin(req["source"])
         if kind == "deposit":
             if amount_received is None:
                 return {"ok": False, "reason": "bad_args"}
@@ -1284,6 +1345,7 @@ def confirm_request(
                 _q_usdt(account_value),
                 now_ms,
                 request_id=request_id,
+                origin=origin,
             )
         else:
             if amount_received is not None:
@@ -1293,11 +1355,17 @@ def confirm_request(
                 return bad
             v_raw = _q_usdt(account_value)
             if kind == "convert":
-                result = _apply_convert_tx(conn, partner_id, v_raw, now_ms, request_id=request_id)
+                result = _apply_convert_tx(
+                    conn, partner_id, v_raw, now_ms, request_id=request_id, origin=origin
+                )
             elif kind == "withdraw_profit":
-                result = _apply_withdraw_profit_tx(conn, partner_id, v_raw, now_ms, request_id=request_id)
+                result = _apply_withdraw_profit_tx(
+                    conn, partner_id, v_raw, now_ms, request_id=request_id, origin=origin
+                )
             elif kind == "close":
-                result = _apply_close_tx(conn, partner_id, v_raw, now_ms, request_id=request_id)
+                result = _apply_close_tx(
+                    conn, partner_id, v_raw, now_ms, request_id=request_id, origin=origin
+                )
             else:
                 return {"ok": False, "reason": "bad_kind"}
 
@@ -1370,6 +1438,162 @@ def mark_paid(conn: sqlite3.Connection, request_id: str, now_ms: int) -> dict[st
         if cur.rowcount != 1:
             return {"ok": False, "reason": "not_due"}
         return {"ok": True}
+
+
+def _owner_amount_refusal(amount: Decimal) -> dict[str, Any] | None:
+    dec = Decimal(amount)
+    if not dec.is_finite() or dec <= 0:
+        return {"ok": False, "reason": "bad_amount"}
+    exp = dec.as_tuple().exponent
+    if isinstance(exp, int) and exp < -6:
+        return {"ok": False, "reason": "bad_amount"}
+    return None
+
+
+def _owner_admin_row(conn: sqlite3.Connection) -> tuple[sqlite3.Row | None, dict[str, Any] | None]:
+    admin = admin_partner(conn)
+    if admin is None:
+        any_partner = conn.execute("SELECT 1 FROM partner LIMIT 1").fetchone()
+        if any_partner is None:
+            return None, {"ok": False, "reason": "no_admin"}
+        return None, {"ok": False, "reason": "not_admin"}
+    if int(admin["is_admin"]) != 1:
+        return None, {"ok": False, "reason": "not_admin"}
+    if str(admin["status"]) == "closed":
+        return None, {"ok": False, "reason": "closed"}
+    return admin, None
+
+
+def _apply_owner_tx(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    amount: Decimal,
+    account_value: Decimal,
+    now_ms: int,
+) -> dict[str, Any]:
+    """Book one owner_redeem or owner_deposit on the admin. No transfer guard."""
+    refused = _owner_amount_refusal(amount)
+    if refused:
+        return refused
+    account = Decimal(account_value)
+    bad = _bad_number(account)
+    if bad:
+        return bad
+    admin, err = _owner_admin_row(conn)
+    if err is not None or admin is None:
+        return err if err is not None else {"ok": False, "reason": "no_admin"}
+    if _has_pending_deposit(conn, now_ms):
+        return {"ok": False, "reason": "deposit_pending"}
+    verified = verify_ledger(conn)
+    if not verified["ok"]:
+        return {"ok": False, "reason": "ledger_unverified"}
+    amount_q = _q_usdt(Decimal(amount))
+    v_raw = _q_usdt(account)
+    due = payouts_due_total(conn)
+    u_before = total_units(conn)
+    admin_units = units_from_e8(int(admin["units_e8"]))
+    admin_cost = usdt_from_micro(int(admin["cost_micro"]))
+    if kind == "owner_redeem":
+        nav_pre = nav(v_raw + amount_q - due, u_before)
+    else:
+        nav_pre = nav(v_raw - amount_q - due, u_before)
+    if isinstance(nav_pre, Refusal):
+        return {"ok": False, "reason": nav_pre.reason}
+    if kind == "owner_redeem":
+        plan_r = plan_owner_redeem(amount_q, nav_pre, admin_units, admin_cost)
+        if isinstance(plan_r, Refusal):
+            return {"ok": False, "reason": plan_r.reason}
+        assert isinstance(plan_r, OwnerRedeemPlan)
+        units_after = plan_r.units_after
+        cost_after = plan_r.cost_after
+        units_delta = -plan_r.burned_units
+        cash = plan_r.cash
+        burned = plan_r.burned_units
+        minted = Decimal("0")
+    else:
+        plan_d = plan_owner_deposit(amount_q, nav_pre, admin_units, admin_cost)
+        if isinstance(plan_d, Refusal):
+            return {"ok": False, "reason": plan_d.reason}
+        assert isinstance(plan_d, OwnerDepositPlan)
+        units_after = plan_d.units_after
+        cost_after = plan_d.cost_after
+        units_delta = plan_d.units_issued
+        cash = plan_d.cash
+        burned = Decimal("0")
+        minted = plan_d.units_issued
+    admin_id = str(admin["id"])
+    eid = _new_event_id()
+    _update_partner(conn, admin_id, units=units_after, cost=cost_after, now_ms=now_ms)
+    _insert_event(
+        conn,
+        event_id=eid,
+        partner_id=admin_id,
+        kind=kind,
+        account_value=v_raw,
+        total_units_before=u_before,
+        nav_value=nav_pre,
+        units_delta=units_delta,
+        cost_delta=cost_after - admin_cost,
+        cash=cash,
+        fee=Decimal("0"),
+        units_after=units_after,
+        cost_after=cost_after,
+        now_ms=now_ms,
+        payouts_due=due,
+        effective_at_ms=int(now_ms),
+        origin="manual",
+        actor="admin",
+    )
+    return {
+        "ok": True,
+        "kind": kind,
+        "nav_pre": nav_pre,
+        "burned_units": burned,
+        "units_issued": minted,
+        "units_after": units_after,
+        "cost_after": cost_after,
+        "cash": cash,
+        "fee": Decimal("0"),
+        "event_ids": [eid],
+        "payouts_due": due,
+    }
+
+
+def apply_owner_redeem(
+    conn: sqlite3.Connection,
+    *,
+    amount: Decimal,
+    account_value: Decimal,
+    now_ms: int,
+) -> dict[str, Any]:
+    """Owner withdrawal already out of the wallet. ``account_value`` is the reading after."""
+    with transaction(conn):
+        return _apply_owner_tx(
+            conn,
+            kind="owner_redeem",
+            amount=amount,
+            account_value=account_value,
+            now_ms=now_ms,
+        )
+
+
+def apply_owner_deposit(
+    conn: sqlite3.Connection,
+    *,
+    amount: Decimal,
+    account_value: Decimal,
+    now_ms: int,
+) -> dict[str, Any]:
+    """Owner deposit already in the wallet. ``account_value`` is the reading after."""
+    with transaction(conn):
+        return _apply_owner_tx(
+            conn,
+            kind="owner_deposit",
+            amount=amount,
+            account_value=account_value,
+            now_ms=now_ms,
+        )
 
 
 def verify_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -1543,6 +1767,9 @@ def verify_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
         eid = str(ev["id"])
         kind = str(ev["kind"])
         rid = ev["request_id"]
+        if kind in ("owner_deposit", "owner_redeem"):
+            # Owner flows have no request_id. Do not flag them as withdraw/close.
+            continue
         if kind in ("withdraw_profit", "close") and rid is None:
             mismatches.append({"event_id": eid, "kind": kind, "request_id": None})
             continue
@@ -1571,4 +1798,137 @@ def verify_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
                 }
             )
 
+    mismatches.extend(_owner_flow_invariants(conn))
     return {"ok": len(mismatches) == 0, "mismatches": mismatches}
+
+
+def _owner_flow_invariants(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """I2 total-units chain, I3 owner NAV identity, I5 non-negative, I6 admin-only."""
+    rows = conn.execute(
+        """
+        SELECT e.id, e.partner_id, e.kind, e.related_event_id,
+               e.total_units_before_e8, e.units_delta_e8, e.units_after_e8,
+               e.cost_after_micro, e.nav, e.account_value_micro, e.cash_micro,
+               e.payouts_due_micro, p.is_admin
+        FROM partner_event e
+        JOIN partner p ON p.id = e.partner_id
+        ORDER BY e.rowid
+        """
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    running = 0
+    seen_before: dict[str, int] = {}
+    for row in rows:
+        eid = str(row["id"])
+        kind = str(row["kind"])
+        before = int(row["total_units_before_e8"])
+        delta_u = int(row["units_delta_e8"])
+        units_after = int(row["units_after_e8"])
+        cost_after = int(row["cost_after_micro"])
+        if kind == "fee_credit":
+            rel = row["related_event_id"]
+            expected = seen_before.get(str(rel)) if rel is not None else None
+            if expected is None or before != expected:
+                actual_delta = before - expected if expected is not None else None
+                out.append(
+                    {
+                        "invariant": "I2",
+                        "event_id": eid,
+                        "expected": expected,
+                        "actual": before,
+                        "delta": actual_delta,
+                    }
+                )
+        elif before != running:
+            out.append(
+                {
+                    "invariant": "I2",
+                    "event_id": eid,
+                    "expected": running,
+                    "actual": before,
+                    "delta": before - running,
+                }
+            )
+        seen_before[eid] = before
+        running += delta_u
+        if units_after < 0 or cost_after < 0 or before < 0 or running < 0:
+            out.append(
+                {
+                    "invariant": "I5",
+                    "event_id": eid,
+                    "expected": 0,
+                    "actual": min(units_after, cost_after, before, running),
+                    "delta": min(units_after, cost_after, before, running),
+                }
+            )
+        if kind in ("owner_deposit", "owner_redeem") and int(row["is_admin"]) != 1:
+            out.append(
+                {
+                    "invariant": "I6",
+                    "event_id": eid,
+                    "expected": 1,
+                    "actual": int(row["is_admin"]),
+                    "delta": int(row["is_admin"]) - 1,
+                }
+            )
+        if kind not in ("owner_deposit", "owner_redeem"):
+            continue
+        if row["payouts_due_micro"] is None:
+            continue
+        av = int(row["account_value_micro"])
+        cash = int(row["cash_micro"])
+        due_m = int(row["payouts_due_micro"])
+        pool_micro = av - cash - due_m
+        stored = Decimal(str(row["nav"]))
+        if before <= 0:
+            out.append(
+                {
+                    "invariant": "I3",
+                    "event_id": eid,
+                    "expected": "positive_units",
+                    "actual": before,
+                    "delta": before,
+                }
+            )
+            continue
+        expected_nav = (Decimal(pool_micro) / MICRO_SCALE) / units_from_e8(before)
+        nav_gap = stored - expected_nav
+        if abs(nav_gap) > Decimal("1e-12"):
+            out.append(
+                {
+                    "invariant": "I3",
+                    "event_id": eid,
+                    "expected": format(expected_nav, "f"),
+                    "actual": format(stored, "f"),
+                    "delta": format(nav_gap, "f"),
+                }
+            )
+        after_e8 = before + delta_u
+        pool_after_micro = av - due_m
+        if after_e8 == 0:
+            if pool_after_micro != 0:
+                out.append(
+                    {
+                        "invariant": "I3",
+                        "event_id": eid,
+                        "expected": 0,
+                        "actual": pool_after_micro,
+                        "delta": pool_after_micro,
+                    }
+                )
+            continue
+        if after_e8 < 0:
+            continue
+        nav_after = (Decimal(pool_after_micro) / MICRO_SCALE) / units_from_e8(after_e8)
+        post_gap = nav_after - stored
+        if abs(post_gap) >= Decimal("1e-9"):
+            out.append(
+                {
+                    "invariant": "I3",
+                    "event_id": eid,
+                    "expected": format(stored, "f"),
+                    "actual": format(nav_after, "f"),
+                    "delta": format(post_gap, "f"),
+                }
+            )
+    return out

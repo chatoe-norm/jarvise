@@ -10,6 +10,7 @@ append a new version; they never overwrite the prior one.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -1836,10 +1837,187 @@ def _migrate_indicator_context(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "market_technicals", name, "REAL")
 
 
+_PARTNER_EVENT_OLD_COLS = (
+    "id",
+    "partner_id",
+    "kind",
+    "request_id",
+    "related_event_id",
+    "account_value_micro",
+    "total_units_before_e8",
+    "nav",
+    "units_delta_e8",
+    "cost_delta_micro",
+    "cash_micro",
+    "fee_micro",
+    "units_after_e8",
+    "cost_after_micro",
+    "actor",
+    "note",
+    "created_at_ms",
+)
+
+# Due at event E, excluding E's own request (admin confirms share the event timestamp).
+# NULL when a confirmed due/paid row has no decided_at_ms or payout_micro, so a wrong
+# zero cannot be frozen by the append-only triggers. No matching rows → 0.
+_PARTNER_EVENT_DUE_BACKFILL = """
+CASE
+    WHEN EXISTS (
+        SELECT 1 FROM partner_request R
+        WHERE R.status = 'confirmed'
+          AND R.payout_state IN ('due', 'paid')
+          AND R.id IS NOT partner_event.request_id
+          AND (R.payout_micro IS NULL OR R.decided_at_ms IS NULL)
+    )
+    THEN NULL
+    ELSE COALESCE((
+        SELECT SUM(R.payout_micro)
+        FROM partner_request R
+        WHERE R.status = 'confirmed'
+          AND R.payout_state IN ('due', 'paid')
+          AND R.decided_at_ms < partner_event.created_at_ms
+          AND (R.paid_at_ms IS NULL OR R.paid_at_ms > partner_event.created_at_ms)
+          AND R.id IS NOT partner_event.request_id
+    ), 0)
+END
+"""
+
+
+def _partner_event_checksum(conn: sqlite3.Connection) -> tuple[int, str]:
+    """Row count and sha256 over (rowid, id, units_after_e8, cost_after_micro) by rowid."""
+    rows = conn.execute(
+        """
+        SELECT rowid, id, units_after_e8, cost_after_micro
+        FROM partner_event
+        ORDER BY rowid
+        """
+    ).fetchall()
+    payload = "\n".join(f"{int(row[0])}|{row[1]}|{int(row[2])}|{int(row[3])}" for row in rows)
+    return len(rows), hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _partner_event_append_only_triggers(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_event_append_only_update
+        BEFORE UPDATE ON partner_event
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_event is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS partner_event_append_only_delete
+        BEFORE DELETE ON partner_event
+        BEGIN
+            SELECT RAISE(ABORT, 'partner_event is append-only');
+        END
+        """
+    )
+
+
+def _migrate_partner_ledger_owner_flows(conn: sqlite3.Connection) -> None:
+    """Owner-flow columns on partner_event (migration 37). Version-gated; repair=False.
+
+    Rebuilds ``partner_event`` inside one ``BEGIN IMMEDIATE`` so a second process
+    cannot rebuild the finished table. Rowids are copied explicitly because
+    ``verify_ledger``, ``_latest_nav``, and P4 tie-break on rowid.
+
+    Rollback: reverting this code leaves user_version 37. Commands that check
+    ``user_version != SCHEMA_VERSION`` (``src/jarvise/cli.py`` real-report and
+    partner-audit schema checks) exit with "schema mismatch". Old code can still
+    INSERT, because the new columns are nullable, and the triggers only block
+    UPDATE and DELETE, which src never does.
+
+    VACUUM can renumber implicit rowids, so never VACUUM this DB without
+    re-running verify_ledger.
+    """
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        cols = _table_columns(conn, "partner_event")
+        if {"effective_at_ms", "origin", "payouts_due_micro"} <= cols:
+            _partner_event_append_only_triggers(conn)
+            conn.execute("PRAGMA user_version = 37")
+            conn.execute("COMMIT")
+            return
+        count_before, digest_before = _partner_event_checksum(conn)
+        col_list = ", ".join(_PARTNER_EVENT_OLD_COLS)
+        conn.execute(
+            """
+            CREATE TABLE partner_event_new (
+                id TEXT PRIMARY KEY,
+                partner_id TEXT NOT NULL REFERENCES partner (id),
+                kind TEXT NOT NULL CHECK (
+                    kind IN (
+                        'deposit', 'convert', 'withdraw_profit', 'close',
+                        'fee_credit', 'adjust_cost',
+                        'owner_deposit', 'owner_redeem'
+                    )
+                ),
+                request_id TEXT,
+                related_event_id TEXT,
+                account_value_micro INTEGER NOT NULL,
+                total_units_before_e8 INTEGER NOT NULL,
+                nav TEXT NOT NULL,
+                units_delta_e8 INTEGER NOT NULL,
+                cost_delta_micro INTEGER NOT NULL,
+                cash_micro INTEGER NOT NULL DEFAULT 0,
+                fee_micro INTEGER NOT NULL DEFAULT 0,
+                units_after_e8 INTEGER NOT NULL,
+                cost_after_micro INTEGER NOT NULL,
+                actor TEXT NOT NULL DEFAULT 'admin',
+                note TEXT,
+                created_at_ms INTEGER NOT NULL,
+                effective_at_ms INTEGER NULL,
+                origin TEXT NULL CHECK (origin IN ('manual', 'portal', 'binance_transfer')),
+                payouts_due_micro INTEGER NULL
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO partner_event_new (
+                rowid, {col_list}, payouts_due_micro
+            )
+            SELECT rowid, {col_list}, {_PARTNER_EVENT_DUE_BACKFILL}
+            FROM partner_event
+            ORDER BY rowid
+            """
+        )
+        conn.execute("DROP TABLE partner_event")
+        conn.execute("ALTER TABLE partner_event_new RENAME TO partner_event")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS ix_partner_event_partner
+            ON partner_event (partner_id, created_at_ms)
+            """
+        )
+        _partner_event_append_only_triggers(conn)
+        fk_bad = conn.execute("PRAGMA foreign_key_check(partner_event)").fetchall()
+        if fk_bad:
+            raise RuntimeError(f"partner_event foreign_key_check failed: {len(fk_bad)} row(s)")
+        count_after, digest_after = _partner_event_checksum(conn)
+        if count_after != count_before or digest_after != digest_before:
+            raise RuntimeError(
+                "partner_event rebuild checksum mismatch: "
+                f"count {count_before}->{count_after} digest {digest_before}->{digest_after}"
+            )
+        conn.execute("PRAGMA user_version = 37")
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 # Ordered, numbered migrations. PRAGMA user_version records the last applied step so a
 # multi-step evolution runs exactly once per database. ``repair=True`` marks cheap,
 # idempotent additive steps (column sniff + ALTER ADD) that also re-run on every open so
-# schema drift self-heals; the destructive bitemporal rebuild is version-gated only.
+# schema drift self-heals. Two steps are version-gated (repair=False): the destructive
+# bitemporal rebuild and the partner_event owner-flow rebuild.
 # Repair steps must not write when there is nothing to repair (enforced by test 1).
 MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (1, "derivatives_bitemporal", _migrate_derivatives_bitemporal, False),
@@ -1878,6 +2056,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (34, "partner_payout_fx", _migrate_partner_payout_fx, True),
     (35, "assist_quick_m1a1", _migrate_assist_quick_m1a1, True),
     (36, "assist_quick_p1a", _migrate_assist_quick_p1a, True),
+    (37, "partner_ledger_owner_flows", _migrate_partner_ledger_owner_flows, False),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

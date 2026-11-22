@@ -93,6 +93,28 @@ class AdjustPlan:
     cost_delta: Decimal
 
 
+@dataclass(frozen=True)
+class OwnerRedeemPlan:
+    amount: Decimal
+    nav_pre: Decimal
+    burned_units: Decimal
+    units_after: Decimal
+    cost_after: Decimal
+    cash: Decimal
+    fee: Decimal
+
+
+@dataclass(frozen=True)
+class OwnerDepositPlan:
+    amount: Decimal
+    nav_pre: Decimal
+    units_issued: Decimal
+    units_after: Decimal
+    cost_after: Decimal
+    cash: Decimal
+    fee: Decimal
+
+
 def _q_down(value: Decimal, quantum: Decimal) -> Decimal:
     return value.quantize(quantum, rounding=ROUND_DOWN)
 
@@ -299,3 +321,77 @@ def plan_adjust_cost(
     u = Decimal(units)
     c = Decimal(cost)
     return AdjustPlan(units_after=u, cost_after=nc, cost_delta=nc - c)
+
+
+def plan_owner_redeem(
+    amount: Decimal,
+    nav: Decimal,
+    admin_units: Decimal,
+    admin_cost: Decimal,
+) -> OwnerRedeemPlan | Refusal:
+    """Burn admin units for an owner withdrawal. Fee is 0. ``nav`` is unrounded.
+
+    Burn is amount/NAV rounded UP to 1e-8, clamped to admin units when the excess
+    is at most one unit. ``owner_overdraw`` when the withdrawal exceeds admin value
+    by more than that.
+    """
+    amt = Decimal(amount)
+    n = Decimal(nav)
+    units = Decimal(admin_units)
+    cost = Decimal(admin_cost)
+    if not amt.is_finite() or amt <= ZERO:
+        return Refusal("bad_amount")
+    if not n.is_finite() or n <= ZERO:
+        return Refusal("nav_not_positive")
+    if units <= ZERO:
+        return Refusal("owner_overdraw")
+    burn = _q_up(amt / n, UNIT)
+    if burn > units:
+        if burn - units <= UNIT:
+            burn = units
+        else:
+            return Refusal("owner_overdraw")
+    units_after = units - burn
+    if units_after == ZERO:
+        cost_after = ZERO
+    else:
+        cost_after = _q_down(cost * units_after / units, MICRO)
+    return OwnerRedeemPlan(
+        amount=amt,
+        nav_pre=n,
+        burned_units=burn,
+        units_after=units_after,
+        cost_after=cost_after,
+        cash=-amt,
+        fee=ZERO,
+    )
+
+
+def plan_owner_deposit(
+    amount: Decimal,
+    nav: Decimal,
+    admin_units: Decimal,
+    admin_cost: Decimal,
+) -> OwnerDepositPlan | Refusal:
+    """Mint admin units for an owner deposit. Fee is 0. ``nav`` is unrounded.
+
+    Mint is amount/NAV rounded DOWN to 1e-8. Cost increases by the full amount.
+    """
+    amt = Decimal(amount)
+    n = Decimal(nav)
+    units = Decimal(admin_units)
+    cost = Decimal(admin_cost)
+    if not amt.is_finite() or amt <= ZERO:
+        return Refusal("bad_amount")
+    if not n.is_finite() or n <= ZERO:
+        return Refusal("nav_not_positive")
+    minted = _q_down(amt / n, UNIT)
+    return OwnerDepositPlan(
+        amount=amt,
+        nav_pre=n,
+        units_issued=minted,
+        units_after=units + minted,
+        cost_after=cost + amt,
+        cash=amt,
+        fee=ZERO,
+    )
