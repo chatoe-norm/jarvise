@@ -980,6 +980,19 @@ def test_verify_ledger_event_request_links(tmp_path: Path) -> None:
     assert any(m.get("event_id") == wd_eid for m in null_wd["mismatches"])
     conn.close()
 
+    conn, _admin_id, carol_id = _base("ok_close.db")
+    cl = ps.apply_close(conn, carol_id, D("1100"), now + 60)
+    assert cl["ok"] is True
+    assert ps.mark_paid(conn, cl["request_id"], now + 61)["ok"] is True
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+    conn, _admin_id, carol_id = _base("ok_wd.db")
+    wd = ps.apply_withdraw_profit(conn, carol_id, D("1320"), now + 80)
+    assert wd["ok"] is True
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
 
 def test_first_deposit_without_kyc_stays_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")

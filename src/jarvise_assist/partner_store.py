@@ -53,6 +53,14 @@ _REQUEST_SOURCES = frozenset({"admin", "portal"})
 _CANCEL_ON_CONFIRM = frozenset({"no_profit", "below_min"})
 
 
+class _OwnerWriteRefused(Exception):
+    """Raised inside a transaction when owner write breaks verify_ledger."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        super().__init__(str(payload.get("reason", "ledger_check_failed")))
+
+
 def usdt_to_micro(value: Decimal) -> int:
     return int((Decimal(value) * MICRO_SCALE).to_integral_value())
 
@@ -1545,6 +1553,15 @@ def _apply_owner_tx(
         origin="manual",
         actor="admin",
     )
+    verified_after = verify_ledger(conn)
+    if not verified_after["ok"]:
+        raise _OwnerWriteRefused(
+            {
+                "ok": False,
+                "reason": "ledger_check_failed",
+                "mismatches": verified_after["mismatches"],
+            }
+        )
     return {
         "ok": True,
         "kind": kind,
@@ -1568,14 +1585,17 @@ def apply_owner_redeem(
     now_ms: int,
 ) -> dict[str, Any]:
     """Owner withdrawal already out of the wallet. ``account_value`` is the reading after."""
-    with transaction(conn):
-        return _apply_owner_tx(
-            conn,
-            kind="owner_redeem",
-            amount=amount,
-            account_value=account_value,
-            now_ms=now_ms,
-        )
+    try:
+        with transaction(conn):
+            return _apply_owner_tx(
+                conn,
+                kind="owner_redeem",
+                amount=amount,
+                account_value=account_value,
+                now_ms=now_ms,
+            )
+    except _OwnerWriteRefused as exc:
+        return exc.payload
 
 
 def apply_owner_deposit(
@@ -1586,14 +1606,17 @@ def apply_owner_deposit(
     now_ms: int,
 ) -> dict[str, Any]:
     """Owner deposit already in the wallet. ``account_value`` is the reading after."""
-    with transaction(conn):
-        return _apply_owner_tx(
-            conn,
-            kind="owner_deposit",
-            amount=amount,
-            account_value=account_value,
-            now_ms=now_ms,
-        )
+    try:
+        with transaction(conn):
+            return _apply_owner_tx(
+                conn,
+                kind="owner_deposit",
+                amount=amount,
+                account_value=account_value,
+                now_ms=now_ms,
+            )
+    except _OwnerWriteRefused as exc:
+        return exc.payload
 
 
 def verify_ledger(conn: sqlite3.Connection) -> dict[str, Any]:

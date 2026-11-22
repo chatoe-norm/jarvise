@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 from jarvise.cli import app
 from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
-from jarvise_assist.partner_admin import _HELP, _latest_nav
+from jarvise_assist.partner_admin import HELP_TEXT, _latest_nav
 from jarvise_assist.partner_audit import (
     Finding,
     GuardResult,
@@ -493,13 +493,47 @@ def _golden_ready(path: Path) -> tuple[sqlite3.Connection, tuple[int, str], list
     return open_db(path), before, rowids
 
 
+def test_owner_redeem_rolls_back_on_ledger_check_failed(tmp_path: Path) -> None:
+    """Burn rounding can break I3 on tiny pools; refused write must not stick."""
+    conn = open_db(tmp_path / "i3-rollback.db")
+    t0 = 1_700_000_000_000
+    admin_id = ps.create_partner(conn, name="admin", is_admin=True, now_ms=t0)["partner_id"]
+    toto_pid = ps.create_partner(conn, name="ToTo", is_admin=False, now_ms=t0 + 1)["partner_id"]
+    ps.apply_deposit(conn, admin_id, D("100"), D("100"), t0 + 10)
+    ps.apply_deposit(conn, toto_pid, D("3"), D("103"), t0 + 20)
+    admin_row = ps.get_partner(conn, admin_id)
+    assert admin_row is not None
+    units_before = int(admin_row["units_e8"])
+    cost_before = int(admin_row["cost_micro"])
+    drifted = D("103.12")
+    redeem_amount = drifted - D("3.5")
+    failed = ps.apply_owner_redeem(conn, amount=redeem_amount, account_value=D("3.5"), now_ms=t0 + 30)
+    assert failed["ok"] is False
+    assert failed["reason"] == "ledger_check_failed"
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind = 'owner_redeem'").fetchone()["n"]
+        == 0
+    )
+    admin_after = ps.get_partner(conn, admin_id)
+    assert admin_after is not None
+    assert int(admin_after["units_e8"]) == units_before
+    assert int(admin_after["cost_micro"]) == cost_before
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+
 def test_owner_flows_do_not_change_join_or_kyc_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_TEST_NO_KYC_SEED", "1")
     conn = open_db(tmp_path / "join.db")
     admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=10)["partner_id"]
     bob = ps.create_partner(conn, name="Bob", now_ms=11)["partner_id"]
+    carol = ps.create_partner(conn, name="Carol", now_ms=12)["partner_id"]
     assert partner_rules.joined_at_ms(conn, admin) is None
-    deposited = ps.apply_owner_deposit(conn, amount=D("100"), account_value=D("100"), now_ms=12)
+    real_kyc = ps.deposit_kyc_required
+    monkeypatch.setattr(ps, "deposit_kyc_required", lambda *_a, **_k: False)
+    assert ps.apply_deposit(conn, carol, D("50"), D("50"), 13)["ok"] is True
+    monkeypatch.setattr(ps, "deposit_kyc_required", real_kyc)
+    deposited = ps.apply_owner_deposit(conn, amount=D("50"), account_value=D("100"), now_ms=14)
     assert deposited["ok"] is True
     assert partner_rules.joined_at_ms(conn, admin) is None
     assert ps.deposit_kyc_required(conn, ps.get_partner(conn, bob)) is True
@@ -507,41 +541,52 @@ def test_owner_flows_do_not_change_join_or_kyc_gate(tmp_path: Path, monkeypatch:
     conn.close()
 
 
+def _assert_events_due_and_nav(conn: sqlite3.Connection, event_ids: list[str], due_used: Decimal) -> None:
+    from jarvise_assist.partner_ledger import nav as nav_fn
+
+    due_micro = ps.usdt_to_micro(due_used)
+    for eid in event_ids:
+        row = conn.execute(
+            """
+            SELECT payouts_due_micro, nav, total_units_before_e8, account_value_micro
+            FROM partner_event WHERE id = ?
+            """,
+            (eid,),
+        ).fetchone()
+        assert int(row["payouts_due_micro"]) == due_micro
+        stored_nav = D(str(row["nav"]))
+        av = ps.usdt_from_micro(int(row["account_value_micro"]))
+        units_before = ps.units_from_e8(int(row["total_units_before_e8"]))
+        assert stored_nav == nav_fn(av - due_used, units_before)
+
+
 def test_payouts_due_matches_nav_input(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "due.db")
     now = 1_700_000_000_000
     admin = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)["partner_id"]
-    carol = ps.create_partner(conn, name="Carol", is_admin=False, now_ms=now + 1)["partner_id"]
+    bob = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=now + 1)["partner_id"]
+    carol = ps.create_partner(conn, name="Carol", is_admin=False, now_ms=now + 2)["partner_id"]
     ps.apply_deposit(conn, admin, D("1000"), D("1000"), now + 10)
-    ps.apply_deposit(conn, carol, D("200"), D("1200"), now + 20)
+    ps.apply_deposit(conn, bob, D("600"), D("1600"), now + 20)
+    ps.apply_deposit(conn, carol, D("100"), D("1700"), now + 25)
     due_before = ps.payouts_due_total(conn)
     assert due_before == 0
-    withdrawn = ps.apply_withdraw_profit(conn, carol, D("1440"), now + 30)
+    withdrawn = ps.apply_withdraw_profit(conn, bob, D("2000"), now + 30)
     assert withdrawn["ok"] is True
     assert ps.payouts_due_total(conn) == withdrawn["cash"]
     assert withdrawn["cash"] > 0
-    for eid in withdrawn["event_ids"]:
-        row = conn.execute(
-            "SELECT payouts_due_micro, nav, total_units_before_e8, account_value_micro FROM partner_event WHERE id = ?",
-            (eid,),
-        ).fetchone()
-        assert int(row["payouts_due_micro"]) == ps.usdt_to_micro(due_before)
-    stored_nav = D(
-        str(conn.execute("SELECT nav FROM partner_event WHERE kind = 'withdraw_profit'").fetchone()["nav"])
-    )
-    units_before = ps.units_from_e8(
-        int(
-            conn.execute(
-                "SELECT total_units_before_e8 FROM partner_event WHERE kind = 'withdraw_profit'"
-            ).fetchone()[0]
-        )
-    )
-    from jarvise_assist.partner_ledger import nav
-
-    expected = nav(D("1440") - due_before, units_before)
-    assert stored_nav == expected
+    _assert_events_due_and_nav(conn, withdrawn["event_ids"], due_before)
+    due_with_payout = ps.payouts_due_total(conn)
+    assert due_with_payout > 0
+    converted = ps.apply_convert(conn, carol, D("2000"), now + 35)
+    assert converted["ok"] is True
+    _assert_events_due_and_nav(conn, converted["event_ids"], due_with_payout)
+    due_before_close = ps.payouts_due_total(conn)
+    closed = ps.apply_close(conn, carol, D("2000"), now + 45)
+    assert closed["ok"] is True
+    _assert_events_due_and_nav(conn, closed["event_ids"], due_before_close)
     due_now = ps.payouts_due_total(conn)
-    minted = ps.apply_owner_deposit(conn, amount=D("50"), account_value=D("1490"), now_ms=now + 40)
+    minted = ps.apply_owner_deposit(conn, amount=D("50"), account_value=D("2050"), now_ms=now + 50)
     assert minted["ok"] is True
     for eid in minted["event_ids"]:
         micro = int(
@@ -773,8 +818,8 @@ def test_alert_guard_and_help_do_not_suggest_admin_capital_commands() -> None:
     )
     assert "p dep ToTo" in hint
     for token in forbidden:
-        assert token not in _HELP
-    assert "owner_deposit" in _HELP and "owner_redeem" in _HELP
+        assert token not in HELP_TEXT
+    assert "owner_deposit" in HELP_TEXT and "owner_redeem" in HELP_TEXT
 
 
 def test_history_cli_dry_run_apply_and_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
