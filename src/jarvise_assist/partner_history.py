@@ -135,6 +135,62 @@ def _idempotent(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _partner_row_counts(conn: sqlite3.Connection, partner_id: str) -> tuple[int, int]:
+    ev_n = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM partner_event WHERE partner_id = ?",
+            (partner_id,),
+        ).fetchone()["n"]
+    )
+    req_n = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM partner_request WHERE partner_id = ?",
+            (partner_id,),
+        ).fetchone()["n"]
+    )
+    return ev_n, req_n
+
+
+def _split_partners(conn: sqlite3.Connection) -> dict[str, Any]:
+    admin = ps.admin_partner(conn)
+    toto: sqlite3.Row | None = None
+    idle: list[sqlite3.Row] = []
+    non_idle: list[sqlite3.Row] = []
+    for row in ps.list_partners(conn):
+        if int(row["is_admin"]) == 1:
+            continue
+        if str(row["name"]) == "ToTo":
+            toto = row
+            continue
+        pid = str(row["id"])
+        ev_n, req_n = _partner_row_counts(conn, pid)
+        if (
+            str(row["status"]) == "active"
+            and int(row["units_e8"]) == 0
+            and int(row["cost_micro"]) == 0
+            and ev_n == 0
+            and req_n == 0
+        ):
+            idle.append(row)
+        else:
+            non_idle.append(row)
+    return {"admin": admin, "toto": toto, "idle": idle, "non_idle": non_idle}
+
+
+def _non_idle_partner_diff(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, object]:
+    pid = str(row["id"])
+    ev_n, req_n = _partner_row_counts(conn, pid)
+    actual = {
+        "partner_id": pid,
+        "status": str(row["status"]),
+        "units_e8": int(row["units_e8"]),
+        "cost_micro": int(row["cost_micro"]),
+        "event_count": ev_n,
+        "request_count": req_n,
+    }
+    return _diff("non_idle_partner", "idle", actual)
+
+
 def _pinned_golden_values(nav_pre: Decimal) -> dict[str, Any]:
     total = ps.units_from_e8(TOTAL_UNITS_E8)
     units_after = total - BURN
@@ -175,10 +231,8 @@ def pre_state_diffs(conn: sqlite3.Connection, effective_at_ms: int) -> list[dict
     kinds = [str(row["kind"]) for row in events]
     if len(events) != 2 or any(kind != "deposit" for kind in kinds):
         diffs.append(_diff("events", "2 deposits", kinds))
-    partners = ps.list_partners(conn)
-    if len(partners) != 2:
-        diffs.append(_diff("partner_count", 2, len(partners)))
-    admin = ps.admin_partner(conn)
+    split = _split_partners(conn)
+    admin = split["admin"]
     if admin is None:
         diffs.append(_diff("admin", "present", None))
     else:
@@ -190,13 +244,10 @@ def pre_state_diffs(conn: sqlite3.Connection, effective_at_ms: int) -> list[dict
             diffs.append(_diff("admin.units_e8", ADMIN_UNITS_E8, int(admin["units_e8"])))
         if int(admin["cost_micro"]) != ADMIN_COST_MICRO:
             diffs.append(_diff("admin.cost_micro", ADMIN_COST_MICRO, int(admin["cost_micro"])))
-    non_admin = [row for row in partners if int(row["is_admin"]) != 1]
-    if len(non_admin) != 1:
-        diffs.append(_diff("non_admin_count", 1, len(non_admin)))
+    toto = split["toto"]
+    if toto is None:
+        diffs.append(_diff("toto", "present", None))
     else:
-        toto = non_admin[0]
-        if str(toto["name"]) != "ToTo":
-            diffs.append(_diff("toto.name", "ToTo", str(toto["name"])))
         if str(toto["status"]) != "active":
             diffs.append(_diff("toto.status", "active", str(toto["status"])))
         if int(toto["units_e8"]) != TOTO_UNITS_E8:
@@ -205,6 +256,8 @@ def pre_state_diffs(conn: sqlite3.Connection, effective_at_ms: int) -> list[dict
             diffs.append(_diff("toto.cost_micro", TOTO_COST_MICRO, int(toto["cost_micro"])))
         if int(toto["fee_rate_bps"]) != TOTO_FEE_BPS:
             diffs.append(_diff("toto.fee_rate_bps", TOTO_FEE_BPS, int(toto["fee_rate_bps"])))
+    for row in split["non_idle"]:
+        diffs.append(_non_idle_partner_diff(conn, row))
     due = ps.payouts_due_total(conn)
     if due != PAYOUTS_DUE:
         diffs.append(_diff("payouts_due_total", PAYOUTS_DUE, due))
@@ -241,13 +294,18 @@ def pre_state_diffs(conn: sqlite3.Connection, effective_at_ms: int) -> list[dict
 def compute_golden(conn: sqlite3.Connection) -> dict[str, Any]:
     """Golden numbers from ``nav`` / ``value_of`` on the current rows. NAV stays unrounded."""
     diffs: list[dict[str, object]] = []
-    admin = ps.admin_partner(conn)
+    split = _split_partners(conn)
+    admin = split["admin"]
     if admin is None:
         return {"ok": False, "diffs": [_diff("admin", "present", None)], "values": {}}
-    non_admin = [row for row in ps.list_partners(conn) if int(row["is_admin"]) != 1]
-    if len(non_admin) != 1:
-        return {"ok": False, "diffs": [_diff("non_admin_count", 1, len(non_admin))], "values": {}}
-    toto = non_admin[0]
+    toto = split["toto"]
+    if toto is None:
+        diffs.append(_diff("toto", "present", None))
+    for row in split["non_idle"]:
+        diffs.append(_non_idle_partner_diff(conn, row))
+    if diffs:
+        return {"ok": False, "diffs": diffs, "values": {}}
+    assert toto is not None
     u_before = ps.total_units(conn)
     if ps.units_to_e8(u_before) != TOTAL_UNITS_E8:
         diffs.append(_diff("total_units_before_e8", TOTAL_UNITS_E8, ps.units_to_e8(u_before)))
@@ -368,6 +426,7 @@ def build_preview(conn: sqlite3.Connection, effective_at_ms: int) -> dict[str, A
             "golden": golden["values"],
             "verify": _verify_pub(conn),
         }
+    idle_count = len(_split_partners(conn)["idle"])
     return {
         "ok": True,
         "reason": "ready",
@@ -379,6 +438,7 @@ def build_preview(conn: sqlite3.Connection, effective_at_ms: int) -> dict[str, A
             "toto_units_e8": TOTO_UNITS_E8,
             "toto_net": format(TOTO_BEFORE, "f"),
             "event_count": 2,
+            "idle_partner_count": idle_count,
         },
         "post": {
             "admin_units_e8": ADMIN_UNITS_AFTER_E8,
@@ -511,6 +571,7 @@ def apply_historical(
                     "verify": {"ok": bool(verified["ok"]), "mismatches": _pub(verified["mismatches"])},
                 }
             )
+        idle_count = len(_split_partners(conn)["idle"])
         return {
             "ok": True,
             "reason": "recorded",
@@ -524,6 +585,7 @@ def apply_historical(
                 "admin_cost_micro": ADMIN_COST_MICRO,
                 "toto_net": format(TOTO_BEFORE, "f"),
                 "event_count": 2,
+                "idle_partner_count": idle_count,
             },
             "post": {
                 "admin_units_e8": int(admin["units_e8"]) if admin is not None else None,

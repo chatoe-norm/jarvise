@@ -47,6 +47,7 @@ from jarvise_assist.partner_history import (
     TOTO_FEE_BPS,
     TOTO_UNITS_E8,
     UNITS_DELTA_E8,
+    compute_golden,
 )
 from jarvise_ingest.db import (
     MIGRATIONS,
@@ -1053,3 +1054,221 @@ def test_history_cli_dry_run_apply_and_refusals(tmp_path: Path, monkeypatch: pyt
         == ADMIN_UNITS_E8
     )
     check.close()
+
+
+IDLE_PARTNER_ID = "pt_idle_l1"
+IDLE_CREATED_MS = T_TOTO + 60_000
+_FORBIDDEN_PRIVACY = ("IdleSentinelZ9", "777000111999", "invhashSentinelZ9")
+
+
+def _insert_idle_partner(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        INSERT INTO partner (
+            id, name, is_admin, fee_rate_bps, units_e8, cost_micro, status,
+            telegram_user_id, invite_hash, created_at_ms, updated_at_ms
+        ) VALUES (?, 'IdleSentinelZ9', 0, 0, 0, 0, 'active',
+                  '777000111999', 'invhashSentinelZ9', ?, ?)
+        """,
+        (IDLE_PARTNER_ID, IDLE_CREATED_MS, IDLE_CREATED_MS),
+    )
+    conn.commit()
+
+
+def _golden_with_idle(path: Path) -> Path:
+    conn, _, _ = _golden_ready(path)
+    _insert_idle_partner(conn)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.close()
+    return path
+
+
+def _assert_no_privacy_leak(result: object) -> None:
+    blob = (getattr(result, "stdout", "") or "") + (getattr(result, "stderr", "") or "")
+    for token in _FORBIDDEN_PRIVACY:
+        assert token not in blob
+
+
+def _baseline_golden_dict(path: Path) -> dict:
+    conn, _, _ = _golden_ready(path)
+    values = compute_golden(conn)["values"]
+    conn.close()
+    return values
+
+
+def test_history_idle_partner_happy_path_cli(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.db"
+    baseline_golden = _baseline_golden_dict(baseline_path)
+
+    path = _golden_with_idle(tmp_path / "idle_happy.db")
+    dry = _invoke(path, "--json")
+    assert dry.exit_code == 0
+    _assert_no_privacy_leak(dry)
+    payload = _json_out(dry)
+    assert payload["ok"] is True
+    assert payload["reason"] == "ready"
+    assert payload["golden"] == baseline_golden
+    assert payload["pre"]["idle_partner_count"] == 1
+
+    copy = tmp_path / "idle_apply.db"
+    shutil.copy(path, copy)
+    before_idle = connect(copy)
+    idle_before = dict(
+        before_idle.execute("SELECT * FROM partner WHERE id = ?", (IDLE_PARTNER_ID,)).fetchone()
+    )
+    before_idle.close()
+
+    applied = _invoke(copy, "--json", "--apply")
+    assert applied.exit_code == 0, applied.stdout + applied.stderr
+    _assert_no_privacy_leak(applied)
+    body = _json_out(applied)
+    assert body["reason"] == "recorded"
+    assert body["golden"] == baseline_golden
+    assert body["pre"]["idle_partner_count"] == 1
+
+    check = open_db(copy)
+    row = check.execute("SELECT * FROM partner_event WHERE id = ?", (HIST_EVENT_ID,)).fetchone()
+    assert row is not None
+    assert int(row["units_delta_e8"]) == UNITS_DELTA_E8
+    assert int(row["units_after_e8"]) == ADMIN_UNITS_AFTER_E8
+    assert int(row["cost_after_micro"]) == 181_536_710
+    assert int(row["cash_micro"]) == CASH_MICRO
+    assert int(row["account_value_micro"]) == AV_MICRO
+    assert ps.verify_ledger(check)["ok"] is True
+    toto_view = ps.view_partner(check, "pt_toto_l1", D("289.12"))
+    assert toto_view["net"] == TOTO_AFTER
+    idle_after = dict(check.execute("SELECT * FROM partner WHERE id = ?", (IDLE_PARTNER_ID,)).fetchone())
+    assert idle_after == idle_before
+    n_events = int(check.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
+    check.close()
+
+    again = _invoke(copy, "--json", "--apply")
+    assert again.exit_code == 0
+    _assert_no_privacy_leak(again)
+    assert _json_out(again)["reason"] == "already_recorded"
+    check = open_db(copy)
+    assert int(check.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == n_events
+    check.close()
+
+
+def test_history_idle_partner_compute_golden_unchanged(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline2.db"
+    conn_base, _, _ = _golden_ready(baseline_path)
+    golden_base = compute_golden(conn_base)
+    assert golden_base["ok"] is True
+    conn_base.close()
+
+    idle_path = _golden_with_idle(tmp_path / "idle_compute.db")
+    conn_idle = open_db(idle_path)
+    golden_idle = compute_golden(conn_idle)
+    assert golden_idle["ok"] is True
+    assert golden_idle["values"] == golden_base["values"]
+    conn_idle.close()
+
+
+def test_history_idle_partner_refusal_non_idle(tmp_path: Path) -> None:
+    base = _golden_with_idle(tmp_path / "refuse_base.db")
+
+    def _assert_refused(setup, expect_single_non_idle: bool = False) -> None:
+        db = tmp_path / f"refuse_{setup.__name__}.db"
+        shutil.copy(base, db)
+        setup(db)
+        result = _invoke(db, "--json", "--apply")
+        assert result.exit_code == 1, result.stdout + result.stderr
+        _assert_no_privacy_leak(result)
+        body = _json_out(result)
+        assert body["ok"] is False
+        diff = body["diff"]
+        non_idle = [item for item in diff if item.get("field") == "non_idle_partner"]
+        assert any(item["actual"]["partner_id"] == IDLE_PARTNER_ID for item in non_idle)
+        check = connect(db)
+        assert check.execute("SELECT 1 FROM partner_event WHERE id = ?", (HIST_EVENT_ID,)).fetchone() is None
+        admin_row = check.execute("SELECT units_e8 FROM partner WHERE id = 'pt_admin_l1'").fetchone()
+        assert int(admin_row[0]) == ADMIN_UNITS_E8
+        check.close()
+        if expect_single_non_idle:
+            assert diff == non_idle and len(non_idle) == 1
+
+    def c1_units(db: Path) -> None:
+        c = connect(db)
+        c.execute("UPDATE partner SET units_e8 = 1 WHERE id = ?", (IDLE_PARTNER_ID,))
+        c.commit()
+        c.close()
+
+    def c2_cost(db: Path) -> None:
+        c = connect(db)
+        c.execute("UPDATE partner SET cost_micro = 1 WHERE id = ?", (IDLE_PARTNER_ID,))
+        c.commit()
+        c.close()
+
+    def c3_event(db: Path) -> None:
+        c = connect(db)
+        c.execute(
+            """
+            INSERT INTO partner_event (
+                id, partner_id, kind, account_value_micro, total_units_before_e8, nav,
+                units_delta_e8, cost_delta_micro, cash_micro, fee_micro,
+                units_after_e8, cost_after_micro, actor, created_at_ms, payouts_due_micro
+            ) VALUES (
+                'pe_idle_evt', ?, 'deposit', 0, 0, '1',
+                0, 0, 0, 0, 0, 0, 'admin', ?, 0
+            )
+            """,
+            (IDLE_PARTNER_ID, T_DEP),
+        )
+        c.commit()
+        c.close()
+
+    def c4_request(db: Path) -> None:
+        c = connect(db)
+        c.execute(
+            """
+            INSERT INTO partner_request (
+                id, partner_id, kind, status, payout_state, created_at_ms, expires_at_ms,
+                decided_at_ms
+            ) VALUES (
+                'pr_idle_rej', ?, 'deposit', 'rejected', 'none', ?, ?, ?
+            )
+            """,
+            (IDLE_PARTNER_ID, T_DEP, T_DEP, T_DEP),
+        )
+        c.commit()
+        c.close()
+
+    def c5_closed(db: Path) -> None:
+        c = connect(db)
+        c.execute("UPDATE partner SET status = 'closed' WHERE id = ?", (IDLE_PARTNER_ID,))
+        c.commit()
+        c.close()
+
+    _assert_refused(c1_units)
+    _assert_refused(c2_cost)
+    _assert_refused(c3_event)
+    _assert_refused(c4_request, expect_single_non_idle=True)
+    _assert_refused(c5_closed)
+
+
+def test_history_idle_partner_refusal_toto_missing(tmp_path: Path) -> None:
+    path = _golden_with_idle(tmp_path / "nototo.db")
+    conn = connect(path)
+    conn.execute("UPDATE partner SET name = 'NotToTo' WHERE id = 'pt_toto_l1'")
+    conn.commit()
+    conn.close()
+
+    dry = _invoke(path, "--json")
+    assert dry.exit_code == 1
+    _assert_no_privacy_leak(dry)
+    body = _json_out(dry)
+    assert body["ok"] is False
+    fields = {item["field"] for item in body["diff"]}
+    assert "toto" in fields
+    assert any(
+        item.get("field") == "non_idle_partner" and item["actual"]["partner_id"] == "pt_toto_l1"
+        for item in body["diff"]
+    )
+    blob = (dry.stdout or "") + (dry.stderr or "")
+    assert "NotToTo" not in blob
+
+    apply = _invoke(path, "--json", "--apply")
+    assert apply.exit_code == 1
+    _assert_no_privacy_leak(apply)
