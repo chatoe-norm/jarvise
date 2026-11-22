@@ -886,6 +886,8 @@ def test_happy_sui_fee_and_target_lines(tmp_path: Path, monkeypatch: pytest.Monk
     assert "ค่าธรรมเนียมไป-กลับ ≈ 0.40R ≈ 2 USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)" in text
     assert "เป้า 1R: 2.0060 → สุทธิ +0.60R · ต้องชนะ ≥ 70% ถึงคุ้มทุน" in text
     assert "เป้า 1.5R: 2.0090 → สุทธิ +1.10R · ต้องชนะ ≥ 56% ถึงคุ้มทุน" in text
+    assert "risk จริง: −7 USDT = 0.70% ของ Futures 1000 USDT (เป้า 0.5%)" in text
+    assert "ลองใหม่" not in text
     conn.close()
 
 
@@ -905,6 +907,8 @@ def test_sui_stop_1993_fee_and_target_lines(tmp_path: Path, monkeypatch: pytest.
     assert "เป้า 1R: 2.0070 → สุทธิ +0.66R · ต้องชนะ ≥ 68% ถึงคุ้มทุน" in text
     assert "เป้า 1.5R: 2.0105 → สุทธิ +1.16R · ต้องชนะ ≥ 54% ถึงคุ้มทุน" in text
     assert "0.3428571428571428571428571429R" not in text
+    assert "risk จริง: −6.71 USDT = 0.67% ของ Futures 1000 USDT (เป้า 0.5%)" in text
+    assert "ลองใหม่" not in text
     conn.close()
 
 
@@ -926,6 +930,8 @@ def test_fee_ge_k_no_profit_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert "เป้า 1R: 2.0016 → สุทธิ −0.50R · ชนะทุกไม้ก็ไม่มีกำไร" in text
     assert "เป้า 1.5R: 2.0024 → สุทธิ 0.00R · ชนะทุกไม้ก็ไม่มีกำไร" in text
     assert "+-0.5" not in text
+    assert "risk จริง: −6.25 USDT = 0.63% ของ Futures 1000 USDT (เป้า 0.25%)" in text
+    assert "ลองใหม่" not in text
     conn.close()
 
 
