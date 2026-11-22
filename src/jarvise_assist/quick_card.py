@@ -344,9 +344,10 @@ def _format_size_offer_refusal(
     available: Decimal,
     base: str,
     tick: Decimal,
+    cap_pct: Decimal,
 ) -> str:
     reason = result.reason or ""
-    cap_usdt = wallet_balance * Decimal("1") / Decimal("100")
+    cap_usdt = wallet_balance * cap_pct / Decimal("100")
     cap_s = _fmt_usdt(cap_usdt)
     wallet_s = fmt_price(wallet_balance)
     if reason == "leverage_over_5x" and result.candidate is None:
@@ -359,7 +360,7 @@ def _format_size_offer_refusal(
     fee_s = _fmt_usdt(cand.fee_usdt)
     qty_s = fmt_qty(cand.qty)
     if reason == "risk_over_1pct" and cand.kind == "min_lot":
-        pct = fmt_pct(cand.real_risk_pct, mode="failed_limit", limit=Decimal("1"))
+        pct = fmt_pct(cand.real_risk_pct, mode="failed_limit", limit=cap_pct)
         stop_pct = fmt_pct(abs(stop - mark) / mark * Decimal("100"))
         _dist, stop_max_pct, stop_max_price = min_lot_stop_max(
             candidate=cand,
@@ -367,6 +368,7 @@ def _format_size_offer_refusal(
             stop=stop,
             wallet_balance=wallet_balance,
             tick=tick,
+            max_real_risk_pct=cap_pct,
         )
         tail = (
             f"👉 ไม้ขั้นต่ำรับ stop ได้ไกลสุด ≈ {fmt_pct(stop_max_pct, mode='floor')}% ({_fmt_price_tick(stop_max_price, tick)})"
@@ -375,15 +377,15 @@ def _format_size_offer_refusal(
         )
         return (
             f"❌ ไม่เปิด — ขั้นต่ำ {qty_s} {base} เสี่ยง {risk_total} USDT ({pct}%) "
-            f"(ราคา {risk_price} + ค่าธรรมเนียม {fee_s}) เกินเพดาน {cap_s} USDT (1% ของ wallet {wallet_s}) "
+            f"(ราคา {risk_price} + ค่าธรรมเนียม {fee_s}) เกินเพดาน {cap_s} USDT ({fmt_price(cap_pct)}% ของ wallet {wallet_s}) "
             f"· stop ห่าง {stop_pct}% กว้างเกินไปสำหรับ Quick · {tail}"
         )
     if reason == "risk_over_1pct" and cand.kind == "fit_margin":
-        pct = fmt_pct(cand.real_risk_pct, mode="failed_limit", limit=Decimal("1"))
+        pct = fmt_pct(cand.real_risk_pct, mode="failed_limit", limit=cap_pct)
         return (
             f"❌ ไม่เปิด — margin ไม่พอสำหรับขนาดตาม risk · ขนาดที่ margin พอ {qty_s} {base} "
             f"เสี่ยง {risk_total} USDT ({pct}%) (ราคา {risk_price} + ค่าธรรมเนียม {fee_s}) "
-            f"เกินเพดาน {cap_s} USDT (1% ของ wallet {wallet_s}) · "
+            f"เกินเพดาน {cap_s} USDT ({fmt_price(cap_pct)}% ของ wallet {wallet_s}) · "
             f"👉 ลดความเสี่ยงในเมนู ⚡ Quick หรือโอน USDT เข้า Futures"
         )
     if reason == "leverage_over_5x" and cand is not None and result.need_margin is not None:
@@ -412,6 +414,7 @@ def _try_quick_size_offer(
     filters: Any,
     sized: SizedSignal | None,
     risk_qty: Decimal,
+    cap_pct: Decimal,
 ) -> tuple[SizedSignal | None, str, dict[str, Any] | None, str | None]:
     """Return (sized, size_mode, fail_dict, offer_bound). size_mode stays 'risk' when unchanged."""
     if not allow_offer:
@@ -429,6 +432,7 @@ def _try_quick_size_offer(
         min_notional=min_notional,
         step=step,
         risk_qty=risk_qty,
+        max_real_risk_pct=cap_pct,
     )
     offer = result.offer
     reason = result.reason
@@ -454,6 +458,7 @@ def _try_quick_size_offer(
             available=available,
             base=base,
             tick=tick,
+            cap_pct=cap_pct,
         )
         return sized, "risk", _fail(reason, text), None
     return sized, "risk", _fail("size_failed"), None
@@ -576,6 +581,7 @@ def build_quick_card(
             filters=filters,
             sized=None,
             risk_qty=Decimal("0"),
+            cap_pct=cap_pct,
         )
         if offer_fail is not None:
             return offer_fail
@@ -605,6 +611,7 @@ def build_quick_card(
                 filters=filters,
                 sized=sized,
                 risk_qty=sized.qty,
+                cap_pct=cap_pct,
             )
             if offer_fail is not None:
                 return offer_fail
@@ -634,6 +641,7 @@ def build_quick_card(
                     filters=filters,
                     sized=sized,
                     risk_qty=risk_qty_pre,
+                    cap_pct=cap_pct,
                 )
                 if offer_fail is not None:
                     return offer_fail
@@ -657,6 +665,7 @@ def build_quick_card(
                         filters=filters,
                         sized=sized,
                         risk_qty=risk_qty_pre,
+                        cap_pct=cap_pct,
                     )
                     if offer_fail is not None:
                         return offer_fail
@@ -681,6 +690,7 @@ def build_quick_card(
                         filters=filters,
                         sized=sized,
                         risk_qty=risk_qty_pre,
+                        cap_pct=cap_pct,
                     )
                     if offer_fail is not None:
                         return offer_fail
@@ -783,7 +793,7 @@ def build_quick_card(
             if bound == "risk_1pct":
                 size_detail = (
                     f"ขนาดที่เสนอ: {fmt_qty(sized.qty)} {base} ≈ {notional_s} USDT "
-                    f"(ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ 1%)"
+                    f"(ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ {fmt_price(cap_pct)}%)"
                 )
             else:
                 size_detail = (
@@ -813,13 +823,23 @@ def build_quick_card(
                 size_detail,
                 (
                     f"risk จริง: −{loss_total_s} USDT = {fmt_pct(real_risk_pct)}% "
-                    f"ของ Futures {bal_s} USDT (เป้า {fmt_price(risk_pct)}% · เพดาน 1%)"
+                    f"ของ Futures {bal_s} USDT (เป้า {fmt_price(risk_pct)}% · เพดาน {fmt_price(cap_pct)}%)"
                 ),
                 lev_line,
             ]
         )
     else:
-        lines.extend([size_head, size_detail, lev_line])
+        lines.extend(
+            [
+                size_head,
+                size_detail,
+                (
+                    f"risk จริง: −{loss_total_s} USDT = {fmt_pct(real_risk_pct)}% "
+                    f"ของ Futures {bal_s} USDT (เป้า {fmt_price(risk_pct)}%)"
+                ),
+                lev_line,
+            ]
+        )
     lines.extend(
         [
             (

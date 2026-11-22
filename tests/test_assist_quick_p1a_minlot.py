@@ -251,6 +251,25 @@ def test_size_offer_e1b_mark10_risk_1pct_bound() -> None:
     assert o.real_risk_pct == Decimal("0.99828")
 
 
+def test_size_offer_e1b_mark10_risk_half_pct_bound() -> None:
+    r = size_offer(
+        mark=Decimal("10"),
+        stop=Decimal("10.2004"),
+        wallet_balance=Decimal("1000"),
+        available=Decimal("100"),
+        min_qty=Decimal("0.1"),
+        step=Decimal("0.1"),
+        min_notional=Decimal("5"),
+        risk_qty=Decimal("49.9"),
+        max_real_risk_pct=Decimal("0.5"),
+    )
+    o = r.offer
+    assert o is not None
+    assert o.qty == Decimal("23.5")
+    assert o.bound == "risk_1pct"
+    assert o.real_risk_pct == Decimal("0.49914")
+
+
 def test_size_offer_q_fit_below_min_leverage_six() -> None:
     """Former test_size_offer_e1a_q_fit_below_min — leverage 6 when q_fit < q_min."""
     r = size_offer(
@@ -989,8 +1008,9 @@ def test_card_must1_offer_and_legacy_p(tmp_path: Path, monkeypatch: pytest.Monke
     assert legacy["qty"] == Decimal("0.0035")
     assert "ขนาด: 0.0035 BTC ≈ 217.35 USDT" in legacy["text"]
     assert "Leverage ที่ต้องใช้: 5x · margin ≈ 43.47 USDT" in legacy["text"]
-    assert "risk จริง" not in legacy["text"]
+    assert "risk จริง: −1.45 USDT = 1.21% ของ Futures 120 USDT (เป้า 1%)" in legacy["text"]
     assert "ตั้งใน Binance" not in legacy["text"]
+    assert "ลองใหม่" not in legacy["text"]
     conn.close()
 
 
@@ -1057,8 +1077,9 @@ def test_card_e1_sui_offer_and_legacy(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     assert leg_a["qty"] == Decimal("24.9")
     assert leg_b["qty"] == Decimal("49.9")
-    assert "risk จริง" not in leg_a["text"]
-    assert "risk จริง" not in leg_b["text"]
+    assert "risk จริง: −5.29 USDT = 0.53% ของ Futures 1000 USDT (เป้า 0.5%)" in leg_a["text"]
+    assert "risk จริง: −10.6 USDT = 1.06% ของ Futures 1000 USDT (เป้า 1%)" in leg_b["text"]
+    assert "ลองใหม่" not in "\n".join([leg_a["text"], leg_b["text"]])
     conn.close()
 
 
@@ -1877,6 +1898,7 @@ def test_format_size_offer_refusal_unknown_reason_never_raw_code() -> None:
             available=Decimal("50"),
             base="BTC",
             tick=Decimal("0.1"),
+            cap_pct=Decimal("1"),
         )
         == REFUSAL["size_failed"]
     )
@@ -1898,6 +1920,92 @@ def test_format_size_offer_refusal_unknown_reason_never_raw_code() -> None:
             available=Decimal("50"),
             base="BTC",
             tick=Decimal("0.1"),
+            cap_pct=Decimal("1"),
         )
         == REFUSAL["size_failed"]
     )
+
+
+def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "cap_sui.db")
+    _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=1.0, cap_pct=0.5)
+    c_half = build_quick_card(
+        conn,
+        _sui_fake(Decimal("100")),
+        symbol="SUIUSDT",
+        side="short",
+        stop=Decimal("10.2004"),
+        now_ms=NOW,
+        allow_offer=True,
+    )
+    assert c_half["ok"] is True
+    assert c_half["size_mode"] == "fit_margin"
+    assert c_half["qty"] == Decimal("23.5")
+    half_text = c_half["text"]
+    assert "ขนาดที่เสนอ: 23.5 SUI ≈ 235 USDT (ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ 0.5%)" in half_text
+    assert "risk จริง: −4.99 USDT = 0.50% ของ Futures 1000 USDT (เป้า 1% · เพดาน 0.5%)" in half_text
+    assert "≤ 1%)" not in half_text
+    assert "เพดาน 1%" not in half_text
+    assert "ลองใหม่" not in half_text
+
+    write_quick_settings(conn, cap_pct=2.0)
+    c_double = build_quick_card(
+        conn,
+        _sui_fake(Decimal("100")),
+        symbol="SUIUSDT",
+        side="short",
+        stop=Decimal("10.2004"),
+        now_ms=NOW,
+        allow_offer=True,
+    )
+    assert c_double["qty"] == Decimal("48.7")
+    double_text = c_double["text"]
+    assert "(ใหญ่สุดที่ margin พอที่ 5x)" in double_text
+    assert "risk จริง: −10.34 USDT = 1.03% ของ Futures 1000 USDT (เป้า 1% · เพดาน 2%)" in double_text
+    assert "≤ 1%)" not in double_text
+    assert "ลองใหม่" not in double_text
+    conn.close()
+
+
+BUG3_CAP15 = (
+    "❌ ไม่เปิด — ขั้นต่ำ 0.001 BTC เสี่ยง 2.74 USDT (1.93%) "
+    "(ราคา 2.67 + ค่าธรรมเนียม 0.07) เกินเพดาน 2.13 USDT (1.5% ของ wallet 142) "
+    "· stop ห่าง 4.50% กว้างเกินไปสำหรับ Quick "
+    "· 👉 ไม้ขั้นต่ำรับ stop ได้ไกลสุด ≈ 3.47% (61388.9)"
+)
+
+
+def test_card_bug3_cap_pct_refusal_and_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "bug3_cap.db")
+    _seed_settings(conn)
+    fake = QuickFake(
+        balance=Decimal("142"),
+        available=Decimal("142"),
+        marks={"BTCUSDT": Decimal("59330.1")},
+        ticks={"BTCUSDT": Decimal("0.1")},
+        steps={"BTCUSDT": Decimal("0.001")},
+        min_qty={"BTCUSDT": Decimal("0.001")},
+        min_notional={"BTCUSDT": Decimal("5")},
+    )
+    write_quick_settings(conn, risk_pct=1.0, cap_pct=1.5)
+    refused = build_quick_card(
+        conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62000"), now_ms=NOW, allow_offer=True
+    )
+    assert refused["ok"] is False
+    assert refused["reason"] == "risk_over_1pct"
+    assert refused["text"] == BUG3_CAP15
+    assert "ลองใหม่" not in refused["text"]
+
+    write_quick_settings(conn, cap_pct=2.0)
+    opened = build_quick_card(
+        conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62000"), now_ms=NOW, allow_offer=True
+    )
+    assert opened["ok"] is True
+    assert opened["size_mode"] == "min_lot"
+    assert opened["qty"] == Decimal("0.001")
+    assert "risk จริง: −2.74 USDT = 1.93% ของ Futures 142 USDT (เป้า 1% · เพดาน 2%)" in opened["text"]
+    assert "ลองใหม่" not in opened["text"]
+    conn.close()
