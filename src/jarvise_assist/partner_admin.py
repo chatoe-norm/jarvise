@@ -71,7 +71,8 @@ HELP_TEXT = (
     "p kyc — สถานะข้อมูลรับเงิน\n"
     "p kyc <ชื่อ> — ดูข้อมูลรับเงินเต็ม\n"
     "p kyc <ชื่อ> set <เหตุผล> — แก้ข้อมูลรับเงิน (บรรทัดถัดไปเป็นฟอร์ม)\n"
-    "ถอนเงินต้นแอดมิน: p cost admin <ทุนใหม่> <เหตุผล> แล้ว p wd admin"
+    "เงินเข้าหรือออกของเจ้าของบันทึกเป็น owner_deposit / owner_redeem "
+    "(จัดประเภทใน L2) — ห้ามบันทึกเงินก้อนนั้นด้วยคำสั่งฝากหรือถอนของแอดมิน"
 )
 
 _GATE_MSG = "คำสั่งพอร์ตร่วมใช้ได้เฉพาะแชทส่วนตัวกับบอท"
@@ -348,14 +349,16 @@ def _pending_request(conn: sqlite3.Connection, partner_id: str, *, now_ms: int) 
 def _latest_nav(conn: sqlite3.Connection) -> tuple[Decimal, int] | None:
     row = conn.execute(
         """
-        SELECT nav, created_at_ms FROM partner_event
-        ORDER BY created_at_ms DESC, rowid DESC LIMIT 1
+        SELECT nav, COALESCE(effective_at_ms, created_at_ms) AS t
+        FROM partner_event
+        ORDER BY t DESC, rowid DESC
+        LIMIT 1
         """
     ).fetchone()
     if row is None:
         return None
     try:
-        return Decimal(str(row["nav"])), int(row["created_at_ms"])
+        return Decimal(str(row["nav"])), int(row["t"])
     except (InvalidOperation, ValueError, TypeError):
         return None
 

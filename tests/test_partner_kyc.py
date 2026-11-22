@@ -74,7 +74,7 @@ def test_migration_32_to_33_is_additive_and_idempotent(
     _no_seed(monkeypatch)
     path = tmp_path / "k.db"
     conn = open_db(path)
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 37
     assert schema_version(conn) == SCHEMA_VERSION
     conn.execute("DROP TABLE partner_kyc_draft")
     conn.execute("DROP TABLE partner_kyc")
@@ -686,12 +686,9 @@ def test_portal_gates_callbacks_and_legacy_card_still_deposits(
     _bind(conn, bob, "501")
     assert pk.admin_set_kyc(conn, bob, _form(), "ตั้งครั้งแรก", NOW + 5)["ok"] is True
     monkeypatch.setattr(ps, "deposit_kyc_required", lambda *_a, **_k: False)
-    assert ps.apply_deposit(conn, bob, D("1000"), D("2100"), NOW + 6)["ok"] is True
+    joined_ms = NOW - 40 * 86_400_000
+    assert ps.apply_deposit(conn, bob, D("1000"), D("2100"), joined_ms)["ok"] is True
     monkeypatch.setattr(ps, "deposit_kyc_required", real)
-    conn.execute(
-        "UPDATE partner_event SET created_at_ms = ? WHERE partner_id = ? AND kind = 'deposit'",
-        (NOW - 40 * 86_400_000, bob),
-    )
     edited: list[str] = []
 
     def edit(

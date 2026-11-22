@@ -37,7 +37,7 @@ def _n_events(conn: sqlite3.Connection, *, kind: str | None = None) -> int:
 
 
 def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 37
     fresh = open_db(tmp_path / "fresh.db")
     assert schema_version(fresh) == SCHEMA_VERSION
     for table in ("partner", "partner_event", "partner_request"):
@@ -893,57 +893,104 @@ def test_public_apply_rejects_request_id_kwarg(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_verify_ledger_event_request_links(tmp_path: Path) -> None:
-    conn = open_db(tmp_path / "ev_req.db")
-    now = 1_700_000_000_000
-    a = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)
-    b = ps.create_partner(conn, name="Bob", is_admin=False, now_ms=now + 1)
-    c = ps.create_partner(conn, name="Carol", is_admin=False, now_ms=now + 2)
-    a_id, b_id, c_id = a["partner_id"], b["partner_id"], c["partner_id"]
-    ps.apply_deposit(conn, a_id, D("1000"), D("1000"), now + 10)
-    ps.apply_deposit(conn, b_id, D("100"), D("1100"), now + 20)
-    ps.apply_deposit(conn, c_id, D("100"), D("1200"), now + 30)
-
-    cl = ps.apply_close(conn, c_id, D("1200"), now + 40)
-    assert cl["ok"]
-    close_eid = cl["event_ids"][0]
-    assert ps.verify_ledger(conn)["ok"] is True
-
-    conn.execute("UPDATE partner_event SET request_id = NULL WHERE id = ?", (close_eid,))
+def _insert_terminal_event(
+    conn: sqlite3.Connection,
+    *,
+    partner_id: str,
+    kind: str,
+    request_id: str | None,
+    now: int,
+) -> str:
+    """Append a consistent close or withdraw with a chosen request link. No UPDATE."""
+    row = ps.get_partner(conn, partner_id)
+    assert row is not None
+    units = int(row["units_e8"])
+    cost = int(row["cost_micro"])
+    total = int(
+        conn.execute(
+            "SELECT COALESCE(SUM(units_e8), 0) AS s FROM partner WHERE status = 'active'"
+        ).fetchone()["s"]
+    )
+    eid = f"pe_{kind[:4]}_{partner_id[-6:]}"
+    conn.execute(
+        """
+        INSERT INTO partner_event (
+            id, partner_id, kind, request_id, account_value_micro, total_units_before_e8,
+            nav, units_delta_e8, cost_delta_micro, cash_micro, fee_micro,
+            units_after_e8, cost_after_micro, actor, created_at_ms, payouts_due_micro, origin
+        ) VALUES (?, ?, ?, ?, 0, ?, '1', ?, ?, 0, 0, 0, 0, 'admin', ?, 0, 'manual')
+        """,
+        (eid, partner_id, kind, request_id, total, -units, -cost, now),
+    )
+    if kind == "close":
+        conn.execute(
+            """
+            UPDATE partner
+            SET units_e8 = 0, cost_micro = 0, status = 'closed', updated_at_ms = ?
+            WHERE id = ?
+            """,
+            (now, partner_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE partner
+            SET units_e8 = 0, cost_micro = 0, updated_at_ms = ?
+            WHERE id = ?
+            """,
+            (now, partner_id),
+        )
     conn.commit()
+    return eid
+
+
+def test_verify_ledger_event_request_links(tmp_path: Path) -> None:
+    now = 1_700_000_000_000
+
+    def _base(name: str) -> tuple[sqlite3.Connection, str, str]:
+        conn = open_db(tmp_path / name)
+        admin = ps.create_partner(conn, name="Admin", is_admin=True, now_ms=now)
+        carol = ps.create_partner(conn, name="Carol", is_admin=False, now_ms=now + 1)
+        ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), now + 10)
+        ps.apply_deposit(conn, carol["partner_id"], D("100"), D("1100"), now + 20)
+        return conn, str(admin["partner_id"]), str(carol["partner_id"])
+
+    conn, _admin_id, carol_id = _base("null_close.db")
+    close_eid = _insert_terminal_event(conn, partner_id=carol_id, kind="close", request_id=None, now=now + 40)
     null_close = ps.verify_ledger(conn)
     assert null_close["ok"] is False
     assert any(m.get("event_id") == close_eid for m in null_close["mismatches"])
+    conn.close()
 
-    conn.execute(
-        "UPDATE partner_event SET request_id = ? WHERE id = ?",
-        ("pr_made_up", close_eid),
+    conn, _admin_id, carol_id = _base("fake_close.db")
+    close_eid = _insert_terminal_event(
+        conn, partner_id=carol_id, kind="close", request_id="pr_made_up", now=now + 40
     )
-    conn.commit()
     fake_close = ps.verify_ledger(conn)
     assert fake_close["ok"] is False
     assert any(m.get("event_id") == close_eid for m in fake_close["mismatches"])
+    conn.close()
 
-    # Restore close event link so withdraw check is isolated
-    conn.execute(
-        "UPDATE partner_event SET request_id = ? WHERE id = ?",
-        (cl["request_id"], close_eid),
+    conn, _admin_id, carol_id = _base("null_wd.db")
+    wd_eid = _insert_terminal_event(
+        conn, partner_id=carol_id, kind="withdraw_profit", request_id=None, now=now + 50
     )
-    conn.commit()
-    assert ps.mark_paid(conn, cl["request_id"], now + 45)["ok"]
-    assert ps.verify_ledger(conn)["ok"] is True
-
-    # A+B = 1100 units; raw V=1320 → NAV 1.2 so B has profit to withdraw
-    wd = ps.apply_withdraw_profit(conn, b_id, D("1320"), now + 50)
-    assert wd["ok"]
-    wd_eid = wd["event_ids"][0]
-    assert ps.verify_ledger(conn)["ok"] is True
-
-    conn.execute("UPDATE partner_event SET request_id = NULL WHERE id = ?", (wd_eid,))
-    conn.commit()
     null_wd = ps.verify_ledger(conn)
     assert null_wd["ok"] is False
     assert any(m.get("event_id") == wd_eid for m in null_wd["mismatches"])
+    conn.close()
+
+    conn, _admin_id, carol_id = _base("ok_close.db")
+    cl = ps.apply_close(conn, carol_id, D("1100"), now + 60)
+    assert cl["ok"] is True
+    assert ps.mark_paid(conn, cl["request_id"], now + 61)["ok"] is True
+    assert ps.verify_ledger(conn)["ok"] is True
+    conn.close()
+
+    conn, _admin_id, carol_id = _base("ok_wd.db")
+    wd = ps.apply_withdraw_profit(conn, carol_id, D("1320"), now + 80)
+    assert wd["ok"] is True
+    assert ps.verify_ledger(conn)["ok"] is True
     conn.close()
 
 
