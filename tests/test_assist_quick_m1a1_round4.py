@@ -1042,6 +1042,7 @@ def _risk_confirm_row(conn: Any, *, now_ms: int) -> list[dict[str, str]]:
         captured.append(kw)
         return True
 
+    quick_mod.write_quick_settings(conn, risk_pct=0.5)
     out = quick_mod.handle_quick_callback(conn, "qs:risk:1", send=capture_send, now_ms=now_ms)
     assert out.get("confirm")
     return captured[-1]["reply_markup"]["inline_keyboard"][0]
@@ -1056,7 +1057,7 @@ def test_menu_line2_mode_tag_and_qs_labels(tmp_path: Any, monkeypatch: pytest.Mo
         assert text.split("\n")[1] == quick_mode_tag()
         row = _risk_confirm_row(conn, now_ms=T0)
         assert row[0]["text"] == "✅ ยืนยัน"
-        assert row[0]["callback_data"] == "qs:ok:risk:1"
+        assert row[0]["callback_data"] == f"qs:ok:risk:1:{T0 // 1000}"
         assert row[1]["text"] == "↩️ ไม่เปลี่ยน"
         assert row[1]["callback_data"] == "qs:no"
         conn.close()
@@ -1145,7 +1146,7 @@ def test_qs_cap_confirm_button_callbacks(tmp_path: Path) -> None:
     out = quick_mod.handle_quick_callback(conn, "qs:cap:1.5", send=capture_send, now_ms=T0)
     assert out.get("confirm")
     row = captured[-1]["reply_markup"]["inline_keyboard"][0]
-    assert row[0] == {"text": "✅ ยืนยัน", "callback_data": "qs:ok:cap:1.5"}
+    assert row[0] == {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:cap:1.5:{T0 // 1000}"}
     assert row[1] == {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"}
     conn.close()
 

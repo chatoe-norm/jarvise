@@ -233,7 +233,7 @@ def test_n_frozen_for_the_week(tmp_path: Path, monkeypatch: Any) -> None:
 
     monkeypatch.setattr(pause_mod, "now_ms", lambda: WED_10)
     sent_m, send_m = _send_capture()
-    handle_risk_callback(conn, "risk:1", send=send_m)
+    handle_risk_callback(conn, "risk:1", send=send_m, now_ms=WED_10)
     assert ensure_settings(conn)["risk_pct"] == 1.0
     assert get_edge(conn)["week_risk_pct"] == 3.0
 
@@ -265,7 +265,7 @@ def test_n_menu_snapshot_while_assist_off(tmp_path: Path, monkeypatch: Any) -> N
     write_settings(conn, enabled=False, risk_pct=3.0)
     monkeypatch.setattr(pause_mod, "now_ms", lambda: MON_07)
     sent, send = _send_capture()
-    handle_risk_callback(conn, "risk:1", send=send)
+    handle_risk_callback(conn, "risk:1", send=send, now_ms=MON_07)
     edge = get_edge(conn)
     assert edge["week_risk_id"] == WEEK_ID
     assert edge["week_risk_pct"] == 3.0
@@ -279,22 +279,22 @@ def test_n_menu_snapshot_while_assist_off(tmp_path: Path, monkeypatch: Any) -> N
     write_settings(conn_b, enabled=False, risk_pct=3.0)
     monkeypatch.setattr(pause_mod, "now_ms", lambda: MON_07)
     sent_b, send_b = _send_capture()
-    handle_risk_callback(conn_b, "risk:3", send=send_b)
-    handle_risk_callback(conn_b, "risk_yes:3", send=send_b)
-    # After confirm risk is still 3; snapshot must be 3.0 (pre-change == 3)
+    handle_risk_callback(conn_b, "risk:3", send=send_b, now_ms=MON_07)
+    assert ensure_settings(conn_b)["risk_pct"] == 3.0
+    # Equal target saves at once; snapshot must be 3.0 (pre-change == 3)
     # Re-seed: start at 2.0 then confirm 3 so pre-change is 2.0
     conn_b2 = open_db(tmp_path / "off_b2.db")
     write_settings(conn_b2, enabled=False, risk_pct=2.0)
     monkeypatch.setattr(pause_mod, "now_ms", lambda: MON_07)
     sent_b2, send_b2 = _send_capture()
-    handle_risk_callback(conn_b2, "risk:3", send=send_b2)
-    handle_risk_callback(conn_b2, "risk_yes:3", send=send_b2)
+    handle_risk_callback(conn_b2, "risk:3", send=send_b2, now_ms=MON_07)
+    handle_risk_callback(conn_b2, f"risk_yes:3:{MON_07 // 1000}", send=send_b2, now_ms=MON_07)
     edge_b2 = get_edge(conn_b2)
     assert edge_b2["week_risk_id"] == WEEK_ID
     assert edge_b2["week_risk_pct"] == 2.0
     assert ensure_settings(conn_b2)["risk_pct"] == 3.0
     # Existing snapshot not overwritten
-    handle_risk_callback(conn_b2, "risk:1", send=send_b2)
+    handle_risk_callback(conn_b2, "risk:1", send=send_b2, now_ms=MON_07)
     assert get_edge(conn_b2)["week_risk_pct"] == 2.0
     conn_b.close()
     conn_b2.close()
@@ -304,15 +304,17 @@ def test_n_menu_snapshot_while_assist_off(tmp_path: Path, monkeypatch: Any) -> N
     write_settings(conn_c, enabled=False, risk_pct=3.0, awaiting_risk="number")
     monkeypatch.setattr(pause_mod, "now_ms", lambda: MON_07)
     sent_c, send_c = _send_capture()
-    handle_risk_number(conn_c, "1", send=send_c)
+    handle_risk_number(conn_c, "1", send=send_c, now_ms=MON_07)
     edge_c = get_edge(conn_c)
     assert edge_c["week_risk_id"] == WEEK_ID
     assert edge_c["week_risk_pct"] == 3.0
     assert ensure_settings(conn_c)["risk_pct"] == 1.0
     # Existing snapshot not overwritten
     write_settings(conn_c, awaiting_risk="number")
-    handle_risk_number(conn_c, "2", send=send_c)
+    handle_risk_number(conn_c, "2", send=send_c, now_ms=MON_07)
+    handle_risk_callback(conn_c, f"risk_yes:2:{MON_07 // 1000}", send=send_c, now_ms=MON_07)
     assert get_edge(conn_c)["week_risk_pct"] == 3.0
+    assert ensure_settings(conn_c)["risk_pct"] == 2.0
     conn_c.close()
 
 

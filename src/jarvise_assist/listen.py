@@ -151,7 +151,7 @@ def process_update(
             )
         if data.startswith("risk:") or data.startswith("risk_yes:") or data == "risk_no":
             answer_fn(cq_id)
-            return handle_risk_callback(conn, data, send=send_fn)
+            return handle_risk_callback(conn, data, send=send_fn, now_ms=ts)
         if data.startswith("qs:"):
             answer_fn(cq_id)
             return handle_quick_callback(conn, data, send=send_fn, now_ms=ts)
@@ -265,7 +265,7 @@ def process_update(
             futures=futures,
             now_ms=ts,
         )
-    risk_num = handle_risk_number(conn, text, send=send_fn)
+    risk_num = handle_risk_number(conn, text, send=send_fn, now_ms=ts)
     if risk_num.get("handled"):
         return risk_num
     qs_parsed = parse_quick_setting_command(text)

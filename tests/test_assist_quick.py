@@ -22,6 +22,7 @@ from jarvise_assist.menu import match_menu_label
 from jarvise_assist.pause import day_bot_net_r, evaluate_pause, format_paused_until
 from jarvise_assist.quick import (
     CAP_ALLOWED,
+    MSG_QUICK_CONFIRM_STALE,
     MSG_QUICK_LOCK_REMOVED,
     MSG_QUICK_SETTING_HINT_CAP,
     MSG_QUICK_SETTING_HINT_RISK,
@@ -966,12 +967,14 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
     assert len(answers) == n_ans + 1
     assert get_quick_settings(conn)["risk_pct"] == 0.25
 
-    # qs:risk:1 asks confirm
+    ts = now // 1000
+    # qs:risk:1 from 0.25 asks confirm
     process_update(conn, _cq("qs:risk:1"), send=send, answer=answer, now_ms_value=now)
     assert any("ยืนยัน" in s["text"] for s in sent[-2:])
-    process_update(conn, _cq("qs:ok:risk:1"), send=send, answer=answer, now_ms_value=now)
+    process_update(conn, _cq(f"qs:ok:risk:1:{ts}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 1.0
 
+    # at 1.0, equal → immediate save
     process_update(conn, _cq("qs:risk:1"), send=send, answer=answer, now_ms_value=now)
     process_update(conn, _cq("qs:no"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 1.0
@@ -979,7 +982,7 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
     # qs:cap:2 confirm: main default 1% → cap 2% + quick 2% = 4%
     process_update(conn, _cq("qs:cap:2"), send=send, answer=answer, now_ms_value=now)
     assert any("ความเสี่ยงรวมสูงสุด 4% (หลัก 2% + quick 2%)" in s["text"] for s in sent)
-    process_update(conn, _cq("qs:ok:cap:2"), send=send, answer=answer, now_ms_value=now)
+    process_update(conn, _cq(f"qs:ok:cap:2:{ts}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 2.0
 
     settings_frozen = dict(get_quick_settings(conn))
@@ -1137,7 +1140,7 @@ def test_quick_settings_ok_risk_long_digits_reject(tmp_path: Path, monkeypatch: 
     sent, send = _send_capture()
     answers, answer = _answers()
     before = dict(get_quick_settings(conn))
-    data = "qs:ok:risk:" + "1" * 27
+    data = f"qs:ok:risk:{'1' * 27}:{now // 1000}"
     process_update(
         conn,
         {
@@ -1211,7 +1214,10 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # Text routing via process_update
     process_update(conn, _msg("q risk"), send=send, now_ms_value=now)
     assert sent[-1]["text"] == MSG_QUICK_SETTING_HINT_RISK
+    write_quick_settings(conn, risk_pct=0.5)
     process_update(conn, _msg("quick RISK 0.6"), send=send, now_ms_value=now)
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+    process_update(conn, _cq(f"qs:ok:risk:0.6:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 0.6
     process_update(conn, _msg("q risk 0.6 %"), send=send, now_ms_value=now)
     assert sent[-1]["text"] == MSG_QUICK_SETTING_HINT_RISK
@@ -1238,7 +1244,10 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     process_update(conn, _cq("qs:cap:0.5"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 0.5
 
+    write_quick_settings(conn, risk_pct=0.25)
     process_update(conn, _msg("q risk 0.6"), send=send, now_ms_value=now)
+    assert get_quick_settings(conn)["risk_pct"] == 0.25
+    process_update(conn, _cq(f"qs:ok:risk:0.6:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 0.6
 
     for cmd in ("q risk 1", "q risk 0.999", "q risk 2.5", "q risk 100"):
@@ -1249,22 +1258,24 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert get_quick_settings(conn)["risk_pct"] == before_r
     process_update(conn, _msg("q risk 0.999"), send=send, now_ms_value=now)
     confirm = sent[-1].get("reply_markup", {}).get("inline_keyboard", [[]])[0][0]
-    assert confirm["callback_data"] == "qs:ok:risk:1"
+    assert confirm["callback_data"] == f"qs:ok:risk:1:{now // 1000}"
 
     process_update(conn, _msg("q risk 2.5"), send=send, now_ms_value=now)
-    process_update(conn, _cq("qs:ok:risk:2.5"), send=send, answer=answer, now_ms_value=now)
+    process_update(conn, _cq(f"qs:ok:risk:2.5:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 2.5
 
     write_quick_settings(conn, cap_pct=1.0)
     n0 = len(sent)
     process_update(conn, _msg("q cap 1.2"), send=send, now_ms_value=now)
     assert any("ความเสี่ยงรวมสูงสุด" in s["text"] for s in sent[n0:])
-    process_update(conn, _cq("qs:ok:cap:1.2"), send=send, answer=answer, now_ms_value=now)
+    process_update(conn, _cq(f"qs:ok:cap:1.2:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 1.2
 
     process_update(conn, _msg("q cap 0.8"), send=send, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 0.8
     process_update(conn, _msg("q cap 1.004"), send=send, now_ms_value=now)
+    assert get_quick_settings(conn)["cap_pct"] == 0.8
+    process_update(conn, _cq(f"qs:ok:cap:1:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 1.0
 
     # Rejects
@@ -1287,17 +1298,26 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert sent[-1]["text"] == MSG_QUICK_SETTING_REJECT
         assert dict(get_quick_settings(conn)) == frozen
 
+    ts = now // 1000
+    process_update(conn, _cq("qs:ok:risk:0"), send=send, answer=answer, now_ms_value=now)
+    assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
+    assert get_quick_settings(conn)["cap_pct"] == frozen["cap_pct"]
+    assert get_quick_settings(conn)["risk_pct"] == frozen["risk_pct"]
+
     for data in (
-        "qs:ok:risk:0",
-        "qs:ok:cap:-1",
-        "qs:ok:risk:nan",
-        "qs:ok:risk:inf",
-        "qs:ok:risk:m",
+        f"qs:ok:risk:0:{ts}",
+        f"qs:ok:cap:-1:{ts}",
+        f"qs:ok:risk:nan:{ts}",
+        f"qs:ok:risk:inf:{ts}",
+        f"qs:ok:risk:m:{ts}",
         "qs:risk:1e+06",
     ):
+        risk_before = get_quick_settings(conn)["risk_pct"]
+        cap_before = get_quick_settings(conn)["cap_pct"]
         process_update(conn, _cq(data), send=send, answer=answer, now_ms_value=now)
         assert sent[-1]["text"] == MSG_QUICK_SETTING_REJECT
-        assert dict(get_quick_settings(conn)) == frozen
+        assert get_quick_settings(conn)["risk_pct"] == risk_before
+        assert get_quick_settings(conn)["cap_pct"] == cap_before
 
     lock_frozen = dict(get_quick_settings(conn))
     for data in ("qs:dl:m", "qs:st:m", "qs:dl:0"):
@@ -1308,9 +1328,8 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert len(sent) == n_sent + 1
 
     # risk > cap warning still saves
-    write_quick_settings(conn, cap_pct=1.0)
+    write_quick_settings(conn, cap_pct=1.0, risk_pct=2.5)
     process_update(conn, _msg("q risk 1.5"), send=send, now_ms_value=now)
-    process_update(conn, _cq("qs:ok:risk:1.5"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 1.5
     saved_lines = sent[-1]["text"].split("\n")
     assert saved_lines[1] == MSG_QUICK_SETTING_RISK_OVER_CAP
@@ -1319,18 +1338,111 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     process_update(conn, _cq("qs:cap:0.5"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["cap_pct"] == 0.5
     process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=now)
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+    process_update(conn, _cq(f"qs:ok:risk:0.75:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 0.75
     assert sent[-1]["text"].split("\n")[1] == MSG_QUICK_SETTING_RISK_OVER_CAP
 
     # callback max length helper
     from jarvise_assist.quick import _fmt_fixed
 
-    worst = f"qs:ok:risk:{_fmt_fixed(99.99)}"
+    ts = now // 1000
+    worst = f"qs:ok:risk:{_fmt_fixed(99.99)}:{ts}"
     assert len(worst.encode()) <= 64
-    assert worst == "qs:ok:risk:99.99"
+    assert worst == f"qs:ok:risk:99.99:{ts}"
 
     assert RISK_ALLOWED == (0.5, 0.75, 1.0)
     assert CAP_ALLOWED == (1.0, 1.5, 2.0)
+    conn.close()
+
+
+def test_quick_confirm_raise_lower_and_stale_ttl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "qs_stale.db")
+    ensure_settings(conn)
+    now = _ms_bangkok(2026, 11, 22, 12, 0)
+    ts = now // 1000
+    sent, send = _send_capture()
+    answers, answer = _answers()
+
+    def _cq(data: str) -> dict[str, Any]:
+        return {
+            "callback_query": {
+                "id": f"cq-{data}",
+                "data": data,
+                "message": {"chat": {"id": 42}, "message_id": 1},
+            }
+        }
+
+    def _msg(text: str) -> dict[str, Any]:
+        return {"message": {"chat": {"id": 42}, "text": text}}
+
+    write_quick_settings(conn, risk_pct=0.5, cap_pct=1.0)
+    process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=now)
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+    process_update(conn, _cq(f"qs:ok:risk:0.75:{ts}"), send=send, answer=answer, now_ms_value=now)
+    assert get_quick_settings(conn)["risk_pct"] == 0.75
+
+    write_quick_settings(conn, risk_pct=1.0)
+    process_update(conn, _cq("qs:risk:0.5"), send=send, answer=answer, now_ms_value=now)
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+
+    write_quick_settings(conn, cap_pct=1.0)
+    process_update(conn, _cq("qs:cap:1.5"), send=send, answer=answer, now_ms_value=now)
+    assert get_quick_settings(conn)["cap_pct"] == 1.0
+    process_update(conn, _cq(f"qs:ok:cap:1.5:{ts}"), send=send, answer=answer, now_ms_value=now)
+    assert get_quick_settings(conn)["cap_pct"] == 1.5
+
+    write_quick_settings(conn, cap_pct=2.0)
+    process_update(conn, _cq("qs:cap:1.5"), send=send, answer=answer, now_ms_value=now)
+    assert get_quick_settings(conn)["cap_pct"] == 1.5
+
+    write_quick_settings(conn, risk_pct=0.5)
+    process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=now)
+    process_update(conn, _cq("qs:ok:risk:2.5"), send=send, answer=answer, now_ms_value=now)
+    assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+
+    process_update(conn, _cq(f"qs:ok:risk:0.75:{ts}"), send=send, answer=answer, now_ms_value=now + 61_000)
+    assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+
+    write_quick_settings(conn, risk_pct=0.5)
+    t_ok = now + 20_000
+    ts_ok = t_ok // 1000
+    process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=t_ok)
+    process_update(
+        conn, _cq(f"qs:ok:risk:0.75:{ts_ok}"), send=send, answer=answer, now_ms_value=t_ok + 60_000
+    )
+    assert get_quick_settings(conn)["risk_pct"] == 0.75
+
+    write_quick_settings(conn, risk_pct=0.5)
+    t_fut = now + 30_000
+    ts_fut_card = t_fut // 1000
+    ts_fut_bad = ts_fut_card + 6
+    process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=t_fut)
+    process_update(conn, _cq(f"qs:ok:risk:0.75:{ts_fut_bad}"), send=send, answer=answer, now_ms_value=t_fut)
+    assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+
+    process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=now)
+    process_update(conn, _cq("qs:no"), send=send, answer=answer, now_ms_value=now + 2_000)
+    process_update(conn, _cq(f"qs:ok:risk:0.75:{ts}"), send=send, answer=answer, now_ms_value=now + 3_000)
+    assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+
+    write_quick_settings(conn, risk_pct=0.75)
+    t1 = now + 10_000
+    ts1 = t1 // 1000
+    process_update(conn, _cq("qs:risk:1"), send=send, answer=answer, now_ms_value=t1)
+    upd = get_quick_settings(conn).get("updated_at_ms")
+    assert upd is None or int(upd) // 1000 <= ts1
+    process_update(conn, _cq("qs:risk:0.5"), send=send, answer=answer, now_ms_value=t1 + 2_000)
+    process_update(conn, _cq(f"qs:ok:risk:1:{ts1}"), send=send, answer=answer, now_ms_value=t1 + 3_000)
+    assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+
+    assert "ลองใหม่" not in " ".join(s["text"] for s in sent)
     conn.close()
 
 

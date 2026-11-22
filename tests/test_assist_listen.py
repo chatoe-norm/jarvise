@@ -156,36 +156,171 @@ def test_skip_callback_sets_skipped_and_edits(tmp_path: Path, monkeypatch: Any) 
     conn.close()
 
 
-def test_risk_menu_confirms_above_2_and_rejects_out_of_range(tmp_path: Path) -> None:
+def test_risk_menu_confirms_on_raise_and_rejects_out_of_range(tmp_path: Path) -> None:
+    from tests.test_assist import _ms_bangkok
+
+    now = _ms_bangkok(2026, 11, 22, 12, 0)
+    ts = now // 1000
     conn = open_db(tmp_path / "risk.db")
     sent, send = _send_capture()
-    out = handle_risk_callback(conn, "risk:other", send=send)
+    out = handle_risk_callback(conn, "risk:other", send=send, now_ms=now)
     assert out["awaiting"] == "number"
     assert ensure_settings(conn)["awaiting_risk"] == "number"
 
-    bad = handle_risk_number(conn, "7.5", send=send)
+    bad = handle_risk_number(conn, "7.5", send=send, now_ms=now)
     assert bad["rejected"] is True
     assert ensure_settings(conn)["risk_pct"] == 1.0
     assert "0.5–3" in sent[-1]["text"]
 
     write_settings(conn, awaiting_risk="number")
-    apply = handle_risk_number(conn, "2", send=send)
-    assert apply.get("risk_pct") == 2.0
+    conf = handle_risk_number(conn, "2", send=send, now_ms=now)
+    assert conf.get("confirm") is True
+    assert "ยืนยัน 2%?" in sent[-1]["text"]
+    assert "กดยืนยันภายใน 60 วิ" in sent[-1]["text"]
+    assert ensure_settings(conn)["risk_pct"] == 1.0
+    assert ensure_settings(conn)["pending_risk_pct"] == 2.0
+
+    yes = handle_risk_callback(conn, f"risk_yes:2:{ts}", send=send, now_ms=now)
+    assert yes == {"ok": True, "risk_pct": 2.0}
     assert ensure_settings(conn)["risk_pct"] == 2.0
 
+    write_settings(conn, risk_pct=2.0, awaiting_risk=None, pending_risk_pct=None)
+    lower = handle_risk_callback(conn, "risk:0.5", send=send, now_ms=now)
+    assert lower.get("risk_pct") == 0.5
+    assert "confirm" not in lower
+
+    same = handle_risk_callback(conn, "risk:0.5", send=send, now_ms=now)
+    assert same.get("risk_pct") == 0.5
+    assert "confirm" not in same
+
+    write_settings(conn, risk_pct=1.0, awaiting_risk=None, pending_risk_pct=None)
+    up = handle_risk_callback(conn, "risk:3", send=send, now_ms=now)
+    assert up.get("confirm") is True
+
+    conn.close()
+
+
+def test_main_risk_raise_precision_and_nan_reject(tmp_path: Path) -> None:
+    from tests.test_assist import _ms_bangkok
+
+    now = _ms_bangkok(2026, 11, 22, 12, 0)
+    ts = now // 1000
+    conn = open_db(tmp_path / "risk_prec.db")
+    sent, send = _send_capture()
     write_settings(conn, awaiting_risk="number")
-    conf = handle_risk_number(conn, "2.5", send=send)
+    conf = handle_risk_number(conn, "2.1234567", send=send, now_ms=now)
     assert conf.get("confirm") is True
-    assert "ยืนยัน 2.5%?" in sent[-1]["text"]
-    assert ensure_settings(conn)["pending_risk_pct"] == 2.5
+    kb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    assert kb == f"risk_yes:2.12346:{ts}"
+    yes = handle_risk_callback(conn, kb, send=send, now_ms=now)
+    assert yes["risk_pct"] == 2.1234567
 
-    yes = handle_risk_callback(conn, "risk_yes:2.5", send=send)
-    assert yes["risk_pct"] == 2.5
-    assert ensure_settings(conn)["risk_pct"] == 2.5
+    write_settings(conn, awaiting_risk="number")
+    nan_typed = handle_risk_number(conn, "nan", send=send, now_ms=now)
+    assert nan_typed.get("rejected") is True
+    assert "0.5–3" in sent[-1]["text"]
+    assert ensure_settings(conn)["risk_pct"] == 2.1234567
 
-    refused = handle_risk_callback(conn, "risk_yes:7.5", send=send)
+    nan_cb = handle_risk_callback(conn, "risk:nan", send=send, now_ms=now)
+    assert nan_cb.get("rejected") is True
+    assert ensure_settings(conn)["risk_pct"] == 2.1234567
+    conn.close()
+
+
+def test_main_risk_confirm_stale_expiry_mismatch(tmp_path: Path) -> None:
+    from tests.test_assist import _ms_bangkok
+
+    t0 = _ms_bangkok(2026, 11, 22, 12, 0)
+    ts = t0 // 1000
+    conn = open_db(tmp_path / "risk_stale.db")
+    sent, send = _send_capture()
+    write_settings(conn, risk_pct=1.0)
+    handle_risk_callback(conn, "risk:2", send=send, now_ms=t0)
+    assert ensure_settings(conn)["pending_risk_pct"] == 2.0
+
+    expired = handle_risk_callback(conn, f"risk_yes:2:{ts}", send=send, now_ms=t0 + 61_000)
+    assert expired.get("rejected") is True
+    assert expired.get("reason") == "expired"
+    assert sent[-1]["text"] == "⌛ หมดเวลา — ไม่ได้เปลี่ยนอะไร · ความเสี่ยงยังเป็น 1%"
+    assert "ลองใหม่" not in sent[-1]["text"]
+    assert ensure_settings(conn)["risk_pct"] == 1.0
+    assert ensure_settings(conn)["pending_risk_pct"] is None
+    assert ensure_settings(conn)["awaiting_risk"] is None
+
+    handle_risk_callback(conn, "risk:2", send=send, now_ms=t0)
+    ok_at_60 = handle_risk_callback(conn, f"risk_yes:2:{ts}", send=send, now_ms=t0 + 60_000)
+    assert ok_at_60 == {"ok": True, "risk_pct": 2.0}
+    write_settings(conn, risk_pct=1.0, awaiting_risk=None, pending_risk_pct=None)
+
+    handle_risk_callback(conn, "risk:2", send=send, now_ms=t0)
+    legacy = handle_risk_callback(conn, "risk_yes:2.5", send=send, now_ms=t0)
+    assert legacy.get("rejected") is True
+    assert legacy.get("reason") == "legacy"
+    assert sent[-1]["text"] == "ปุ่มนี้ใช้ไม่ได้แล้ว — ความเสี่ยงยังเป็น 1%"
+    assert ensure_settings(conn)["risk_pct"] == 1.0
+    assert ensure_settings(conn)["pending_risk_pct"] is None
+    assert ensure_settings(conn)["awaiting_risk"] is None
+
+    handle_risk_callback(conn, "risk:2", send=send, now_ms=t0)
+    mismatch = handle_risk_callback(conn, f"risk_yes:3:{ts}", send=send, now_ms=t0)
+    assert mismatch.get("rejected") is True
+    assert mismatch.get("reason") == "mismatch"
+    assert sent[-1]["text"] == "ปุ่มนี้ใช้ไม่ได้แล้ว — ความเสี่ยงยังเป็น 1%"
+    assert ensure_settings(conn)["risk_pct"] == 1.0
+    assert ensure_settings(conn)["pending_risk_pct"] is None
+    assert ensure_settings(conn)["awaiting_risk"] is None
+
+    handle_risk_callback(conn, "risk:2", send=send, now_ms=t0)
+    handle_risk_callback(conn, "risk_no", send=send, now_ms=t0)
+    after_no = handle_risk_callback(conn, f"risk_yes:2:{ts}", send=send, now_ms=t0)
+    assert after_no.get("rejected") is True
+    assert after_no.get("reason") == "not_pending"
+    assert sent[-1]["text"] == "ปุ่มนี้ใช้ไม่ได้แล้ว — ความเสี่ยงยังเป็น 1%"
+    assert ensure_settings(conn)["risk_pct"] == 1.0
+    assert ensure_settings(conn)["pending_risk_pct"] is None
+    assert ensure_settings(conn)["awaiting_risk"] is None
+
+    write_settings(conn, awaiting_risk="confirm", pending_risk_pct=2.0, risk_pct=1.0)
+    refused = handle_risk_callback(conn, f"risk_yes:7.5:{ts}", send=send, now_ms=t0)
     assert refused.get("rejected") is True
-    assert ensure_settings(conn)["risk_pct"] == 2.5
+    assert "ลองใหม่" not in " ".join(s["text"] for s in sent)
+    conn.close()
+
+
+def test_main_risk_yes_superseded_by_immediate_lower(tmp_path: Path) -> None:
+    from tests.test_assist import _ms_bangkok
+
+    t0 = _ms_bangkok(2026, 11, 22, 12, 0)
+    ts = t0 // 1000
+    conn = open_db(tmp_path / "risk_sup.db")
+    sent, send = _send_capture()
+    write_settings(conn, risk_pct=1.0)
+    handle_risk_callback(conn, "risk:2", send=send, now_ms=t0)
+    handle_risk_callback(conn, "risk:0.5", send=send, now_ms=t0 + 1_000)
+    assert ensure_settings(conn)["risk_pct"] == 0.5
+    out = handle_risk_callback(conn, f"risk_yes:2:{ts}", send=send, now_ms=t0 + 2_000)
+    assert out.get("rejected") is True
+    assert out.get("reason") == "not_pending"
+    assert ensure_settings(conn)["risk_pct"] == 0.5
+    assert "ลองใหม่" not in " ".join(s["text"] for s in sent)
+    conn.close()
+
+
+def test_main_risk_yes_future_timestamp_rejected(tmp_path: Path) -> None:
+    from tests.test_assist import _ms_bangkok
+
+    t0 = _ms_bangkok(2026, 11, 22, 12, 0)
+    now_s = t0 // 1000
+    conn = open_db(tmp_path / "risk_future.db")
+    sent, send = _send_capture()
+    write_settings(conn, risk_pct=1.0)
+    handle_risk_callback(conn, "risk:2", send=send, now_ms=t0)
+    future_ts = now_s + 6
+    out = handle_risk_callback(conn, f"risk_yes:2:{future_ts}", send=send, now_ms=t0)
+    assert out.get("rejected") is True
+    assert out.get("reason") == "expired"
+    assert ensure_settings(conn)["risk_pct"] == 1.0
+    assert "ลองใหม่" not in " ".join(s["text"] for s in sent)
     conn.close()
 
 
