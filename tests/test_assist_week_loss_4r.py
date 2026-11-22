@@ -314,6 +314,7 @@ def test_n_menu_snapshot_while_assist_off(tmp_path: Path, monkeypatch: Any) -> N
     handle_risk_number(conn_c, "2", send=send_c, now_ms=MON_07)
     handle_risk_callback(conn_c, f"risk_yes:2:{MON_07 // 1000}", send=send_c, now_ms=MON_07)
     assert get_edge(conn_c)["week_risk_pct"] == 3.0
+    assert ensure_settings(conn_c)["risk_pct"] == 2.0
     conn_c.close()
 
 

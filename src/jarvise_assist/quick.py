@@ -1003,6 +1003,7 @@ def handle_quick_callback(
             send(MSG_QUICK_CONFIRM_STALE)
             return {"ok": False, "rejected": True, "reason": "stale"}
         updated_at_ms = get_quick_settings(conn).get("updated_at_ms")
+        # A write in the same unix second as the card does not make it stale (known limit).
         if updated_at_ms is not None and int(updated_at_ms) // 1000 > ts_s:
             send(MSG_QUICK_CONFIRM_STALE)
             return {"ok": False, "rejected": True, "reason": "stale"}

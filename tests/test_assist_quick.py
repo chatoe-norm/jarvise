@@ -1407,6 +1407,24 @@ def test_quick_confirm_raise_lower_and_stale_ttl(tmp_path: Path, monkeypatch: py
     assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
     assert get_quick_settings(conn)["risk_pct"] == 0.5
 
+    write_quick_settings(conn, risk_pct=0.5)
+    t_ok = now + 20_000
+    ts_ok = t_ok // 1000
+    process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=t_ok)
+    process_update(
+        conn, _cq(f"qs:ok:risk:0.75:{ts_ok}"), send=send, answer=answer, now_ms_value=t_ok + 60_000
+    )
+    assert get_quick_settings(conn)["risk_pct"] == 0.75
+
+    write_quick_settings(conn, risk_pct=0.5)
+    t_fut = now + 30_000
+    ts_fut_card = t_fut // 1000
+    ts_fut_bad = ts_fut_card + 6
+    process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=t_fut)
+    process_update(conn, _cq(f"qs:ok:risk:0.75:{ts_fut_bad}"), send=send, answer=answer, now_ms_value=t_fut)
+    assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
+    assert get_quick_settings(conn)["risk_pct"] == 0.5
+
     process_update(conn, _cq("qs:risk:0.75"), send=send, answer=answer, now_ms_value=now)
     process_update(conn, _cq("qs:no"), send=send, answer=answer, now_ms_value=now + 2_000)
     process_update(conn, _cq(f"qs:ok:risk:0.75:{ts}"), send=send, answer=answer, now_ms_value=now + 3_000)
@@ -1414,10 +1432,13 @@ def test_quick_confirm_raise_lower_and_stale_ttl(tmp_path: Path, monkeypatch: py
     assert get_quick_settings(conn)["risk_pct"] == 0.5
 
     write_quick_settings(conn, risk_pct=0.75)
-    t1 = now
+    t1 = now + 10_000
+    ts1 = t1 // 1000
     process_update(conn, _cq("qs:risk:1"), send=send, answer=answer, now_ms_value=t1)
+    upd = get_quick_settings(conn).get("updated_at_ms")
+    assert upd is None or int(upd) // 1000 <= ts1
     process_update(conn, _cq("qs:risk:0.5"), send=send, answer=answer, now_ms_value=t1 + 2_000)
-    process_update(conn, _cq(f"qs:ok:risk:1:{ts}"), send=send, answer=answer, now_ms_value=t1 + 3_000)
+    process_update(conn, _cq(f"qs:ok:risk:1:{ts1}"), send=send, answer=answer, now_ms_value=t1 + 3_000)
     assert sent[-1]["text"] == MSG_QUICK_CONFIRM_STALE
     assert get_quick_settings(conn)["risk_pct"] == 0.5
 
