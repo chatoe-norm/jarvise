@@ -139,9 +139,9 @@ Unchanged. For trades that last minutes, an LLM summary adds latency and failure
 
 Stays: the separate quick stats bucket, the quick report metrics, net-of-fee (and, after 20 Nov, net-of-real-fee-and-funding) R, staged orders, and Telegram latency (the listener is a long-poll thread inside `jobs`).
 
-**Quick cap (settings + option B), as shipped and reconfirmed 20 Nov:** default **1%**, allowed **0.5 / 1 / 1.5 / 2%**, confirm above 1%. This matches §4.
+**Quick cap (settings + option B), as shipped and reconfirmed 20 Nov:** default **1%**, allowed **0.5 / 1 / 1.5 / 2%**, confirm above 1%. This matches §4. (changed by PR #381, merged 2026-11-23 Bangkok: confirm on any raise, 60s TTL)
 
-**Per-trade Quick risk, as shipped by QPR1 (not revisited on 20 Nov):** `assist_quick_settings.risk_pct` default **0.5%**, allowed **0.25 / 0.5 / 0.75 / 1.0**, confirm at 1.0 (`RISK_CONFIRM_AT`). This is not the portfolio cap, and it is not the stale §2.8 "0.25–1.0%, confirm above 0.75%" proposal.
+**Per-trade Quick risk, as shipped by QPR1 (not revisited on 20 Nov):** `assist_quick_settings.risk_pct` default **0.5%**, allowed **0.25 / 0.5 / 0.75 / 1.0**, confirm at 1.0 (`RISK_CONFIRM_AT`). This is not the portfolio cap, and it is not the stale §2.8 "0.25–1.0%, confirm above 0.75%" proposal. (changed by PR #381, merged 2026-11-23 Bangkok: confirm on any raise, 60s TTL; RISK_CONFIRM_AT removed)
 
 **Quick-only daily stop and 3-loss lock — shipped, now out of policy.** QPR1 did ship both, and they are live on `main`:
 

@@ -1083,6 +1083,7 @@ def test_quick_menu_total_uses_dynamic_main_cap(tmp_path: Path) -> None:
     now = _ms_bangkok(2026, 11, 14, 15, 0)
     text, _kb = render_quick_menu(conn, now_ms=now)
     assert "ความเสี่ยงรวมสูงสุด 8% (หลัก 6% + quick 2%)" in text
+    assert "เพดาน quick 2% (ข้อเสนอคิดรวมค่าธรรมเนียม · ไม้ที่เปิดพร้อมกันคิดจากระยะ stop)" in text
     conn.close()
 
 
@@ -1129,6 +1130,7 @@ def test_quick_settings_risk_value_edges(
         assert any("ยืนยัน" in s["text"] for s in sent)
     elif expect == "no_raise":
         assert len(sent) >= 1
+        assert get_quick_settings(conn)["risk_pct"] == 0.11
     conn.close()
 
 
@@ -1326,6 +1328,17 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert sent[-1]["text"] == MSG_QUICK_LOCK_REMOVED
         assert dict(get_quick_settings(conn)) == lock_frozen
         assert len(sent) == n_sent + 1
+
+    for data, want in (
+        ("qs:foo:m", "คำสั่งไม่รู้จัก"),
+        ("qs:ok:foo:m", MSG_QUICK_CONFIRM_STALE),
+    ):
+        frozen = dict(get_quick_settings(conn))
+        n_sent = len(sent)
+        process_update(conn, _cq(data), send=send, answer=answer, now_ms_value=now)
+        assert len(sent) == n_sent + 1
+        assert sent[-1]["text"] == want
+        assert dict(get_quick_settings(conn)) == frozen
 
     # risk > cap warning still saves
     write_quick_settings(conn, cap_pct=1.0, risk_pct=2.5)

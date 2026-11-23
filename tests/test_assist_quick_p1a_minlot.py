@@ -1949,6 +1949,7 @@ def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.Mon
     assert "≤ 1%)" not in half_text
     assert "เพดาน 1%" not in half_text
     assert "ลองใหม่" not in half_text
+    assert "ไม้นี้ 0.47% (ไม่รวมค่าธรรมเนียม)" in half_text
 
     write_quick_settings(conn, cap_pct=2.0)
     c_double = build_quick_card(
@@ -1960,6 +1961,8 @@ def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.Mon
         now_ms=NOW,
         allow_offer=True,
     )
+    assert c_double["ok"] is True
+    assert c_double["size_mode"] == "fit_margin"
     assert c_double["qty"] == Decimal("48.7")
     double_text = c_double["text"]
     assert "(ใหญ่สุดที่ margin พอที่ 5x)" in double_text

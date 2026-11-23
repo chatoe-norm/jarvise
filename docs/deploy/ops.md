@@ -118,7 +118,8 @@ Job subprocesses have wall-clock limits (`JARVISE_JOB_TIMEOUT_*_S`; defaults ing
 
 ```bash
 tailscale ping <vps-magicdns-or-ip>
-curl -fsS "http://<vps-ip>:8080/healthz"
+export TAILSCALE_IP=$(tailscale ip -4 <vps-magicdns-or-ip>)
+curl -fsS "http://${TAILSCALE_IP}:8080/healthz"
 ```
 
 Open web `:8080`, n8n `:5678`, OpenClaw `:18789` only over Tailscale.

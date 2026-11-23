@@ -51,10 +51,14 @@ WEB_BASIC_AUTH_PASSWORD=...
 Live submit **requires** `invalidation_price` on the approval and places a venue `STOP_LOSS_LIMIT` after a BUY fill. Do not enable live until you have verified the stop row in `live_orders`. Paper equity is **never** used to size live orders.
 
 ```bash
-docker compose up -d --force-recreate jobs web
-curl -sS http://127.0.0.1:8080/healthz   # via Tailscale IP in practice
+export TAILSCALE_IP=$(tailscale ip -4)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate jobs web
+curl -sS "http://${TAILSCALE_IP}:8080/healthz"   # web binds only to the Tailscale IP; jobs :8090/healthz is container-internal
+curl -sS -u "<web-basic-auth-user>" "http://${TAILSCALE_IP}:8080/api/status"   # curl prompts for the password
 # expect live_trading true
 ```
+
+WEB_BASIC_AUTH_* live in /opt/jarvise/.env and are not in the shell. Do not source .env and do not put the password on the command line.
 
 ## 4. Smoke
 

@@ -862,7 +862,7 @@ def build_quick_card(
         lines.append(warn)
     lines.append(
         f"ความเสี่ยงเปิดอยู่: หลัก {_pct_of_bal(main_open)}% · "
-        f"quick {_pct_of_bal(quick_open)}% + ไม้นี้ {_pct_of_bal(new_risk)}% "
+        f"quick {_pct_of_bal(quick_open)}% + ไม้นี้ {_pct_of_bal(new_risk)}% (ไม่รวมค่าธรรมเนียม) "
         f"(เพดาน quick {fmt_price(cap_pct)}% · รวม {fmt_price(portfolio_cap_pct)}%)"
     )
     lines.append(
