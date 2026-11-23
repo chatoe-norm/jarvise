@@ -74,7 +74,7 @@ def test_migration_32_to_33_is_additive_and_idempotent(
     _no_seed(monkeypatch)
     path = tmp_path / "k.db"
     conn = open_db(path)
-    assert SCHEMA_VERSION == 37
+    assert SCHEMA_VERSION == 38
     assert schema_version(conn) == SCHEMA_VERSION
     conn.execute("DROP TABLE partner_kyc_draft")
     conn.execute("DROP TABLE partner_kyc")

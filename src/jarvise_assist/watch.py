@@ -51,6 +51,7 @@ from jarvise_assist.messages import (
 )
 from jarvise_assist.pause import evaluate_day_loss_pause, evaluate_pause, maybe_auto_resume
 from jarvise_assist.quick import sync_quick_trades
+from jarvise_assist.quick_cutoff import maybe_send_cutoff_alerts
 from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.real_trades import refresh_incomplete_income
 from jarvise_assist.signals import (
@@ -1227,6 +1228,25 @@ def flush_held_watch_advice(
     return {"sent": sent, "dropped": dropped}
 
 
+def _emit_quick_cutoff(
+    conn: Any,
+    *,
+    now_ms: int,
+    send: SendFn,
+    sync_ok: bool,
+) -> dict[str, int]:
+    try:
+        return maybe_send_cutoff_alerts(conn, now_ms=now_ms, send=send, sync_ok=sync_ok)
+    except Exception:  # noqa: BLE001
+        logger.exception("assist quick cutoff failed")
+        return {}
+
+
+def _merge_quick_cutoff(payload: dict[str, Any], counts: dict[str, int]) -> None:
+    if counts:
+        payload["quick_cutoff"] = counts
+
+
 def run_assist_watch(
     conn: Any,
     *,
@@ -1245,9 +1265,15 @@ def run_assist_watch(
     else:
         _log_decision(decision="watch_only", reason="assist_disabled")
 
-    client = futures if futures is not None else build_futures_client()
+    try:
+        client = futures if futures is not None else build_futures_client()
+    except Exception:
+        _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=False)
+        raise
+
     if client is None:
-        return _strip_secrets(
+        cutoff = _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=False)
+        out = _strip_secrets(
             {
                 "ok": False,
                 "error": "no_binance_auth",
@@ -1256,11 +1282,19 @@ def run_assist_watch(
                 "assist_enabled": assist_enabled,
             }
         )
+        _merge_quick_cutoff(out, cutoff)
+        return out
 
     try:
         client.assert_key_safe()
     except FuturesKeyUnsafeError as exc:
-        return _strip_secrets(_alert_key_unsafe(conn, send=send_fn, detail=str(exc), now=ts))
+        cutoff = _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=False)
+        out = _strip_secrets(_alert_key_unsafe(conn, send=send_fn, detail=str(exc), now=ts))
+        _merge_quick_cutoff(out, cutoff)
+        return out
+    except Exception:
+        cutoff = _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=False)
+        raise
 
     try:
         client.usdt_wallet_balance()
@@ -1271,15 +1305,24 @@ def run_assist_watch(
             orders = [*client.open_orders(), *client.open_algo_orders()]
         recovered = _handle_futures_ok(conn, send=send_fn)
     except FuturesPermissionError as exc:
-        return _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
+        cutoff = _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=False)
+        out = _strip_secrets(_alert_permission(conn, send=send_fn, detail=str(exc), now=ts))
+        _merge_quick_cutoff(out, cutoff)
+        return out
     except Exception as exc:  # noqa: BLE001
-        return _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
+        cutoff = _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=False)
+        out = _strip_secrets(_handle_futures_down(conn, now=ts, send=send_fn, error=type(exc).__name__))
+        _merge_quick_cutoff(out, cutoff)
+        return out
 
     quick_info: dict[str, Any] = {}
+    quick_sync_ok = True
     try:
         quick_info = sync_quick_trades(conn, client, now_ms=ts, send=send_fn) or {}
     except Exception:  # noqa: BLE001 — quick sync must not stop advice, journal, or pauses
         logger.exception("assist quick sync failed")
+        quick_sync_ok = False
+    cutoff_after_sync = _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=quick_sync_ok)
     quick = quick_symbols(conn)
 
     # Pause may engage here; watch still emits advice for open positions.
@@ -1358,4 +1401,5 @@ def run_assist_watch(
     }
     if quick_info:
         result["quick"] = quick_info
+    _merge_quick_cutoff(result, cutoff_after_sync)
     return _strip_secrets(result)

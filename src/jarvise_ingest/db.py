@@ -788,6 +788,12 @@ def _migrate_assist_quick_p1a(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_quick_card", "size_mode", "TEXT")
 
 
+def _migrate_assist_quick_p1b(conn: sqlite3.Connection) -> None:
+    """Quick P1b: idempotent cutoff notice day on trades and registrations."""
+    _add_column_if_missing(conn, "assist_quick_trade", "cutoff_notice_day", "TEXT")
+    _add_column_if_missing(conn, "assist_quick_registration", "cutoff_notice_day", "TEXT")
+
+
 def _migrate_assist_income_status(conn: sqlite3.Connection) -> None:
     """Income completeness on closed real trades. Nullable. Does not rewrite existing rows.
 
@@ -2057,6 +2063,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (35, "assist_quick_m1a1", _migrate_assist_quick_m1a1, True),
     (36, "assist_quick_p1a", _migrate_assist_quick_p1a, True),
     (37, "partner_ledger_owner_flows", _migrate_partner_ledger_owner_flows, False),
+    (38, "assist_quick_p1b", _migrate_assist_quick_p1b, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

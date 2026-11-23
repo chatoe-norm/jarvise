@@ -465,7 +465,7 @@ def test_migration_34_adds_quick_card(tmp_path: Any) -> None:
     conn.commit()
     conn.close()
     conn = open_db(path)
-    assert schema_version(conn) == SCHEMA_VERSION == 37
+    assert schema_version(conn) == SCHEMA_VERSION == 38
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='assist_quick_card'"
     ).fetchone()
@@ -476,7 +476,7 @@ def test_migration_34_adds_quick_card(tmp_path: Any) -> None:
     ver1 = schema_version(conn)
     conn.close()
     conn2 = open_db(path)
-    assert schema_version(conn2) == ver1 == 37
+    assert schema_version(conn2) == ver1 == 38
     conn2.close()
 
 

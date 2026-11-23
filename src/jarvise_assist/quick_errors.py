@@ -398,6 +398,10 @@ def e_draft_stop_pct_range(pct_s: str) -> str:
     return f"❌ stop {pct_s}% ต้องมากกว่า 0 และน้อยกว่า 20%"
 
 
+def e_cutoff_block(*, minutes: int) -> str:
+    return f"❌ หลัง 23:30 ไม่ลงทะเบียน quick ใหม่ · cutoff 00:00 อีก {int(minutes)} นาที · 👉 เริ่มใหม่ได้หลัง 00:00"
+
+
 def e_reg(code: str) -> str:
     if code == "qty_non_positive":
         return "❌ ขนาดไม้เป็น 0 — ยังไม่ได้ลงทะเบียน · 👉 กด 🔄 อัปเดตราคา"
