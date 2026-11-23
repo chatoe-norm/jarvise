@@ -337,17 +337,16 @@ def e_stop_side(side: str, stop: Decimal, mark: Decimal, tick: Decimal) -> str:
         mark_s = fmt_price(mark)
     else:
         mark_s = mark_tick_s
-    hint_mark_s = mark_s
     if str(side).lower() == "short":
         rel = "ต่ำกว่า" if stop < mark else "เท่ากับ"
         return (
             f"❌ SHORT ต้องตั้ง stop เหนือราคา — stop {stop_s} {rel} mark {mark_s} · "
-            f"👉 ใส่ราคา > {hint_mark_s} หรือเป็น % เช่น 0.4%"
+            f"👉 ใส่ราคา > {mark_s} หรือเป็น % เช่น 0.4%"
         )
     rel = "สูงกว่า" if stop > mark else "เท่ากับ"
     return (
         f"❌ LONG ต้องตั้ง stop ใต้ราคา — stop {stop_s} {rel} mark {mark_s} · "
-        f"👉 ใส่ราคา < {hint_mark_s} หรือเป็น % เช่น 0.4%"
+        f"👉 ใส่ราคา < {mark_s} หรือเป็น % เช่น 0.4%"
     )
 
 

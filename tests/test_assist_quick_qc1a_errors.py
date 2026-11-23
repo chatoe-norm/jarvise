@@ -734,6 +734,70 @@ def test_g14_draft_numeric_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     conn.close()
 
 
+def test_draft_stop_far_overflow_and_send_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_trade_client(monkeypatch)
+
+    def _reject_price(
+        conn: Any,
+        *,
+        token: str,
+        fake: QuickFake,
+    ) -> None:
+        sent, send = _sent()
+        out = handle_quick_draft_text(
+            conn,
+            token,
+            futures=fake,
+            send=send,
+            edit=lambda *_a, **_k: True,
+            now_ms=NOW,
+        )
+        assert out == {"handled": True, "rejected": True}
+        assert len(sent) == 1
+        assert sent[0]["text"] == DRAFT_STOP_HUGE_FAR
+        _no_codes(sent[0]["text"])
+        row = conn.execute("SELECT stop_kind, stop_value FROM assist_quick_card").fetchone()
+        assert row[0] is None and row[1] is None
+
+    conn = _conn(tmp_path, "draft-ovf.db")
+    _draft(conn, status="pick_stop", symbol="BTCUSDT")
+    for token in ("1e1000000", "1E+9999999"):
+        _reject_price(conn, token=token, fake=_fake())
+        conn.execute("UPDATE assist_quick_card SET stop_kind=NULL, stop_value=NULL WHERE id='draft1'")
+        conn.commit()
+
+    for mark in (Decimal("1.5"), Decimal("0.001")):
+        conn.execute("DELETE FROM assist_quick_card")
+        _draft(conn, status="pick_stop", symbol="BTCUSDT")
+        _reject_price(conn, token="1e999999", fake=_fake(marks={"BTCUSDT": mark}))
+    conn.close()
+
+    conn_fail = _conn(tmp_path, "draft-send.db")
+    _draft(conn_fail, status="pick_stop", symbol="BTCUSDT")
+
+    def boom(_t: str, **_kw: Any) -> int:
+        raise RuntimeError("send failed")
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        handle_quick_draft_text(
+            conn_fail,
+            "130",
+            futures=_fake(
+                marks={"BTCUSDT": Decimal("100")},
+                ticks={"BTCUSDT": Decimal("0.01")},
+                steps={"BTCUSDT": Decimal("0.001")},
+                min_notional={"BTCUSDT": Decimal("1")},
+            ),
+            send=boom,
+            edit=lambda *_a, **_k: True,
+            now_ms=NOW,
+        )
+    row = conn_fail.execute("SELECT status, stop_kind, stop_value FROM assist_quick_card").fetchone()
+    assert row["status"] == "pick_stop"
+    assert row["stop_kind"] is None and row["stop_value"] is None
+    conn_fail.close()
+
+
 def test_g15_g16_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_trade_client(monkeypatch)
     conn = _conn(tmp_path, "g15.db")
@@ -795,21 +859,25 @@ def test_g18_replay_skips_stop_far(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     card_id = str(row["id"])
     fake.marks["BTCUSDT"] = Decimal("40000")
 
-    sent_rf, answers_rf, out_rf, _edits = _run_qk(conn, f"qk:rf:{card_id}", fake, now_ms=NOW + 1000)
+    sent_rf, answers_rf, out_rf, edits_rf = _run_qk(conn, f"qk:rf:{card_id}", fake, now_ms=NOW + 1000)
     assert out_rf.get("reason") != "stop_far"
     for msg in sent_rf:
         assert "stop_far" not in msg["text"]
         assert msg["text"] != G9
         _no_codes(msg["text"])
+    for edit in edits_rf:
+        _no_codes(edit["text"])
     for toast in answers_rf:
         if toast:
             assert len(toast) <= 200
 
-    sent_rg, answers_rg, out_rg, _edits_rg = _run_qk(conn, f"qk:rg:{card_id}", fake, now_ms=NOW + 2000)
+    sent_rg, answers_rg, out_rg, edits_rg = _run_qk(conn, f"qk:rg:{card_id}", fake, now_ms=NOW + 2000)
     assert out_rg.get("reason") != "stop_far"
     for msg in sent_rg:
         assert "stop ห่าง" not in msg["text"] or "เกิน 20%" not in msg["text"]
         _no_codes(msg["text"])
+    for edit in edits_rg:
+        _no_codes(edit["text"])
     for toast in answers_rg:
         if toast:
             assert len(toast) <= 200

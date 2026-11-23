@@ -7,7 +7,7 @@ import re
 import secrets
 from collections.abc import Callable
 from datetime import timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, Overflow
 from typing import Any
 
 from jarvise_assist.explore import normalize_explore_symbol
@@ -1082,16 +1082,23 @@ def handle_quick_draft_text(
                 send(e_draft_stop_token(token))
                 return {"handled": True, "rejected": True}
             return None
+        far_pct: Decimal | None = None
         if futures is not None:
             try:
                 mark = Decimal(str(futures.mark_price(sym)))
                 if mark > 0:
-                    ratio = abs(price - mark) / mark
+                    try:
+                        ratio = abs(price - mark) / mark
+                        dist_pct = ratio * Decimal("100")
+                    except Overflow:
+                        ratio = dist_pct = Decimal("Infinity")
                     if ratio > Decimal("0.2") and not token.endswith("%"):
-                        send(e_stop_far(ratio * Decimal("100")))
-                        return {"handled": True, "rejected": True}
+                        far_pct = dist_pct
             except Exception:  # noqa: BLE001
                 pass
+        if far_pct is not None:
+            send(e_stop_far(far_pct))
+            return {"handled": True, "rejected": True}
         cur = conn.execute(
             """
             UPDATE assist_quick_card
