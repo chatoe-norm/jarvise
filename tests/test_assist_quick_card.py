@@ -47,6 +47,7 @@ from jarvise_assist.quick_card import (
     main_week_loss_pause_until,
     parse_quick_command,
 )
+from jarvise_assist.quick_errors import e_parse_count, e_parse_stop
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN, quick_symbols
 from jarvise_assist.store import (
     ensure_settings,
@@ -207,15 +208,32 @@ def test_parse_quick_command() -> None:
         "side": "long",
         "stop": Decimal("67000"),
     }
-    for bad in (
-        "q btc",
-        "q btc up 1",
-        "q btc long abc",
-        "q btc long 0",
-        "q btc long 25%",
-        "q btc long 1 2",
-    ):
-        assert parse_quick_command(bad) == {"error": "usage"}
+    assert parse_quick_command("q btc") == {"error": "usage", "field": "count", "count": 1}
+    assert parse_quick_command("q btc up 1") == {
+        "error": "usage",
+        "field": "side",
+        "token": "up",
+        "count": 3,
+    }
+    assert parse_quick_command("q btc long abc") == {
+        "error": "usage",
+        "field": "stop",
+        "token": "abc",
+        "count": 3,
+    }
+    assert parse_quick_command("q btc long 0") == {
+        "error": "usage",
+        "field": "stop",
+        "token": "0",
+        "count": 3,
+    }
+    assert parse_quick_command("q btc long 25%") == {
+        "error": "usage",
+        "field": "stop",
+        "token": "25%",
+        "count": 3,
+    }
+    assert parse_quick_command("q btc long 1 2") == {"error": "usage", "field": "count", "count": 4}
     for none in (
         "hello",
         "q",
@@ -386,7 +404,7 @@ def test_usage_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         now_ms_value=NOW,
     )
     assert len(sent) == 1
-    assert sent[0]["text"] == QUICK_USAGE
+    assert sent[0]["text"] == e_parse_count(1) + "\n" + QUICK_USAGE
     conn.close()
 
 
@@ -796,7 +814,10 @@ def test_refusal_margin_cap_available_300(tmp_path: Path, monkeypatch: pytest.Mo
         fake,
         reason="margin_cap",
         monkeypatch=monkeypatch,
-        text_has=REFUSAL["margin_cap"],
+        text_has=(
+            "❌ margin ไม่พอ — ขนาดตาม risk 1666.6 SUI ≈ 3333.2 USDT "
+            "ต้องใช้ ≈ 666.64 USDT ที่ 5x มี 300 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+        ),
     )
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
     conn.close()
@@ -818,7 +839,11 @@ def test_refusal_leverage_cap_stop_19984(tmp_path: Path, monkeypatch: pytest.Mon
     )
     assert card["ok"] is False
     assert card["reason"] == "leverage_cap"
-    assert card["text"] == REFUSAL["leverage_cap"]
+    assert card["text"] == (
+        "❌ stop ห่าง 0.08% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
+        "ค่าธรรมเนียมไป-กลับ ≈ 1.50R · "
+        "👉 ขยาย stop ≥ 0.20% (≤ 1.9960) หรือลดความเสี่ยงในเมนู ⚡ Quick"
+    )
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
     conn.close()
 
@@ -866,7 +891,10 @@ def test_qr_tap_refuses_when_available_drops_to_300(tmp_path: Path, monkeypatch:
     )
     assert len(answers) == 1
     assert len(sent) == 1
-    assert sent[0]["text"] == REFUSAL["margin_cap"]
+    assert sent[0]["text"] == (
+        "❌ margin ไม่พอ — ขนาดตาม risk 1666.6 SUI ≈ 3333.2 USDT "
+        "ต้องใช้ ≈ 666.64 USDT ที่ 5x มี 300 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+    )
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
     conn.close()
 
@@ -937,15 +965,20 @@ def test_fee_ge_k_no_profit_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 def test_parse_rejects_nan_inf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """1h: nan/inf stop tokens → usage; process_update sends QUICK_USAGE once."""
-    for bad in (
-        "q btc long nan",
-        "q btc long snan",
-        "q btc long inf",
-        "q btc long -inf",
-        "q btc short nan%",
-        "q btc short inf%",
+    for bad, token in (
+        ("q btc long nan", "nan"),
+        ("q btc long snan", "snan"),
+        ("q btc long inf", "inf"),
+        ("q btc long -inf", "-inf"),
+        ("q btc short nan%", "nan%"),
+        ("q btc short inf%", "inf%"),
     ):
-        assert parse_quick_command(bad) == {"error": "usage"}
+        assert parse_quick_command(bad) == {
+            "error": "usage",
+            "field": "stop",
+            "token": token,
+            "count": 3,
+        }
 
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
@@ -967,9 +1000,10 @@ def test_parse_rejects_nan_inf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
             futures=_happy_fake(),
             now_ms_value=NOW,
         )
+        stop_token = bad.split()[-1]
         assert out["handled"] is True
         assert len(sent) == 1
-        assert sent[0]["text"] == QUICK_USAGE
+        assert sent[0]["text"] == e_parse_stop(stop_token) + "\n" + QUICK_USAGE
     conn.close()
 
 
@@ -1003,7 +1037,12 @@ def test_qr_bad_stop_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_parse_rejects_huge_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Leftover A: 1e999999 → usage / bad_data; no Overflow; one send each."""
     for text in ("q btc long 1e999999", "q btc short 1e999999"):
-        assert parse_quick_command(text) == {"error": "usage"}
+        assert parse_quick_command(text) == {
+            "error": "usage",
+            "field": "stop",
+            "token": "1e999999",
+            "count": 3,
+        }
 
     _forbid_trade_client(monkeypatch)
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
@@ -1020,7 +1059,7 @@ def test_parse_rejects_huge_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         )
         assert out["handled"] is True
         assert len(sent) == 1
-        assert sent[0]["text"] == QUICK_USAGE
+        assert sent[0]["text"] == e_parse_stop("1e999999") + "\n" + QUICK_USAGE
 
     sent_qr, send_qr = _send_capture()
     answers, answer = _answers()

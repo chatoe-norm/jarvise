@@ -14,9 +14,10 @@ import re
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any
 
+from jarvise_assist import quick_errors
 from jarvise_assist.explore import contract_rejection, normalize_explore_symbol
 from jarvise_assist.messages import (
     STOP_INSTRUCTION,
@@ -30,6 +31,7 @@ from jarvise_assist.order_lines import format_closing_order_line
 from jarvise_assist.pause import format_paused_until, main_week_loss_pause_until
 from jarvise_assist.quick import (
     QUICK_USAGE,
+    RISK_ALLOWED,
     get_quick_settings,
 )
 from jarvise_assist.quick_minlot import (
@@ -46,6 +48,7 @@ from jarvise_assist.sizing import (
     SizedSignal,
     assign_shared_leverage,
     below_min_notional,
+    floor_to_step,
     portfolio_risk_cap_pct,
     round_level_to_tick,
     size_signal,
@@ -112,7 +115,11 @@ def _refusal_below_min() -> str:
 
 
 def _refusal_size_failed() -> str:
-    return "คำนวณขนาดไม้ไม่ได้"
+    return "❌ คำนวณขนาดไม่ได้ — ตรวจยอดใน Futures"
+
+
+def _refusal_stop_far() -> str:
+    return "❌ stop ห่างเกิน 20% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 
 
 def _refusal_quick_cap() -> str:
@@ -157,6 +164,7 @@ REFUSAL: dict[str, str] = {
     "leverage_cap": _refusal_leverage_cap(),
     "card_expired": _refusal_card_expired(),
     "bad_data": _refusal_bad_data(),
+    "stop_far": _refusal_stop_far(),
 }
 
 
@@ -167,54 +175,48 @@ def parse_quick_command(text: str) -> dict[str, Any] | None:
     parts = (text or "").strip().split()
     # q / quick + 3 tokens
     if len(parts) < 2:
-        return {"error": "usage"}
+        return {"error": "usage", "field": "count", "count": max(0, len(parts) - 1)}
     head = parts[0].lower()
     if head not in {"q", "quick"}:
         return None
     tokens = parts[1:]
     if len(tokens) != 3:
-        return {"error": "usage"}
+        return {"error": "usage", "field": "count", "count": len(tokens)}
     raw_sym, raw_side, raw_stop = tokens
     sym = raw_sym.upper().replace("/", "").replace("-", "").replace(",", "")
     if not sym.endswith("USDT"):
         sym = f"{sym}USDT"
     symbol = normalize_explore_symbol(sym)
     if symbol is None:
-        return {"error": "usage"}
+        return {"error": "usage", "field": "symbol", "token": raw_sym, "count": 3}
     side_l = raw_side.lower()
     if side_l in {"long", "l", "buy"}:
         side = "long"
     elif side_l in {"short", "s", "sell"}:
         side = "short"
     else:
-        return {"error": "usage"}
+        return {"error": "usage", "field": "side", "token": raw_side, "count": 3}
+    # token keeps the original stop spelling, before the comma strip below.
     stop_raw = raw_stop.replace(",", "")
+    stop_err = {"error": "usage", "field": "stop", "token": raw_stop, "count": 3}
     if stop_raw.endswith("%"):
         try:
             pct = Decimal(stop_raw[:-1])
         except Exception:  # noqa: BLE001
-            return {"error": "usage"}
-        if not pct.is_finite():
-            return {"error": "usage"}
-        if pct <= 0 or pct >= 20:
-            return {"error": "usage"}
+            return stop_err
+        if not pct.is_finite() or pct <= 0 or pct >= 20:
+            return stop_err
         return {"symbol": symbol, "side": side, "stop_pct": pct}
     try:
         price = Decimal(stop_raw)
     except Exception:  # noqa: BLE001
-        return {"error": "usage"}
-    if not price.is_finite():
-        return {"error": "usage"}
-    if price <= 0:
-        return {"error": "usage"}
-    if price >= Decimal("1e9"):
-        return {"error": "usage"}
+        return stop_err
+    if not price.is_finite() or price <= 0 or price >= Decimal("1e9"):
+        return stop_err
     return {"symbol": symbol, "side": side, "stop": price}
 
 
-def _fmt_usdt(value: Decimal) -> str:
-    """USDT display: half-up to 0.01, then fmt_price (strip trailing zeros)."""
-    return fmt_price(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+_fmt_usdt = quick_errors.fmt_usdt
 
 
 def _fmt_r_abs(value: Decimal) -> str:
@@ -277,8 +279,12 @@ def _hhmm(ms: int) -> str:
     return local.strftime("%H:%M")
 
 
+_GENERIC_FAIL = "❌ ทำรายการไม่ได้ — ดูสถานะในเมนู ⚡ Quick"
+
+
 def _fail(reason: str, text: str | None = None) -> dict[str, Any]:
-    return {"ok": False, "reason": reason, "text": text or REFUSAL.get(reason, reason)}
+    shown = text or REFUSAL.get(reason) or _GENERIC_FAIL
+    return {"ok": False, "reason": reason, "text": shown}
 
 
 def _sized_stub(
@@ -347,21 +353,12 @@ def _format_size_offer_refusal(
     cap_pct: Decimal,
 ) -> str:
     reason = result.reason or ""
-    cap_usdt = wallet_balance * cap_pct / Decimal("100")
-    cap_s = _fmt_usdt(cap_usdt)
-    wallet_s = fmt_price(wallet_balance)
     if reason == "leverage_over_5x" and result.candidate is None:
-        return "❌ margin ไม่พอ — มีให้ใช้ 0 USDT ใน Futures · 👉 โอน USDT เข้า Futures หรือปิดไม้อื่น"
+        return quick_errors.e_no_available()
     cand = result.candidate
     if cand is None:
         return REFUSAL["size_failed"]
-    risk_total = _fmt_usdt(cand.risk_usdt + cand.fee_usdt)
-    risk_price = _fmt_usdt(cand.risk_usdt)
-    fee_s = _fmt_usdt(cand.fee_usdt)
-    qty_s = fmt_qty(cand.qty)
     if reason == "risk_over_1pct" and cand.kind == "min_lot":
-        pct = fmt_pct(cand.real_risk_pct, mode="failed_limit", limit=cap_pct)
-        stop_pct = fmt_pct(abs(stop - mark) / mark * Decimal("100"))
         _dist, stop_max_pct, stop_max_price = min_lot_stop_max(
             candidate=cand,
             mark=mark,
@@ -370,32 +367,37 @@ def _format_size_offer_refusal(
             tick=tick,
             max_real_risk_pct=cap_pct,
         )
-        tail = (
-            f"👉 ไม้ขั้นต่ำรับ stop ได้ไกลสุด ≈ {fmt_pct(stop_max_pct, mode='floor')}% ({_fmt_price_tick(stop_max_price, tick)})"
-            if stop_max_price is not None
-            else "👉 ขั้นต่ำของสัญญาใหญ่เกินสำหรับ wallet นี้"
-        )
-        return (
-            f"❌ ไม่เปิด — ขั้นต่ำ {qty_s} {base} เสี่ยง {risk_total} USDT ({pct}%) "
-            f"(ราคา {risk_price} + ค่าธรรมเนียม {fee_s}) เกินเพดาน {cap_s} USDT ({fmt_price(cap_pct)}% ของ wallet {wallet_s}) "
-            f"· stop ห่าง {stop_pct}% กว้างเกินไปสำหรับ Quick · {tail}"
+        return quick_errors.e_minlot(
+            qty=cand.qty,
+            base=base,
+            risk_usdt=cand.risk_usdt,
+            fee_usdt=cand.fee_usdt,
+            real_risk_pct=cand.real_risk_pct,
+            cap_pct=cap_pct,
+            wallet_balance=wallet_balance,
+            mark=mark,
+            stop=stop,
+            stop_max_pct=stop_max_pct,
+            stop_max_price=stop_max_price,
+            tick=tick,
         )
     if reason == "risk_over_1pct" and cand.kind == "fit_margin":
-        pct = fmt_pct(cand.real_risk_pct, mode="failed_limit", limit=cap_pct)
-        return (
-            f"❌ ไม่เปิด — margin ไม่พอสำหรับขนาดตาม risk · ขนาดที่ margin พอ {qty_s} {base} "
-            f"เสี่ยง {risk_total} USDT ({pct}%) (ราคา {risk_price} + ค่าธรรมเนียม {fee_s}) "
-            f"เกินเพดาน {cap_s} USDT ({fmt_price(cap_pct)}% ของ wallet {wallet_s}) · "
-            f"👉 ลดความเสี่ยงในเมนู ⚡ Quick หรือโอน USDT เข้า Futures"
+        return quick_errors.e_fit_over(
+            qty=cand.qty,
+            base=base,
+            risk_usdt=cand.risk_usdt,
+            fee_usdt=cand.fee_usdt,
+            real_risk_pct=cand.real_risk_pct,
+            cap_pct=cap_pct,
+            wallet_balance=wallet_balance,
         )
-    if reason == "leverage_over_5x" and cand is not None and result.need_margin is not None:
-        need_s = _fmt_usdt(result.need_margin)
-        avail_s = _fmt_usdt(available)
-        q_fit_s = fmt_qty(result.q_fit or Decimal("0"))
-        q_min_s = fmt_qty(result.q_min or Decimal("0"))
-        return (
-            f"❌ margin ไม่พอแม้ใช้ 5x — ต้องใช้ ≈ {need_s} USDT (รวมค่าธรรมเนียม + กันไว้ 2%) มี {avail_s} USDT · "
-            f"ขนาดใหญ่สุดที่พอ {q_fit_s} < ขั้นต่ำ {q_min_s} {base} · 👉 โอนเข้า Futures หรือปิดไม้อื่น"
+    if reason == "leverage_over_5x" and result.need_margin is not None:
+        return quick_errors.e_margin_offer(
+            need_margin=result.need_margin,
+            available=available,
+            q_fit=result.q_fit or Decimal("0"),
+            q_min=result.q_min or Decimal("0"),
+            base=base,
         )
     return REFUSAL["size_failed"]
 
@@ -461,7 +463,124 @@ def _try_quick_size_offer(
             cap_pct=cap_pct,
         )
         return sized, "risk", _fail(reason, text), None
-    return sized, "risk", _fail("size_failed"), None
+    return (
+        sized,
+        "risk",
+        _fail(
+            "size_failed",
+            quick_errors.e_size_failed(quick_errors.fmt_usdt(balance), fmt_price(risk_pct)),
+        ),
+        None,
+    )
+
+
+def _base_asset(sym: str) -> str:
+    return sym[:-4] if sym.endswith("USDT") else sym
+
+
+def _quick_open_text(conn: Any, sym: str, *, now_ms: int) -> str:
+    reg = conn.execute(
+        """
+        SELECT expires_at_ms FROM assist_quick_registration
+        WHERE status='open' AND UPPER(symbol)=?
+        """,
+        (sym,),
+    ).fetchone()
+    if reg is not None:
+        raw_exp = reg[0]
+        if raw_exp is None or int(now_ms) >= int(raw_exp):
+            return quick_errors.e_quick_open_reg_grace(sym)
+        return quick_errors.e_quick_open_reg(sym, _hhmm(int(raw_exp)))
+    trade = conn.execute(
+        """
+        SELECT entry_avg FROM assist_quick_trade
+        WHERE status='open' AND UPPER(symbol)=?
+        """,
+        (sym,),
+    ).fetchone()
+    if trade is not None:
+        return quick_errors.e_quick_open_trade(sym, fmt_price(Decimal(str(trade[0] or 0))))
+    return REFUSAL["quick_open"]
+
+
+def _stop_tight_text(
+    *,
+    side: str,
+    mark: Decimal,
+    stop: Decimal,
+    tick: Decimal,
+    risk_pct: Decimal,
+) -> str:
+    dist = abs(stop - mark)
+    stop_pct = (dist / mark * Decimal("100")) if mark > 0 else Decimal("0")
+    fee_r = (Decimal("0.0012") * mark / dist) if dist > 0 else Decimal("0")
+    min_stop_pct = risk_pct / Decimal("5")
+    price_s = quick_errors.min_stop_price_s(mark=mark, tick=tick, side=side, min_stop_pct=min_stop_pct)
+    return quick_errors.e_stop_tight(stop_pct, risk_pct, fee_r, min_stop_pct, price_s, side)
+
+
+def _margin_legacy_text(*, sized: SizedSignal, available: Decimal, base: str) -> str:
+    need = sized.notional / Decimal("5")
+    return quick_errors.e_margin_legacy(
+        fmt_qty(sized.qty),
+        base,
+        quick_errors.fmt_usdt(sized.notional),
+        quick_errors.fmt_usdt(need),
+        quick_errors.fmt_usdt(available),
+    )
+
+
+def _below_min_legacy_text(
+    *,
+    sized: SizedSignal,
+    mark: Decimal,
+    filters: Any,
+    step: Decimal,
+    base: str,
+) -> str:
+    min_qty = Decimal(str(filters.min_qty))
+    min_notional = Decimal(str(filters.min_notional))
+    qmin_s = quick_errors.format_qmin(mark=mark, min_qty=min_qty, min_notional=min_notional, step=step)
+    return quick_errors.e_below_min_legacy(
+        fmt_qty(sized.qty),
+        base,
+        quick_errors.fmt_usdt(sized.notional),
+        qmin_s,
+        quick_errors.fmt_usdt(min_notional),
+    )
+
+
+def _numbered_size_failed(
+    *,
+    allow_offer: bool,
+    balance: Decimal,
+    risk_pct: Decimal,
+    mark: Decimal,
+    stop_level: Decimal,
+    step: Decimal,
+    tick: Decimal,
+    base: str,
+) -> str:
+    generic = quick_errors.e_size_failed(quick_errors.fmt_usdt(balance), fmt_price(risk_pct))
+    if allow_offer or balance <= 0 or risk_pct <= 0 or mark <= 0 or step <= 0:
+        return generic
+    dist = abs(mark - stop_level)
+    if dist <= 0:
+        return generic
+    budget = balance * (risk_pct / Decimal("100"))
+    raw_qty = budget / dist
+    if floor_to_step(raw_qty, step) > 0:
+        return generic
+    raw_5 = raw_qty.quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
+    dist_s = _fmt_price_tick(dist, tick) if tick > 0 else fmt_price(dist)
+    return quick_errors.e_size_zero_legacy(
+        quick_errors.fmt_usdt(budget),
+        dist_s,
+        fmt_pct(dist / mark * Decimal("100")),
+        fmt_qty(raw_5),
+        fmt_qty(step),
+        base,
+    )
 
 
 def build_quick_card(
@@ -474,6 +593,7 @@ def build_quick_card(
     stop_pct: Decimal | None = None,
     now_ms: int,
     allow_offer: bool = False,
+    enforce_stop_far: bool = False,
 ) -> dict[str, Any]:
     """Build the on-demand sizing card. Read-only."""
     sym = str(symbol).upper()
@@ -484,7 +604,7 @@ def build_quick_card(
         return _fail("week_loss_pause", _refusal_week_loss(week_until, now_ms=now_ms))
 
     if sym in quick_symbols(conn):
-        return _fail("quick_open")
+        return _fail("quick_open", _quick_open_text(conn, sym, now_ms=now_ms))
 
     watch = conn.execute(
         """
@@ -545,12 +665,17 @@ def build_quick_card(
         return _fail("stop_wrong_side")
 
     stop_level = round_level_to_tick(raw_stop, tick, side=side_l, kind="stop")
-    if stop_level <= 0:
-        return _fail("stop_wrong_side")
-    if side_l == "long" and stop_level >= mark:
-        return _fail("stop_wrong_side")
-    if side_l == "short" and stop_level <= mark:
-        return _fail("stop_wrong_side")
+    if (
+        stop_level <= 0
+        or (side_l == "long" and stop_level >= mark)
+        or (side_l == "short" and stop_level <= mark)
+    ):
+        return _fail("stop_wrong_side", quick_errors.e_stop_side(side_l, stop_level, mark, tick))
+    if enforce_stop_far and stop_pct is None and stop is not None and mark > 0:
+        raw_price = Decimal(str(stop))
+        if abs(raw_price - mark) / mark > Decimal("0.20"):
+            dist_pct = abs(raw_price - mark) / mark * Decimal("100")
+            return _fail("stop_far", quick_errors.e_stop_far(dist_pct))
 
     qs = get_quick_settings(conn)
     risk_pct = Decimal(str(qs["risk_pct"]))
@@ -586,9 +711,24 @@ def build_quick_card(
         if offer_fail is not None:
             return offer_fail
         if sized is None:
-            return _fail("size_failed")
+            return _fail(
+                "size_failed",
+                _numbered_size_failed(
+                    allow_offer=allow_offer,
+                    balance=balance,
+                    risk_pct=risk_pct,
+                    mark=mark,
+                    stop_level=stop_level,
+                    step=step,
+                    tick=tick,
+                    base=_base_asset(sym),
+                ),
+            )
     elif "leverage_cap" in sized.reduce_reasons:
-        return _fail("leverage_cap")
+        return _fail(
+            "leverage_cap",
+            _stop_tight_text(side=side_l, mark=mark, stop=stop_level, tick=tick, risk_pct=risk_pct),
+        )
     else:
         if below_min_notional(
             qty=sized.qty,
@@ -597,7 +737,16 @@ def build_quick_card(
             min_notional=Decimal(str(filters.min_notional)),
         ):
             if not allow_offer:
-                return _fail("below_min_notional")
+                return _fail(
+                    "below_min_notional",
+                    _below_min_legacy_text(
+                        sized=sized,
+                        mark=mark,
+                        filters=filters,
+                        step=step,
+                        base=_base_asset(sym),
+                    ),
+                )
             sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
                 allow_offer=True,
                 sym=sym,
@@ -616,7 +765,19 @@ def build_quick_card(
             if offer_fail is not None:
                 return offer_fail
             if sized is None:
-                return _fail("size_failed")
+                return _fail(
+                    "size_failed",
+                    _numbered_size_failed(
+                        allow_offer=allow_offer,
+                        balance=balance,
+                        risk_pct=risk_pct,
+                        mark=mark,
+                        stop_level=stop_level,
+                        step=step,
+                        tick=tick,
+                        base=_base_asset(sym),
+                    ),
+                )
 
         if size_mode == "risk":
             assert sized is not None
@@ -627,7 +788,10 @@ def build_quick_card(
             )
             if not survivors or "margin_cap" in survivors[0].sized.reduce_reasons:
                 if not allow_offer:
-                    return _fail("margin_cap")
+                    return _fail(
+                        "margin_cap",
+                        _margin_legacy_text(sized=sized, available=available, base=_base_asset(sym)),
+                    )
                 sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
                     allow_offer=True,
                     sym=sym,
@@ -676,7 +840,16 @@ def build_quick_card(
                     min_notional=Decimal(str(filters.min_notional)),
                 ):
                     if not allow_offer:
-                        return _fail("below_min_notional")
+                        return _fail(
+                            "below_min_notional",
+                            _below_min_legacy_text(
+                                sized=sized,
+                                mark=mark,
+                                filters=filters,
+                                step=step,
+                                base=_base_asset(sym),
+                            ),
+                        )
                     sized, size_mode, offer_fail, offer_bound = _try_quick_size_offer(
                         allow_offer=True,
                         sym=sym,
@@ -696,7 +869,19 @@ def build_quick_card(
                         return offer_fail
 
     if sized is None:
-        return _fail("size_failed")
+        return _fail(
+            "size_failed",
+            _numbered_size_failed(
+                allow_offer=allow_offer,
+                balance=balance,
+                risk_pct=risk_pct,
+                mark=mark,
+                stop_level=stop_level,
+                step=step,
+                tick=tick,
+                base=_base_asset(sym),
+            ),
+        )
 
     main_risk_pct = Decimal(str(ensure_settings(conn)["risk_pct"]))
     portfolio_cap_pct = portfolio_risk_cap_pct(main_risk_pct)
@@ -724,10 +909,37 @@ def build_quick_card(
         quick_open += abs(pe - ps) * q
 
     new_risk = sized.loss_at_stop
-    if quick_open + new_risk > balance * (cap_pct / Decimal("100")):
-        return _fail("quick_cap")
+    cap_usdt = balance * (cap_pct / Decimal("100"))
+    if quick_open + new_risk > cap_usdt:
+        preset = quick_errors.suggest_quick_preset(
+            balance=balance,
+            risk_pct=risk_pct,
+            mark=mark,
+            stop=stop_level,
+            step=step,
+            min_qty=Decimal(str(filters.min_qty)),
+            min_notional=Decimal(str(filters.min_notional)),
+            remaining=cap_usdt - quick_open,
+            main_open=main_open,
+            quick_open=quick_open,
+            portfolio_cap_pct=portfolio_cap_pct,
+            risk_allowed=RISK_ALLOWED,
+        )
+        return _fail(
+            "quick_cap",
+            quick_errors.e_quick_cap(
+                cap_pct=cap_pct,
+                balance=balance,
+                open_usdt=quick_open,
+                new_usdt=new_risk,
+                preset=preset,
+            ),
+        )
     if main_open + quick_open + new_risk > balance * (portfolio_cap_pct / Decimal("100")):
-        return _fail("portfolio_cap", _refusal_portfolio_cap(portfolio_cap_pct))
+        return _fail(
+            "portfolio_cap",
+            quick_errors.e_portfolio_cap(portfolio_cap_pct, balance, main_open, quick_open, new_risk),
+        )
 
     if size_mode not in VALID_SIZE_MODES:
         size_mode = "risk"
@@ -915,7 +1127,18 @@ def handle_quick_text(
     if parsed is None:
         return None
     if parsed.get("error") == "usage":
-        send(QUICK_USAGE)
+        field = str(parsed.get("field") or "count")
+        token = str(parsed.get("token") or "")
+        count = int(parsed.get("count") or 0)
+        if field == "side":
+            detail = quick_errors.e_parse_side(token)
+        elif field == "symbol":
+            detail = quick_errors.e_parse_symbol(token)
+        elif field == "stop":
+            detail = quick_errors.e_parse_stop(token)
+        else:
+            detail = quick_errors.e_parse_count(count)
+        send(f"{detail}\n{QUICK_USAGE}")
         return {"handled": True, "kind": "quick_card", "ok": False, "reason": "usage"}
     card_id, card = create_card_from_typed_command(conn, futures, parsed, now_ms=now_ms)
     markup = card.get("reply_markup")

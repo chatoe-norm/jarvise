@@ -978,7 +978,10 @@ def test_card_available_zero_refusal_text(tmp_path: Path, monkeypatch: pytest.Mo
         conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62300"), now_ms=NOW, allow_offer=False
     )
     assert legacy["reason"] == "margin_cap"
-    assert legacy["text"] == "margin ไม่พอ (available balance) — บอทไม่ย่อขนาดให้"
+    assert legacy["text"] == (
+        "❌ margin ไม่พอ — ขนาดตาม risk 0.006 BTC ≈ 372.6 USDT "
+        "ต้องใช้ ≈ 74.52 USDT ที่ 5x มี 0 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+    )
     assert "ลองใหม่" not in "\n".join([offered["text"], legacy["text"]])
     conn.close()
 
@@ -1216,7 +1219,7 @@ def test_card_wallet_zero_maps_no_balance(tmp_path: Path, monkeypatch: pytest.Mo
         conn, fake, symbol="BTCUSDT", side="short", stop=BTC_STOP_SHORT, now_ms=NOW, allow_offer=True
     )
     assert card["reason"] == "size_failed"
-    assert card["text"] == REFUSAL["size_failed"]
+    assert card["text"] == "❌ คำนวณขนาดไม่ได้ — wallet 0 USDT · risk 1% · 👉 ตรวจยอดใน Futures"
     assert "ลองใหม่" not in card["text"]
     pure = size_offer(
         mark=BTC_MARK,
@@ -1426,7 +1429,10 @@ def test_legacy_qr_margin_below_min_same_side_y(tmp_path: Path, monkeypatch: pyt
         allow_offer=False,
     )
     assert card_m["reason"] == "margin_cap"
-    assert card_m["text"] == REFUSAL["margin_cap"]
+    assert card_m["text"] == (
+        "❌ margin ไม่พอ — ขนาดตาม risk 0.0035 BTC ≈ 217.35 USDT "
+        "ต้องใช้ ≈ 43.47 USDT ที่ 5x มี 0.01 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+    )
 
     write_quick_settings(conn, risk_pct=0.25)
     below_fake = QuickFake(
@@ -1448,7 +1454,10 @@ def test_legacy_qr_margin_below_min_same_side_y(tmp_path: Path, monkeypatch: pyt
         allow_offer=False,
     )
     assert card_b["reason"] == "below_min_notional"
-    assert card_b["text"] == REFUSAL["below_min_notional"]
+    assert card_b["text"] == (
+        "❌ ไม้เล็กกว่าขั้นต่ำ — ขนาดตาม risk 1 BTC ≈ 100 USDT "
+        "ต่ำกว่าขั้นต่ำ 3 BTC / 5 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดขั้นต่ำถ้าความเสี่ยงไม่เกินเพดาน"
+    )
 
     write_quick_settings(conn, risk_pct=0.5, cap_pct=10.0)
     _insert_quick_trade(conn, symbol="ETHUSDT", side="long", now_ms=NOW)

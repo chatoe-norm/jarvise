@@ -7,7 +7,7 @@ import re
 import secrets
 from collections.abc import Callable
 from datetime import timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, Overflow
 from typing import Any
 
 from jarvise_assist.explore import normalize_explore_symbol
@@ -21,6 +21,14 @@ from jarvise_assist.quick_card import (
     _fail,
     _hhmm,
     _refusal_week_loss,
+)
+from jarvise_assist.quick_errors import (
+    STOP_STEP_HINT,
+    e_draft_stop_pct_range,
+    e_draft_stop_token,
+    e_reg,
+    e_stop_far,
+    fmt_pct_bounded,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,7 +56,7 @@ MSG_CARD_QUOTE_EXPIRED = "การ์ดหมดอายุ — กด 🔄 �
 MSG_REGISTER_FAILED = "ลงทะเบียนไม่สำเร็จ — ยังไม่ได้ลงทะเบียน · ดูสถานะในเมนู ⚡ Quick"
 MSG_SIZE_CHANGED = "ขนาดเปลี่ยนจากการ์ด — ยังไม่ได้ลงทะเบียน · กด 🔄 อัปเดตราคา"
 MSG_STOP_FAR = "stop ห่างเกิน 20% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
-STOP_STEP_HINT = "เลือก stop หรือพิมพ์ราคา/เปอร์เซ็นต์ (เช่น 67000 หรือ 0.4%)"
+_DRAFT_NUMERIC_TOKEN = re.compile(r"[0-9][0-9.,]*%?")
 
 
 def _new_card_id(conn: Any) -> str:
@@ -97,7 +105,11 @@ def _registration_refusal_text(reason: str) -> str:
     if reason == "same_side_cap":
         return "ไม่ลงทะเบียน — ฝั่งนี้เปิดอยู่ครบเพดานแล้ว (เพดานฝั่งละ 2) · ปิดหรือให้ทะเบียนหมดอายุก่อน"
     mapped = _QUICK_REG_REFUSAL_MAP.get(str(reason), str(reason))
-    return REFUSAL.get(mapped, REFUSAL.get(str(reason), str(reason)))
+    if mapped in REFUSAL:
+        return REFUSAL[mapped]
+    if str(reason) in REFUSAL:
+        return REFUSAL[str(reason)]
+    return e_reg(str(reason))
 
 
 def create_quick_registration_from_card(
@@ -301,6 +313,7 @@ def build_card_for_row(
     row: dict[str, Any],
     *,
     now_ms: int,
+    enforce_stop_far: bool = False,
 ) -> dict[str, Any]:
     from jarvise_assist.quick_card import build_quick_card
 
@@ -316,6 +329,7 @@ def build_card_for_row(
     else:
         return _fail("bad_data")
     kw["allow_offer"] = True
+    kw["enforce_stop_far"] = enforce_stop_far
     return build_quick_card(conn, futures, **kw)
 
 
@@ -1006,6 +1020,7 @@ def handle_quick_draft_text(
                 sym0 = str(draft.get("symbol") or sym)
                 hint = "\n".join(
                     [
+                        e_draft_stop_pct_range(fmt_pct_bounded(pct)),
                         f"⚡ Quick · {sym0} · {_side_label(side)} — {STOP_STEP_HINT}",
                         _mode_tag(),
                     ]
@@ -1056,22 +1071,34 @@ def handle_quick_draft_text(
                 edit=edit,
             )
             return {"handled": True, "quoted": True}
+        price: Decimal | None
         try:
             price = Decimal(token.replace(",", ""))
         except Exception:  # noqa: BLE001
+            price = None
+        numeric_token = _DRAFT_NUMERIC_TOKEN.fullmatch(token) is not None
+        if price is None or not price.is_finite() or price <= 0:
+            if numeric_token:
+                send(e_draft_stop_token(token))
+                return {"handled": True, "rejected": True}
             return None
-        if not price.is_finite() or price <= 0:
-            return None
+        far_pct: Decimal | None = None
         if futures is not None:
             try:
                 mark = Decimal(str(futures.mark_price(sym)))
                 if mark > 0:
-                    ratio = abs(price - mark) / mark
+                    try:
+                        ratio = abs(price - mark) / mark
+                        dist_pct = ratio * Decimal("100")
+                    except Overflow:
+                        ratio = dist_pct = Decimal("Infinity")
                     if ratio > Decimal("0.2") and not token.endswith("%"):
-                        send(MSG_STOP_FAR)
-                        return {"handled": True, "rejected": True}
+                        far_pct = dist_pct
             except Exception:  # noqa: BLE001
                 pass
+        if far_pct is not None:
+            send(e_stop_far(far_pct))
+            return {"handled": True, "rejected": True}
         cur = conn.execute(
             """
             UPDATE assist_quick_card
@@ -1131,7 +1158,7 @@ def create_card_from_typed_command(
         "stop_kind": stop_kind,
         "stop_value": stop_value,
     }
-    card = build_card_for_row(conn, futures, row_stub, now_ms=now_ms)
+    card = build_card_for_row(conn, futures, row_stub, now_ms=now_ms, enforce_stop_far=True)
     if not card.get("ok"):
         return None, card
     card_id = _new_card_id(conn)

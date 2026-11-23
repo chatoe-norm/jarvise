@@ -43,7 +43,6 @@ from jarvise_assist.quick_m1a1 import (
     MSG_ALREADY_REGISTERED,
     MSG_BAD_BUTTON,
     MSG_REGISTER_FAILED,
-    MSG_STOP_FAR,
     STOP_STEP_HINT,
     _quoted_markup,
     _refresh_only_markup,
@@ -905,7 +904,7 @@ def test_stepper_btc_stop_markup_and_stop_far(tmp_path: Any, monkeypatch: pytest
     sent2, send2 = _send_capture()
     out2 = process_update(conn, _msg("0.5"), send=send2, edit=edit_fn, futures=fake, now_ms_value=T2)
     assert out2.get("handled")
-    assert [m["text"] for m in sent2] == [MSG_STOP_FAR]
+    assert [m["text"] for m in sent2] == ["❌ stop ห่าง 100.00% เกิน 20% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"]
     assert (
         conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()["status"]
         == "pick_stop"
@@ -1010,7 +1009,7 @@ def test_qr_refusal_texts(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Non
     handle_quick_register_callback(
         conn, str(cb), futures=fake, send=lambda t, **_k: sent.append(t), now_ms=T1
     )
-    assert REFUSAL["quick_open"] in sent[0]
+    assert sent[0] == ("❌ BTCUSDT มีทะเบียน quick ค้างอยู่ (หมดอายุ 12:10) · 👉 รอหมดอายุหรือเปิดไม้นั้นใน Binance")
     conn2 = open_db(tmp_path / "qr2.db")
     _seed_settings(conn2)
     card2 = build_quick_card(conn2, fake, symbol="BTCUSDT", side="long", stop=Decimal("99000"), now_ms=T0)
