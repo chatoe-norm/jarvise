@@ -19,6 +19,12 @@ from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.messages import fmt_price, fmt_qty
 from jarvise_assist.order_lines import format_closing_order_line
 from jarvise_assist.pause import bangkok_day_start_ms, format_paused_until, main_week_loss_pause_until
+from jarvise_assist.quick_errors import (
+    e_confirm_stale,
+    e_confirm_stale_ttl,
+    e_setting_reject,
+    e_setting_risk_over_cap,
+)
 from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
 from jarvise_assist.sizing import portfolio_risk_cap_pct
 from jarvise_assist.store import ensure_settings
@@ -44,11 +50,10 @@ _QUICK_SETTING_SIDE = frozenset({"long", "short", "l", "s", "buy", "sell"})
 _QUICK_SETTING_VALUE_RE = re.compile(r"(?:[0-9]{1,3}(?:\.[0-9]+)?|\.[0-9]+)")
 
 MSG_QUICK_LOCK_REMOVED = "ตั้งค่านี้ถูกยกเลิกแล้ว — quick ไม่มีล็อกรายวัน/แพ้ติดกัน (ยังหยุดเมื่อขาดทุนสัปดาห์เกิน 4R)"
-MSG_QUICK_SETTING_REJECT = "ค่าต้องมากกว่า 0 และไม่เกิน 100"
-MSG_QUICK_CONFIRM_STALE = "ปุ่มนี้หมดอายุแล้ว — ไม่ได้เปลี่ยนอะไร"
+MSG_QUICK_SETTING_REJECT = e_setting_reject()
+MSG_QUICK_CONFIRM_STALE = e_confirm_stale()
 MSG_QUICK_SETTING_HINT_RISK = "พิมพ์ค่าเอง: q risk 0.6"
 MSG_QUICK_SETTING_HINT_CAP = "พิมพ์ค่าเอง: q cap 1.2"
-MSG_QUICK_SETTING_RISK_OVER_CAP = "⚠️ risk ต่อไม้มากกว่าเพดาน — ไม้ quick จะถูกปฏิเสธ (quick_cap)"
 
 
 def get_quick_settings(conn: Any) -> dict[str, Any]:
@@ -823,7 +828,7 @@ def _quick_settings_saved_lines(
     cap = float(settings["cap_pct"])
     warn = ""
     if risk > cap:
-        warn = f"{MSG_QUICK_SETTING_RISK_OVER_CAP}\n"
+        warn = f"{e_setting_risk_over_cap(_fmt_fixed(risk), _fmt_fixed(cap))}\n"
     text, kb = render_quick_menu(conn, now_ms=now_ms)
     if key == "risk":
         head = f"บันทึกความเสี่ยง {_fmt_fixed(val)}% แล้ว\n{warn}{text}"
@@ -1000,7 +1005,10 @@ def handle_quick_callback(
         ts_s = int(matched_ok.group(3))
         now_s = int(now_ms) // 1000
         if now_s - ts_s > QUICK_CONFIRM_TTL_S or ts_s > now_s + QUICK_CONFIRM_FUTURE_S:
-            send(MSG_QUICK_CONFIRM_STALE)
+            if now_s - ts_s > QUICK_CONFIRM_TTL_S:
+                send(e_confirm_stale_ttl())
+            else:
+                send(MSG_QUICK_CONFIRM_STALE)
             return {"ok": False, "rejected": True, "reason": "stale"}
         updated_at_ms = get_quick_settings(conn).get("updated_at_ms")
         # A write in the same unix second as the card does not make it stale (known limit).
@@ -1040,14 +1048,14 @@ def _apply_quick_setting(
             send("คำสั่งไม่รู้จัก")
             return {"ok": False}
         if confirmed:
-            send(MSG_QUICK_SETTING_REJECT)
+            send(e_setting_reject(raw))
             return {"ok": False, "rejected": True}
         send(MSG_QUICK_SETTING_HINT_RISK if key == "risk" else MSG_QUICK_SETTING_HINT_CAP)
         return {"ok": True, "hint": True}
 
     parsed = _parse_quick_setting_value(raw, allow_trailing_pct=allow_trailing_pct)
     if parsed is None:
-        send(MSG_QUICK_SETTING_REJECT)
+        send(e_setting_reject(raw))
         return {"ok": False, "rejected": True}
     val = float(parsed)
 
