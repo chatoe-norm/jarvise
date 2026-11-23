@@ -43,10 +43,14 @@ from jarvise_assist.quick_errors import (
     e_parse_count,
     e_parse_side,
     e_parse_stop,
+    e_parse_symbol,
     e_portfolio_cap,
+    e_quick_cap,
     e_reg,
     e_setting_reject,
     e_setting_risk_over_cap,
+    e_stop_far,
+    e_stop_side,
 )
 from jarvise_assist.quick_m1a1 import (
     STOP_STEP_HINT,
@@ -143,6 +147,7 @@ _RAW_CODES = (
     "main_position",
     "in_flight",
     "pending_order",
+    "contract",
     "read_failed",
     "stop_wrong_side",
     "below_min_notional",
@@ -549,6 +554,43 @@ def test_g11_portfolio_template() -> None:
     )
 
 
+DRAFT_STOP_HUGE_FAR = "❌ stop ห่าง > 999999.99% เกิน 20% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+DRAFT_STOP_HUGE_PCT_PREFIX = "❌ stop > 999999.99% ต้องมากกว่า 0 และน้อยกว่า 20%"
+
+
+def test_catalogue_display_rounding() -> None:
+    assert e_quick_cap(
+        cap_pct=Decimal("1"),
+        balance=Decimal("142"),
+        open_usdt=Decimal("0.2334"),
+        new_usdt=Decimal("1.1868"),
+        preset=None,
+    ) == (
+        "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 0.23 + ไม้นี้ 1.19 = 1.43 · "
+        "เหลือ 1.18 USDT (0.83%) · 👉 ปิดไม้หรือรอทะเบียนหมดอายุ"
+    )
+    assert e_portfolio_cap(
+        Decimal("2"),
+        Decimal("142"),
+        Decimal("1.0"),
+        Decimal("0.65"),
+        Decimal("1.1901"),
+    ) == (
+        "❌ เกินเพดานความเสี่ยงรวม (หลัก + quick ≤ 2%) = 2.84 USDT · "
+        "หลัก 1 + quick 0.65 + ไม้นี้ 1.19 = 2.85 · "
+        "👉 ลดความเสี่ยงในเมนู ⚡ Quick หรือปิดไม้"
+    )
+    assert e_stop_side("short", Decimal("59330.1"), Decimal("59330.14"), Decimal("0.1")) == (
+        "❌ SHORT ต้องตั้ง stop เหนือราคา — stop 59330.1 ต่ำกว่า mark 59330.14 · "
+        "👉 ใส่ราคา > 59330.14 หรือเป็น % เช่น 0.4%"
+    )
+    assert e_stop_side("long", Decimal("59330.2"), Decimal("59330.16"), Decimal("0.1")) == (
+        "❌ LONG ต้องตั้ง stop ใต้ราคา — stop 59330.2 สูงกว่า mark 59330.16 · "
+        "👉 ใส่ราคา < 59330.16 หรือเป็น % เช่น 0.4%"
+    )
+    assert e_stop_far(Decimal("1000000")) == DRAFT_STOP_HUGE_FAR
+
+
 def test_g12_parser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_trade_client(monkeypatch)
     assert parse_quick_command("q BTC short") == {"error": "usage", "field": "count", "count": 2}
@@ -580,6 +622,9 @@ def test_g12_parser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         out, sent = _typed(conn, text, _fake())
         assert out["reason"] == "usage"
         assert sent[0]["text"] == want
+    out_sym, sent_sym = _typed(conn, "q @@@ long 1", _fake())
+    assert out_sym["reason"] == "usage"
+    assert sent_sym[0]["text"] == e_parse_symbol("@@@") + "\n" + QUICK_USAGE
     conn.close()
 
 
@@ -615,7 +660,13 @@ def test_g14_draft_numeric_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             edit=lambda *_a, **_k: True,
             now_ms=NOW,
         )
+        for msg in sent:
+            _no_codes(msg["text"])
         return out, sent
+
+    def _assert_stop_null() -> None:
+        row = conn.execute("SELECT stop_kind, stop_value FROM assist_quick_card").fetchone()
+        assert row[0] is None and row[1] is None
 
     out, sent = _once("1.2.3")
     assert out == {"handled": True, "rejected": True}
@@ -652,6 +703,34 @@ def test_g14_draft_numeric_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert out_z is not None and out_z.get("step") == "pick_stop"
     assert conn.execute("SELECT status, symbol FROM assist_quick_card").fetchone()["symbol"] == "ZZZQUSDT"
     assert sent_z and "ไม่ใช่ราคา" not in sent_z[0]["text"]
+
+    conn.execute("DELETE FROM assist_quick_card")
+    _draft(conn, status="pick_stop", symbol="BTCUSDT")
+    huge = "9" * 30
+    out_pct, sent_pct = _once(huge + "%")
+    assert out_pct == {"handled": True, "rejected": True}
+    assert sent_pct[0]["text"].startswith(DRAFT_STOP_HUGE_PCT_PREFIX)
+    _assert_stop_null()
+
+    out_short, sent_short = _once(huge)
+    assert out_short == {"handled": True, "rejected": True}
+    assert sent_short[0]["text"] == DRAFT_STOP_HUGE_FAR
+    _assert_stop_null()
+
+    conn.execute("DELETE FROM assist_quick_card")
+    _draft(conn, status="pick_stop", symbol="BTCUSDT", side="long")
+    out_long, sent_long = _once(huge)
+    assert out_long == {"handled": True, "rejected": True}
+    assert sent_long[0]["text"] == DRAFT_STOP_HUGE_FAR
+    _assert_stop_null()
+
+    conn.execute("DELETE FROM assist_quick_card")
+    _draft(conn, status="pick_stop", symbol="BTCUSDT")
+    out_sci, sent_sci = _once("1e30")
+    assert out_sci == {"handled": True, "rejected": True}
+    assert sent_sci[0]["text"] == DRAFT_STOP_HUGE_FAR
+    _assert_stop_null()
+
     conn.close()
 
 
@@ -721,6 +800,7 @@ def test_g18_replay_skips_stop_far(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     for msg in sent_rf:
         assert "stop_far" not in msg["text"]
         assert msg["text"] != G9
+        _no_codes(msg["text"])
     for toast in answers_rf:
         if toast:
             assert len(toast) <= 200
@@ -729,6 +809,7 @@ def test_g18_replay_skips_stop_far(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert out_rg.get("reason") != "stop_far"
     for msg in sent_rg:
         assert "stop ห่าง" not in msg["text"] or "เกิน 20%" not in msg["text"]
+        _no_codes(msg["text"])
     for toast in answers_rg:
         if toast:
             assert len(toast) <= 200
@@ -745,6 +826,7 @@ def test_g18_replay_skips_stop_far(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert qr.get("reason") != "stop_far"
     for msg in sent_qr:
         assert "stop_far" not in msg["text"]
+        _no_codes(msg["text"])
     conn.close()
     conn_far.close()
 

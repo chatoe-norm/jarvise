@@ -21,6 +21,29 @@ def fmt_usdt(value: Decimal) -> str:
     return fmt_price(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def fmt_usdt_floor(value: Decimal) -> str:
+    """USDT display for remaining headroom: round down to 0.01, then fmt_price."""
+    return fmt_price(value.quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
+
+
+def fmt_pct_bounded(value: Decimal, *, limit: Decimal | None = None) -> str:
+    """Format a percent for display; huge values avoid InvalidOperation in fmt_pct."""
+    if value >= Decimal("1000000"):
+        return "> 999999.99"
+    if limit is not None:
+        return fmt_pct(value, mode="failed_limit", limit=limit)
+    return fmt_pct(value)
+
+
+def _fmt_total_display(total: Decimal, cap_usdt: Decimal) -> str:
+    """Show totals above cap even when half-up USDT rounds equal to the cap line."""
+    cap_s = fmt_usdt(cap_usdt)
+    total_s = fmt_usdt(total)
+    if total > cap_usdt and Decimal(total_s) <= Decimal(cap_s):
+        return fmt_usdt(cap_usdt + Decimal("0.01"))
+    return total_s
+
+
 def fmt_pct_ceiling(value: Decimal) -> str:
     """Minimum stop percent: ceiling to 2 d.p. so the hint is reachable."""
     shown = value.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
@@ -275,8 +298,9 @@ def e_quick_cap(
         remaining_pct = Decimal("0")
     head = (
         f"❌ เกินเพดาน Quick รวม {fmt_price(cap_pct)}% = {fmt_usdt(cap_usdt)} USDT · "
-        f"เปิดอยู่ {fmt_usdt(open_usdt)} + ไม้นี้ {fmt_usdt(new_usdt)} = {fmt_usdt(total)} · "
-        f"เหลือ {fmt_usdt(remaining)} USDT ({fmt_pct_remaining_down(remaining_pct)}%)"
+        f"เปิดอยู่ {fmt_usdt(open_usdt)} + ไม้นี้ {fmt_usdt(new_usdt)} = "
+        f"{_fmt_total_display(total, cap_usdt)} · "
+        f"เหลือ {fmt_usdt_floor(remaining)} USDT ({fmt_pct_remaining_down(remaining_pct)}%)"
     )
     if preset is None:
         return f"{head} · 👉 ปิดไม้หรือรอทะเบียนหมดอายุ"
@@ -298,7 +322,8 @@ def e_portfolio_cap(
     total = main + quick + new
     return (
         f"❌ เกินเพดานความเสี่ยงรวม (หลัก + quick ≤ {fmt_price(cap_pct)}%) = {fmt_usdt(cap_usdt)} USDT · "
-        f"หลัก {fmt_usdt(main)} + quick {fmt_usdt(quick)} + ไม้นี้ {fmt_usdt(new)} = {fmt_usdt(total)} · "
+        f"หลัก {fmt_usdt(main)} + quick {fmt_usdt(quick)} + ไม้นี้ {fmt_usdt(new)} = "
+        f"{_fmt_total_display(total, cap_usdt)} · "
         f"👉 ลดความเสี่ยงในเมนู ⚡ Quick หรือปิดไม้"
     )
 
@@ -307,22 +332,27 @@ def e_stop_side(side: str, stop: Decimal, mark: Decimal, tick: Decimal) -> str:
     if stop <= 0:
         return "❌ stop ต้องมากกว่า 0"
     stop_s = _fmt_price_tick(stop, tick)
-    mark_s = _fmt_price_tick(mark, tick)
+    mark_tick_s = _fmt_price_tick(mark, tick)
+    if stop != mark and stop_s == mark_tick_s:
+        mark_s = fmt_price(mark)
+    else:
+        mark_s = mark_tick_s
+    hint_mark_s = mark_s
     if str(side).lower() == "short":
         rel = "ต่ำกว่า" if stop < mark else "เท่ากับ"
         return (
             f"❌ SHORT ต้องตั้ง stop เหนือราคา — stop {stop_s} {rel} mark {mark_s} · "
-            f"👉 ใส่ราคา > {mark_s} หรือเป็น % เช่น 0.4%"
+            f"👉 ใส่ราคา > {hint_mark_s} หรือเป็น % เช่น 0.4%"
         )
     rel = "สูงกว่า" if stop > mark else "เท่ากับ"
     return (
         f"❌ LONG ต้องตั้ง stop ใต้ราคา — stop {stop_s} {rel} mark {mark_s} · "
-        f"👉 ใส่ราคา < {mark_s} หรือเป็น % เช่น 0.4%"
+        f"👉 ใส่ราคา < {hint_mark_s} หรือเป็น % เช่น 0.4%"
     )
 
 
 def e_stop_far(dist_pct: Decimal) -> str:
-    shown = fmt_pct(dist_pct, mode="failed_limit", limit=Decimal("20"))
+    shown = fmt_pct_bounded(dist_pct, limit=Decimal("20"))
     return f"❌ stop ห่าง {shown}% เกิน 20% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 
 

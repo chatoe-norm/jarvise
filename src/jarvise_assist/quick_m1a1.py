@@ -28,8 +28,8 @@ from jarvise_assist.quick_errors import (
     e_draft_stop_token,
     e_reg,
     e_stop_far,
+    fmt_pct_bounded,
 )
-from jarvise_assist.quick_minlot import fmt_pct
 
 logger = logging.getLogger(__name__)
 
@@ -1020,7 +1020,7 @@ def handle_quick_draft_text(
                 sym0 = str(draft.get("symbol") or sym)
                 hint = "\n".join(
                     [
-                        e_draft_stop_pct_range(fmt_pct(pct)),
+                        e_draft_stop_pct_range(fmt_pct_bounded(pct)),
                         f"⚡ Quick · {sym0} · {_side_label(side)} — {STOP_STEP_HINT}",
                         _mode_tag(),
                     ]
