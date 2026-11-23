@@ -161,6 +161,30 @@ def _invoke(path: Path, *extra: str) -> object:
     )
 
 
+def test_history_apply_open_db_error_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "open_db_fail.db"
+    conn, _, _ = _golden_ready(path)
+    conn.close()
+    sentinel = "OPEN_DB_HISTORY_APPLY_SENTINEL"
+    db_str = str(path)
+
+    def _boom(db_path: Path) -> sqlite3.Connection:
+        msg = f"cannot open {db_path} — {sentinel}"
+        raise sqlite3.OperationalError(msg)
+
+    import jarvise_ingest.db as db_mod
+
+    monkeypatch.setattr(db_mod, "open_db", _boom)
+    result = _invoke(path, "--json", "--apply")
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    body = _json_out(result)
+    assert body["reason"] == "db_error"
+    blob = (result.stdout or "") + (result.stderr or "")
+    assert db_str not in blob
+    assert sentinel not in blob
+
+
 def _json_out(result: object) -> dict:
     import json
 
@@ -1164,6 +1188,20 @@ def test_history_idle_partner_compute_golden_unchanged(tmp_path: Path) -> None:
     assert golden_idle["ok"] is True
     assert golden_idle["values"] == golden_base["values"]
     conn_idle.close()
+
+
+def test_compute_golden_non_idle_units_on_idle_partner(tmp_path: Path) -> None:
+    path = tmp_path / "idle_non_idle_units.db"
+    conn, _, _ = _golden_ready(path)
+    _insert_idle_partner(conn)
+    conn.execute("UPDATE partner SET units_e8 = 1 WHERE id = ?", (IDLE_PARTNER_ID,))
+    conn.commit()
+    golden = compute_golden(conn)
+    assert golden["ok"] is False
+    assert golden["values"] == {}
+    non_idle = [item for item in golden["diffs"] if item.get("field") == "non_idle_partner"]
+    assert any(item["actual"]["partner_id"] == IDLE_PARTNER_ID for item in non_idle)
+    conn.close()
 
 
 def test_history_idle_partner_refusal_non_idle(tmp_path: Path) -> None:

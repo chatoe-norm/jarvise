@@ -902,7 +902,7 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
         f"สถานะ: {status}",
         (
             f"ความเสี่ยงต่อไม้ {_fmt_pct(risk)}% · "
-            f"เพดานไม้ quick ที่เปิดพร้อมกัน {_fmt_pct(cap)}% · "
+            f"เพดาน quick {_fmt_pct(cap)}% (ข้อเสนอคิดรวมค่าธรรมเนียม · ไม้ที่เปิดพร้อมกันคิดจากระยะ stop) · "
             f"ความเสี่ยงรวมสูงสุด {_fmt_pct(total)}% "
             f"(หลัก {_fmt_pct(main_cap)}% + quick {_fmt_pct(cap)}%)"
         ),

@@ -838,18 +838,19 @@ def assist_partner_record_owner_redeem_20261119(
             _echo(payload, 3)
         _echo(payload, 0 if payload.get("ok") else 1)
 
-    conn = open_db(db)
     try:
+        conn = open_db(db)
         try:
-            payload = apply_historical(conn, when)
-        except HistoricalRecordError as exc:
-            payload = exc.payload
-        except sqlite3.Error:
-            payload = {"ok": False, "reason": "db_error", "mode": "apply"}
-    finally:
-        conn.close()
-    if payload.get("reason") == "db_error":
-        _echo(payload, 1)
+            try:
+                payload = apply_historical(conn, when)
+            except HistoricalRecordError as exc:
+                payload = exc.payload
+            except sqlite3.Error:
+                payload = {"ok": False, "reason": "db_error", "mode": "apply"}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        payload = {"ok": False, "reason": "db_error", "mode": "apply"}
     if payload.get("reason") == "conflict":
         _echo(payload, 3)
     _echo(payload, 0 if payload.get("ok") else 1)
