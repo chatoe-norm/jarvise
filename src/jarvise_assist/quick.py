@@ -597,7 +597,6 @@ def _bot_menu_quick_close(
         return False
     if closed_at_ms is None:
         return False
-    from jarvise_assist.journal import MATCH_PAD_MS
 
     rows = conn.execute(
         """
@@ -614,7 +613,7 @@ def _bot_menu_quick_close(
         (
             symbol.upper(),
             str(side).lower(),
-            int(entry_time_ms) - MATCH_PAD_MS,
+            int(entry_time_ms),
             int(closed_at_ms),
         ),
     ).fetchall()

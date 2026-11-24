@@ -1606,6 +1606,7 @@ def test_quick_close_notice_bot_vs_manual(tmp_path: Path) -> None:
         "non_quick_menu",
         "entry_time_none",
         "intent_before_entry",
+        "intent_30s_before_entry",
     ],
 )
 def test_quick_close_notice_binance_when_no_exit_market(tmp_path: Path, case: str) -> None:
@@ -1651,7 +1652,7 @@ def test_quick_close_notice_binance_when_no_exit_market(tmp_path: Path, case: st
             created_at_ms=210,
         )
     elif case == "intent_before_entry":
-        # Outside journal MATCH_PAD_MS (60s) before entry — must not match.
+        # Before entry (no pad) — must not match.
         intent_id = insert_exec_intent(
             conn,
             kind="exit",
@@ -1673,6 +1674,30 @@ def test_quick_close_notice_binance_when_no_exit_market(tmp_path: Path, case: st
             http_status=200,
             order_or_algo_id="99",
             created_at_ms=2,
+        )
+    elif case == "intent_30s_before_entry":
+        # entry−30s would have matched under the old 60s pad; lower bound is entry now.
+        intent_id = insert_exec_intent(
+            conn,
+            kind="exit",
+            symbol="BTCUSDT",
+            side="long",
+            preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+            created_at_ms=70_000,
+            expires_at_ms=70_000 + PREVIEW_TTL_MS,
+        )
+        conn.execute(
+            "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+            ("✅ ปิด BTCUSDT", intent_id),
+        )
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step="exit_market",
+            endpoint="/fapi/v1/order",
+            http_status=200,
+            order_or_algo_id="99",
+            created_at_ms=70_001,
         )
     elif case == "entry_time_none":
         # Clear DB fallback too; a would-match intent must still not count.
@@ -1704,8 +1729,8 @@ def test_quick_close_notice_binance_when_no_exit_market(tmp_path: Path, case: st
     if case == "entry_time_none":
         entry_ms: int | None = None
         closed_ms = 300
-    elif case == "intent_before_entry":
-        # entry 100_000; pad lower bound 40_000; intent at 1 is before window.
+    elif case in ("intent_before_entry", "intent_30s_before_entry"):
+        # entry 100_000; lower bound is entry; intent before entry is outside the window.
         conn.execute(
             "UPDATE assist_quick_trade SET entry_time_ms=? WHERE id='t1'",
             (100_000,),
@@ -1771,6 +1796,165 @@ def test_quick_close_notice_bot_with_exit_market_log(tmp_path: Path, status: str
     assert len(sent) == 1
     assert "(ปิดผ่านบอท)" in sent[0]
     assert "(ปิดใน Binance)" not in sent[0]
+    conn.close()
+
+
+def test_quick_close_notice_binance_when_entry_time_zero(tmp_path: Path) -> None:
+    """N4: entry_time_ms=0 refuses bot-detect even when a Quick exit_market 200 exists."""
+    conn = open_db(tmp_path / "notice-entry-zero.db")
+    _seed_closed_quick_trade(conn, trade_id="t1", entry_time_ms=0)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+        created_at_ms=200,
+        expires_at_ms=200 + PREVIEW_TTL_MS,
+    )
+    conn.execute(
+        "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+        ("✅ ปิด BTCUSDT", intent_id),
+    )
+    insert_exec_log(
+        conn,
+        intent_id=intent_id,
+        step="exit_market",
+        endpoint="/fapi/v1/order",
+        http_status=200,
+        order_or_algo_id="99",
+        created_at_ms=210,
+    )
+    conn.commit()
+    sent: list[str] = []
+    _send_close_notice(
+        conn,
+        lambda m, **_: sent.append(m),
+        trade_id="t1",
+        client=None,
+        payload=_close_notice_payload(entry_time_ms=0, closed_at_ms=300),
+        now_ms=400,
+    )
+    assert len(sent) == 1
+    assert "(ปิดใน Binance)" in sent[0]
+    assert "(ปิดผ่านบอท)" not in sent[0]
+    conn.close()
+
+
+def test_quick_close_notice_binance_when_bot_detect_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N3: DB error in bot-detect still sends exactly one (ปิดใน Binance) notice."""
+    import sqlite3
+
+    conn = open_db(tmp_path / "notice-bot-raise.db")
+    _seed_closed_quick_trade(conn, trade_id="t1")
+
+    def _raise(*_a: Any, **_k: Any) -> bool:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr("jarvise_assist.quick._bot_menu_quick_close", _raise)
+    sent: list[str] = []
+    _send_close_notice(
+        conn,
+        lambda m, **_: sent.append(m),
+        trade_id="t1",
+        client=None,
+        payload=_close_notice_payload(),
+        now_ms=400,
+    )
+    assert len(sent) == 1
+    assert "(ปิดใน Binance)" in sent[0]
+    assert "(ปิดผ่านบอท)" not in sent[0]
+    conn.close()
+
+
+def test_quick_r_ignores_main_signal_when_registration_side_mismatches(tmp_path: Path) -> None:
+    """Quick R never borrows a main signal; opposite-side Quick reg → R unknown."""
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / "qr-ignore-main.db")
+    _insert_quick_reg(
+        conn,
+        reg_id="qr-short",
+        symbol="BTCUSDT",
+        side="short",
+        planned_stop=105.0,
+        planned_entry=100.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_signal (
+            id, symbol, side, entry, stop, target, qty, notional, leverage, loss_at_stop,
+            created_at_ms, expires_at_ms, status, sent_at_ms
+        ) VALUES (
+            'as_main_btc', 'BTCUSDT', 'long', 100, 95, 120, 0.01, 1, 1, 0.05,
+            1, 999999999, 'sent', 1
+        )
+        """
+    )
+    conn.commit()
+    pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("101"),
+        update_time_ms=1,
+        liquidation_price=None,
+    )
+    line, r_mult, risk = compute_position_unrealized(conn, pos=pos, orders=[], now_ms=1, tick=None)
+    assert risk == 0.0
+    assert r_mult is None
+    assert "R unknown" in line
+    conn.close()
+
+
+def test_quick_r_profit_side_planned_stop_falls_back_to_placed(tmp_path: Path) -> None:
+    """N2: profit-side Quick planned stop is ignored; placed loss-side stop yields R."""
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / "qr-profit-side.db")
+    _insert_quick_reg(
+        conn,
+        reg_id="qr-long",
+        symbol="BTCUSDT",
+        side="long",
+        planned_stop=105.0,
+        planned_entry=100.0,
+    )
+    pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("101"),
+        update_time_ms=1,
+        liquidation_price=None,
+    )
+    line_empty, r_empty, risk_empty = compute_position_unrealized(
+        conn, pos=pos, orders=[], now_ms=1, tick=None
+    )
+    assert risk_empty == 0.0
+    assert r_empty is None
+    assert "R unknown" in line_empty
+
+    owner_stop = {
+        "symbol": "BTCUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "stopPrice": "98",
+        "origQty": "1",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientOrderId": "manual-sl-1",
+    }
+    line_placed, r_placed, risk_placed = compute_position_unrealized(
+        conn, pos=pos, orders=[owner_stop], now_ms=1, tick=None
+    )
+    assert risk_placed == pytest.approx(2.0)
+    assert r_placed == pytest.approx(0.5)
+    assert "+0.5R (จาก stop จริง)" in line_placed
     conn.close()
 
 
