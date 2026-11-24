@@ -588,19 +588,35 @@ def _bot_menu_quick_close(
     conn: Any,
     *,
     symbol: str,
+    side: str,
     entry_time_ms: int | None,
+    closed_at_ms: int | None,
 ) -> bool:
-    """True when a done menu Quick exit intent was created after this trade's entry."""
-    if entry_time_ms is None:
+    """True when a Quick menu exit placed an exit_market order for this trade window."""
+    if entry_time_ms is None or int(entry_time_ms) == 0:
         return False
+    if closed_at_ms is None:
+        return False
+    from jarvise_assist.journal import MATCH_PAD_MS
+
     rows = conn.execute(
         """
-        SELECT preview_json, created_at_ms FROM assist_exec_intent
-        WHERE kind='exit' AND status='done' AND UPPER(symbol)=?
-          AND created_at_ms > ?
-        ORDER BY created_at_ms DESC
+        SELECT i.preview_json FROM assist_exec_intent i
+        INNER JOIN assist_exec_log l ON l.intent_id = i.id
+          AND l.step = 'exit_market' AND l.http_status = 200
+        WHERE i.kind = 'exit'
+          AND UPPER(i.symbol) = ?
+          AND LOWER(i.side) = ?
+          AND i.created_at_ms >= ?
+          AND i.created_at_ms <= ?
+        ORDER BY i.created_at_ms DESC
         """,
-        (symbol.upper(), int(entry_time_ms)),
+        (
+            symbol.upper(),
+            str(side).lower(),
+            int(entry_time_ms) - MATCH_PAD_MS,
+            int(closed_at_ms),
+        ),
     ).fetchall()
     for row in rows:
         try:
@@ -609,7 +625,7 @@ def _bot_menu_quick_close(
             continue
         if not isinstance(preview, dict):
             continue
-        if preview.get("cohort") == "quick" or preview.get("source") == "menu_quick":
+        if preview.get("cohort") == "quick":
             return True
     return False
 
@@ -668,11 +684,19 @@ def _send_close_notice(
                 entry_ms = row["entry_time_ms"] if row is not None else None
             except Exception:  # noqa: BLE001
                 entry_ms = None
-        via = (
-            "(ปิดผ่านบอท)"
-            if _bot_menu_quick_close(conn, symbol=sym, entry_time_ms=entry_ms)
-            else "(ปิดใน Binance)"
-        )
+        via = "(ปิดใน Binance)"
+        try:
+            if _bot_menu_quick_close(
+                conn,
+                symbol=sym,
+                side=str(payload["side"]),
+                entry_time_ms=entry_ms,
+                closed_at_ms=payload.get("closed_at_ms"),
+            ):
+                via = "(ปิดผ่านบอท)"
+        except Exception:  # noqa: BLE001
+            logger.exception("quick close notice bot detect failed")
+            via = "(ปิดใน Binance)"
         lines = [
             (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว {via} — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
         ]

@@ -409,15 +409,17 @@ def compute_position_unrealized(
 ) -> tuple[str, float | None, float]:
     """Return display line, R multiple (None if unknown), and risk distance used for R."""
     sym = pos.symbol
-    quick_stop = (
-        quick_planned_stop(conn, symbol=sym, side=pos.side) if sym.upper() in quick_symbols(conn) else None
-    )
-    watch = get_watch_position(conn, sym, pos.position_side)
-    linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
+    is_quick = sym.upper() in quick_symbols(conn)
+    quick_stop = quick_planned_stop(conn, symbol=sym, side=pos.side) if is_quick else None
+    # Quick never borrows a main watch row or main signal for R.
+    if is_quick:
+        watch = None
+        linked = None
+    else:
+        watch = get_watch_position(conn, sym, pos.position_side)
+        linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
     initial_stop: float | None
-    if quick_stop is not None:
-        initial_stop = quick_stop
-    elif watch and watch.get("initial_stop") is not None:
+    if watch and watch.get("initial_stop") is not None:
         initial_stop = float(watch["initial_stop"])
     elif linked is not None:
         initial_stop = float(linked["stop"])
@@ -437,9 +439,22 @@ def compute_position_unrealized(
     else:
         unreal_usdt = (entry - mark) * qty
     r_note = ""
-    if quick_stop is not None:
-        risk = abs(entry - quick_stop)
-        r_note = " (จาก stop ที่ลงทะเบียน)"
+    risk = 0.0
+    if is_quick:
+        # Order: Quick planned stop (loss-side) → placed stop → R unknown.
+        if quick_stop is not None:
+            loss_side = (pos.side == "long" and quick_stop < entry) or (
+                pos.side == "short" and quick_stop > entry
+            )
+            if loss_side:
+                risk = abs(entry - quick_stop)
+                r_note = " (จาก stop ที่ลงทะเบียน)"
+        if risk <= 0 and stop_info is not None:
+            placed = float(stop_info.price)
+            loss_side = (pos.side == "long" and placed < entry) or (pos.side == "short" and placed > entry)
+            if loss_side:
+                risk = abs(entry - placed)
+                r_note = " (จาก stop จริง)"
     elif initial_stop is not None:
         risk = abs(entry - initial_stop)
     elif stop_info is not None:
@@ -548,6 +563,10 @@ def render_open_positions_message(
             continue
         watch = get_watch_position(conn, sym, pos.position_side)
         linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
+        # Quick: keep ⚡ / R / placed stop / TP / liq; hide main 1R anchor + trail advice.
+        if is_quick:
+            watch = None
+            linked = None
         initial_stop: float | None
         if watch and watch.get("initial_stop") is not None:
             initial_stop = float(watch["initial_stop"])
