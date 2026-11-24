@@ -584,6 +584,36 @@ def _send_tag_notice(
         logger.exception("quick tag notice failed")
 
 
+def _bot_menu_quick_close(
+    conn: Any,
+    *,
+    symbol: str,
+    entry_time_ms: int | None,
+) -> bool:
+    """True when a done menu Quick exit intent was created after this trade's entry."""
+    if entry_time_ms is None:
+        return False
+    rows = conn.execute(
+        """
+        SELECT preview_json, created_at_ms FROM assist_exec_intent
+        WHERE kind='exit' AND status='done' AND UPPER(symbol)=?
+          AND created_at_ms > ?
+        ORDER BY created_at_ms DESC
+        """,
+        (symbol.upper(), int(entry_time_ms)),
+    ).fetchall()
+    for row in rows:
+        try:
+            preview = json.loads(row["preview_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(preview, dict):
+            continue
+        if preview.get("cohort") == "quick" or preview.get("source") == "menu_quick":
+            return True
+    return False
+
+
 def _send_close_notice(
     conn: Any,
     send: SendFn,
@@ -628,8 +658,23 @@ def _send_close_notice(
                 r_line = "R คำนวณไม่ได้"
         else:
             r_line = f"{float(net_r):+.2f}R (รวมค่าธรรมเนียมจริง + funding)"
+        entry_ms = payload.get("entry_time_ms")
+        if entry_ms is None:
+            try:
+                row = conn.execute(
+                    "SELECT entry_time_ms FROM assist_quick_trade WHERE id=?",
+                    (trade_id,),
+                ).fetchone()
+                entry_ms = row["entry_time_ms"] if row is not None else None
+            except Exception:  # noqa: BLE001
+                entry_ms = None
+        via = (
+            "(ปิดผ่านบอท)"
+            if _bot_menu_quick_close(conn, symbol=sym, entry_time_ms=entry_ms)
+            else "(ปิดใน Binance)"
+        )
         lines = [
-            (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว (ปิดใน Binance) — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
+            (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว {via} — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
         ]
         from jarvise_assist.order_lines import is_symbol_protective_leftover
 
