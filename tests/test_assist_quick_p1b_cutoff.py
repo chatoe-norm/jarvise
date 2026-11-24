@@ -12,6 +12,7 @@ from tests.test_assist import FakeFutures, _ms_bangkok
 from tests.test_assist_quick_card import _happy_fake, _seed_settings
 from tests.test_assist_quick_m1a1_round1 import _flow_to_quoted, _run_qk
 
+from jarvise_assist.futures import FuturesKeyUnsafeError, FuturesPermissionError
 from jarvise_assist.quick_card import REFUSAL, handle_quick_register_callback, handle_quick_text
 from jarvise_assist.quick_cutoff import (
     cutoff_block_text,
@@ -29,9 +30,27 @@ T_233000 = _ms_bangkok(2026, 11, 23, 23, 30)
 T_233100 = _ms_bangkok(2026, 11, 23, 23, 31)
 T_233500 = _ms_bangkok(2026, 11, 23, 23, 35)
 T_234210 = _ms_bangkok(2026, 11, 23, 23, 42) + 10_000
+T_235500 = _ms_bangkok(2026, 11, 23, 23, 55)
 T_235959 = _ms_bangkok(2026, 11, 23, 23, 59) + 59_000
 T_000000 = _ms_bangkok(2026, 11, 24, 0, 0)
 T_NEXT_233000 = _ms_bangkok(2026, 11, 24, 23, 30)
+
+# Owner-approved / source-pinned Thai copy (item 11). Spec and source agree.
+STATIC_REFUSAL = "❌ หลัง 23:30 ไม่ลงทะเบียน quick ใหม่ · 👉 เริ่มใหม่ได้หลัง 00:00"
+LIVE_CUTOFF_18 = "❌ หลัง 23:30 ไม่ลงทะเบียน quick ใหม่ · cutoff 00:00 อีก 18 นาที · 👉 เริ่มใหม่ได้หลัง 00:00"
+TRADE_ALERT_1H05 = (
+    "⏰ ใกล้ cutoff 00:00 — ไม้ quick BTCUSDT LONG ยังเปิดอยู่ (ถือมา 1:05) "
+    "· บอทไม่ปิดให้ — ถ้าไม่อยากถือข้ามวัน ปิดเองใน Binance"
+)
+TRADE_ALERT_0 = (
+    "⏰ ใกล้ cutoff 00:00 — ไม้ quick BTCUSDT LONG ยังเปิดอยู่ (ถือมา 0:00) "
+    "· บอทไม่ปิดให้ — ถ้าไม่อยากถือข้ามวัน ปิดเองใน Binance"
+)
+REG_ALERT = "⏰ ใกล้ cutoff 00:00 — ลงทะเบียน quick ETHUSDT SHORT ยังไม่เข้า · ไม่ควรเปิดหลังเที่ยงคืน"
+REG_DEGRADED = (
+    "⏰ ใกล้ cutoff 00:00 — ลงทะเบียน quick ETHUSDT SHORT "
+    "ยืนยันสถานะไม่ได้ (อ่าน Binance ไม่ได้) · เช็กใน Binance ว่ามีไม้เปิดอยู่ไหม"
+)
 
 
 def _insert_trade(
@@ -79,6 +98,19 @@ def _insert_reg(
     conn.commit()
 
 
+def _trade_alerts(sent: list[str]) -> list[str]:
+    return [m for m in sent if "ไม้ quick" in m]
+
+
+def _reg_alerts(sent: list[str]) -> list[str]:
+    return [m for m in sent if "ลงทะเบียน quick" in m]
+
+
+def _no_buttons(**kwargs: Any) -> None:
+    markup = kwargs.get("reply_markup")
+    assert markup is None or markup == {} or not (markup or {}).get("inline_keyboard")
+
+
 def test_in_entry_block_edges() -> None:
     assert not in_entry_block(T_232959)
     assert in_entry_block(T_233000)
@@ -88,17 +120,50 @@ def test_in_entry_block_edges() -> None:
 
 def test_cutoff_block_live_text() -> None:
     text = cutoff_block_text(T_234210)
-    assert "อีก 18 นาที" in text
-    assert "หลัง 00:00" in text
+    assert text == LIVE_CUTOFF_18
+    assert text == e_cutoff_block(minutes=18)
     assert "ลองใหม่" not in text
     assert len(text) <= 200
-    assert text == e_cutoff_block(minutes=18)
 
 
 def test_refusal_cutoff_static() -> None:
-    expected = "❌ หลัง 23:30 ไม่ลงทะเบียน quick ใหม่ · 👉 เริ่มใหม่ได้หลัง 00:00"
-    assert REFUSAL["cutoff_block"] == expected
+    assert REFUSAL["cutoff_block"] == STATIC_REFUSAL
     assert "{m}" not in REFUSAL["cutoff_block"]
+
+
+def test_owner_approved_thai_copy_exact(tmp_path: Path) -> None:
+    """Item 11: full-string equality for every owner-facing cutoff string."""
+    assert REFUSAL["cutoff_block"] == STATIC_REFUSAL
+    assert e_cutoff_block(minutes=18) == LIVE_CUTOFF_18
+    assert cutoff_block_text(T_234210) == LIVE_CUTOFF_18
+    assert cutoff_block_text(T_233000) == e_cutoff_block(minutes=30)
+
+    conn = open_db(tmp_path / "copy.db")
+    entry_ms = T_233100 - 65 * 60_000
+    _insert_trade(conn, entry_time_ms=entry_ms)
+    _insert_reg(conn, expires_at_ms=T_233500)
+    sent: list[str] = []
+
+    def send(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=send, sync_ok=True)
+    assert sent[0] == TRADE_ALERT_1H05
+    assert sent[1] == REG_ALERT
+
+    conn2 = open_db(tmp_path / "copy2.db")
+    _insert_reg(conn2, expires_at_ms=T_233000 - 1)
+    sent2: list[str] = []
+
+    def send2(msg: str, **_k: Any) -> bool:
+        sent2.append(msg)
+        return True
+
+    maybe_send_cutoff_alerts(conn2, now_ms=T_233100, send=send2, sync_ok=False)
+    assert sent2 == [REG_DEGRADED]
+    conn.close()
+    conn2.close()
 
 
 def test_maybe_send_outside_window_noop(tmp_path: Path) -> None:
@@ -111,6 +176,40 @@ def test_maybe_send_outside_window_noop(tmp_path: Path) -> None:
 
     assert maybe_send_cutoff_alerts(conn, now_ms=T_232959, send=send, sync_ok=True) == {}
     assert sent == []
+    conn.close()
+
+
+def test_maybe_send_outside_window_with_open_rows(tmp_path: Path) -> None:
+    """Item 3: open trade+reg at 23:29:59 and 00:00:00 — no send, no row change."""
+    conn = open_db(tmp_path / "win.db")
+    _insert_trade(conn, entry_time_ms=T_233000 - 60_000)
+    _insert_reg(conn, expires_at_ms=T_233500)
+    before_trade = conn.execute(
+        "SELECT id, status, cutoff_notice_day, entry_time_ms FROM assist_quick_trade"
+    ).fetchall()
+    before_reg = conn.execute(
+        "SELECT id, status, cutoff_notice_day, expires_at_ms FROM assist_quick_registration"
+    ).fetchall()
+    sent: list[str] = []
+
+    def send(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    for when in (T_232959, T_000000):
+        changes_before = conn.total_changes
+        assert maybe_send_cutoff_alerts(conn, now_ms=when, send=send, sync_ok=True) == {}
+        assert maybe_send_cutoff_alerts(conn, now_ms=when, send=send, sync_ok=False) == {}
+        assert conn.total_changes == changes_before
+    assert sent == []
+    after_trade = conn.execute(
+        "SELECT id, status, cutoff_notice_day, entry_time_ms FROM assist_quick_trade"
+    ).fetchall()
+    after_reg = conn.execute(
+        "SELECT id, status, cutoff_notice_day, expires_at_ms FROM assist_quick_registration"
+    ).fetchall()
+    assert [dict(r) for r in after_trade] == [dict(r) for r in before_trade]
+    assert [dict(r) for r in after_reg] == [dict(r) for r in before_reg]
     conn.close()
 
 
@@ -129,8 +228,11 @@ def test_alerts_sync_ok(tmp_path: Path) -> None:
 
     counts = maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=send, sync_ok=True)
     assert len(sent) == 2
-    assert "LONG" in sent[0] and "0:46" in sent[0]
-    assert "ยังไม่เข้า" in sent[1] and "SHORT" in sent[1]
+    assert sent[0] == (
+        "⏰ ใกล้ cutoff 00:00 — ไม้ quick BTCUSDT LONG ยังเปิดอยู่ (ถือมา 0:46) "
+        "· บอทไม่ปิดให้ — ถ้าไม่อยากถือข้ามวัน ปิดเองใน Binance"
+    )
+    assert sent[1] == REG_ALERT
     assert counts.get("trades_sent") == 1
     assert counts.get("regs_sent") == 1
     conn.close()
@@ -146,8 +248,56 @@ def test_alerts_sync_ok_false_degraded(tmp_path: Path) -> None:
         return True
 
     maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=send, sync_ok=False)
-    assert len(sent) == 1
-    assert "ยืนยันสถานะไม่ได้" in sent[0]
+    assert sent == [REG_DEGRADED]
+    conn.close()
+
+
+def test_alerts_expires_at_equals_now_skipped_when_sync_ok(tmp_path: Path) -> None:
+    """Item 6: expires_at_ms == now_ms → no reg alert when sync_ok=True."""
+    conn = open_db(tmp_path / "eq.db")
+    _insert_reg(conn, expires_at_ms=T_233100)
+    sent: list[str] = []
+
+    def send(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    counts = maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=send, sync_ok=True)
+    assert sent == []
+    assert counts.get("regs_sent") is None
+    conn.close()
+
+
+def test_hold_time_null_and_negative_clamp(tmp_path: Path) -> None:
+    """Item 6: NULL entry and future entry → 0:00."""
+    conn = open_db(tmp_path / "hold.db")
+    _insert_trade(conn, tid="tn", rid="rn", entry_time_ms=None)
+    _insert_trade(conn, tid="tf", rid="rf", entry_time_ms=T_233100 + 60_000)
+    sent: list[str] = []
+
+    def send(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=send, sync_ok=True)
+    assert sent == [TRADE_ALERT_0, TRADE_ALERT_0]
+    conn.close()
+
+
+def test_send_false_counts_as_failed(tmp_path: Path) -> None:
+    """Item 6: send False → *_failed, not *_sent."""
+    conn = open_db(tmp_path / "ffc.db")
+    _insert_trade(conn)
+    _insert_reg(conn, expires_at_ms=T_233500)
+
+    def nope(msg: str, **_k: Any) -> bool:
+        return False
+
+    counts = maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=nope, sync_ok=True)
+    assert counts.get("trades_failed") == 1
+    assert counts.get("regs_failed") == 1
+    assert counts.get("trades_sent") is None
+    assert counts.get("regs_sent") is None
     conn.close()
 
 
@@ -163,6 +313,59 @@ def test_alerts_no_duplicate_same_day(tmp_path: Path) -> None:
     maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=send, sync_ok=True)
     maybe_send_cutoff_alerts(conn, now_ms=T_233500, send=send, sync_ok=True)
     assert len(sent) == 1
+    conn.close()
+
+
+def test_cutoff_notice_once_per_bangkok_day_registration(tmp_path: Path) -> None:
+    """Item 10: open registration notified once per Bangkok day (both sync paths)."""
+
+    def _once_per_day(db_name: str, *, sync_ok: bool) -> None:
+        conn = open_db(tmp_path / db_name)
+        _insert_reg(conn, expires_at_ms=T_NEXT_233000 + 60_000)
+        sent: list[str] = []
+
+        def send(msg: str, **_k: Any) -> bool:
+            sent.append(msg)
+            return True
+
+        for when in (T_233000, T_233500, T_235500):
+            maybe_send_cutoff_alerts(conn, now_ms=when, send=send, sync_ok=sync_ok)
+        assert len(sent) == 1
+        row = conn.execute(
+            "SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'"
+        ).fetchone()
+        assert row["cutoff_notice_day"] == "2026-11-23"
+        maybe_send_cutoff_alerts(conn, now_ms=T_NEXT_233000, send=send, sync_ok=sync_ok)
+        assert len(sent) == 2
+        row2 = conn.execute(
+            "SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'"
+        ).fetchone()
+        assert row2["cutoff_notice_day"] == "2026-11-24"
+        conn.close()
+
+    _once_per_day("regday-ok.db", sync_ok=True)
+    _once_per_day("regday-bad.db", sync_ok=False)
+
+
+def test_cutoff_notice_once_per_bangkok_day_trade(tmp_path: Path) -> None:
+    """Item 10: open trade notified once per Bangkok day across watch ticks."""
+    conn = open_db(tmp_path / "tradeday.db")
+    _insert_trade(conn, entry_time_ms=T_233000 - 60_000)
+    sent: list[str] = []
+
+    def send(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    for when in (T_233000, T_233500, T_235500):
+        maybe_send_cutoff_alerts(conn, now_ms=when, send=send, sync_ok=True)
+    assert len(sent) == 1
+    row = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='t1'").fetchone()
+    assert row["cutoff_notice_day"] == "2026-11-23"
+    maybe_send_cutoff_alerts(conn, now_ms=T_NEXT_233000, send=send, sync_ok=True)
+    assert len(sent) == 2
+    row2 = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='t1'").fetchone()
+    assert row2["cutoff_notice_day"] == "2026-11-24"
     conn.close()
 
 
@@ -233,7 +436,7 @@ def test_watch_no_auth_sends_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     out = run_assist_watch(conn, futures=None, now_ms_value=T_233100, send=capture)
     assert out["error"] == "no_binance_auth"
-    assert sent and "ยืนยันสถานะไม่ได้" in sent[0]
+    assert _reg_alerts(sent) == [REG_DEGRADED]
     conn.close()
 
 
@@ -292,7 +495,7 @@ def test_watch_sync_raises_degraded_reg(tmp_path: Path, monkeypatch: pytest.Monk
         return True
 
     run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_233100, send=capture)
-    assert sent and "ยืนยันสถานะไม่ได้" in sent[0]
+    assert _reg_alerts(sent) == [REG_DEGRADED]
     conn.close()
 
 
@@ -314,25 +517,46 @@ def test_watch_build_client_raises_after_cutoff(tmp_path: Path, monkeypatch: pyt
     conn.close()
 
 
+def _seed_trade_and_reg(conn: Any) -> None:
+    _seed_settings(conn)
+    _insert_trade(conn, tid="tw", rid="rw", entry_time_ms=T_233000 - 60_000)
+    _insert_reg(conn, expires_at_ms=T_233500)
+
+
+def _assert_one_trade_and_degraded_reg(sent: list[str], *, hold: str = "0:02") -> None:
+    trades = _trade_alerts(sent)
+    regs = _reg_alerts(sent)
+    assert len(trades) == 1
+    assert trades[0] == (
+        f"⏰ ใกล้ cutoff 00:00 — ไม้ quick BTCUSDT LONG ยังเปิดอยู่ (ถือมา {hold}) "
+        "· บอทไม่ปิดให้ — ถ้าไม่อยากถือข้ามวัน ปิดเองใน Binance"
+    )
+    assert regs == [REG_DEGRADED]
+
+
 def test_watch_assert_key_safe_network_raises(tmp_path: Path) -> None:
+    """Item 2: key-probe RuntimeError — cutoff then re-raise."""
     conn = open_db(tmp_path / "ks.db")
-    _insert_trade(conn, tid="tn", rid="rn")
+    _seed_trade_and_reg(conn)
     fake = FakeFutures(key_error=RuntimeError("network"))
+    sent: list[str] = []
 
     def capture(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
         return True
 
     with pytest.raises(RuntimeError, match="network"):
         run_assist_watch(conn, futures=fake, now_ms_value=T_233100, send=capture)
+    _assert_one_trade_and_degraded_reg(sent)
+    row = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='tw'").fetchone()
+    assert row["cutoff_notice_day"] == "2026-11-23"
     conn.close()
 
 
 def test_watch_key_unsafe_returns_with_cutoff(tmp_path: Path) -> None:
-    from jarvise_assist.futures import FuturesKeyUnsafeError
-
+    """Item 2: key-unsafe early return — one trade alert + degraded reg."""
     conn = open_db(tmp_path / "ku.db")
-    _seed_settings(conn)
-    _insert_trade(conn, tid="tk", rid="rk")
+    _seed_trade_and_reg(conn)
     fake = FakeFutures(key_error=FuturesKeyUnsafeError("unsafe"))
     sent: list[str] = []
 
@@ -342,19 +566,68 @@ def test_watch_key_unsafe_returns_with_cutoff(tmp_path: Path) -> None:
 
     out = run_assist_watch(conn, futures=fake, now_ms_value=T_233100, send=capture)
     assert not out.get("ok", True)
-    assert sent
+    assert out.get("error") == "key_unsafe"
+    _assert_one_trade_and_degraded_reg(sent)
+    assert out.get("quick_cutoff", {}).get("trades_sent") == 1
+    assert out.get("quick_cutoff", {}).get("regs_sent") == 1
+    conn.close()
+
+
+def test_watch_permission_error_cutoff(tmp_path: Path) -> None:
+    """Item 2: FuturesPermissionError — one trade alert + degraded reg."""
+    conn = open_db(tmp_path / "pe.db")
+    _seed_trade_and_reg(conn)
+    fake = FakeFutures(permission_on_balance=FuturesPermissionError("code=-2015"))
+    sent: list[str] = []
+
+    def capture(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    out = run_assist_watch(conn, futures=fake, now_ms_value=T_233100, send=capture)
+    assert out.get("error") == "permission_error"
+    _assert_one_trade_and_degraded_reg(sent)
+    assert out.get("quick_cutoff", {}).get("trades_sent") == 1
+    assert out.get("quick_cutoff", {}).get("regs_sent") == 1
+    conn.close()
+
+
+def test_watch_futures_down_at_2330_cutoff(tmp_path: Path) -> None:
+    """Item 2 MUST: Binance unreachable at 23:30 — cutoff still alerts."""
+    conn = open_db(tmp_path / "fd.db")
+    _seed_trade_and_reg(conn)
+    fake = FakeFutures(read_error=RuntimeError("binance unreachable"))
+    sent: list[str] = []
+
+    def capture(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    out = run_assist_watch(conn, futures=fake, now_ms_value=T_233000, send=capture)
+    assert out.get("error") == "futures_unavailable"
+    trades = _trade_alerts(sent)
+    regs = _reg_alerts(sent)
+    assert len(trades) == 1
+    assert trades[0] == (
+        "⏰ ใกล้ cutoff 00:00 — ไม้ quick BTCUSDT LONG ยังเปิดอยู่ (ถือมา 0:01) "
+        "· บอทไม่ปิดให้ — ถ้าไม่อยากถือข้ามวัน ปิดเองใน Binance"
+    )
+    assert regs == [REG_DEGRADED]
+    assert out.get("quick_cutoff", {}).get("trades_sent") == 1
+    assert out.get("quick_cutoff", {}).get("regs_sent") == 1
     conn.close()
 
 
 def test_typed_q_cutoff_no_db_no_binance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Item 5: typed q refusal — no reply_markup, no rows, no Binance."""
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "tq.db")
     _seed_settings(conn)
     fake = _happy_fake()
-    sent: list[str] = []
+    sent: list[dict[str, Any]] = []
 
-    def send(text: str, **_k: Any) -> int:
-        sent.append(text)
+    def send(text: str, **kwargs: Any) -> int:
+        sent.append({"text": text, **kwargs})
         return 1
 
     handle_quick_text(
@@ -364,37 +637,47 @@ def test_typed_q_cutoff_no_db_no_binance(tmp_path: Path, monkeypatch: pytest.Mon
         send=send,
         now_ms=T_233000,
     )
-    assert sent
-    assert "อีก" in sent[0] and "นาที" in sent[0]
+    assert len(sent) == 1
+    assert sent[0]["text"] == cutoff_block_text(T_233000)
+    _no_buttons(**{k: v for k, v in sent[0].items() if k != "text"})
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_card").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_trade").fetchone()[0] == 0
     assert fake.calls == []
     conn.close()
 
 
 def test_qk_rg_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Item 5: qk:rg refusal — answer(None) once, no buttons, no rows."""
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "rg.db")
     _seed_settings(conn)
     fake = _happy_fake()
     cid = _flow_to_quoted(conn, fake, now_ms=T_232959 - 50_000)
     fake.calls.clear()
-    sent, _ans, out, _ed = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=T_233000 + 5_000)
+    sent, answers, out, _ed = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=T_233000 + 5_000)
     assert out.get("reason") == "cutoff_block"
-    assert sent
+    assert len(sent) == 1
+    assert sent[0]["text"] == cutoff_block_text(T_233000 + 5_000)
+    _no_buttons(**{k: v for k, v in sent[0].items() if k != "text"})
+    assert answers == [None]
     row = conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
     assert row["status"] == "quoted"
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_trade").fetchone()[0] == 0
     assert fake.calls == []
     conn.close()
 
 
 def test_legacy_qr_cutoff(tmp_path: Path) -> None:
+    """Item 5: legacy qr: refusal — no reply_markup."""
     conn = open_db(tmp_path / "qr.db")
     _seed_settings(conn)
     fake = _happy_fake()
-    sent: list[str] = []
+    sent: list[dict[str, Any]] = []
 
-    def send(text: str, **_k: Any) -> int:
-        sent.append(text)
+    def send(text: str, **kwargs: Any) -> int:
+        sent.append({"text": text, **kwargs})
         return 1
 
     created = T_233000 // 1000
@@ -405,21 +688,28 @@ def test_legacy_qr_cutoff(tmp_path: Path) -> None:
         send=send,
         now_ms=T_233100,
     )
-    assert sent and "อีก" in sent[0]
-    assert not any("inline_keyboard" in str(s) for s in sent)
+    assert len(sent) == 1
+    assert sent[0]["text"] == cutoff_block_text(T_233100)
+    _no_buttons(**{k: v for k, v in sent[0].items() if k != "text"})
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_trade").fetchone()[0] == 0
     assert fake.calls == []
     conn.close()
 
 
 def test_qk_rg_after_midnight_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Item 1: quote at 00:00:00, qk:rg at 00:00:05 → registered."""
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "mid.db")
     _seed_settings(conn)
     fake = _happy_fake()
-    quote_at = T_000000 - 30_000
-    cid = _flow_to_quoted(conn, fake, now_ms=quote_at)
+    cid = _flow_to_quoted(conn, fake, now_ms=T_000000)
     sent, answers, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=T_000000 + 5_000)
-    assert out.get("ok") is True or out.get("quoted") is not False
+    assert out.get("ok") is True
+    assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 1
+    row = conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "registered"
+    del sent, answers
     conn.close()
 
 
@@ -435,23 +725,62 @@ def test_qk_sl_cutoff_no_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     cid = str(row["id"])
     _run_qk(conn, f"qk:sy:{cid}:BTCUSDT", fake, now_ms=T_232959)
     before = conn.execute(
-        "SELECT stop_kind, stop_value, updated_at_ms, status FROM assist_quick_card WHERE id=?",
+        "SELECT stop_kind, stop_value, updated_at_ms, status, message_id FROM assist_quick_card WHERE id=?",
         (cid,),
     ).fetchone()
     fake.calls.clear()
-    sent, _, out, _ = _run_qk(conn, f"qk:sl:{cid}:0.5", fake, now_ms=T_233100)
+    sent, _, out, edits = _run_qk(conn, f"qk:sl:{cid}:0.5", fake, now_ms=T_233100)
     after = conn.execute(
-        "SELECT stop_kind, stop_value, updated_at_ms, status FROM assist_quick_card WHERE id=?",
+        "SELECT stop_kind, stop_value, updated_at_ms, status, message_id FROM assist_quick_card WHERE id=?",
         (cid,),
     ).fetchone()
     assert out.get("reason") == "cutoff_block"
-    assert before == after
+    assert dict(before) == dict(after)
     assert fake.calls == []
     assert sent
+    assert edits == []
+    conn.close()
+
+
+def test_qk_rf_cutoff_edit_fails_no_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Item 7 MUST: qk:rf at cutoff with edit failing — send only, no DB/Binance."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    conn = open_db(tmp_path / "rf.db")
+    _seed_settings(conn)
+    fake = _happy_fake()
+    cid = _flow_to_quoted(conn, fake, now_ms=T_232959 - 50_000)
+    before = conn.execute(
+        "SELECT stop_kind, stop_value, updated_at_ms, status, message_id FROM assist_quick_card WHERE id=?",
+        (cid,),
+    ).fetchone()
+    fake.calls.clear()
+    changes_before = conn.total_changes
+    sent, answers, out, edits = _run_qk(
+        conn,
+        f"qk:rf:{cid}",
+        fake,
+        now_ms=T_233100,
+        edit_returns=False,
+    )
+    after = conn.execute(
+        "SELECT stop_kind, stop_value, updated_at_ms, status, message_id FROM assist_quick_card WHERE id=?",
+        (cid,),
+    ).fetchone()
+    assert out.get("reason") == "cutoff_block"
+    assert out.get("ok") is False
+    assert dict(before) == dict(after)
+    assert before["message_id"] == after["message_id"]
+    assert edits == []
+    assert fake.calls == []
+    assert conn.total_changes == changes_before
+    assert len(sent) == 1
+    assert sent[0]["text"] == cutoff_block_text(T_233100)
+    assert answers == [None]
     conn.close()
 
 
 def test_draft_pct_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Item 4: draft % at 23:30 — exact return, fields unchanged, no edit/Binance."""
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     conn = open_db(tmp_path / "dp.db")
     _seed_settings(conn)
@@ -466,17 +795,22 @@ def test_draft_pct_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         (T_232959, T_232959),
     )
     conn.commit()
+    before = conn.execute(
+        "SELECT stop_kind, stop_value, updated_at_ms, message_id FROM assist_quick_card WHERE id='dc1'"
+    ).fetchone()
     fake.calls.clear()
     sent: list[str] = []
+    edits: list[Any] = []
 
     def send(t: str, **_k: Any) -> int:
         sent.append(t)
         return 2
 
     def edit(mid: int, text: str, **_k: Any) -> bool:
+        edits.append((mid, text))
         return True
 
-    handle_quick_draft_text(
+    out = handle_quick_draft_text(
         conn,
         "0.4%",
         futures=fake,
@@ -484,16 +818,19 @@ def test_draft_pct_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         edit=edit,
         now_ms=T_233100,
     )
-    row = conn.execute(
-        "SELECT stop_kind, stop_value, updated_at_ms FROM assist_quick_card WHERE id='dc1'"
+    assert out == {"handled": True, "rejected": True}
+    after = conn.execute(
+        "SELECT stop_kind, stop_value, updated_at_ms, message_id FROM assist_quick_card WHERE id='dc1'"
     ).fetchone()
-    assert row["stop_kind"] == "price"
+    assert dict(after) == dict(before)
+    assert edits == []
     assert fake.calls == []
-    assert sent
+    assert sent == [cutoff_block_text(T_233100)]
     conn.close()
 
 
 def test_draft_price_cutoff_not_far(tmp_path: Path) -> None:
+    """Item 4 + 9: draft price at 23:30 — exact return; readable assert when sent empty."""
     conn = open_db(tmp_path / "dpr.db")
     _seed_settings(conn)
     fake = _happy_fake(marks={"BTCUSDT": Decimal("100")})
@@ -507,24 +844,40 @@ def test_draft_price_cutoff_not_far(tmp_path: Path) -> None:
         (T_232959, T_232959),
     )
     conn.commit()
+    before = conn.execute(
+        "SELECT stop_kind, stop_value, updated_at_ms, message_id FROM assist_quick_card WHERE id='dc2'"
+    ).fetchone()
     fake.calls.clear()
     sent: list[str] = []
+    edits: list[Any] = []
 
     def send(t: str, **_k: Any) -> int:
         sent.append(t)
         return 1
 
-    handle_quick_draft_text(
+    def edit(mid: int, text: str, **_k: Any) -> bool:
+        edits.append((mid, text))
+        return True
+
+    out = handle_quick_draft_text(
         conn,
         "130",
         futures=fake,
         send=send,
-        edit=lambda *_a, **_k: True,
+        edit=edit,
         now_ms=T_233100,
     )
-    assert sent and "cutoff" in sent[0].lower() or "23:30" in sent[0]
-    assert "เกิน 20%" not in sent[0]
+    assert out == {"handled": True, "rejected": True}
+    after = conn.execute(
+        "SELECT stop_kind, stop_value, updated_at_ms, message_id FROM assist_quick_card WHERE id='dc2'"
+    ).fetchone()
+    assert dict(after) == dict(before)
+    assert edits == []
     assert fake.calls == []
+    assert sent, "expected cutoff refusal text"
+    assert ("cutoff" in sent[0].lower()) or ("23:30" in sent[0])
+    assert sent[0] == cutoff_block_text(T_233100)
+    assert "เกิน 20%" not in sent[0]
     conn.close()
 
 
@@ -588,22 +941,41 @@ def test_draft_garbage_returns_none(tmp_path: Path) -> None:
 
 
 def test_quick_cutoff_ast_import_ban() -> None:
+    """Item 8: ban from-import aliases and submodules (redis.asyncio, etc.)."""
     from jarvise_assist import quick_cutoff
 
     path = Path(quick_cutoff.__file__)
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    banned = {
+    banned_roots = (
         "redis",
         "jarvise_trade",
         "jarvise_assist.execute",
         "jarvise_assist.futures",
         "jarvise_assist.pause",
         "jarvise_notify.quiet",
-    }
-    imports: set[str] = set()
+    )
+
+    def _is_banned(name: str) -> bool:
+        for root in banned_roots:
+            if name == root or name.startswith(root + "."):
+                return True
+        return False
+
+    found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module)
-    assert banned.isdisjoint(imports)
+            for alias in node.names:
+                found.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod:
+                found.add(mod)
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if mod:
+                    found.add(f"{mod}.{alias.name}")
+                else:
+                    found.add(alias.name)
+    banned_hits = {name for name in found if _is_banned(name)}
+    assert not banned_hits, f"banned imports in quick_cutoff.py: {banned_hits}"
