@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -99,11 +100,13 @@ def _insert_reg(
 
 
 def _trade_alerts(sent: list[str]) -> list[str]:
-    return [m for m in sent if "ไม้ quick" in m]
+    prefix = "⏰ ใกล้ cutoff 00:00 — ไม้ quick "
+    return [m for m in sent if m.startswith(prefix)]
 
 
 def _reg_alerts(sent: list[str]) -> list[str]:
-    return [m for m in sent if "ลงทะเบียน quick" in m]
+    prefix = "⏰ ใกล้ cutoff 00:00 — ลงทะเบียน quick "
+    return [m for m in sent if m.startswith(prefix)]
 
 
 def _no_buttons(**kwargs: Any) -> None:
@@ -149,8 +152,7 @@ def test_owner_approved_thai_copy_exact(tmp_path: Path) -> None:
         return True
 
     maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=send, sync_ok=True)
-    assert sent[0] == TRADE_ALERT_1H05
-    assert sent[1] == REG_ALERT
+    assert sent == [TRADE_ALERT_1H05, REG_ALERT]
 
     conn2 = open_db(tmp_path / "copy2.db")
     _insert_reg(conn2, expires_at_ms=T_233000 - 1)
@@ -284,20 +286,30 @@ def test_hold_time_null_and_negative_clamp(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_send_false_counts_as_failed(tmp_path: Path) -> None:
-    """Item 6: send False → *_failed, not *_sent."""
-    conn = open_db(tmp_path / "ffc.db")
+@pytest.mark.parametrize(
+    "send_mode",
+    ["false", "none", "raise"],
+    ids=["send_false", "send_none", "send_raises"],
+)
+def test_send_false_counts_as_failed(tmp_path: Path, send_mode: str) -> None:
+    """Item 6: send False/None/raise → *_failed, claim kept, no exception."""
+    conn = open_db(tmp_path / f"ffc-{send_mode}.db")
     _insert_trade(conn)
     _insert_reg(conn, expires_at_ms=T_233500)
 
-    def nope(msg: str, **_k: Any) -> bool:
-        return False
+    def send(msg: str, **_k: Any) -> Any:
+        if send_mode == "false":
+            return False
+        if send_mode == "none":
+            return None
+        raise RuntimeError("telegram down")
 
-    counts = maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=nope, sync_ok=True)
-    assert counts.get("trades_failed") == 1
-    assert counts.get("regs_failed") == 1
-    assert counts.get("trades_sent") is None
-    assert counts.get("regs_sent") is None
+    counts = maybe_send_cutoff_alerts(conn, now_ms=T_233100, send=send, sync_ok=True)
+    assert counts == {"trades_failed": 1, "regs_failed": 1}
+    trade = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='t1'").fetchone()
+    reg = conn.execute("SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'").fetchone()
+    assert trade["cutoff_notice_day"] == "2026-11-23"
+    assert reg["cutoff_notice_day"] == "2026-11-23"
     conn.close()
 
 
@@ -440,20 +452,26 @@ def test_watch_no_auth_sends_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     conn.close()
 
 
-def test_watch_night_hold_still_alerts(tmp_path: Path) -> None:
+def test_watch_night_hold_still_alerts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     conn = open_db(tmp_path / "nh.db")
-    _insert_trade(conn)
     assert is_night_hold(now_ms=T_233100)
+    _insert_trade(conn)
+    _insert_reg(conn, expires_at_ms=T_233500)
+    _insert_reg(conn, rid="reg2", expires_at_ms=T_233100 - 1)
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {},
+    )
     sent: list[str] = []
 
     def capture(msg: str, **_k: Any) -> bool:
         sent.append(msg)
         return True
 
-    fake = FakeFutures()
-    out = run_assist_watch(conn, futures=fake, now_ms_value=T_233100, send=capture)
+    out = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_233100, send=capture)
     assert out["ok"] is True
-    assert sent
+    assert sent == [TRADE_ALERT_0, REG_ALERT]
+    assert out["quick_cutoff"] == {"trades_sent": 1, "regs_sent": 1}
     conn.close()
 
 
@@ -630,6 +648,7 @@ def test_typed_q_cutoff_no_db_no_binance(tmp_path: Path, monkeypatch: pytest.Mon
         sent.append({"text": text, **kwargs})
         return 1
 
+    before = conn.total_changes
     handle_quick_text(
         conn,
         "q BTC short 0.4%",
@@ -637,6 +656,7 @@ def test_typed_q_cutoff_no_db_no_binance(tmp_path: Path, monkeypatch: pytest.Mon
         send=send,
         now_ms=T_233000,
     )
+    assert conn.total_changes == before
     assert len(sent) == 1
     assert sent[0]["text"] == cutoff_block_text(T_233000)
     _no_buttons(**{k: v for k, v in sent[0].items() if k != "text"})
@@ -654,15 +674,28 @@ def test_qk_rg_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_settings(conn)
     fake = _happy_fake()
     cid = _flow_to_quoted(conn, fake, now_ms=T_232959 - 50_000)
+    card_before = conn.execute(
+        "SELECT updated_at_ms, message_id, stop_kind, stop_value, status FROM assist_quick_card WHERE id=?",
+        (cid,),
+    ).fetchone()
     fake.calls.clear()
+    before = conn.total_changes
     sent, answers, out, _ed = _run_qk(conn, f"qk:rg:{cid}", fake, now_ms=T_233000 + 5_000)
+    assert conn.total_changes == before
     assert out.get("reason") == "cutoff_block"
     assert len(sent) == 1
     assert sent[0]["text"] == cutoff_block_text(T_233000 + 5_000)
     _no_buttons(**{k: v for k, v in sent[0].items() if k != "text"})
     assert answers == [None]
-    row = conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (cid,)).fetchone()
+    row = conn.execute(
+        "SELECT updated_at_ms, message_id, stop_kind, stop_value, status FROM assist_quick_card WHERE id=?",
+        (cid,),
+    ).fetchone()
     assert row["status"] == "quoted"
+    assert row["updated_at_ms"] == card_before["updated_at_ms"]
+    assert row["message_id"] == card_before["message_id"]
+    assert row["stop_kind"] == card_before["stop_kind"]
+    assert row["stop_value"] == card_before["stop_value"]
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_trade").fetchone()[0] == 0
     assert fake.calls == []
@@ -681,6 +714,7 @@ def test_legacy_qr_cutoff(tmp_path: Path) -> None:
         return 1
 
     created = T_233000 // 1000
+    before = conn.total_changes
     handle_quick_register_callback(
         conn,
         f"qr:BTCUSDT:s:90000:{created}",
@@ -688,6 +722,7 @@ def test_legacy_qr_cutoff(tmp_path: Path) -> None:
         send=send,
         now_ms=T_233100,
     )
+    assert conn.total_changes == before
     assert len(sent) == 1
     assert sent[0]["text"] == cutoff_block_text(T_233100)
     _no_buttons(**{k: v for k, v in sent[0].items() if k != "text"})
@@ -874,8 +909,6 @@ def test_draft_price_cutoff_not_far(tmp_path: Path) -> None:
     assert dict(after) == dict(before)
     assert edits == []
     assert fake.calls == []
-    assert sent, "expected cutoff refusal text"
-    assert ("cutoff" in sent[0].lower()) or ("23:30" in sent[0])
     assert sent[0] == cutoff_block_text(T_233100)
     assert "เกิน 20%" not in sent[0]
     conn.close()
@@ -940,6 +973,53 @@ def test_draft_garbage_returns_none(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_watch_cutoff_failure_does_not_break_watch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Watch survives cutoff failure: swallow, no quick_cutoff key."""
+    conn = open_db(tmp_path / "wcf.db")
+    _insert_trade(conn)
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {},
+    )
+    monkeypatch.setattr(
+        "jarvise_assist.watch.maybe_send_cutoff_alerts",
+        lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("cutoff boom")),
+    )
+    sent: list[str] = []
+
+    def capture(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    out = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_233100, send=capture)
+    assert out["ok"] is True
+    assert "quick_cutoff" not in out
+    conn.close()
+
+
+def test_cutoff_claim_durable_across_connections(tmp_path: Path) -> None:
+    """Claim UPDATE is committed: second open_db connection sees cutoff_notice_day."""
+    path = tmp_path / "claim.db"
+    conn = open_db(path)
+    _insert_trade(conn)
+    _insert_reg(conn, expires_at_ms=T_233500)
+    sent: list[str] = []
+
+    def send(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    maybe_send_cutoff_alerts(conn, now_ms=T_233000, send=send, sync_ok=True)
+    conn.close()
+
+    conn2 = open_db(path)
+    trade = conn2.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='t1'").fetchone()
+    reg = conn2.execute("SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'").fetchone()
+    assert trade["cutoff_notice_day"] == "2026-11-23"
+    assert reg["cutoff_notice_day"] == "2026-11-23"
+    conn2.close()
+
+
 def test_quick_cutoff_ast_import_ban() -> None:
     """Item 8: ban from-import aliases and submodules (redis.asyncio, etc.)."""
     from jarvise_assist import quick_cutoff
@@ -967,7 +1047,12 @@ def test_quick_cutoff_ast_import_ban() -> None:
             for alias in node.names:
                 found.add(alias.name)
         elif isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
+            if node.level == 1:
+                mod = "jarvise_assist"
+                if node.module:
+                    mod = f"{mod}.{node.module}"
+            else:
+                mod = node.module or ""
             if mod:
                 found.add(mod)
             for alias in node.names:
