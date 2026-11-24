@@ -368,6 +368,37 @@ def _append_position_block(lines: list[str], number: int, symbol: str, details: 
         lines.append(f"• {detail}")
 
 
+def quick_planned_stop(conn: Any, *, symbol: str, side: str) -> float | None:
+    """1R anchor for an open Quick: tagged trade stop, else open registration stop."""
+    sym = symbol.upper()
+    side_l = side.lower()
+    trade = conn.execute(
+        """
+        SELECT planned_stop FROM assist_quick_trade
+        WHERE status='open' AND UPPER(symbol)=? AND LOWER(side)=?
+        ORDER BY entry_time_ms DESC, id DESC LIMIT 1
+        """,
+        (sym, side_l),
+    ).fetchone()
+    if trade is not None and trade["planned_stop"] is not None:
+        return float(trade["planned_stop"])
+    reg = conn.execute(
+        """
+        SELECT planned_stop FROM assist_quick_registration
+        WHERE status='open' AND UPPER(symbol)=? AND LOWER(side)=?
+        ORDER BY created_at_ms DESC, id DESC LIMIT 1
+        """,
+        (sym, side_l),
+    ).fetchone()
+    if reg is not None and reg["planned_stop"] is not None:
+        return float(reg["planned_stop"])
+    return None
+
+
+def quick_registered_stop_line(*, stop: float, tick: Decimal | None) -> str:
+    return f"⚡ ไม้ quick · stop ที่ลงทะเบียน {_price_text(stop, tick)} (ฐาน 1R)"
+
+
 def compute_position_unrealized(
     conn: Any,
     *,
@@ -378,8 +409,15 @@ def compute_position_unrealized(
 ) -> tuple[str, float | None, float]:
     """Return display line, R multiple (None if unknown), and risk distance used for R."""
     sym = pos.symbol
-    watch = get_watch_position(conn, sym, pos.position_side)
-    linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
+    is_quick = sym.upper() in quick_symbols(conn)
+    quick_stop = quick_planned_stop(conn, symbol=sym, side=pos.side) if is_quick else None
+    # Quick never borrows a main watch row or main signal for R.
+    if is_quick:
+        watch = None
+        linked = None
+    else:
+        watch = get_watch_position(conn, sym, pos.position_side)
+        linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
     initial_stop: float | None
     if watch and watch.get("initial_stop") is not None:
         initial_stop = float(watch["initial_stop"])
@@ -401,7 +439,23 @@ def compute_position_unrealized(
     else:
         unreal_usdt = (entry - mark) * qty
     r_note = ""
-    if initial_stop is not None:
+    risk = 0.0
+    if is_quick:
+        # Order: Quick planned stop (loss-side) → placed stop → R unknown.
+        if quick_stop is not None:
+            loss_side = (pos.side == "long" and quick_stop < entry) or (
+                pos.side == "short" and quick_stop > entry
+            )
+            if loss_side:
+                risk = abs(entry - quick_stop)
+                r_note = " (จาก stop ที่ลงทะเบียน)"
+        if risk <= 0 and stop_info is not None:
+            placed = float(stop_info.price)
+            loss_side = (pos.side == "long" and placed < entry) or (pos.side == "short" and placed > entry)
+            if loss_side:
+                risk = abs(entry - placed)
+                r_note = " (จาก stop จริง)"
+    elif initial_stop is not None:
         risk = abs(entry - initial_stop)
     elif stop_info is not None:
         placed = float(stop_info.price)
@@ -452,6 +506,7 @@ def render_open_positions_message(
         return "อ่าน futures ไม่ได้", None
     if not positions:
         return "ไม่มีไม้ที่ถืออยู่", None
+    quick = quick_symbols(conn)
     lines = ["📋 ไม้ที่ถืออยู่"]
     for number, pos in enumerate(positions, start=1):
         sym = pos.symbol
@@ -471,7 +526,9 @@ def render_open_positions_message(
             trade_side=pos.side,
         )
         side_l = "LONG" if pos.side == "long" else "SHORT"
-        if sym not in ASSIST_SYMBOLS:
+        is_quick = sym.upper() in quick
+        quick_stop = quick_planned_stop(conn, symbol=sym, side=pos.side) if is_quick else None
+        if sym not in ASSIST_SYMBOLS and not is_quick:
             outside = [f"{side_l} · qty {fmt_qty(pos.qty)} · {_margin_text(pos)} · no data, no advice"]
             if coverage == "none":
                 outside.append(_NO_STOP_LINE)
@@ -479,8 +536,37 @@ def render_open_positions_message(
                 outside.append(_partial_stop_line(covered, pos.qty))
             _append_position_block(lines, number, sym, outside)
             continue
+        if sym not in ASSIST_SYMBOLS and is_quick:
+            mark_s = _price_text(pos.mark_price, tick)
+            outside = [
+                f"{side_l} · qty {fmt_qty(pos.qty)} · {_margin_text(pos)}",
+                f"เข้า {_price_text(pos.entry_price, tick)} · mark {mark_s}",
+            ]
+            if quick_stop is not None:
+                outside.append(quick_registered_stop_line(stop=quick_stop, tick=tick))
+            if coverage == "none":
+                outside.append(_NO_STOP_LINE)
+            elif coverage == "partial":
+                outside.append(_partial_stop_line(covered, pos.qty))
+            unrealized, _r_mult, _risk = compute_position_unrealized(
+                conn, pos=pos, orders=orders, now_ms=now_ms, tick=tick
+            )
+            outside.append(unrealized)
+            liq_s = (
+                _price_text(pos.liquidation_price, tick)
+                if pos.liquidation_price is not None and pos.liquidation_price > 0
+                else None
+            )
+            if liq_s is not None:
+                outside.append(f"liquidation {liq_s}")
+            _append_position_block(lines, number, sym, outside)
+            continue
         watch = get_watch_position(conn, sym, pos.position_side)
         linked = find_linkable_signal(conn, symbol=sym, side=pos.side, now_ms=now_ms)
+        # Quick: keep ⚡ / R / placed stop / TP / liq; hide main 1R anchor + trail advice.
+        if is_quick:
+            watch = None
+            linked = None
         initial_stop: float | None
         if watch and watch.get("initial_stop") is not None:
             initial_stop = float(watch["initial_stop"])
@@ -511,6 +597,8 @@ def render_open_positions_message(
             f"{side_l} · qty {fmt_qty(pos.qty)} · {_margin_text(pos)}",
             f"เข้า {_price_text(pos.entry_price, tick)} · mark {mark_s}",
         ]
+        if quick_stop is not None:
+            details.append(quick_registered_stop_line(stop=quick_stop, tick=tick))
         unrealized, _r_mult, risk = compute_position_unrealized(
             conn, pos=pos, orders=orders, now_ms=now_ms, tick=tick
         )
@@ -595,11 +683,8 @@ def render_open_positions_message(
         _append_position_block(lines, number, sym, details)
     markup: dict[str, Any] | None = None
     if assist_execute_mode() == "live":
-        quick = quick_symbols(conn)
         rows: list[list[dict[str, str]]] = []
         for pos in positions:
-            if pos.symbol.upper() in quick:
-                continue
             side_l = "LONG" if pos.side == "long" else "SHORT"
             side_code = "l" if pos.side == "long" else "s"
             rows.append(

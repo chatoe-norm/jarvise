@@ -143,7 +143,6 @@ MSG_PREORDER_MOVE = "อ่าน Binance ไม่ได้ — ยังไม
 MSG_PREORDER_EXIT = "อ่าน Binance ไม่ได้ — ยังไม่ได้ส่งคำสั่ง ดู 📋 ไม้ที่ถืออยู่"
 MSG_MOVE_STOP_OLD_UNREADABLE = "เลื่อน stop ไม่ได้ — ยืนยัน stop เดิมไม่ได้ — เช็กในแอป"
 MSG_CANCELLED = "ยกเลิกแล้ว"
-MSG_MENU_QUICK = "ไม้ quick — ปิดในแอป"
 OWNER_CLOSING_ORDER_NOTE = "✋ คุณตั้งเอง — จะยังค้างอยู่ ลบในแอป"
 OWNER_CLOSING_HEADER = "stop/TP ที่คุณตั้งเอง (บอทจะไม่ยกเลิก):"
 MSG_MENU_EXIT_EXPIRED = "หมดเวลา — กด 🔄 อัปเดต หรือเปิด 📋 ไม้ที่ถืออยู่ใหม่"
@@ -3170,6 +3169,7 @@ def _format_menu_exit_confirm(
     orders: list[dict[str, Any]],
     unrealized_line: str,
     tick: Decimal | None,
+    quick_stop_line: str | None = None,
 ) -> str:
     sym = pos.symbol.upper()
     side_l = "LONG" if pos.side == "long" else "SHORT"
@@ -3184,8 +3184,10 @@ def _format_menu_exit_confirm(
             f"เข้า {_fmt_price_tick(pos.entry_price, tick) if tick else fmt_price_display(pos.entry_price)}"
             f" · mark {_fmt_price_tick(pos.mark_price, tick) if tick else fmt_price_display(pos.mark_price)}"
         ),
-        unrealized_line,
     ]
+    if quick_stop_line:
+        lines.append(quick_stop_line)
+    lines.append(unrealized_line)
     if owner_orders:
         lines.append("")
         lines.append(OWNER_CLOSING_HEADER)
@@ -3289,10 +3291,6 @@ def handle_exec_callback(
             send("ไม่พบคำสั่ง")
             return {"ok": False, "reason": "bad_data"}
         symbol, side = parsed
-        if symbol in quick_symbols(conn):
-            answer()
-            send(MSG_MENU_QUICK)
-            return {"ok": False, "reason": "quick"}
         if symbol_has_in_flight_exec(conn, symbol):
             answer()
             send(_msg_menu_in_flight(symbol))
@@ -3327,36 +3325,50 @@ def handle_exec_callback(
             tick = reader.symbol_filters(symbol).tick_size
         except Exception:  # noqa: BLE001
             tick = None
-        from jarvise_assist.menu import compute_position_unrealized
+        from jarvise_assist.menu import (
+            compute_position_unrealized,
+            quick_planned_stop,
+            quick_registered_stop_line,
+        )
 
         unrealized_line, r_at_tap, _risk = compute_position_unrealized(
             conn, pos=pos, orders=orders, now_ms=ts, tick=tick
         )
         mark_at_tap = float(pos.mark_price)
         exit_advice_active = _exit_advice_active(conn, symbol=symbol, position_side=pos.position_side)
+        is_quick = symbol in quick_symbols(conn)
+        quick_stop_line: str | None = None
+        if is_quick:
+            q_stop = quick_planned_stop(conn, symbol=symbol, side=side)
+            if q_stop is not None:
+                quick_stop_line = quick_registered_stop_line(stop=q_stop, tick=tick)
         confirm_text = _format_menu_exit_confirm(
             pos=pos,
             orders=orders,
             unrealized_line=unrealized_line,
             tick=tick,
+            quick_stop_line=quick_stop_line,
         )
+        preview: dict[str, Any] = {
+            "qty": str(pos.qty),
+            "entry": str(pos.entry_price),
+            "position_side": pos.position_side,
+            "source": "menu",
+            "early_close": False,
+            "unrealized_line": unrealized_line,
+            "r_at_tap": r_at_tap,
+            "mark_at_tap": mark_at_tap,
+            "exit_advice_active": exit_advice_active,
+            "confirm_text": confirm_text,
+        }
+        if is_quick:
+            preview["cohort"] = "quick"
         intent_id = insert_exec_intent(
             conn,
             kind="exit",
             symbol=symbol,
             side=side,
-            preview={
-                "qty": str(pos.qty),
-                "entry": str(pos.entry_price),
-                "position_side": pos.position_side,
-                "source": "menu",
-                "early_close": False,
-                "unrealized_line": unrealized_line,
-                "r_at_tap": r_at_tap,
-                "mark_at_tap": mark_at_tap,
-                "exit_advice_active": exit_advice_active,
-                "confirm_text": confirm_text,
-            },
+            preview=preview,
             created_at_ms=ts,
             expires_at_ms=ts + PREVIEW_TTL_MS,
         )
@@ -3554,10 +3566,6 @@ def handle_exec_callback(
             answer()
             send(_msg_menu_in_flight(str(intent["symbol"])))
             return {"ok": False, "reason": "in_flight"}
-        if menu_exit and str(intent["symbol"]).upper() in quick_symbols(conn):
-            answer()
-            send(MSG_MENU_QUICK)
-            return {"ok": False, "reason": "quick"}
         if prefix in {"ey:", "ms:"} and intent["expires_at_ms"] < ts:
             expired_text = MSG_MOVE_STOP_EXPIRED if prefix == "ms:" else MSG_EXPIRED
             wrote = finish_exec_intent(

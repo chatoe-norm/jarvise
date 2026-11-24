@@ -15,7 +15,6 @@ from jarvise_assist.execute import (
     MSG_ALREADY_CLOSED,
     MSG_MENU_LIVE_ONLY,
     MSG_MENU_POSITION_CHANGED,
-    MSG_MENU_QUICK,
     OWNER_CLOSING_HEADER,
     OWNER_CLOSING_ORDER_NOTE,
     PREVIEW_TTL_MS,
@@ -26,7 +25,14 @@ from jarvise_assist.exit_log import record_intent_action
 from jarvise_assist.journal import collect_auto_checks
 from jarvise_assist.keyboard import BTN_POSITIONS
 from jarvise_assist.listen import process_update
-from jarvise_assist.menu import handle_menu_text, render_open_positions, render_open_positions_message
+from jarvise_assist.menu import (
+    compute_position_unrealized,
+    handle_menu_text,
+    render_open_positions,
+    render_open_positions_message,
+)
+from jarvise_assist.quick import _send_close_notice
+from jarvise_assist.quick_card import quick_mode_tag
 from jarvise_assist.store import (
     claim_exec_intent,
     get_exec_intent,
@@ -38,6 +44,51 @@ from jarvise_assist.store import (
     write_settings,
 )
 from jarvise_ingest.db import open_db
+
+
+def _insert_quick_reg(
+    conn: Any,
+    *,
+    reg_id: str,
+    symbol: str,
+    side: str = "long",
+    planned_stop: float = 90.0,
+    planned_entry: float = 100.0,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO assist_quick_registration (
+            id, symbol, side, planned_entry, planned_stop, qty, status,
+            created_at_ms, expires_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, 1, 'open', 1, 999999999, 1)
+        """,
+        (reg_id, symbol, side, planned_entry, planned_stop),
+    )
+    conn.commit()
+
+
+def _insert_quick_trade(
+    conn: Any,
+    *,
+    trade_id: str,
+    symbol: str,
+    side: str = "long",
+    planned_stop: float = 90.0,
+    entry_time_ms: int = 1,
+    status: str = "open",
+    registration_id: str | None = None,
+) -> None:
+    rid = registration_id or f"r-{trade_id}"
+    conn.execute(
+        """
+        INSERT INTO assist_quick_trade (
+            id, registration_id, symbol, side, status,
+            entry_avg, entry_qty, risk_usdt, entry_time_ms, updated_at_ms, planned_stop
+        ) VALUES (?, ?, ?, ?, ?, 100, 1, 10, ?, 1, ?)
+        """,
+        (trade_id, rid, symbol, side, status, entry_time_ms, planned_stop),
+    )
+    conn.commit()
 
 
 def _long_pos(symbol: str = "BTCUSDT", qty: str = "0.01") -> Any:
@@ -54,20 +105,12 @@ def _long_pos(symbol: str = "BTCUSDT", qty: str = "0.01") -> Any:
     )
 
 
-def test_positions_markup_live_skips_quick_and_respects_bytes(
+def test_positions_markup_live_includes_quick_and_respects_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
     conn = open_db(tmp_path / "markup.db")
-    conn.execute(
-        """
-        INSERT INTO assist_quick_registration (
-            id, symbol, side, planned_entry, planned_stop, qty, status,
-            created_at_ms, expires_at_ms, updated_at_ms
-        ) VALUES ('q1', 'DOGEUSDT', 'long', 1, 0.9, 1, 'open', 1, 999999999, 1)
-        """
-    )
-    conn.commit()
+    _insert_quick_reg(conn, reg_id="q1", symbol="DOGEUSDT", planned_stop=0.9, planned_entry=1)
     positions = [
         _long_pos("BTCUSDT"),
         _long_pos("DOGEUSDT"),
@@ -79,8 +122,8 @@ def test_positions_markup_live_skips_quick_and_respects_bytes(
     buttons = [b for row in markup["inline_keyboard"] for b in row]
     cbs = [str(b["callback_data"]) for b in buttons]
     assert "xc:BTCUSDT:l" in cbs
+    assert "xc:DOGEUSDT:l" in cbs
     assert "xc:1000PEPEUSDT:l" in cbs
-    assert all("DOGE" not in cb for cb in cbs)
     assert all(len(cb) <= 64 for cb in cbs)
     assert all(str(b["text"]).startswith("ปิดไม้ ") for b in buttons)
     conn.close()
@@ -158,7 +201,7 @@ def test_xc_refuses_when_not_live(
     conn.close()
 
 
-def test_xc_refusals_position_and_quick(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_xc_refusals_position_changed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
     conn = open_db(tmp_path / "refuse2.db")
     sent: list[str] = []
@@ -196,27 +239,53 @@ def test_xc_refusals_position_and_quick(tmp_path: Path, monkeypatch: pytest.Monk
         now_ms_value=2,
     )
     assert sent[-1] == MSG_MENU_POSITION_CHANGED
+    conn.close()
 
-    conn.execute(
-        """
-        INSERT INTO assist_quick_registration (
-            id, symbol, side, planned_entry, planned_stop, qty, status,
-            created_at_ms, expires_at_ms, updated_at_ms
-        ) VALUES ('q1', 'BTCUSDT', 'long', 1, 0.9, 1, 'open', 1, 999999999, 1)
-        """
-    )
-    conn.commit()
-    sent.clear()
-    handle_exec_callback(
+
+def test_xc_quick_builds_confirm_with_registered_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "xc-quick.db")
+    write_settings(conn, enabled=True)
+    _insert_quick_reg(conn, reg_id="q1", symbol="BTCUSDT", planned_stop=90.0, planned_entry=100.0)
+    owner_stop = {
+        "symbol": "BTCUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "stopPrice": "95",
+        "origQty": "0.01",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientOrderId": "manual-sl-1",
+    }
+    sent: list[dict[str, Any]] = []
+
+    def send(text: str, **kw: Any) -> int:
+        sent.append({"text": text, **kw})
+        return len(sent)
+
+    out = handle_exec_callback(
         conn,
         "xc:BTCUSDT:l",
-        send=lambda t, **_k: sent.append(t) or True,
+        send=send,
         answer=lambda *_a, **_k: None,
         edit=lambda *_a, **_k: None,
-        read_futures=FakeFutures(positions=[_long_pos()], orders=[]),
+        read_futures=FakeFutures(positions=[_long_pos()], orders=[owner_stop]),
         now_ms_value=3,
     )
-    assert sent[-1] == MSG_MENU_QUICK
+    assert out.get("preview")
+    text = sent[-1]["text"]
+    assert "ยืนยันปิดไม้" in text
+    assert "⚡ ไม้ quick · stop ที่ลงทะเบียน" in text
+    assert "จาก stop ที่ลงทะเบียน" in text
+    assert OWNER_CLOSING_HEADER in text
+    assert OWNER_CLOSING_ORDER_NOTE in text
+    intent = get_exec_intent(conn, str(out["preview"]))
+    assert intent is not None
+    preview = intent["preview"]
+    assert preview.get("source") == "menu"
+    assert preview.get("cohort") == "quick"
     conn.close()
 
 
@@ -794,7 +863,7 @@ def test_menu_close_under_kill_switch(tmp_path: Path, monkeypatch: pytest.Monkey
     conn.close()
 
 
-def test_menu_xx_off_and_quick_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_menu_xx_off_still_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     conn = open_db(tmp_path / "xx-refuse.db")
     ts = now_ms()
     intent_id = insert_exec_intent(
@@ -818,28 +887,82 @@ def test_menu_xx_off_and_quick_refused(tmp_path: Path, monkeypatch: pytest.Monke
         now_ms_value=ts,
     )
     assert sent[-1] == MSG_MENU_LIVE_ONLY
+    conn.close()
 
-    conn.execute(
-        """
-        INSERT INTO assist_quick_registration (
-            id, symbol, side, planned_entry, planned_stop, qty, status,
-            created_at_ms, expires_at_ms, updated_at_ms
-        ) VALUES ('q9', 'DOGEUSDT', 'short', 1, 2, 1, 'open', 1, 9, 1)
-        """
-    )
-    conn.commit()
-    sent.clear()
+
+def test_menu_xx_closes_quick_full_qty_and_lists_owner_leftovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "xx-quick.db")
+    _insert_quick_reg(conn, reg_id="q9", symbol="DOGEUSDT", side="short", planned_stop=2.0, planned_entry=1.0)
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "cohort": "quick",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_limit = {
+        "symbol": "DOGEUSDT",
+        "type": "LIMIT",
+        "side": "BUY",
+        "price": "0.075",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientOrderId": "owner-tp-1",
+    }
+    handlers = _menu_close_handlers(open_orders=(200, [owner_limit]))
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    sent: list[str] = []
+
     handle_exec_callback(
         conn,
         f"xx:{intent_id}",
         send=lambda t, **_k: sent.append(t) or True,
         answer=lambda *_a, **_k: None,
         edit=lambda *_a, **_k: None,
-        trade=_client(RecordingTransport({})),
+        trade=trade,
         now_ms_value=ts,
+        message={"message_id": 1},
     )
-    assert sent[-1] == MSG_MENU_QUICK
+    posts = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
+    assert len(posts) == 1
+    body = posts[0][2]
+    assert body.get("reduceOnly") in {True, "true", "True"}
+    assert str(body.get("quantity")) == "100"
+    cancels = [c for c in transport.calls if c[0] == "DELETE"]
+    assert cancels == []
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "done"
+    assert "LIMIT BUY 0.075" in str(row["result_text"])
+    assert OWNER_CLOSING_ORDER_NOTE in str(row["result_text"])
+
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda t, **_k: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=ts + 1,
+        message={"message_id": 1},
+    )
+    assert len([c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]) == 1
     conn.close()
 
 
@@ -1177,4 +1300,719 @@ def test_menu_xx_wrong_side_stores_menu_wording(tmp_path: Path, monkeypatch: pyt
     assert row is not None
     assert str(row["result_text"]) == MSG_MENU_POSITION_CHANGED
     assert markups and "🔄 อัปเดต" in str(markups[-1])
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("side", "amt", "entry", "mark", "stop", "expect_r"),
+    [
+        ("long", "1", "100", "110", 90.0, 1.0),
+        ("short", "-1", "100", "90", 110.0, 1.0),
+    ],
+)
+def test_quick_r_from_open_registration(
+    tmp_path: Path,
+    side: str,
+    amt: str,
+    entry: str,
+    mark: str,
+    stop: float,
+    expect_r: float,
+) -> None:
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / f"qr-reg-{side}.db")
+    _insert_quick_reg(
+        conn,
+        reg_id="qr1",
+        symbol="BTCUSDT",
+        side=side,
+        planned_stop=stop,
+        planned_entry=float(entry),
+    )
+    pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal(amt),
+        entry_price=Decimal(entry),
+        mark_price=Decimal(mark),
+        update_time_ms=1,
+        liquidation_price=None,
+    )
+    line, r_mult, risk = compute_position_unrealized(conn, pos=pos, orders=[], now_ms=1, tick=None)
+    assert risk == pytest.approx(abs(float(entry) - stop))
+    assert r_mult == pytest.approx(expect_r)
+    assert "จาก stop ที่ลงทะเบียน" in line
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("side", "amt", "entry", "mark", "stop", "expect_r"),
+    [
+        ("long", "1", "100", "105", 90.0, 0.5),
+        ("short", "-1", "100", "95", 110.0, 0.5),
+    ],
+)
+def test_quick_r_from_tagged_trade(
+    tmp_path: Path,
+    side: str,
+    amt: str,
+    entry: str,
+    mark: str,
+    stop: float,
+    expect_r: float,
+) -> None:
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / f"qr-trade-{side}.db")
+    _insert_quick_trade(
+        conn,
+        trade_id="qt1",
+        symbol="BTCUSDT",
+        side=side,
+        planned_stop=stop,
+        entry_time_ms=1,
+    )
+    pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal(amt),
+        entry_price=Decimal(entry),
+        mark_price=Decimal(mark),
+        update_time_ms=1,
+        liquidation_price=None,
+    )
+    line, r_mult, _risk = compute_position_unrealized(conn, pos=pos, orders=[], now_ms=1, tick=None)
+    assert r_mult == pytest.approx(expect_r)
+    assert "จาก stop ที่ลงทะเบียน" in line
+    conn.close()
+
+
+def test_outside_universe_quick_shows_registered_r_not_no_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "out-quick.db")
+    _insert_quick_reg(
+        conn,
+        reg_id="q-pepe",
+        symbol="1000PEPEUSDT",
+        planned_stop=90.0,
+        planned_entry=100.0,
+    )
+    pos = _long_pos("1000PEPEUSDT", "1000")
+    # entry 100 mark 101 → risk 10 → +0.1R
+    body, markup = render_open_positions_message(
+        conn, futures=FakeFutures(positions=[pos], orders=[]), now_ms=1
+    )
+    assert "no data, no advice" not in body
+    assert "⚡ ไม้ quick · stop ที่ลงทะเบียน" in body
+    assert "จาก stop ที่ลงทะเบียน" in body
+    assert markup is not None
+    cbs = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert "xc:1000PEPEUSDT:l" in cbs
+    conn.close()
+
+
+def test_outside_universe_non_quick_keeps_no_data_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "out-nonquick.db")
+    pos = _long_pos("1000PEPEUSDT", "1000")
+    body, markup = render_open_positions_message(
+        conn, futures=FakeFutures(positions=[pos], orders=[]), now_ms=1
+    )
+    assert "no data, no advice" in body
+    assert "⚡ ไม้ quick" not in body
+    assert markup is not None
+    cbs = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert "xc:1000PEPEUSDT:l" in cbs
+    conn.close()
+
+
+def test_in_universe_quick_menu_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "in-quick.db")
+    _insert_quick_reg(conn, reg_id="q-btc", symbol="BTCUSDT", planned_stop=90.0)
+    body, _markup = render_open_positions_message(
+        conn,
+        futures=FakeFutures(positions=[_long_pos("BTCUSDT")], orders=[]),
+        now_ms=1,
+    )
+    assert "⚡ ไม้ quick · stop ที่ลงทะเบียน" in body
+    assert "จาก stop ที่ลงทะเบียน" in body
+    conn.close()
+
+
+def test_in_universe_quick_hides_main_stop_and_trail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S1: Quick + same-side main signal must not show main 1R / trail advice."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "in-quick-main.db")
+    _insert_quick_reg(conn, reg_id="q-btc", symbol="BTCUSDT", planned_stop=90.0)
+    # Main signal stop 95 would otherwise print "stop ตั้งต้น 95 (ฐาน 1R)".
+    conn.execute(
+        """
+        INSERT INTO assist_signal (
+            id, symbol, side, entry, stop, target, qty, notional, leverage, loss_at_stop,
+            created_at_ms, expires_at_ms, status, sent_at_ms
+        ) VALUES (
+            'as_main_btc', 'BTCUSDT', 'long', 100, 95, 120, 0.01, 1, 1, 0.05,
+            1, 999999999, 'sent', 1
+        )
+        """
+    )
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 100.0,
+            "qty": 0.01,
+            "in_universe": 1,
+            "signal_id": "as_main_btc",
+            "initial_stop": 95.0,
+            "initial_stop_source": "signal",
+            "entry_time_ms": 1,
+            "no_stop_latched": 0,
+            "last_seen_ms": 1,
+            "closed_at_ms": None,
+        },
+    )
+    conn.commit()
+    body, _markup = render_open_positions_message(
+        conn,
+        futures=FakeFutures(positions=[_long_pos("BTCUSDT")], orders=[]),
+        now_ms=1,
+    )
+    assert "⚡ ไม้ quick · stop ที่ลงทะเบียน" in body
+    assert "stop ตั้งต้น" not in body
+    assert "stop แนะนำตอนนี้" not in body
+    assert "จาก stop ที่ลงทะเบียน" in body
+    # entry 100 mark 101, Quick stop 90 → +0.1R from registered stop (not main 95).
+    assert "+0.1R (จาก stop ที่ลงทะเบียน)" in body
+    conn.close()
+
+
+def _close_notice_payload(
+    *,
+    symbol: str = "BTCUSDT",
+    side: str = "long",
+    entry_time_ms: int | None = 100,
+    closed_at_ms: int | None = 300,
+    net_usdt: float = 1.0,
+    net_r: float = 0.1,
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "side": side,
+        "net_usdt": net_usdt,
+        "net_r": net_r,
+        "risk_usdt": 10.0,
+        "entry_time_ms": entry_time_ms,
+        "closed_at_ms": closed_at_ms,
+        "commission_other_asset": None,
+    }
+
+
+def _seed_closed_quick_trade(
+    conn: Any,
+    *,
+    trade_id: str,
+    symbol: str = "BTCUSDT",
+    side: str = "long",
+    entry_time_ms: int = 100,
+) -> None:
+    _insert_quick_trade(
+        conn,
+        trade_id=trade_id,
+        symbol=symbol,
+        side=side,
+        planned_stop=90.0,
+        entry_time_ms=entry_time_ms,
+        status="closed",
+    )
+    conn.execute(
+        "UPDATE assist_quick_trade SET status='closed', net_usdt=1, net_r=0.1, "
+        "close_notice_at_ms=NULL WHERE id=?",
+        (trade_id,),
+    )
+    conn.commit()
+
+
+def test_quick_close_notice_bot_vs_manual(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "close-notice.db")
+    tag = quick_mode_tag()
+    _seed_closed_quick_trade(conn, trade_id="t-bot")
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+        created_at_ms=200,
+        expires_at_ms=200 + PREVIEW_TTL_MS,
+    )
+    conn.execute(
+        "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+        ("✅ ปิด BTCUSDT", intent_id),
+    )
+    insert_exec_log(
+        conn,
+        intent_id=intent_id,
+        step="exit_market",
+        endpoint="/fapi/v1/order",
+        http_status=200,
+        order_or_algo_id="99",
+        created_at_ms=210,
+    )
+    conn.commit()
+
+    sent: list[str] = []
+    _send_close_notice(
+        conn,
+        lambda m, **_: sent.append(m),
+        trade_id="t-bot",
+        client=None,
+        payload=_close_notice_payload(),
+        now_ms=300,
+    )
+    assert len(sent) == 1
+    assert "(ปิดผ่านบอท)" in sent[0]
+    assert "(ปิดใน Binance)" not in sent[0]
+    assert tag in sent[0]
+
+    _seed_closed_quick_trade(conn, trade_id="t-manual", symbol="ETHUSDT")
+    sent.clear()
+    _send_close_notice(
+        conn,
+        lambda m, **_: sent.append(m),
+        trade_id="t-manual",
+        client=None,
+        payload=_close_notice_payload(symbol="ETHUSDT"),
+        now_ms=400,
+    )
+    assert len(sent) == 1
+    assert "(ปิดใน Binance)" in sent[0]
+    assert "(ปิดผ่านบอท)" not in sent[0]
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "already_closed_no_log",
+        "non_quick_menu",
+        "entry_time_none",
+        "intent_before_entry",
+        "intent_30s_before_entry",
+    ],
+)
+def test_quick_close_notice_binance_when_no_exit_market(tmp_path: Path, case: str) -> None:
+    """S2: (ปิดใน Binance) unless a Quick exit_market 200 log sits in the trade window."""
+    conn = open_db(tmp_path / f"notice-binance-{case}.db")
+    _seed_closed_quick_trade(conn, trade_id="t1")
+    if case == "already_closed_no_log":
+        intent_id = insert_exec_intent(
+            conn,
+            kind="exit",
+            symbol="BTCUSDT",
+            side="long",
+            preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+            created_at_ms=200,
+            expires_at_ms=200 + PREVIEW_TTL_MS,
+        )
+        conn.execute(
+            "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+            (MSG_ALREADY_CLOSED, intent_id),
+        )
+        # No exit_market log — Binance (or owner) already flat before confirm.
+    elif case == "non_quick_menu":
+        intent_id = insert_exec_intent(
+            conn,
+            kind="exit",
+            symbol="BTCUSDT",
+            side="long",
+            preview={"source": "menu", "qty": "1", "entry": "100"},
+            created_at_ms=200,
+            expires_at_ms=200 + PREVIEW_TTL_MS,
+        )
+        conn.execute(
+            "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+            ("✅ ปิด BTCUSDT", intent_id),
+        )
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step="exit_market",
+            endpoint="/fapi/v1/order",
+            http_status=200,
+            order_or_algo_id="99",
+            created_at_ms=210,
+        )
+    elif case == "intent_before_entry":
+        # Before entry (no pad) — must not match.
+        intent_id = insert_exec_intent(
+            conn,
+            kind="exit",
+            symbol="BTCUSDT",
+            side="long",
+            preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+            created_at_ms=1,
+            expires_at_ms=1 + PREVIEW_TTL_MS,
+        )
+        conn.execute(
+            "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+            ("✅ ปิด BTCUSDT", intent_id),
+        )
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step="exit_market",
+            endpoint="/fapi/v1/order",
+            http_status=200,
+            order_or_algo_id="99",
+            created_at_ms=2,
+        )
+    elif case == "intent_30s_before_entry":
+        # entry−30s would have matched under the old 60s pad; lower bound is entry now.
+        intent_id = insert_exec_intent(
+            conn,
+            kind="exit",
+            symbol="BTCUSDT",
+            side="long",
+            preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+            created_at_ms=70_000,
+            expires_at_ms=70_000 + PREVIEW_TTL_MS,
+        )
+        conn.execute(
+            "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+            ("✅ ปิด BTCUSDT", intent_id),
+        )
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step="exit_market",
+            endpoint="/fapi/v1/order",
+            http_status=200,
+            order_or_algo_id="99",
+            created_at_ms=70_001,
+        )
+    elif case == "entry_time_none":
+        # Clear DB fallback too; a would-match intent must still not count.
+        conn.execute("UPDATE assist_quick_trade SET entry_time_ms=NULL WHERE id='t1'")
+        intent_id = insert_exec_intent(
+            conn,
+            kind="exit",
+            symbol="BTCUSDT",
+            side="long",
+            preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+            created_at_ms=200,
+            expires_at_ms=200 + PREVIEW_TTL_MS,
+        )
+        conn.execute(
+            "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+            ("✅ ปิด BTCUSDT", intent_id),
+        )
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step="exit_market",
+            endpoint="/fapi/v1/order",
+            http_status=200,
+            order_or_algo_id="99",
+            created_at_ms=210,
+        )
+    conn.commit()
+
+    if case == "entry_time_none":
+        entry_ms: int | None = None
+        closed_ms = 300
+    elif case in ("intent_before_entry", "intent_30s_before_entry"):
+        # entry 100_000; lower bound is entry; intent before entry is outside the window.
+        conn.execute(
+            "UPDATE assist_quick_trade SET entry_time_ms=? WHERE id='t1'",
+            (100_000,),
+        )
+        conn.commit()
+        entry_ms = 100_000
+        closed_ms = 200_000
+    else:
+        entry_ms = 100
+        closed_ms = 300
+    sent: list[str] = []
+    _send_close_notice(
+        conn,
+        lambda m, **_: sent.append(m),
+        trade_id="t1",
+        client=None,
+        payload=_close_notice_payload(entry_time_ms=entry_ms, closed_at_ms=closed_ms),
+        now_ms=400,
+    )
+    assert len(sent) == 1
+    assert "(ปิดใน Binance)" in sent[0]
+    assert "(ปิดผ่านบอท)" not in sent[0]
+    conn.close()
+
+
+@pytest.mark.parametrize("status", ["confirmed", "unknown"])
+def test_quick_close_notice_bot_with_exit_market_log(tmp_path: Path, status: str) -> None:
+    """S2: exit_market 200 proves bot close even when intent status is not done."""
+    conn = open_db(tmp_path / f"notice-bot-{status}.db")
+    _seed_closed_quick_trade(conn, trade_id="t1")
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+        created_at_ms=200,
+        expires_at_ms=200 + PREVIEW_TTL_MS,
+    )
+    conn.execute(
+        "UPDATE assist_exec_intent SET status=?, result_text=? WHERE id=?",
+        (status, "✅ ปิด BTCUSDT", intent_id),
+    )
+    insert_exec_log(
+        conn,
+        intent_id=intent_id,
+        step="exit_market",
+        endpoint="/fapi/v1/order",
+        http_status=200,
+        order_or_algo_id="99",
+        created_at_ms=210,
+    )
+    conn.commit()
+    sent: list[str] = []
+    _send_close_notice(
+        conn,
+        lambda m, **_: sent.append(m),
+        trade_id="t1",
+        client=None,
+        payload=_close_notice_payload(),
+        now_ms=400,
+    )
+    assert len(sent) == 1
+    assert "(ปิดผ่านบอท)" in sent[0]
+    assert "(ปิดใน Binance)" not in sent[0]
+    conn.close()
+
+
+def test_quick_close_notice_binance_when_entry_time_zero(tmp_path: Path) -> None:
+    """N4: entry_time_ms=0 refuses bot-detect even when a Quick exit_market 200 exists."""
+    conn = open_db(tmp_path / "notice-entry-zero.db")
+    _seed_closed_quick_trade(conn, trade_id="t1", entry_time_ms=0)
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"source": "menu", "cohort": "quick", "qty": "1", "entry": "100"},
+        created_at_ms=200,
+        expires_at_ms=200 + PREVIEW_TTL_MS,
+    )
+    conn.execute(
+        "UPDATE assist_exec_intent SET status='done', result_text=? WHERE id=?",
+        ("✅ ปิด BTCUSDT", intent_id),
+    )
+    insert_exec_log(
+        conn,
+        intent_id=intent_id,
+        step="exit_market",
+        endpoint="/fapi/v1/order",
+        http_status=200,
+        order_or_algo_id="99",
+        created_at_ms=210,
+    )
+    conn.commit()
+    sent: list[str] = []
+    _send_close_notice(
+        conn,
+        lambda m, **_: sent.append(m),
+        trade_id="t1",
+        client=None,
+        payload=_close_notice_payload(entry_time_ms=0, closed_at_ms=300),
+        now_ms=400,
+    )
+    assert len(sent) == 1
+    assert "(ปิดใน Binance)" in sent[0]
+    assert "(ปิดผ่านบอท)" not in sent[0]
+    conn.close()
+
+
+def test_quick_close_notice_binance_when_bot_detect_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N3: DB error in bot-detect still sends exactly one (ปิดใน Binance) notice."""
+    import sqlite3
+
+    conn = open_db(tmp_path / "notice-bot-raise.db")
+    _seed_closed_quick_trade(conn, trade_id="t1")
+
+    def _raise(*_a: Any, **_k: Any) -> bool:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr("jarvise_assist.quick._bot_menu_quick_close", _raise)
+    sent: list[str] = []
+    _send_close_notice(
+        conn,
+        lambda m, **_: sent.append(m),
+        trade_id="t1",
+        client=None,
+        payload=_close_notice_payload(),
+        now_ms=400,
+    )
+    assert len(sent) == 1
+    assert "(ปิดใน Binance)" in sent[0]
+    assert "(ปิดผ่านบอท)" not in sent[0]
+    conn.close()
+
+
+def test_quick_r_ignores_main_signal_when_registration_side_mismatches(tmp_path: Path) -> None:
+    """Quick R never borrows a main signal; opposite-side Quick reg → R unknown."""
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / "qr-ignore-main.db")
+    _insert_quick_reg(
+        conn,
+        reg_id="qr-short",
+        symbol="BTCUSDT",
+        side="short",
+        planned_stop=105.0,
+        planned_entry=100.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_signal (
+            id, symbol, side, entry, stop, target, qty, notional, leverage, loss_at_stop,
+            created_at_ms, expires_at_ms, status, sent_at_ms
+        ) VALUES (
+            'as_main_btc', 'BTCUSDT', 'long', 100, 95, 120, 0.01, 1, 1, 0.05,
+            1, 999999999, 'sent', 1
+        )
+        """
+    )
+    conn.commit()
+    pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("101"),
+        update_time_ms=1,
+        liquidation_price=None,
+    )
+    line, r_mult, risk = compute_position_unrealized(conn, pos=pos, orders=[], now_ms=1, tick=None)
+    assert risk == 0.0
+    assert r_mult is None
+    assert "R unknown" in line
+    conn.close()
+
+
+def test_quick_r_profit_side_planned_stop_falls_back_to_placed(tmp_path: Path) -> None:
+    """N2: profit-side Quick planned stop is ignored; placed loss-side stop yields R."""
+    from jarvise_assist.futures import FuturesPosition
+
+    conn = open_db(tmp_path / "qr-profit-side.db")
+    _insert_quick_reg(
+        conn,
+        reg_id="qr-long",
+        symbol="BTCUSDT",
+        side="long",
+        planned_stop=105.0,
+        planned_entry=100.0,
+    )
+    pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("101"),
+        update_time_ms=1,
+        liquidation_price=None,
+    )
+    line_empty, r_empty, risk_empty = compute_position_unrealized(
+        conn, pos=pos, orders=[], now_ms=1, tick=None
+    )
+    assert risk_empty == 0.0
+    assert r_empty is None
+    assert "R unknown" in line_empty
+
+    owner_stop = {
+        "symbol": "BTCUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "stopPrice": "98",
+        "origQty": "1",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientOrderId": "manual-sl-1",
+    }
+    line_placed, r_placed, risk_placed = compute_position_unrealized(
+        conn, pos=pos, orders=[owner_stop], now_ms=1, tick=None
+    )
+    assert risk_placed == pytest.approx(2.0)
+    assert r_placed == pytest.approx(0.5)
+    assert "+0.5R (จาก stop จริง)" in line_placed
+    conn.close()
+
+
+def test_menu_xx_quick_leaves_owner_algo_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """N5 / Q5=a: owner STOP_MARKET algo (non-jv-) must not be DELETE'd."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "xx-quick-algo.db")
+    _insert_quick_reg(
+        conn, reg_id="q-algo", symbol="DOGEUSDT", side="short", planned_stop=2.0, planned_entry=1.0
+    )
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "cohort": "quick",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_algo = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "orderType": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-sl-1",
+    }
+    handlers = _menu_close_handlers(open_orders=(200, []))
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_algo])
+    handlers[("DELETE", "/fapi/v1/algoOrder")] = (200, {"code": "200", "msg": "success"})
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    algo_deletes = [c for c in transport.calls if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder"]
+    assert algo_deletes == []
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "done"
     conn.close()

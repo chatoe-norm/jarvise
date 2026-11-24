@@ -584,6 +584,51 @@ def _send_tag_notice(
         logger.exception("quick tag notice failed")
 
 
+def _bot_menu_quick_close(
+    conn: Any,
+    *,
+    symbol: str,
+    side: str,
+    entry_time_ms: int | None,
+    closed_at_ms: int | None,
+) -> bool:
+    """True when a Quick menu exit placed an exit_market order for this trade window."""
+    if entry_time_ms is None or int(entry_time_ms) == 0:
+        return False
+    if closed_at_ms is None:
+        return False
+
+    rows = conn.execute(
+        """
+        SELECT i.preview_json FROM assist_exec_intent i
+        INNER JOIN assist_exec_log l ON l.intent_id = i.id
+          AND l.step = 'exit_market' AND l.http_status = 200
+        WHERE i.kind = 'exit'
+          AND UPPER(i.symbol) = ?
+          AND LOWER(i.side) = ?
+          AND i.created_at_ms >= ?
+          AND i.created_at_ms <= ?
+        ORDER BY i.created_at_ms DESC
+        """,
+        (
+            symbol.upper(),
+            str(side).lower(),
+            int(entry_time_ms),
+            int(closed_at_ms),
+        ),
+    ).fetchall()
+    for row in rows:
+        try:
+            preview = json.loads(row["preview_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(preview, dict):
+            continue
+        if preview.get("cohort") == "quick":
+            return True
+    return False
+
+
 def _send_close_notice(
     conn: Any,
     send: SendFn,
@@ -628,8 +673,31 @@ def _send_close_notice(
                 r_line = "R คำนวณไม่ได้"
         else:
             r_line = f"{float(net_r):+.2f}R (รวมค่าธรรมเนียมจริง + funding)"
+        entry_ms = payload.get("entry_time_ms")
+        if entry_ms is None:
+            try:
+                row = conn.execute(
+                    "SELECT entry_time_ms FROM assist_quick_trade WHERE id=?",
+                    (trade_id,),
+                ).fetchone()
+                entry_ms = row["entry_time_ms"] if row is not None else None
+            except Exception:  # noqa: BLE001
+                entry_ms = None
+        via = "(ปิดใน Binance)"
+        try:
+            if _bot_menu_quick_close(
+                conn,
+                symbol=sym,
+                side=str(payload["side"]),
+                entry_time_ms=entry_ms,
+                closed_at_ms=payload.get("closed_at_ms"),
+            ):
+                via = "(ปิดผ่านบอท)"
+        except Exception:  # noqa: BLE001
+            logger.exception("quick close notice bot detect failed")
+            via = "(ปิดใน Binance)"
         lines = [
-            (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว (ปิดใน Binance) — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
+            (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว {via} — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
         ]
         from jarvise_assist.order_lines import is_symbol_protective_leftover
 
