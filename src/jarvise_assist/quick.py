@@ -355,7 +355,7 @@ def sync_quick_trades(
     if not open_regs and not open_trades:
         return {}
 
-    info: dict[str, Any] = {"tagged": 0, "expired": 0, "updated": 0}
+    info: dict[str, Any] = {"tagged": 0, "expired": 0, "updated": 0, "closed": []}
 
     tagged_trade_ids: set[str] = set()
     for reg in open_regs:
@@ -454,6 +454,14 @@ def sync_quick_trades(
         info["tagged"] += 1
         _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
         if str(rebuilt.get("status")) == "closed":
+            info["closed"].append(
+                {
+                    "symbol": sym,
+                    "side": side,
+                    "closed_at_ms": int(rebuilt.get("closed_at_ms") or now_ms),
+                    "trade_id": trade_id,
+                }
+            )
             _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     # Rebuild already-open trades (skip ones tagged earlier in this run)
@@ -495,6 +503,14 @@ def sync_quick_trades(
         )
         info["updated"] += 1
         if was_open and str(rebuilt.get("status")) == "closed":
+            info["closed"].append(
+                {
+                    "symbol": sym,
+                    "side": side,
+                    "closed_at_ms": int(rebuilt.get("closed_at_ms") or now_ms),
+                    "trade_id": trade_id,
+                }
+            )
             _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     return {k: v for k, v in info.items() if v}
@@ -699,23 +715,26 @@ def _send_close_notice(
         lines = [
             (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว {via} — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
         ]
+        from jarvise_assist.execute import assist_cancel_owner_enabled
         from jarvise_assist.order_lines import is_symbol_protective_leftover
 
-        leftovers: list[dict[str, Any]] = []
-        try:
-            if client is not None and hasattr(client, "all_open_orders"):
-                leftovers = [
-                    o for o in client.all_open_orders(symbol=sym) if is_symbol_protective_leftover(o)
-                ]
-        except Exception:  # noqa: BLE001
-            lines.append("อ่านคำสั่งค้างไม่ได้ — ตรวจในแอป")
-        else:
-            if leftovers:
-                lines.append(f"คำสั่งที่ยังค้างบน {sym}:")
-                tick = None
-                for o in leftovers:
-                    lines.append(format_closing_order_line(o, tick=tick))
-                lines.append("✋ ยังค้างอยู่ — ลบในแอป")
+        # When CANCEL_OWNER is on, watch reports leftovers after the one cancel attempt.
+        if not assist_cancel_owner_enabled():
+            leftovers: list[dict[str, Any]] = []
+            try:
+                if client is not None and hasattr(client, "all_open_orders"):
+                    leftovers = [
+                        o for o in client.all_open_orders(symbol=sym) if is_symbol_protective_leftover(o)
+                    ]
+            except Exception:  # noqa: BLE001
+                lines.append("อ่านคำสั่งค้างไม่ได้ — ตรวจในแอป")
+            else:
+                if leftovers:
+                    lines.append(f"คำสั่งที่ยังค้างบน {sym}:")
+                    tick = None
+                    for o in leftovers:
+                        lines.append(format_closing_order_line(o, tick=tick))
+                    lines.append("✋ ยังค้างอยู่ — ลบในแอป")
         lines.append(quick_mode_tag())
         send("\n".join(lines))
     except Exception:  # noqa: BLE001

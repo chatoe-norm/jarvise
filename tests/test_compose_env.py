@@ -33,10 +33,12 @@ def test_jobs_receives_every_env_var_the_assist_reads() -> None:
         read.update(pattern.findall(path.read_text(encoding="utf-8")))
     assert "JARVISE_ASSIST_EXECUTE" in read
     assert "JARVISE_ASSIST_REDUCE" in read
+    assert "JARVISE_ASSIST_CANCEL_OWNER" in read
     jobs = _service_env((ROOT / "docker-compose.yml").read_text(encoding="utf-8"), "jobs")
     missing = sorted(read - set(jobs))
     assert not missing, f"jobs service is missing {missing}"
     assert jobs.get("JARVISE_ASSIST_REDUCE") == "${JARVISE_ASSIST_REDUCE:-off}"
+    assert jobs.get("JARVISE_ASSIST_CANCEL_OWNER") == "${JARVISE_ASSIST_CANCEL_OWNER:-off}"
 
 
 def test_assist_trade_key_env_is_jobs_only() -> None:

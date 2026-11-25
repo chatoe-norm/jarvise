@@ -12,10 +12,15 @@ from jarvise_analyze.engine import ATR_STOP_MULT
 from jarvise_assist import ASSIST_SYMBOLS, ASSIST_TIMEFRAME
 from jarvise_assist.execute import (
     MOVE_STOP_TTL_MS,
+    OWNER_CLOSING_ORDER_NOTE,
     PREVIEW_TTL_MS,
+    _format_owner_order_line,
+    _owner_closing_orders,
+    assist_cancel_owner_enabled,
     assist_execute_mode,
     build_trade_client,
     cancel_jv_orders_for_symbol,
+    cancel_owner_reducing_orders_for_symbol,
 )
 from jarvise_assist.exit_log import (
     ENTRY_MATCH_MS,
@@ -79,6 +84,7 @@ from jarvise_assist.store import (
     now_ms,
     reset_watch_position,
     set_watch_no_stop_latched,
+    symbol_has_in_flight_exec,
     upsert_watch_position,
 )
 from jarvise_assist.trail_advice import (
@@ -101,6 +107,124 @@ SendFn = Callable[..., Any]
 def _default_send(text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
     """Telegram send that keeps inline buttons (exit / move-stop)."""
     return send_message(text, reply_markup=reply_markup) is not None
+
+
+def _watch_leftover_notice(
+    *,
+    symbol: str,
+    cancelled: list[str],
+    already_gone: list[str],
+    leftover_orders: list[dict[str, Any]],
+    failed_ids: list[str],
+    jv_cancelled: list[str] | None = None,
+) -> str | None:
+    """Itemised leftover-cancel notice. None when nothing happened."""
+    jv = jv_cancelled or []
+    if not (cancelled or already_gone or leftover_orders or failed_ids or jv):
+        return None
+    lines = [f"🧹 หลังปิด {symbol.upper()}"]
+    if jv or cancelled or already_gone:
+        bits: list[str] = []
+        if jv:
+            bits.append(f"jv- ยกเลิก {', '.join(jv)}")
+        if cancelled:
+            bits.append(f"ยกเลิก {', '.join(cancelled)}")
+        if already_gone:
+            bits.append(f"หายไปแล้ว {', '.join(already_gone)}")
+        lines.append(" · ".join(bits))
+    if failed_ids:
+        lines.append(f"⚠️ ยกเลิกไม่สำเร็จ {', '.join(failed_ids)} — ลบในแอป")
+    if leftover_orders:
+        lines.append(f"คำสั่งที่ยังค้างบน {symbol.upper()}:")
+        for order in leftover_orders:
+            lines.append(_format_owner_order_line(order, tick=None, note=OWNER_CLOSING_ORDER_NOTE))
+    return "\n".join(lines)
+
+
+def _cleanup_flat_symbol_leftovers(
+    conn: Any,
+    trade: Any,
+    *,
+    symbol: str,
+    side: str | None,
+    position_side: str,
+    anchor_ms: int | None,
+    also_cancel_jv: bool,
+    send: SendFn,
+) -> dict[str, Any]:
+    """One-shot leftover cleanup on a watch/Quick close tick. Never raises."""
+    out: dict[str, Any] = {"symbol": symbol, "skipped": False}
+    try:
+        if symbol_has_in_flight_exec(conn, symbol):
+            out["skipped"] = True
+            out["reason"] = "in_flight"
+            return out
+        jv_ids: list[str] = []
+        if also_cancel_jv:
+            try:
+                jv_ids, _ok = cancel_jv_orders_for_symbol(trade, symbol)
+            except Exception:  # noqa: BLE001
+                logger.exception("watch jv- cancel failed for %s", symbol)
+                jv_ids = []
+        owner_cancelled: list[str] = []
+        already_gone: list[str] = []
+        leftover: list[dict[str, Any]] = []
+        failed: list[str] = []
+        if assist_cancel_owner_enabled() and side and anchor_ms is not None:
+            try:
+                owner = cancel_owner_reducing_orders_for_symbol(
+                    trade,
+                    symbol=symbol,
+                    side=side,
+                    position_side=position_side,
+                    anchor_ms=int(anchor_ms),
+                )
+                owner_cancelled = list(owner.cancelled)
+                already_gone = list(owner.already_gone)
+                leftover = list(owner.leftover_orders)
+                failed = list(owner.failed_ids)
+            except Exception:  # noqa: BLE001
+                logger.exception("watch owner cancel failed for %s", symbol)
+                failed = ["owner_cancel"]
+        elif assist_cancel_owner_enabled() and (not side or anchor_ms is None):
+            try:
+                orders = [
+                    *trade.open_orders(symbol=symbol, strict=True),
+                    *trade.open_algo_orders(symbol=symbol, strict=True),
+                ]
+                if side:
+                    leftover = _owner_closing_orders(
+                        orders, symbol=symbol, position_side=position_side, trade_side=side
+                    )
+                else:
+                    leftover = [
+                        o
+                        for o in orders
+                        if not str(o.get("clientAlgoId") or o.get("clientOrderId") or "").startswith("jv-")
+                    ]
+            except Exception:  # noqa: BLE001
+                logger.exception("watch leftover list failed for %s", symbol)
+        notice = _watch_leftover_notice(
+            symbol=symbol,
+            cancelled=owner_cancelled,
+            already_gone=already_gone,
+            leftover_orders=leftover,
+            failed_ids=failed,
+            jv_cancelled=jv_ids if also_cancel_jv else None,
+        )
+        if notice is not None:
+            try:
+                send(notice)
+            except Exception:  # noqa: BLE001
+                logger.exception("watch leftover notice failed for %s", symbol)
+            out["notice"] = True
+        out["jv_cancelled"] = jv_ids
+        out["owner_cancelled"] = owner_cancelled
+        return out
+    except Exception:  # noqa: BLE001 — must not raise out of run_assist_watch
+        logger.exception("watch leftover cleanup failed for %s", symbol)
+        out["error"] = True
+        return out
 
 
 def _log_decision(**fields: Any) -> None:
@@ -1363,10 +1487,10 @@ def run_assist_watch(
         )
     closed = mark_watch_positions_closed(conn, open_keys=open_keys, now_ms=ts)
     orphan_cancelled: list[dict[str, str]] = []
-    if closed and assist_execute_mode() == "live":
+    if assist_execute_mode() == "live":
         trade, _auth_reason = build_trade_client()
         if trade is not None:
-            for sym, _ps in closed:
+            for sym, ps in closed:
                 try:
                     ids, _ok = cancel_jv_orders_for_symbol(trade, sym)
                 except Exception:  # noqa: BLE001
@@ -1374,6 +1498,51 @@ def run_assist_watch(
                     ids = []
                 for algo_id in ids:
                     orphan_cancelled.append({"symbol": sym, "algo_id": algo_id})
+                if assist_cancel_owner_enabled():
+                    if symbol_has_in_flight_exec(conn, sym):
+                        continue
+                    watch_row = get_watch_position(conn, sym, ps)
+                    side = str(watch_row["side"]) if watch_row and watch_row.get("side") else None
+                    anchor_ms = (
+                        int(watch_row["last_seen_ms"])
+                        if watch_row and watch_row.get("last_seen_ms") is not None
+                        else None
+                    )
+                    try:
+                        _cleanup_flat_symbol_leftovers(
+                            conn,
+                            trade,
+                            symbol=sym,
+                            side=side,
+                            position_side=ps,
+                            anchor_ms=anchor_ms,
+                            also_cancel_jv=False,
+                            send=send_fn,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("watch owner leftover cleanup failed for %s", sym)
+            if assist_cancel_owner_enabled():
+                for qrow in quick_info.get("closed") or []:
+                    try:
+                        qsym = str(qrow.get("symbol") or "").upper()
+                        qside = str(qrow.get("side") or "") or None
+                        q_anchor = qrow.get("closed_at_ms")
+                        if not qsym:
+                            continue
+                        q_result = _cleanup_flat_symbol_leftovers(
+                            conn,
+                            trade,
+                            symbol=qsym,
+                            side=qside,
+                            position_side="BOTH",
+                            anchor_ms=int(q_anchor) if q_anchor is not None else None,
+                            also_cancel_jv=True,
+                            send=send_fn,
+                        )
+                        for algo_id in q_result.get("jv_cancelled") or []:
+                            orphan_cancelled.append({"symbol": qsym, "algo_id": str(algo_id)})
+                    except Exception:  # noqa: BLE001
+                        logger.exception("quick leftover cleanup failed")
     try:
         journal_on_close(conn, closed, futures=client, now_ms_value=ts)
     except Exception:  # noqa: BLE001 — a journal failure must not stop advice or orphan cancel

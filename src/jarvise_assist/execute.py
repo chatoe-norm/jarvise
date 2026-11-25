@@ -12,7 +12,7 @@ from dataclasses import replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from urllib.parse import urlencode
 
 import httpx
@@ -149,6 +149,9 @@ MSG_MOVE_STOP_OLD_UNREADABLE = "เลื่อน stop ไม่ได้ — �
 MSG_CANCELLED = "ยกเลิกแล้ว"
 OWNER_CLOSING_ORDER_NOTE = "✋ คุณตั้งเอง — จะยังค้างอยู่ ลบในแอป"
 OWNER_CLOSING_HEADER = "stop/TP ที่คุณตั้งเอง (บอทจะไม่ยกเลิก):"
+# Confirm-card copy when JARVISE_ASSIST_CANCEL_OWNER=on (after-close / leftover lists keep NOTE above).
+OWNER_CLOSING_HEADER_WILL_CANCEL = "stop/TP ที่คุณตั้งเอง (หลังปิดหมด บอทจะยกเลิกให้):"
+OWNER_CLOSING_ORDER_NOTE_WILL_CANCEL = "✋ คุณตั้งเอง — หลังปิดหมดบอทจะยกเลิก"
 MSG_MENU_EXIT_EXPIRED = "หมดเวลา — กด 🔄 อัปเดต หรือเปิด 📋 ไม้ที่ถืออยู่ใหม่"
 MSG_MENU_LIVE_ONLY = "ปุ่มปิดไม้ใช้ได้เฉพาะโหมดเงินจริง — ยังไม่ได้ส่งคำสั่ง ปิดในแอป Binance"
 MSG_MENU_POSITION_CHANGED = "ไม้เปลี่ยนไป — ไม่ปิด"
@@ -257,6 +260,11 @@ def assist_execute_mode() -> str:
 def assist_reduce_enabled() -> bool:
     """JARVISE_ASSIST_REDUCE=on (strip/lower). Still requires EXECUTE=live at the call site."""
     return (os.environ.get("JARVISE_ASSIST_REDUCE") or "off").strip().lower() == "on"
+
+
+def assist_cancel_owner_enabled() -> bool:
+    """JARVISE_ASSIST_CANCEL_OWNER=on (strip/lower). Independent of REDUCE; default off."""
+    return (os.environ.get("JARVISE_ASSIST_CANCEL_OWNER") or "off").strip().lower() == "on"
 
 
 def execution_buttons_enabled(conn: Any) -> bool:
@@ -709,6 +717,13 @@ class BinanceTradeClient:
         return self.signed_delete(
             "/fapi/v1/algoOrder",
             {"symbol": symbol.upper(), "clientAlgoId": client_algo_id},
+        )
+
+    def cancel_order(self, *, symbol: str, order_id: str | int) -> Any:
+        """DELETE a regular (non-algo) order. Never send this id to /fapi/v1/algoOrder."""
+        return self.signed_delete(
+            "/fapi/v1/order",
+            {"symbol": symbol.upper(), "orderId": order_id},
         )
 
     def realized_pnl_for_order(self, *, symbol: str, order_id: Any) -> Decimal:
@@ -3051,6 +3066,69 @@ def run_move_stop_sequence(
     return _exec_result(head, status="done")
 
 
+class ExitCancelResult(NamedTuple):
+    """Outcome of jv- (and optional owner) leftover cancel after a verified flat."""
+
+    ok: bool
+    failed_ids: list[str]
+    aborted_reopen: bool = False
+
+
+class OwnerCancelResult(NamedTuple):
+    """Outcome of cancel_owner_reducing_orders_for_symbol."""
+
+    ok: bool
+    aborted_reopen: bool
+    read_failed: bool
+    cancelled: list[str]
+    leftover_orders: list[dict[str, Any]]
+    failed_ids: list[str]
+    already_gone: list[str]
+
+
+def _flat_cancel_anchor_ms(conn: Any, intent_id: str) -> int | None:
+    """created_at_ms of exit_market / reduce_market for the creation-time rule."""
+    row = conn.execute(
+        """
+        SELECT created_at_ms FROM assist_exec_log
+        WHERE intent_id=? AND step IN ('exit_market', 'reduce_market')
+        ORDER BY created_at_ms DESC
+        LIMIT 1
+        """,
+        (intent_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row["created_at_ms"] if hasattr(row, "keys") else row[0]
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _owner_order_create_ms(order: dict[str, Any]) -> int | None:
+    """Binance create time: `time` on openOrders, `createTime` on openAlgoOrders."""
+    for key in ("createTime", "time", "updateTime"):
+        raw = order.get(key)
+        if raw in (None, "", 0, "0"):
+            continue
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _reduce_only_flag(order: dict[str, Any]) -> bool:
+    """Parse reduceOnly like closePosition — string \"false\" must be false."""
+    raw = order.get("reduceOnly")
+    if raw is True:
+        return True
+    if raw is False:
+        return False
+    return str(raw or "").lower() in {"true", "1"}
+
+
 def _cancel_exit_stops_and_tp(
     trade: BinanceTradeClient,
     *,
@@ -3059,14 +3137,19 @@ def _cancel_exit_stops_and_tp(
     symbol: str,
     side: str,
     position_side: str,
-) -> tuple[bool, list[str]]:
-    """Cancel jv- stop/TP after a flat exit. Failed client ids are returned."""
+) -> ExitCancelResult:
+    """Cancel jv- stop/TP after a flat exit; optionally owner leftovers when flag on.
+
+    The jv- phase is identical under both flag states (same endpoints / calls).
+    Failed client ids are returned. Position reopen during the owner phase is
+    aborted_reopen=True with ok=True (close stays done; no exit_cancel_pending).
+    """
     all_ok = True
     failed_ids: list[str] = []
     try:
         orders = trade.all_open_orders(symbol=symbol)
     except Exception:  # noqa: BLE001
-        return False, failed_ids
+        return ExitCancelResult(ok=False, failed_ids=failed_ids)
     for order in orders:
         cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
         if not cid.startswith("jv-"):
@@ -3112,7 +3195,40 @@ def _cancel_exit_stops_and_tp(
         except Exception:  # noqa: BLE001
             all_ok = False
             failed_ids.append(cid)
-    return all_ok, failed_ids
+
+    if not assist_cancel_owner_enabled():
+        return ExitCancelResult(ok=all_ok, failed_ids=failed_ids)
+
+    anchor = _flat_cancel_anchor_ms(conn, intent_id)
+    if anchor is None:
+        return ExitCancelResult(ok=all_ok, failed_ids=failed_ids)
+
+    owner = cancel_owner_reducing_orders_for_symbol(
+        trade,
+        symbol=symbol,
+        side=side,
+        position_side=position_side,
+        anchor_ms=anchor,
+        conn=conn,
+        intent_id=intent_id,
+    )
+    if owner.aborted_reopen:
+        leftover_ids = [
+            str(o.get("clientAlgoId") or o.get("clientOrderId") or o.get("algoId") or o.get("orderId") or "?")
+            for o in owner.leftover_orders
+        ]
+        return ExitCancelResult(
+            ok=True,
+            failed_ids=failed_ids + leftover_ids + owner.failed_ids,
+            aborted_reopen=True,
+        )
+    if owner.read_failed or not owner.ok:
+        return ExitCancelResult(
+            ok=False,
+            failed_ids=failed_ids + owner.failed_ids,
+            aborted_reopen=False,
+        )
+    return ExitCancelResult(ok=all_ok, failed_ids=failed_ids)
 
 
 def _finish_flat_exit(
@@ -3128,7 +3244,7 @@ def _finish_flat_exit(
     include_pnl: bool,
 ) -> ExecResult:
     """Cancel stops after a flat exit. A failed cancel stays unknown for recovery."""
-    cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+    cancel = _cancel_exit_stops_and_tp(
         trade,
         conn=conn,
         intent_id=intent_id,
@@ -3146,8 +3262,11 @@ def _finish_flat_exit(
         text = f"✅ ปิด {symbol}{pnl_bit}"
     else:
         text = f"✅ ปิด {symbol}"
-    if not cancel_ok:
-        warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+    if cancel.aborted_reopen:
+        warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+        return _exec_result(f"{text}\n{warning}", status="done")
+    if not cancel.ok:
+        warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
         text = f"{text}\n{warning}"
         _log_write(
             conn,
@@ -3524,6 +3643,175 @@ def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> tuple
     return cancelled, all_ok
 
 
+def cancel_owner_reducing_orders_for_symbol(
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    side: str,
+    position_side: str,
+    anchor_ms: int,
+    conn: Any | None = None,
+    intent_id: str | None = None,
+) -> OwnerCancelResult:
+    """Cancel owner reduce-only / closePosition leftovers after a verified flat.
+
+    Fail-closed: a position re-read that raises aborts with read_failed. Re-read
+    before the batch and before each DELETE; abort remaining if not flat.
+    Creation-time rule: only cancel when create time <= anchor_ms; missing time
+    → list only. Dispatch by list source — never send a regular orderId to algo.
+    """
+    cancelled: list[str] = []
+    leftover: list[dict[str, Any]] = []
+    failed_ids: list[str] = []
+    already_gone: list[str] = []
+
+    def _label(order: dict[str, Any]) -> str:
+        return str(
+            order.get("clientAlgoId")
+            or order.get("clientOrderId")
+            or order.get("algoId")
+            or order.get("orderId")
+            or "?"
+        )
+
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001 — never treat a failed read as flat
+        return OwnerCancelResult(
+            ok=False,
+            aborted_reopen=False,
+            read_failed=True,
+            cancelled=cancelled,
+            leftover_orders=leftover,
+            failed_ids=failed_ids,
+            already_gone=already_gone,
+        )
+    if positions:
+        return OwnerCancelResult(
+            ok=True,
+            aborted_reopen=True,
+            read_failed=False,
+            cancelled=cancelled,
+            leftover_orders=leftover,
+            failed_ids=failed_ids,
+            already_gone=already_gone,
+        )
+
+    try:
+        regular = trade.open_orders(symbol=symbol, strict=True)
+        algos = trade.open_algo_orders(symbol=symbol, strict=True)
+    except Exception:  # noqa: BLE001
+        return OwnerCancelResult(
+            ok=False,
+            aborted_reopen=False,
+            read_failed=True,
+            cancelled=cancelled,
+            leftover_orders=leftover,
+            failed_ids=failed_ids,
+            already_gone=already_gone,
+        )
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for order in regular:
+        if _is_owner_reducing_order(order, position_side=position_side, trade_side=side):
+            candidates.append(("regular", order))
+    for order in algos:
+        if _is_owner_reducing_order(order, position_side=position_side, trade_side=side):
+            candidates.append(("algo", order))
+
+    for idx, (source, order) in enumerate(candidates):
+        create_ms = _owner_order_create_ms(order)
+        if create_ms is None or create_ms > int(anchor_ms):
+            leftover.append(order)
+            continue
+        try:
+            still = trade.position_risk(symbol=symbol)
+        except Exception:  # noqa: BLE001
+            rest = [o for _, o in candidates[idx:]]
+            return OwnerCancelResult(
+                ok=False,
+                aborted_reopen=False,
+                read_failed=True,
+                cancelled=cancelled,
+                leftover_orders=leftover + rest,
+                failed_ids=failed_ids,
+                already_gone=already_gone,
+            )
+        if still:
+            leftover.extend(o for _, o in candidates[idx:])
+            return OwnerCancelResult(
+                ok=True,
+                aborted_reopen=True,
+                read_failed=False,
+                cancelled=cancelled,
+                leftover_orders=leftover,
+                failed_ids=failed_ids,
+                already_gone=already_gone,
+            )
+
+        label = _label(order)
+        try:
+            if source == "algo":
+                algo_id = order.get("algoId")
+                if algo_id is None:
+                    leftover.append(order)
+                    continue
+                trade.cancel_algo(symbol=symbol, algo_id=algo_id)
+                endpoint = "/fapi/v1/algoOrder"
+                order_ref = str(algo_id)
+            else:
+                order_id = order.get("orderId")
+                if order_id is None:
+                    leftover.append(order)
+                    continue
+                trade.cancel_order(symbol=symbol, order_id=order_id)
+                endpoint = "/fapi/v1/order"
+                order_ref = str(order_id)
+            cancelled.append(label)
+            if conn is not None and intent_id is not None:
+                _log_write(
+                    conn,
+                    intent_id=intent_id,
+                    step="exit_cancel_owner",
+                    endpoint=endpoint,
+                    http_status=200,
+                    order_or_algo_id=order_ref,
+                )
+        except TradeClientError as exc:
+            if conn is not None and intent_id is not None:
+                _log_write(
+                    conn,
+                    intent_id=intent_id,
+                    step="exit_cancel_owner",
+                    endpoint=("/fapi/v1/algoOrder" if source == "algo" else "/fapi/v1/order"),
+                    http_status=exc.http_status,
+                    binance_code=exc.binance_code,
+                    order_or_algo_id=str(
+                        order.get("algoId") if source == "algo" else order.get("orderId") or ""
+                    ),
+                )
+            if exc.binance_code in {-2011, -2013}:
+                already_gone.append(label)
+                cancelled.append(label)
+            else:
+                failed_ids.append(label)
+                leftover.append(order)
+        except Exception:  # noqa: BLE001
+            failed_ids.append(label)
+            leftover.append(order)
+
+    ok = not failed_ids
+    return OwnerCancelResult(
+        ok=ok,
+        aborted_reopen=False,
+        read_failed=False,
+        cancelled=cancelled,
+        leftover_orders=leftover,
+        failed_ids=failed_ids,
+        already_gone=already_gone,
+    )
+
+
 def _close_position_flag(order: dict[str, Any]) -> bool:
     raw = order.get("closePosition")
     if raw is True:
@@ -3540,7 +3828,7 @@ def _is_owner_reducing_order(
     cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
     if cid.startswith("jv-"):
         return False
-    reduce_only = bool(order.get("reduceOnly")) or _close_position_flag(order)
+    reduce_only = _reduce_only_flag(order) or _close_position_flag(order)
     if not reduce_only:
         return False
     close_side = "SELL" if trade_side == "long" else "BUY"
@@ -3583,7 +3871,12 @@ def _order_list_price(order: dict[str, Any]) -> Decimal | None:
     return dec if dec > 0 else None
 
 
-def _format_owner_order_line(order: dict[str, Any], *, tick: Decimal | None) -> str:
+def _format_owner_order_line(
+    order: dict[str, Any],
+    *,
+    tick: Decimal | None,
+    note: str = OWNER_CLOSING_ORDER_NOTE,
+) -> str:
     otype = order_type(order)
     side = str(order.get("side") or "").upper()
     px = _order_list_price(order)
@@ -3597,7 +3890,7 @@ def _format_owner_order_line(order: dict[str, Any], *, tick: Decimal | None) -> 
     else:
         raw_qty = order.get("origQty") or order.get("quantity")
         qty_s = fmt_qty(Decimal(str(raw_qty))) if raw_qty not in (None, "") else "?"
-    return f"• {otype} {side} {px_s} · {qty_s} · {OWNER_CLOSING_ORDER_NOTE}"
+    return f"• {otype} {side} {px_s} · {qty_s} · {note}"
 
 
 def _exit_advice_active(
@@ -3646,9 +3939,15 @@ def _format_menu_exit_confirm(
     lines.append(unrealized_line)
     if owner_orders:
         lines.append("")
-        lines.append(OWNER_CLOSING_HEADER)
+        if assist_cancel_owner_enabled():
+            header = OWNER_CLOSING_HEADER_WILL_CANCEL
+            note = OWNER_CLOSING_ORDER_NOTE_WILL_CANCEL
+        else:
+            header = OWNER_CLOSING_HEADER
+            note = OWNER_CLOSING_ORDER_NOTE
+        lines.append(header)
         for order in owner_orders:
-            lines.append(_format_owner_order_line(order, tick=tick))
+            lines.append(_format_owner_order_line(order, tick=tick, note=note))
     lines.append("💰 เงินจริง")
     return "\n".join(lines)
 
@@ -5106,7 +5405,7 @@ def _recover_exit_intent(
                     expect_status="recovering",
                 )
             return
-        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        cancel = _cancel_exit_stops_and_tp(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -5114,7 +5413,17 @@ def _recover_exit_intent(
             side=side,
             position_side="BOTH",
         )
-        if cancel_ok:
+        if cancel.aborted_reopen:
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="done",
+                text=f"✅ ปิด {symbol}\n{warning}",
+                expect_status="recovering",
+            )
+        elif cancel.ok:
             _recovery_notify(
                 send,
                 conn,
@@ -5124,7 +5433,7 @@ def _recover_exit_intent(
                 expect_status="recovering",
             )
         else:
-            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
             _recovery_notify(
                 send,
                 conn,
@@ -5138,7 +5447,7 @@ def _recover_exit_intent(
         fill = queried.order if queried.kind == QueryResultKind.FOUND else None
         avg = _positive_fill_price(fill)
         pos_side = "BOTH"
-        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        cancel = _cancel_exit_stops_and_tp(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -5151,8 +5460,11 @@ def _recover_exit_intent(
         else:
             text = f"✅ ปิด {symbol}"
         status = "done"
-        if not cancel_ok:
-            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+        if cancel.aborted_reopen:
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+            text = f"{text}\n{warning}"
+        elif not cancel.ok:
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
             text = f"{text}\n{warning}"
             _log_write(
                 conn,
@@ -5285,7 +5597,7 @@ def _recover_reduce_intent(
                     expect_status="recovering",
                 )
             return
-        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        cancel = _cancel_exit_stops_and_tp(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -5293,7 +5605,17 @@ def _recover_reduce_intent(
             side=side,
             position_side="BOTH",
         )
-        if cancel_ok:
+        if cancel.aborted_reopen:
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="done",
+                text=f"✅ ปิด {symbol}\n{warning}",
+                expect_status="recovering",
+            )
+        elif cancel.ok:
             _recovery_notify(
                 send,
                 conn,
@@ -5303,7 +5625,7 @@ def _recover_reduce_intent(
                 expect_status="recovering",
             )
         else:
-            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
             _recovery_notify(
                 send,
                 conn,
@@ -5316,7 +5638,7 @@ def _recover_reduce_intent(
     if not positions:
         fill = queried.order if queried.kind == QueryResultKind.FOUND else None
         avg = _positive_fill_price(fill)
-        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        cancel = _cancel_exit_stops_and_tp(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -5329,8 +5651,11 @@ def _recover_reduce_intent(
         else:
             text = f"✅ ปิด {symbol}"
         status = "done"
-        if not cancel_ok:
-            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+        if cancel.aborted_reopen:
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+            text = f"{text}\n{warning}"
+        elif not cancel.ok:
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
             text = f"{text}\n{warning}"
             _log_write(
                 conn,
