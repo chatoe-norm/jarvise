@@ -11,6 +11,7 @@ cash does not inflate everyone else's mark.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import secrets
 import sqlite3
@@ -40,6 +41,8 @@ from jarvise_assist.partner_ledger import (
     value_of,
 )
 from jarvise_ingest.db import transaction
+
+logger = logging.getLogger(__name__)
 
 MICRO_SCALE = Decimal("1000000")
 UNIT_SCALE = Decimal("100000000")
@@ -1631,6 +1634,23 @@ def _apply_owner_tx(
     }
 
 
+def _owner_integrity_outcome(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    note: str | None,
+    event_id: str | None,
+) -> dict[str, Any]:
+    """After IntegrityError + rollback: already_recorded only when the intended row exists."""
+    if _owner_tx_already_in_ledger(conn, event_id=event_id, kind=kind, note=note):
+        out: dict[str, Any] = {"ok": True, "reason": "already_recorded", "kind": kind}
+        if event_id is not None:
+            out["event_ids"] = [event_id]
+        return out
+    logger.warning("owner tx integrity_error type=%s", "IntegrityError")
+    return {"ok": False, "reason": "integrity_error", "kind": kind}
+
+
 def apply_owner_redeem(
     conn: sqlite3.Connection,
     *,
@@ -1657,7 +1677,7 @@ def apply_owner_redeem(
     except _OwnerWriteRefused as exc:
         return exc.payload
     except sqlite3.IntegrityError:
-        return {"ok": True, "reason": "already_recorded", "kind": "owner_redeem"}
+        return _owner_integrity_outcome(conn, kind="owner_redeem", note=note, event_id=event_id)
 
 
 def apply_owner_deposit(
@@ -1686,7 +1706,7 @@ def apply_owner_deposit(
     except _OwnerWriteRefused as exc:
         return exc.payload
     except sqlite3.IntegrityError:
-        return {"ok": True, "reason": "already_recorded", "kind": "owner_deposit"}
+        return _owner_integrity_outcome(conn, kind="owner_deposit", note=note, event_id=event_id)
 
 
 def verify_ledger(conn: sqlite3.Connection) -> dict[str, Any]:

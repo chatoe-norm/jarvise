@@ -609,58 +609,40 @@ def test_owner_idempotent_race_and_tran_prefix(tmp_path: Path) -> None:
     n = conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE id = 'pe_owner_tran100'").fetchone()["n"]
     assert int(n) == 1
 
-    # Two connections: skip in-tx recheck so the second hits PRIMARY KEY → already_recorded
+    # Two connections: second apply hits the real in-tx recheck (do not disable it)
     path = tmp_path / "race2.db"
     c1 = open_db(path)
     adm = ps.create_partner(c1, name="admin", is_admin=True, now_ms=NOW)["partner_id"]
     assert ps.apply_deposit(c1, adm, D("400"), D("400"), NOW)["ok"]
     c1.close()
 
-    import jarvise_assist.partner_store as store_mod
-
-    real_check = store_mod._owner_tx_already_in_ledger
-
-    def _race_check(conn: Any, **kwargs: Any) -> bool:
-        # First writer: normal. After one row exists, still claim clear so insert races.
-        n = conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE id = 'pe_owner_tranrace'").fetchone()[
-            "n"
-        ]
-        if int(n) == 0:
-            return False
-        return False  # force IntegrityError path on second insert
-
-    store_mod._owner_tx_already_in_ledger = _race_check  # type: ignore[assignment]
-    try:
-        a = open_db(path)
-        b = open_db(path)
-        ra = ps.apply_owner_deposit(
-            a,
-            amount=D("25"),
-            account_value=D("425"),
-            now_ms=NOW + 10,
-            note="owner tx via p owner; Binance TRANSFER tranId race",
-            event_id="pe_owner_tranrace",
-        )
-        rb = ps.apply_owner_deposit(
-            b,
-            amount=D("25"),
-            account_value=D("425"),
-            now_ms=NOW + 11,
-            note="owner tx via p owner; Binance TRANSFER tranId race",
-            event_id="pe_owner_tranrace",
-        )
-        assert ra["ok"] is True and ra.get("reason") != "already_recorded"
-        assert rb.get("reason") == "already_recorded"
-        n_race = a.execute(
-            "SELECT COUNT(*) AS n FROM partner_event WHERE id = 'pe_owner_tranrace'"
-        ).fetchone()["n"]
-        assert int(n_race) == 1
-        a.close()
-        b.close()
-    finally:
-        store_mod._owner_tx_already_in_ledger = real_check  # type: ignore[assignment]
+    a = open_db(path)
+    b = open_db(path)
+    ra = ps.apply_owner_deposit(
+        a,
+        amount=D("25"),
+        account_value=D("425"),
+        now_ms=NOW + 10,
+        note="owner tx via p owner; Binance TRANSFER tranId race",
+        event_id="pe_owner_tranrace",
+    )
+    rb = ps.apply_owner_deposit(
+        b,
+        amount=D("25"),
+        account_value=D("425"),
+        now_ms=NOW + 11,
+        note="owner tx via p owner; Binance TRANSFER tranId race",
+        event_id="pe_owner_tranrace",
+    )
+    assert ra["ok"] is True and ra.get("reason") != "already_recorded"
+    assert rb.get("reason") == "already_recorded"
+    n_race = a.execute("SELECT COUNT(*) AS n FROM partner_event WHERE id = 'pe_owner_tranrace'").fetchone()[
+        "n"
+    ]
+    assert int(n_race) == 1
+    a.close()
+    b.close()
     conn.close()
-    _ = real_check
 
 
 def test_owner_b1_clears_open_unrecorded_fingerprint(tmp_path: Path, env_chat: None) -> None:
@@ -750,4 +732,258 @@ def test_apply_owner_passthrough_effective_and_note(tmp_path: Path) -> None:
     ).fetchone()
     assert int(row2["effective_at_ms"]) == NOW + 20
     assert row2["note"] is None
+    conn.close()
+
+
+def test_owner_integrity_error_not_already_recorded(tmp_path: Path, monkeypatch: Any) -> None:
+    """CHECK/FK-style IntegrityError with no matching row → ok False, nothing written."""
+    import sqlite3
+
+    conn = open_db(tmp_path / "int.db")
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)["partner_id"]
+    assert ps.apply_deposit(conn, admin, D("400"), D("400"), NOW)["ok"]
+    units_before = int(ps.admin_partner(conn)["units_e8"])  # type: ignore[index]
+    n_before = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
+    real_insert = ps._insert_event
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise sqlite3.IntegrityError("CHECK constraint failed")
+
+    monkeypatch.setattr(ps, "_insert_event", boom)
+    out = ps.apply_owner_deposit(
+        conn,
+        amount=D("100"),
+        account_value=D("500"),
+        now_ms=NOW + 1,
+        note="owner tx via p owner; Binance TRANSFER tranId inj1",
+        event_id="pe_owner_traninj1",
+    )
+    assert out["ok"] is False
+    assert out["reason"] == "integrity_error"
+    assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == n_before
+    assert int(ps.admin_partner(conn)["units_e8"]) == units_before  # type: ignore[index]
+
+    # Real duplicate id → already_recorded (IntegrityError after row exists)
+    monkeypatch.setattr(ps, "_insert_event", real_insert)
+    first = ps.apply_owner_deposit(
+        conn,
+        amount=D("50"),
+        account_value=D("450"),
+        now_ms=NOW + 2,
+        note="owner tx via p owner; Binance TRANSFER tranId dup1",
+        event_id="pe_owner_trandup1",
+    )
+    assert first["ok"] is True and first.get("reason") != "already_recorded"
+
+    def boom_pk(*_a: Any, **_k: Any) -> None:
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: partner_event.id")
+
+    monkeypatch.setattr(ps, "_insert_event", boom_pk)
+    # Skip only the in-tx recheck; post-rollback verify must see the existing row
+    real_check = ps._owner_tx_already_in_ledger
+    check_calls = {"n": 0}
+
+    def _skip_first(conn: Any, **kwargs: Any) -> bool:
+        check_calls["n"] += 1
+        if check_calls["n"] == 1:
+            return False
+        return real_check(conn, **kwargs)
+
+    monkeypatch.setattr(ps, "_owner_tx_already_in_ledger", _skip_first)
+    again = ps.apply_owner_deposit(
+        conn,
+        amount=D("50"),
+        account_value=D("450"),
+        now_ms=NOW + 3,
+        note="owner tx via p owner; Binance TRANSFER tranId dup1",
+        event_id="pe_owner_trandup1",
+    )
+    assert again["ok"] is True
+    assert again["reason"] == "already_recorded"
+    n_dup = int(
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE id = 'pe_owner_trandup1'").fetchone()["n"]
+    )
+    assert n_dup == 1
+    conn.close()
+
+
+def test_owner_in_tx_recheck_by_note_tran_different_id(tmp_path: Path) -> None:
+    """Existing owner_deposit with different id but note tranId X → already_recorded, no mint."""
+    conn = open_db(tmp_path / "recheck.db")
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)["partner_id"]
+    assert ps.apply_deposit(conn, admin, D("400"), D("400"), NOW)["ok"]
+    first = ps.apply_owner_deposit(
+        conn,
+        amount=D("25"),
+        account_value=D("425"),
+        now_ms=NOW + 1,
+        note="owner tx via p owner; Binance TRANSFER tranId X",
+        event_id="pe_owner_old_X",
+    )
+    assert first["ok"] is True and first.get("reason") != "already_recorded"
+    units_after = int(ps.admin_partner(conn)["units_e8"])  # type: ignore[index]
+    n_events = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
+
+    again = ps.apply_owner_deposit(
+        conn,
+        amount=D("25"),
+        account_value=D("425"),
+        now_ms=NOW + 2,
+        note="owner tx via p owner; Binance TRANSFER tranId X",
+        event_id="pe_owner_tranX",
+    )
+    assert again["ok"] is True
+    assert again["reason"] == "already_recorded"
+    assert int(ps.admin_partner(conn)["units_e8"]) == units_after  # type: ignore[index]
+    assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == n_events
+    assert conn.execute("SELECT 1 FROM partner_event WHERE id = 'pe_owner_tranX'").fetchone() is None
+    conn.close()
+
+
+def test_owner_booking_v_open_pos_refuses(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+    """Safety V flat, booking V has open position → refuse; nothing minted (not 98.76…)."""
+    conn = open_db(tmp_path / "vflip.db")
+    t_init = NOW - 10 * HOUR
+    _init(conn, wallet="400", now_ms=t_init)
+    t0 = NOW - HOUR
+    client = FakeClient([_xfer(time_ms=t0, amount="100", tran_id="vflip")], wallet="500")
+    reads = {"n": 0}
+
+    def _seq_read(_futures: Any, *, now_ms: int) -> AccountValue:
+        reads["n"] += 1
+        if reads["n"] == 1:
+            # safety read: flat
+            return AccountValue(
+                value=D("500"),
+                wallet=D("500"),
+                unrealized=D("0"),
+                open_positions=0,
+                read_at_ms=int(now_ms),
+            )
+        # booking read: open position, V=505
+        return AccountValue(
+            value=D("505"),
+            wallet=D("500"),
+            unrealized=D("5"),
+            open_positions=1,
+            read_at_ms=int(now_ms),
+        )
+
+    monkeypatch.setattr(pa, "_read_v", _seq_read)
+    sent: list[dict[str, Any]] = []
+
+    def send(text: str, **kwargs: Any) -> None:
+        sent.append({"text": text, **kwargs})
+
+    def answer(_id: str, text: str | None = None) -> None:
+        sent.append({"answer": text})
+
+    def edit(_mid: int, text: str, **_k: Any) -> bool:
+        sent.append({"edit": text})
+        return True
+
+    # Preview must also refuse when booking V has open positions
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert out["reason"] == "unsafe"
+    assert "โพซิชัน" in sent[-1]["text"]
+    admin = ps.admin_partner(conn)
+    assert admin is not None
+    assert int(admin["units_e8"]) == 40_000_000_000
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind = 'owner_deposit'").fetchone()["n"]
+        == 0
+    )
+
+    # Confirm path: forge a callback; safety flat then booking open → refuse
+    reads["n"] = 0
+    conf = pa.handle_partner_callback(
+        conn,
+        f"pa:oy:d:vflip:{NOW // 1000}:100000000",
+        callback=_owner_cb("x"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert conf["reason"] == "unsafe"
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind = 'owner_deposit'").fetchone()["n"]
+        == 0
+    )
+    # Never minted 98.76543209 units
+    assert int(ps.admin_partner(conn)["units_e8"]) == 40_000_000_000  # type: ignore[index]
+    conn.close()
+
+
+def test_owner_safety_v_error_refuses(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+    conn = open_db(tmp_path / "verr.db")
+    t_init = NOW - 10 * HOUR
+    _init(conn, wallet="400", now_ms=t_init)
+    t0 = NOW - HOUR
+    client = FakeClient([_xfer(time_ms=t0, amount="100", tran_id="verr")], wallet="500")
+    from jarvise_assist.partner_value import AccountValueError
+
+    def _err_read(_futures: Any, *, now_ms: int) -> AccountValueError:
+        return AccountValueError(reason="read_failed")
+
+    monkeypatch.setattr(pa, "_read_v", _err_read)
+    sent: list[str] = []
+
+    def send(text: str, **_k: Any) -> None:
+        sent.append(text)
+
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert out["reason"] == "unsafe"
+    assert sent and ("อ่านยอด" in sent[-1] or "ย้อนหลัง" in sent[-1])
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind = 'owner_deposit'").fetchone()["n"]
+        == 0
+    )
+    conn.close()
+
+
+def test_owner_amount_max_preview_and_callback_bytes(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "amax.db")
+    t_init = NOW - 10 * HOUR
+    _init(conn, wallet="400", now_ms=t_init)
+    sent: list[str] = []
+
+    def send(text: str, **_k: Any) -> None:
+        sent.append(text)
+
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 1000000",
+        message=_owner_msg(),
+        send=send,
+        futures=FakeClient(wallet="400"),
+        now_ms=NOW,
+    )
+    assert out["reason"] == "amount_too_large"
+    assert "ใหญ่เกิน" in sent[-1]
+
+    # Max legal: 32-char tranId + 10-digit ts + 12-digit micro ≤ 64
+    tran = "T" * 32
+    ts = "1700000000"
+    micro = "999999999999"
+    cb = f"pa:oy:d:{tran}:{ts}:{micro}"
+    assert len(cb.encode("utf-8")) <= 64
+    assert pa._OWNER_CONFIRM_RE.match(cb)
+    # 13-digit micro fails confirm regex
+    assert pa._OWNER_CONFIRM_RE.match(f"pa:oy:d:{tran}:{ts}:1000000000000") is None
     conn.close()
