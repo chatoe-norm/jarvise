@@ -617,6 +617,9 @@ def test_watch_maybe_auto_resume_raises_still_alerts_healthy(
 
     out = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_233100, send=capture)
     assert out["ok"] is True
+    # M9: full protective-watch return (not an early {"ok": True} after cutoff).
+    assert "actions" in out and "pause" in out
+    assert out.get("quick_cutoff") == {"trades_sent": 1, "regs_sent": 1}
     assert called["n"] == 1
     trades = _trade_alerts(sent)
     regs = _reg_alerts(sent)
