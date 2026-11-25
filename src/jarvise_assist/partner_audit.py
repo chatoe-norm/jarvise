@@ -229,59 +229,76 @@ def fetch_transfers(
 
     seen: set[tuple[str, ...]] = set()
     out: list[Transfer] = []
+    page_cap = 100
+    pages = 0
     for income_type in sorted(TRANSFER_INCOME_TYPES):
         for win_start, win_end in time_windows(clamped_start, end + 1):
-            try:
-                page = client.income_rows(
-                    start_ms=win_start,
-                    end_ms=win_end - 1,
-                    income_type=income_type,
-                    limit=1000,
-                )
-            except Exception as exc:  # noqa: BLE001
-                return FetchResult(status="read_failed", error=type(exc).__name__)
-            if len(page) >= 1000:
-                return FetchResult(status="incomplete")
-            for row in page:
-                if not isinstance(row, dict):
-                    return FetchResult(status="bad_payload")
-                time_raw = row.get("time")
-                if time_raw is None:
-                    return FetchResult(status="bad_payload")
+            cursor = int(win_start)
+            win_end_incl = int(win_end) - 1
+            while cursor <= win_end_incl:
+                if pages >= page_cap:
+                    return FetchResult(status="incomplete")
                 try:
-                    time_val = int(time_raw)
-                except (TypeError, ValueError):
-                    return FetchResult(status="bad_payload")
-                amount = _finite_decimal(row.get("income"))
-                if amount is None:
-                    return FetchResult(status="bad_payload")
-                asset = str(row.get("asset") or "").strip()
-                if not asset:
-                    return FetchResult(status="bad_payload")
-                row_type = str(row.get("incomeType") or "")
-                if row_type != income_type:
-                    continue
-                if amount == 0:
-                    continue
-                tran_raw = row.get("tranId")
-                tran_id = str(tran_raw) if tran_raw is not None and str(tran_raw) != "" else ""
-                if tran_id:
-                    key: tuple[str, ...] = (income_type, tran_id)
-                else:
-                    key = (income_type, str(time_val), str(amount))
-                    tran_id = f"{time_val}:{amount}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(
-                    Transfer(
-                        time_ms=time_val,
-                        amount=amount,
-                        asset=asset,
+                    page = client.income_rows(
+                        start_ms=cursor,
+                        end_ms=win_end_incl,
                         income_type=income_type,
-                        tran_id=tran_id,
+                        limit=1000,
                     )
-                )
+                except Exception as exc:  # noqa: BLE001
+                    return FetchResult(status="read_failed", error=type(exc).__name__)
+                pages += 1
+                if not page:
+                    break
+                max_time = cursor
+                for row in page:
+                    if not isinstance(row, dict):
+                        return FetchResult(status="bad_payload")
+                    time_raw = row.get("time")
+                    if time_raw is None:
+                        return FetchResult(status="bad_payload")
+                    try:
+                        time_val = int(time_raw)
+                    except (TypeError, ValueError):
+                        return FetchResult(status="bad_payload")
+                    if time_val > max_time:
+                        max_time = time_val
+                    amount = _finite_decimal(row.get("income"))
+                    if amount is None:
+                        return FetchResult(status="bad_payload")
+                    asset = str(row.get("asset") or "").strip()
+                    if not asset:
+                        return FetchResult(status="bad_payload")
+                    row_type = str(row.get("incomeType") or "")
+                    if row_type != income_type:
+                        continue
+                    if amount == 0:
+                        continue
+                    tran_raw = row.get("tranId")
+                    tran_id = str(tran_raw) if tran_raw is not None and str(tran_raw) != "" else ""
+                    if tran_id:
+                        key: tuple[str, ...] = (income_type, tran_id)
+                    else:
+                        key = (income_type, str(time_val), str(amount))
+                        tran_id = f"{time_val}:{amount}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(
+                        Transfer(
+                            time_ms=time_val,
+                            amount=amount,
+                            asset=asset,
+                            income_type=income_type,
+                            tran_id=tran_id,
+                        )
+                    )
+                if len(page) < 1000:
+                    break
+                if max_time > cursor:
+                    cursor = max_time
+                    continue
+                return FetchResult(status="incomplete")
     out.sort(key=lambda t: (t.time_ms, t.income_type, t.tran_id))
     return FetchResult(status="ok", transfers=out)
 

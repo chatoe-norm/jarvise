@@ -224,6 +224,88 @@ def fetch_all_orders(
     return rows
 
 
+class IncomeIncompleteError(RuntimeError):
+    """Income history hit the page safety cap; the book is truncated."""
+
+
+def _income_dedupe_key(row: dict[str, Any]) -> tuple[str, ...]:
+    """Stable key for income rows. Prefer (incomeType, tranId)."""
+    itype = str(row.get("incomeType") or "")
+    tran = row.get("tranId")
+    if tran is not None and str(tran) != "":
+        return (itype, str(tran))
+    return (
+        itype,
+        str(row.get("time") or ""),
+        str(row.get("income") or ""),
+        str(row.get("asset") or ""),
+        str(row.get("symbol") or ""),
+    )
+
+
+def fetch_all_income(
+    client: Any,
+    *,
+    start_ms: int,
+    end_ms: int,
+    income_type: str | None = None,
+    symbol: str | None = None,
+    limit: int = 1000,
+    page_cap: int = 100,
+) -> list[dict[str, Any]]:
+    """Page ``/fapi/v1/income`` until a short page. Never sends ``page``.
+
+    Advances ``startTime`` to the last row's ``time`` (inclusive) and dedupes
+    by ``(incomeType, tranId)`` (fallback: type + time + income + asset +
+    symbol). Windows stay within ``time_windows`` (7-day max). Raises
+    ``IncomeIncompleteError`` when ``page_cap`` is hit so callers do not
+    treat a truncated book as complete.
+    """
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    pages = 0
+    # time_windows is half-open [start, end); Binance endTime is inclusive.
+    for win_start, win_end_excl in time_windows(int(start_ms), int(end_ms) + 1):
+        cursor = int(win_start)
+        win_end = int(win_end_excl) - 1
+        while cursor <= win_end:
+            if pages >= page_cap:
+                raise IncomeIncompleteError("income_incomplete")
+            hist_kwargs: dict[str, Any] = {
+                "start_ms": cursor,
+                "end_ms": win_end,
+                "limit": limit,
+            }
+            if income_type is not None:
+                hist_kwargs["income_type"] = income_type
+            if symbol is not None:
+                hist_kwargs["symbol"] = symbol
+            page = client.income_history(**hist_kwargs)
+            pages += 1
+            if not page:
+                break
+            max_time = cursor
+            new_count = 0
+            for row in page:
+                t = int(row.get("time") or 0)
+                if t > max_time:
+                    max_time = t
+                key = _income_dedupe_key(row)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+                new_count += 1
+            if len(page) < limit:
+                break
+            if max_time > cursor:
+                cursor = max_time
+                continue
+            # Full page stuck at the same timestamp — cannot advance safely.
+            raise IncomeIncompleteError("income_incomplete")
+    return rows
+
+
 def fetch_income_range(
     client: BinanceFuturesClient,
     *,
@@ -232,17 +314,19 @@ def fetch_income_range(
     end_ms: int,
     income_type: str,
 ) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for win_start, win_end in time_windows(start_ms, end_ms):
-        page = client.income_history(
-            start_ms=win_start,
-            end_ms=win_end - 1,
-            income_type=income_type,
-            symbol=symbol,
-            limit=1000,
-        )
-        rows.extend(page)
-    return rows
+    """Fetch income for ``[start_ms, end_ms)`` with full pagination.
+
+    ``end_ms`` is exclusive (legacy callers pass ``exit_time + 1``).
+    """
+    if end_ms <= start_ms:
+        return []
+    return fetch_all_income(
+        client,
+        start_ms=start_ms,
+        end_ms=end_ms - 1,
+        income_type=income_type,
+        symbol=symbol,
+    )
 
 
 def _log_market_by_client(conn: Any) -> dict[str, dict[str, Any]]:
@@ -630,7 +714,24 @@ def _resolve_stop_trigger_for_entry(
     return None, None
 
 
-def _fee_usdt_and_other(fill: dict[str, Any], *, fraction: float = 1.0) -> tuple[float, str | None]:
+# Credits / stables treated as 1:1 USDT for commission conversion (owner decision).
+USDT_PEGGED_FEE_ASSETS = frozenset({"BNFCR", "USDC", "FDUSD", "BFUSD"})
+
+
+def _fee_usdt_and_other(
+    fill: dict[str, Any],
+    *,
+    fraction: float = 1.0,
+    asset_prices: dict[str, float] | None = None,
+) -> tuple[float, str | None]:
+    """Convert fill commission to USDT. Returns (usdt_fee, other_asset_tag).
+
+    USDT and pegged stables (BNFCR/USDC/FDUSD/BFUSD) are 1:1. Other assets
+    (e.g. BNB) need ``asset_prices[asset]`` or ``asset_prices['BNBUSDT']`` as
+    the USDT price (preferred production source: fill-time 1m kline close).
+    Without a price the fee stays in ``other`` and callers must not treat
+    ``net_r_real`` as complete. Never invents a rate; does not call the network.
+    """
     asset = str(fill.get("commissionAsset") or "").upper()
     try:
         fee = float(fill.get("commission") or 0) * fraction
@@ -638,7 +739,19 @@ def _fee_usdt_and_other(fill: dict[str, Any], *, fraction: float = 1.0) -> tuple
         fee = 0.0
     if asset == "USDT":
         return -abs(fee), None
+    if asset in USDT_PEGGED_FEE_ASSETS:
+        return -abs(fee), None
     if asset and fee:
+        prices = asset_prices or {}
+        price = prices.get(asset)
+        if price is None:
+            price = prices.get(f"{asset}USDT")
+        try:
+            px = float(price) if price is not None else 0.0
+        except (TypeError, ValueError):
+            px = 0.0
+        if px > 0:
+            return -abs(abs(fee) * px), None
         return 0.0, f"{asset}:{fee}"
     return 0.0, None
 
@@ -673,10 +786,17 @@ def build_real_rows(
     *,
     since_ms: int = SPEC_START_MS,
     until_ms: int | None = None,
+    asset_prices: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch Binance history and build assist_real_trade rows in memory. No writes."""
+    """Fetch Binance history and build assist_real_trade rows in memory. No writes.
+
+    ``asset_prices`` maps commission assets (e.g. ``BNB`` / ``BNBUSDT``) to a
+    USDT price for fee conversion. Prefer fill-time 1m close when building the
+    map; omit an asset to leave its fee incomplete for day-loss R.
+    """
     end = int(until_ms if until_ms is not None else now_ms())
     start = int(since_ms)
+    fee_prices = asset_prices
     market_logs = _log_market_by_client(conn)
     move_stop_by_cid = _move_stop_intent_by_client(conn)
     logged_cids = _logged_client_ids(conn)
@@ -696,6 +816,34 @@ def build_real_rows(
             trades_by_order.setdefault(oid, []).append(t)
 
         chron_trades = sorted(trades, key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
+
+        # Resolve non-USDT commission prices (injected map wins; else client 1m close).
+        prices: dict[str, float] = dict(fee_prices or {})
+        lookup = getattr(client, "asset_usdt_close_1m", None)
+        if callable(lookup):
+            for fill in chron_trades:
+                asset = str(fill.get("commissionAsset") or "").upper()
+                if (
+                    not asset
+                    or asset == "USDT"
+                    or asset in USDT_PEGGED_FEE_ASSETS
+                    or asset in prices
+                    or f"{asset}USDT" in prices
+                ):
+                    continue
+                try:
+                    fee_raw = float(fill.get("commission") or 0)
+                except (TypeError, ValueError):
+                    fee_raw = 0.0
+                if not fee_raw:
+                    continue
+                px = lookup(asset, int(fill.get("time") or 0))
+                try:
+                    px_f = float(px) if px is not None else 0.0
+                except (TypeError, ValueError):
+                    px_f = 0.0
+                if px_f > 0:
+                    prices[asset] = px_f
 
         # jv-…-mkt entry order ids for this symbol (matched or not).
         mkt_entry_order_ids: set[str] = set()
@@ -778,7 +926,7 @@ def build_real_rows(
         # Entry commission (full).
         for entry in open_entries:
             for f in entry["entry_fills"]:
-                usdt, other = _fee_usdt_and_other(f, fraction=1.0)
+                usdt, other = _fee_usdt_and_other(f, fraction=1.0, asset_prices=prices)
                 entry["commission_usdt"] += usdt
                 if other:
                     entry["other_assets"].append(other)
@@ -826,7 +974,7 @@ def build_real_rows(
                 entry["fill_realized_usdt"] += pnl * fraction
                 if tid and _realized_pnl_nonzero(t):
                     entry["pnl_trade_ids"].add(tid)
-                usdt, other = _fee_usdt_and_other(t, fraction=fraction)
+                usdt, other = _fee_usdt_and_other(t, fraction=fraction, asset_prices=prices)
                 entry["commission_usdt"] += usdt
                 if other:
                     entry["other_assets"].append(other)
@@ -936,7 +1084,8 @@ def build_real_rows(
             loss = entry.get("loss_at_stop")
             net_usdt = realized + commission_usdt + funding_usdt
             net_r_real = None
-            if closed and loss is not None and float(loss) > 0:
+            # Incomplete non-USDT fees must not feed day-loss R as if complete.
+            if closed and loss is not None and float(loss) > 0 and not other_assets:
                 net_r_real = net_usdt / float(loss)
             risk_actual, net_r_actual = _risk_actual(
                 closed=closed,
@@ -1159,10 +1308,11 @@ def sync_real_trades(
     *,
     since_ms: int = SPEC_START_MS,
     until_ms: int | None = None,
+    asset_prices: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Build all rows, then replace [since_ms, …) in one transaction. All or nothing."""
     start = int(since_ms)
-    rows = build_real_rows(conn, client, since_ms=start, until_ms=until_ms)
+    rows = build_real_rows(conn, client, since_ms=start, until_ms=until_ms, asset_prices=asset_prices)
     with transaction(conn):
         # A stored ATR must survive the delete/insert. COALESCE(preserved, built).
         preserved: dict[str, Any] = {}

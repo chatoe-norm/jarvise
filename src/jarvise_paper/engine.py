@@ -9,6 +9,7 @@ from typing import Any
 
 from jarvise_ingest.db import (
     STARTING_PAPER_EQUITY,
+    day_open_equity,
     delete_paper_position,
     ensure_paper_account,
     get_paper_account,
@@ -22,6 +23,7 @@ from jarvise_ingest.db import (
     upsert_performance_risk_metrics,
 )
 from jarvise_paper.schemas import parse_signal
+from jarvise_risk.caps import bangkok_day_bounds_ms
 
 # Binance spot taker (no BNB discount) — owner-protective paper EV default.
 FEE_BPS = 10.0
@@ -298,6 +300,11 @@ def apply_signal(
     if not dry_run:
         set_paper_account_value(conn, "cash", round(cash, 8))
         set_paper_account_value(conn, "equity", round(equity_out, 8))
+        day_start, _day_end = bangkok_day_bounds_ms(ts)
+        open_eq = day_open_equity(conn, day_start)
+        if open_eq is None:
+            acct = get_paper_account(conn)
+            open_eq = float(acct.get("starting_equity") or STARTING_PAPER_EQUITY)
         upsert_performance_risk_metrics(
             conn,
             {
@@ -307,7 +314,7 @@ def apply_signal(
                 "sharpe_ratio": None,
                 "sortino_ratio": None,
                 "max_drawdown_pct": None,
-                "daily_pnl_usd": round(equity_out - STARTING_PAPER_EQUITY, 8),
+                "daily_pnl_usd": round(equity_out - float(open_eq), 8),
                 "regime_state": analysis.get("regime_state"),
                 "confidence_score": analysis.get("confidence_score"),
             },

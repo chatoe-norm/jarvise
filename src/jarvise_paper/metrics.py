@@ -9,6 +9,7 @@ from typing import Any
 
 from jarvise_ingest.db import (
     STARTING_PAPER_EQUITY,
+    day_open_equity,
     get_paper_account,
     list_paper_orders_asc,
     list_paper_positions,
@@ -20,7 +21,7 @@ from jarvise_paper.feedback import (
     metrics_by_decision_source,
     sync_decision_outcomes,
 )
-from jarvise_risk.caps import utc_day_bounds_ms
+from jarvise_risk.caps import bangkok_day_bounds_ms
 
 PAPER_STRATEGY_ID = "paper"
 MIN_TRADES_FOR_RATIOS = 30
@@ -103,8 +104,11 @@ def reconstruct_closed_trades(orders: list[dict]) -> tuple[list[dict], int, int]
 
 
 def paper_utc_day_realized_pnl(orders: list[dict], *, now_ms: int) -> float:
-    """Sum closed round-trip PnL whose close_ts falls in the UTC calendar day of now_ms."""
-    start, end = utc_day_bounds_ms(now_ms)
+    """Sum closed round-trip PnL whose close_ts falls in the Bangkok day of now_ms.
+
+    Name kept for callers; the day boundary is Asia/Bangkok 00:00 (not UTC).
+    """
+    start, end = bangkok_day_bounds_ms(now_ms)
     trades, _unmatched, _open = reconstruct_closed_trades(orders)
     return round(
         sum(float(t["pnl_usd"]) for t in trades if start <= int(t["close_ts"]) < end),
@@ -222,8 +226,13 @@ def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, 
 
     account = get_paper_account(conn)
     equity = float(account.get("equity") or STARTING_PAPER_EQUITY)
-    daily_pnl = round(equity - STARTING_PAPER_EQUITY, 8)
+    total_pnl = round(equity - STARTING_PAPER_EQUITY, 8)
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
+    day_start, _day_end = bangkok_day_bounds_ms(ts)
+    open_eq = day_open_equity(conn, day_start)
+    if open_eq is None:
+        open_eq = float(account.get("starting_equity") or STARTING_PAPER_EQUITY)
+    daily_pnl = round(equity - float(open_eq), 8)
     by_source = metrics_by_decision_source(conn)
     by_source_30d = metrics_by_decision_source(conn, since_ms=ts - WINDOW_30D_MS)
     gate = auto_ev_gate_status(conn, now_ms=ts)
@@ -255,6 +264,7 @@ def compute_paper_metrics(conn: Any, *, now_ms: int | None = None) -> dict[str, 
         "need_trades_for_ratios": MIN_TRADES_FOR_RATIOS,
         "ratios_ready": len(trades) >= MIN_TRADES_FOR_RATIOS,
         "daily_pnl_usd": daily_pnl,
+        "total_pnl_usd": total_pnl,
         "starting_equity": STARTING_PAPER_EQUITY,
         "equity": equity,
         "trades": trades,

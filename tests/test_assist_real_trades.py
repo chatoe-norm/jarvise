@@ -1660,6 +1660,7 @@ def test_second_sync_no_duplicate_skips_income_refetch(tmp_path: Path) -> None:
 
 
 def test_non_usdt_excluded_from_mean_r(tmp_path: Path) -> None:
+    """Without a BNBUSDT price the fee stays other and mean R stays incomplete."""
     conn = open_db(tmp_path / "bnb.db")
     _seed_jv_entry(
         conn,
@@ -1743,10 +1744,125 @@ def test_non_usdt_excluded_from_mean_r(tmp_path: Path) -> None:
     ]
     fake = FakeFutures(trades=trades, orders=orders, income=income)
     sync_real_trades(conn, fake, since_ms=SPEC_START_MS, until_ms=t0 + 5000)  # type: ignore[arg-type]
+    row = conn.execute(
+        "SELECT commission_other_asset, net_r_real FROM assist_real_trade WHERE status='closed'"
+    ).fetchone()
+    assert row is not None
+    assert row[0]  # commission_other_asset set
+    assert row[1] is None  # net_r_real incomplete for day-loss
     s = summarize_real_vs_virtual(conn)
     assert s["closed_n"] == 1
     assert s["non_usdt_fee_n"] == 1
     assert s["mean_net_r"] is None
+    conn.close()
+
+
+def test_bnb_fee_converted_with_price_included_in_mean_r(tmp_path: Path) -> None:
+    """With an injected BNBUSDT price the fee folds into USDT and mean R uses it."""
+    conn = open_db(tmp_path / "bnb_px.db")
+    _seed_jv_entry(
+        conn,
+        intent_id="aei_bnb_px",
+        client_id="jv-bnbpx-mkt",
+        preview={
+            "entry": "100",
+            "stop": "90",
+            "target": "120",
+            "qty": "0.1",
+            "loss_at_stop": "1",
+            "signal_id": "as_bnb_px",
+            "leverage": 5,
+        },
+        ref_price="100",
+    )
+    t0 = SPEC_START_MS + 60_000
+    orders = [
+        {
+            "orderId": 601,
+            "clientOrderId": "jv-bnbpx-mkt",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "MARKET",
+            "time": t0,
+            "status": "FILLED",
+            "reduceOnly": False,
+        },
+        {
+            "orderId": 602,
+            "clientOrderId": "jv-bnbpx-sl0",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "type": "MARKET",
+            "stopPrice": "",
+            "time": t0 + 1000,
+            "status": "FILLED",
+            "reduceOnly": True,
+        },
+    ]
+    trades = [
+        {
+            "id": 11,
+            "orderId": 601,
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "price": "100",
+            "qty": "0.1",
+            "time": t0,
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "realizedPnl": "0",
+        },
+        {
+            "id": 12,
+            "orderId": 602,
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "price": "110",
+            "qty": "0.1",
+            "time": t0 + 1000,
+            "commission": "0",
+            "commissionAsset": "USDT",
+            "realizedPnl": "100",
+        },
+    ]
+    income = [
+        {
+            "symbol": "BTCUSDT",
+            "incomeType": "REALIZED_PNL",
+            "income": "100",
+            "time": t0 + 1000,
+            "tradeId": 12,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "incomeType": "FUNDING_FEE",
+            "income": "0",
+            "time": t0 + 500,
+        },
+    ]
+    fake = FakeFutures(trades=trades, orders=orders, income=income)
+    sync_real_trades(
+        conn,
+        fake,  # type: ignore[arg-type]
+        since_ms=SPEC_START_MS,
+        until_ms=t0 + 5000,
+        asset_prices={"BNB": 600.0},
+    )
+    row = conn.execute(
+        """
+        SELECT commission_usdt, commission_other_asset, realized_pnl_usdt,
+               funding_usdt, net_r_real
+        FROM assist_real_trade WHERE status='closed'
+        """
+    ).fetchone()
+    assert row is not None
+    assert abs(float(row[0]) - (-0.6)) < 1e-9
+    assert row[1] is None
+    realized = float(row[2])
+    funding = float(row[3] or 0)
+    net_usdt = realized + float(row[0]) + funding
+    assert abs(net_usdt - 99.4) < 1e-9
+    assert abs(float(row[4]) - 99.4) < 1e-9
     conn.close()
 
 

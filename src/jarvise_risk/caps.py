@@ -10,9 +10,13 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from jarvise_notify import notify_kill_switch
+
+# Asia/Bangkok has no DST. Fixed offset matches jarvise_assist.pause.BANGKOK.
+BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +238,18 @@ def utc_day_bounds_ms(now_ms: int) -> tuple[int, int]:
     day_ms = 86_400_000
     start = (int(now_ms) // day_ms) * day_ms
     return start, start + day_ms
+
+
+def bangkok_day_bounds_ms(now_ms: int) -> tuple[int, int]:
+    """Asia/Bangkok calendar day [start, end) in unix milliseconds.
+
+    Start is 00:00 Asia/Bangkok on the calendar day that contains ``now_ms``;
+    end is the next Bangkok midnight. Fixed UTC+7 (no DST).
+    """
+    local = datetime.fromtimestamp(int(now_ms) / 1000.0, tz=BANGKOK)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
 
 
 def get_paper_auto_decide_enabled() -> bool:

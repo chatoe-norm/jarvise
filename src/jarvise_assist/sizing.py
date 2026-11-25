@@ -517,14 +517,30 @@ def _shrink_for_max_leverage(
     uncapped: int,
     max_leverage: int = MAX_LEVERAGE,
 ) -> SizedSignal | None:
-    """Cap notional to availableBalance × max_leverage (existing leverage_capped rule).
+    """Cap notional so 5x margin + opening fee fit available × 0.95.
 
-    Returns None when no margin is left or the capped size rounds to zero lots.
+    Matches ``shared_leverage_needed``'s 5% buffer and reserves one-side
+    ``ASSIST_FEE_BPS_PER_SIDE`` (6 bps) for the entry taker. Returns None when
+    no margin is left, the capped size rounds to zero lots, or the shrunk
+    notional still needs L > max_leverage vs the buffer.
     """
-    max_notional = available_balance * Decimal(max_leverage) if available_balance > 0 else Decimal("0")
-    if max_notional <= 0 or sized.entry <= 0:
+    if available_balance <= 0 or sized.entry <= 0:
         return None
+    usable = available_balance * Decimal("0.95")
+    open_fee_rate = ASSIST_FEE_BPS_PER_SIDE / Decimal("10000")
+    denom = (Decimal("1") / Decimal(max_leverage)) + open_fee_rate
+    if usable <= 0 or denom <= 0:
+        return None
+    max_notional = usable / denom
     if sized.notional <= max_notional:
+        if (
+            shared_leverage_needed(
+                total_notional=sized.notional,
+                available_balance=available_balance,
+            )
+            > max_leverage
+        ):
+            return None
         return replace(
             sized,
             leverage=max_leverage,
@@ -538,6 +554,14 @@ def _shrink_for_max_leverage(
     if qty <= 0:
         return None
     notional = qty * sized.entry
+    if (
+        shared_leverage_needed(
+            total_notional=notional,
+            available_balance=available_balance,
+        )
+        > max_leverage
+    ):
+        return None
     loss = qty * sized.r_distance
     reasons = sized.reduce_reasons
     if qty < sized.qty:
@@ -565,7 +589,8 @@ def assign_shared_leverage(
     ``L = max(1, ceil(sum(notional) / (availableBalance * 0.95)))``.
     When ``L > max_leverage``, drop the lowest-confidence idea and recompute.
     A lone survivor that still needs more than ``max_leverage`` is shrunk with
-    the ``leverage_capped`` rule (notional at most availableBalance × max).
+    the ``leverage_capped`` rule (notional fits available×0.95 at max L plus
+    a one-side opening-fee reserve).
     """
     survivors = list(admitted)
     dropped: list[SignalCandidate] = []

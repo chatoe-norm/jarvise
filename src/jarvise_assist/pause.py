@@ -10,6 +10,7 @@ from typing import Any
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import BinanceFuturesClient
 from jarvise_assist.quick_tags import quick_income_predicate
+from jarvise_assist.real_trades import IncomeIncompleteError, fetch_all_income
 from jarvise_assist.store import (
     RISK_MAX_PCT,
     ensure_settings,
@@ -474,7 +475,9 @@ def evaluate_pause(
     week_start = monday_bangkok_ms(now_ms)
     try:
         balance = futures.usdt_wallet_balance()
-        income = futures.income_history(start_ms=week_start, end_ms=now_ms, limit=1000)
+        income = fetch_all_income(futures, start_ms=week_start, end_ms=now_ms)
+    except IncomeIncompleteError:
+        return {"paused": False, "error": "income_incomplete"}
     except Exception as exc:  # noqa: BLE001
         return {"paused": False, "error": type(exc).__name__}
 

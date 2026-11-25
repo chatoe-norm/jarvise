@@ -115,10 +115,11 @@ def test_margin_cap_reason_only_when_shrink_lowers_qty() -> None:
     assert "margin_cap" not in same.reduce_reasons
     shrunk = _shrink_for_max_leverage(sized, available_balance=Decimal("10"), uncapped=8)
     assert shrunk is not None
-    assert shrunk.qty == Decimal("5")
-    assert shrunk.notional == Decimal("50")
+    # available×0.95 / (1/5 + 6bps) ≈ 47.36 → qty floors to 4 lots at entry 10.
+    assert shrunk.qty == Decimal("4")
+    assert shrunk.notional == Decimal("40")
     assert shrunk.leverage == 5
-    assert shrunk.loss_at_stop == Decimal("5")
+    assert shrunk.loss_at_stop == Decimal("4")
     assert shrunk.reduce_reasons == ("step", "margin_cap")
 
 
