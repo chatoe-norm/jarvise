@@ -441,6 +441,13 @@ def _paid_button(request_id: str) -> dict[str, Any]:
     return {"inline_keyboard": [[{"text": "📤 USDT ออกจากพอร์ตแล้ว", "callback_data": f"pa:pd:{request_id}"}]]}
 
 
+def _admin_guard_seen() -> None:
+    """Admin guard evaluations never store the display cache — only invalidate."""
+    from jarvise_assist import partner_unrecorded as pu
+
+    pu.invalidate_display_cache()
+
+
 def _transfer_guard(
     conn: sqlite3.Connection,
     client: Any,
@@ -450,10 +457,9 @@ def _transfer_guard(
 ) -> tuple[GuardResult, str]:
     """Run confirm-time transfer guard. Lazy-imports partner_audit (never at module load).
 
-    Notes fresh evidence into the shared display cache so a portal cached clear
-    cannot survive an admin confirm that saw unrecorded/unknown/error.
+    Always invalidates the portal display cache (never stores): deposit-context
+    results are hypothetical and must not unlock a cached clear/unrecorded.
     """
-    from jarvise_assist import partner_unrecorded as pu
     from jarvise_assist.partner_audit import GuardResult as _GuardResult
     from jarvise_assist.partner_audit import format_guard_th, guard_check, load_state
 
@@ -474,7 +480,7 @@ def _transfer_guard(
             deposit_amount=deposit_amount,
             deposit_partner=deposit_partner,
         )
-        pu.note_fresh_guard(result, conn=conn, now_ms=int(now_ms))
+        _admin_guard_seen()
         last_ok_ms: int | None = None
         if result.status != "ok":
             row = conn.execute("PRAGMA database_list").fetchone()
@@ -488,7 +494,7 @@ def _transfer_guard(
         return result, format_guard_th(result, last_ok_ms=last_ok_ms)
     except Exception as exc:  # noqa: BLE001
         logger.warning("partner transfer guard error type=%s", type(exc).__name__)
-        pu.note_fresh_guard("unknown")
+        _admin_guard_seen()
         err = _GuardResult(
             status="error",
             checked_at_ms=int(now_ms),
@@ -540,8 +546,8 @@ def _blocks_on_unrecorded(result: GuardResult) -> bool:
 def _open_unrecorded_overview(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> tuple[str, int]:
     """Return (status, count). Live clear overrides a stale state-file list.
 
-    Notes the resolved overview status so a portal cached clear cannot survive
-    admin-side discovery of unrecorded/unknown (including a raising guard stub).
+    Invalidates the portal display cache on every evaluation (never stores),
+    including a raising guard stub.
     """
     from jarvise_assist import partner_unrecorded as pu
 
@@ -549,19 +555,16 @@ def _open_unrecorded_overview(conn: sqlite3.Connection, futures: Any, *, now_ms:
     try:
         live = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
     except Exception:
-        pu.note_fresh_guard("unknown")
+        _admin_guard_seen()
         raise
+    _admin_guard_seen()
     hint = pu.open_unrecorded_hint(conn)
     if live == "clear":
-        pu.note_fresh_guard("clear", conn=conn, now_ms=int(now_ms))
         return "clear", 0
     if live == "unrecorded":
-        pu.note_fresh_guard("unrecorded", conn=conn, now_ms=int(now_ms))
         return "unrecorded", max(len(hint), 1)
     if hint:
-        pu.note_fresh_guard("unrecorded", conn=conn, now_ms=int(now_ms))
         return "unrecorded", len(hint)
-    pu.note_fresh_guard("unknown")
     return "unknown", 0
 
 
@@ -959,7 +962,12 @@ def _handle_owner_tx(
     if tran_id and _owner_already_recorded(conn, side=side, tran_id=tran_id):
         send("บันทึก tranId นี้แล้ว")
         return {"ok": True, "cmd": "owner", "reason": "already_recorded"}
-    guard = guard_check(conn, client, now_ms=int(now_ms))
+    try:
+        guard = guard_check(conn, client, now_ms=int(now_ms))
+    except Exception:
+        _admin_guard_seen()
+        raise
+    _admin_guard_seen()
     if guard.status != "ok":
         send("อ่านรายการโอนไม่ได้ตอนนี้ — ลองใหม่")
         return {"ok": False, "reason": guard.status}
@@ -2020,7 +2028,12 @@ def handle_partner_callback(
             from jarvise_assist.partner_audit import guard_check
 
             client = _resolve_client(futures)
-            guard = guard_check(conn, client, now_ms=int(now_ms))
+            try:
+                guard = guard_check(conn, client, now_ms=int(now_ms))
+            except Exception:
+                _admin_guard_seen()
+                raise
+            _admin_guard_seen()
             if guard.status != "ok":
                 _answer("อ่านรายการโอนไม่ได้ตอนนี้")
                 return {"ok": False, "reason": guard.status}

@@ -913,8 +913,8 @@ def test_portal_request_gate_key_raise_clears_stale_clear(
         == 0
     )
     # Mid-check key raise must have dropped the prior clear (not left it intact).
-    # note_fresh_guard may store "unrecorded" after consuming the flaky first key
-    # call; unknown/raise paths leave None. Never clear.
+    # Portal may store "unrecorded" after the flaky first key; unknown/raise leave
+    # None. Never clear.
     assert pu._display_cache is None or pu._display_cache[1] != "clear"
     assert calls["n"] >= 1
 
@@ -1801,7 +1801,7 @@ def test_portal_request_gate_raise_requires_preclear(tmp_path: Path, monkeypatch
 
     Warm clear → gate raises → cache must be None and the next card re-queries.
     Removing the pre-clear plus except/unknown clears in ``_money_request_blocked``
-    would leave a stale clear (note_fresh_guard never runs if the function raises).
+    would leave a stale clear (the pure guard never touches the cache on raise).
     """
     from jarvise_assist import partner_unrecorded as pu
 
@@ -1876,4 +1876,403 @@ def test_portal_request_gate_raise_requires_preclear(tmp_path: Path, monkeypatch
     assert guard_calls["n"] >= 1
     assert "กำลังตรวจยอด" in card_text
     assert "206.15" not in card_text
+    conn.close()
+
+
+def _warm_portal_clear(
+    conn: Any,
+    row: Any,
+    *,
+    monkeypatch: Any,
+    av: AccountValue,
+) -> None:
+    """Warm the shared display cache to clear via the portal card path."""
+
+    def _clear(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(status="ok", checked_at_ms=NOW, findings=[], warn=False)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _clear)
+    clear_text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "ยอดสุทธิ" in clear_text
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "clear"
+
+
+def _assert_portal_requeries_locked(
+    conn: Any,
+    row: Any,
+    *,
+    monkeypatch: Any,
+    av: AccountValue,
+    now_ms: int,
+    guard_impl: Any,
+) -> int:
+    """Next card must re-query the guard and stay locked. Returns guard call count."""
+    calls = {"n": 0}
+
+    def counting_guard(*a: Any, **k: Any) -> GuardResult:
+        calls["n"] += 1
+        return guard_impl(*a, **k)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", counting_guard)
+    # Drop any residual cache so we measure a real re-query; callers already
+    # asserted admin invalidated (or TTL expired) before calling this helper.
+    text, _m = portal._build_card(conn, row, av, now_ms=now_ms, futures=FakeClient())
+    assert calls["n"] >= 1
+    assert "กำลังตรวจยอด" in text
+    assert "206.15" not in text
+    return calls["n"]
+
+
+def test_b1_owner_preview_invalidates_portal_clear(tmp_path: Path, monkeypatch: Any) -> None:
+    """Codex r7: B1 owner preview that finds unrecorded must drop a portal clear.
+
+    Warm clear → preview discovers unrecorded (no ledger write) → next portal
+    card re-queries and stays locked.
+    """
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    db = tmp_path / "r7_b1_preview.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+    finding = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:r7prev",
+        time_ms=NOW - 1000,
+        amount=D("100"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+    _warm_portal_clear(conn, row, monkeypatch=monkeypatch, av=av)
+
+    def _unrecorded(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(
+            status="ok",
+            checked_at_ms=NOW + 1,
+            findings=[finding],
+            warn=True,
+        )
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _unrecorded)
+    monkeypatch.setattr(
+        pa,
+        "_read_v",
+        lambda *_a, **_k: AccountValue(
+            value=D("1061.5"),
+            wallet=D("1061.5"),
+            unrealized=D("0"),
+            open_positions=0,
+            read_at_ms=NOW + 1,
+        ),
+    )
+    # Focus this test on guard→cache; skip post-guard safety/history checks.
+    monkeypatch.setattr(pa, "_owner_safety_refuse", lambda *_a, **_k: None)
+    sent: list[dict[str, Any]] = []
+
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message={"chat": {"id": ADMIN, "type": "private"}, "from": {"id": ADMIN}},
+        send=lambda text, **kw: sent.append({"text": text, **kw}),
+        futures=FakeClient(),
+        now_ms=NOW + 1,
+    )
+    assert out.get("ok") is True
+    assert out.get("tran_id") == "r7prev"
+    assert pu._display_cache is None or pu._display_cache[1] != "clear"
+
+    n = _assert_portal_requeries_locked(
+        conn,
+        row,
+        monkeypatch=monkeypatch,
+        av=av,
+        now_ms=NOW + 2,
+        guard_impl=_unrecorded,
+    )
+    assert n >= 1
+    _assert_displays_locked_after_refuse(
+        conn,
+        row,
+        monkeypatch=monkeypatch,
+        av=av,
+        futures=FakeClient(),
+        now_ms=NOW + 3,
+    )
+    conn.close()
+
+
+def test_b1_owner_confirm_refuse_invalidates_portal_clear(
+    tmp_path: Path, env_chat: None, monkeypatch: Any
+) -> None:
+    """Codex r7: B1 confirm refused (no matching transfer) must drop a portal clear."""
+    db = tmp_path / "r7_b1_confirm.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+    finding = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:other",
+        time_ms=NOW - 1000,
+        amount=D("100"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+    _warm_portal_clear(conn, row, monkeypatch=monkeypatch, av=av)
+
+    def _wrong_tran(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(
+            status="ok",
+            checked_at_ms=NOW + 1,
+            findings=[finding],
+            warn=True,
+        )
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _wrong_tran)
+    ts_s = int(NOW + 1) // 1000
+    cb = f"pa:oy:d:missing:{ts_s}:100000000"
+    answers: list[str | None] = []
+
+    out = pa.handle_partner_callback(
+        conn,
+        cb,
+        callback=_owner_cb(cb),
+        send=lambda *_a, **_k: None,
+        answer=lambda _id, text=None: answers.append(text),
+        edit=lambda *_a, **_k: True,
+        futures=FakeClient(),
+        now_ms=NOW + 1,
+    )
+    assert out["reason"] == "no_match"
+    assert pu._display_cache is None or pu._display_cache[1] != "clear"
+
+    n = _assert_portal_requeries_locked(
+        conn,
+        row,
+        monkeypatch=monkeypatch,
+        av=av,
+        now_ms=NOW + 2,
+        guard_impl=_wrong_tran,
+    )
+    assert n >= 1
+    conn.close()
+
+
+def test_b1_owner_preview_guard_raise_invalidates_portal_clear(tmp_path: Path, monkeypatch: Any) -> None:
+    """Codex r7: B1 preview where guard_check raises must drop a portal clear."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    db = tmp_path / "r7_b1_raise.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+    _warm_portal_clear(conn, row, monkeypatch=monkeypatch, av=av)
+
+    def boom(*_a: Any, **_k: Any) -> GuardResult:
+        raise RuntimeError("b1 preview guard boom")
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", boom)
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message={"chat": {"id": ADMIN, "type": "private"}, "from": {"id": ADMIN}},
+        send=lambda *_a, **_k: None,
+        futures=FakeClient(),
+        now_ms=NOW + 1,
+    )
+    assert out["reason"] == "exception"
+    assert pu._display_cache is None
+
+    def _unknown(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(
+            status="read_failed",
+            checked_at_ms=NOW + 2,
+            findings=[],
+            warn=True,
+            error="xfer",
+        )
+
+    n = _assert_portal_requeries_locked(
+        conn,
+        row,
+        monkeypatch=monkeypatch,
+        av=av,
+        now_ms=NOW + 2,
+        guard_impl=_unknown,
+    )
+    assert n >= 1
+    conn.close()
+
+
+def test_deposit_amount_diff_does_not_store_clear_over_unrecorded(
+    tmp_path: Path, env_chat: None, monkeypatch: Any
+) -> None:
+    """Codex r7: deposit-context this_deposit_amount_diff must not unlock display.
+
+    Warm a portal unrecorded lock → admin deposit confirm whose guard yields
+    this_deposit_amount_diff (looks clear under old coercion) → display cache
+    must not become clear; next card re-queries and stays locked.
+    """
+    db = tmp_path / "r7_dep_diff.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+    unrecorded = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:r7orph",
+        time_ms=NOW - 2000,
+        amount=D("50"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+    amount_diff = Finding(
+        code="this_deposit_amount_diff",
+        fingerprint="dep:pending",
+        time_ms=NOW - 1000,
+        amount=D("99.50"),
+        partner_name="Bob",
+        detail="100 vs 99.50",
+        alertable=True,
+    )
+    mode = {"v": "unrecorded"}
+
+    def _guard(conn: Any, client: Any, *, now_ms: int, **_k: Any) -> GuardResult:
+        if mode["v"] == "unrecorded":
+            return GuardResult(
+                status="ok",
+                checked_at_ms=int(now_ms),
+                findings=[unrecorded],
+                warn=True,
+            )
+        # Deposit-context: amount_diff consumes the transfer; no unrecorded codes.
+        # Old note_fresh_guard coercion treated this as clear and would unlock.
+        return GuardResult(
+            status="ok",
+            checked_at_ms=int(now_ms),
+            findings=[amount_diff],
+            warn=True,
+        )
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _guard)
+    lock_text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "กำลังตรวจยอด" in lock_text
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "unrecorded"
+
+    created = ps.create_request(conn, bob, "deposit", NOW, amount=D("100"), source="admin")
+    assert created["ok"]
+    rid = str(created["request_id"])
+    mode["v"] = "amount_diff"
+
+    out = pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid}",
+        callback=_owner_cb(f"pa:dy:{rid}"),
+        send=lambda *_a, **_k: None,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: True,
+        futures=FakeClient(),
+        now_ms=NOW + 1,
+    )
+    assert out["reason"] == "guard_warn"
+    # Must not promote to clear (the class of bug under test).
+    assert pu._display_cache is None or pu._display_cache[1] != "clear"
+
+    mode["v"] = "unrecorded"
+    calls = {"n": 0}
+
+    def counting_guard(*a: Any, **k: Any) -> GuardResult:
+        calls["n"] += 1
+        return _guard(*a, **k)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", counting_guard)
+    card_text, _cm = portal._build_card(conn, row, av, now_ms=NOW + 2, futures=FakeClient())
+    assert calls["n"] >= 1
+    assert "กำลังตรวจยอด" in card_text
+    assert "206.15" not in card_text
+    conn.close()
+
+
+def test_display_cache_ttl_forces_requery(tmp_path: Path, monkeypatch: Any) -> None:
+    """Codex r7: a cached clear older than DISPLAY_CACHE_TTL_MS must re-query."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    db = tmp_path / "r7_ttl.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+    calls = {"n": 0}
+
+    def _clear(conn: Any, client: Any, *, now_ms: int, **_k: Any) -> GuardResult:
+        calls["n"] += 1
+        return GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _clear)
+    text1, _m1 = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "ยอดสุทธิ" in text1
+    assert calls["n"] == 1
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "clear"
+
+    # Within TTL — cache hit, no re-query.
+    text2, _m2 = portal._build_card(
+        conn, row, av, now_ms=NOW + pu.DISPLAY_CACHE_TTL_MS - 1, futures=FakeClient()
+    )
+    assert "ยอดสุทธิ" in text2
+    assert calls["n"] == 1
+
+    # At/after TTL — must re-query (removing the age check leaves calls at 1).
+    text3, _m3 = portal._build_card(conn, row, av, now_ms=NOW + pu.DISPLAY_CACHE_TTL_MS, futures=FakeClient())
+    assert "ยอดสุทธิ" in text3
+    assert calls["n"] == 2
     conn.close()

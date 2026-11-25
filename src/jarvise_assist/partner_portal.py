@@ -179,8 +179,7 @@ def _unrecorded_status_for_card(conn: sqlite3.Connection, futures: Any, *, now_m
         # Fresh check / key raised — drop any prior clear so display stays fail-closed.
         pu.invalidate_display_cache()
         raise
-    # resolve/note_fresh_guard already applied live evidence; store final status
-    # (hint-raised unrecorded included) without ever caching unknown.
+    # Pure resolve does not store; portal is the only path that may store.
     pu.store_display_status(key, status, int(now_ms))
     return status
 
@@ -194,8 +193,7 @@ def _money_request_blocked(conn: sqlite3.Connection, futures: Any, *, now_ms: in
 
     Cache is cleared *before* the fresh guard and key lookup so a mid-check
     failure (or a raising ``guard_unrecorded_status`` stub) cannot leave a
-    prior cached clear intact. ``note_fresh_guard`` inside the real guard is
-    the structural path; these layered clears catch raise-through cases.
+    prior cached clear intact.
     """
     from jarvise_assist import partner_unrecorded as pu
 
