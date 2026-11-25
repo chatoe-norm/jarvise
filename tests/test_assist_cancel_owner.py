@@ -27,6 +27,7 @@ from jarvise_assist.execute import (
     RECOVER_MAX_AGE_MS,
     BinanceTradeClient,
     _append_exit_retained_leftovers,
+    _finish_flat_exit,
     _format_menu_exit_confirm,
     _owner_order_create_ms,
     assist_cancel_owner_enabled,
@@ -2065,6 +2066,9 @@ def test_o_exit_recovery_list_only_leftovers_notified(
     assert "อ่านคำสั่งค้างไม่ได้" not in joined
     bare = [m for m in sent if m.strip() == "✅ ปิด DOGEUSDT"]
     assert not bare, f"must not notify only bare close, got {sent!r}"
+    # tick 0.00001 → 0.09000; pins exit first-flat recovery (:5581)
+    assert "BUY 0.09000 ·" in joined, f"expected tick-formatted leftover price, got {joined!r}"
+    assert "BUY 0.09 ·" not in joined
     conn.close()
 
 
@@ -2509,6 +2513,9 @@ def test_s_reduce_pending_retry_lists_leftovers(tmp_path: Path, monkeypatch: pyt
     assert "อ่านคำสั่งค้างไม่ได้" not in joined
     bare = [m for m in sent if m.strip() == "✅ ปิด DOGEUSDT"]
     assert not bare, f"must not notify only bare close, got {sent!r}"
+    # tick 0.00001 → 0.09000; fmt_price alone would print 0.09
+    assert "BUY 0.09000 ·" in joined, f"expected tick-formatted leftover price, got {joined!r}"
+    assert "BUY 0.09 ·" not in joined
     conn.close()
 
 
@@ -2711,6 +2718,7 @@ def test_v_non_menu_finish_flat_exit_lists_leftovers(tmp_path: Path, monkeypatch
     }
     handlers = _menu_close_handlers(open_orders=(200, []))
     handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_ut])
+    handlers[("GET", "/fapi/v1/exchangeInfo")] = (200, _filters())  # tickSize 0.00001
     handlers[("DELETE", "/fapi/v1/algoOrder")] = (200, {"code": "200", "msg": "success"})
     transport = RecordingTransport(handlers)
     handle_exec_callback(
@@ -2735,6 +2743,9 @@ def test_v_non_menu_finish_flat_exit_lists_leftovers(tmp_path: Path, monkeypatch
     assert "คำสั่งที่ยังค้างบน" in result_text
     assert any(ln.strip().startswith("•") for ln in result_text.splitlines())
     assert "อ่านคำสั่งค้างไม่ได้" not in result_text
+    # tick 0.00001 → 0.09000; pins _finish_flat_exit (:3335)
+    assert "BUY 0.09000 ·" in result_text, f"expected tick-formatted leftover price, got {result_text!r}"
+    assert "BUY 0.09 ·" not in result_text
     conn.close()
 
 
@@ -2810,6 +2821,9 @@ def test_w_exit_pending_retry_lists_leftovers(tmp_path: Path, monkeypatch: pytes
     assert "อ่านคำสั่งค้างไม่ได้" not in joined
     bare = [m for m in sent if m.strip() == "✅ ปิด DOGEUSDT"]
     assert not bare, f"must not notify only bare close, got {sent!r}"
+    # tick 0.00001 → 0.09000; pins exit pending-retry (:5524)
+    assert "BUY 0.09000 ·" in joined, f"expected tick-formatted leftover price, got {joined!r}"
+    assert "BUY 0.09 ·" not in joined
     conn.close()
 
 
@@ -2936,3 +2950,171 @@ def test_y_leftover_listing_uses_tick() -> None:
         tick=None,
     )
     assert f"BUY {raw} ·" in without
+
+
+def test_z_flag_off_flat_close_no_extra_exchange_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag off: flat-close paths must not call GET /fapi/v1/exchangeInfo for leftover tick."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.delenv("JARVISE_ASSIST_CANCEL_OWNER", raising=False)
+
+    def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    def _assert_no_exchange_info(transport: RecordingTransport) -> None:
+        info = [c for c in transport.calls if c[0] == "GET" and c[1] == "/fapi/v1/exchangeInfo"]
+        assert info == [], f"flag-off must not fetch exchangeInfo, got {info!r}"
+
+    # 1) _finish_flat_exit (advice/non-menu path)
+    conn = open_db(tmp_path / "z-finish.db")
+    ts = now_ms()
+    fid = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08", "position_side": "BOTH"},
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    handlers = {
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+    }
+    transport = RecordingTransport(handlers)
+    result = _finish_flat_exit(
+        _client(transport),
+        conn,
+        intent_id=fid,
+        symbol="DOGEUSDT",
+        side="short",
+        position_side="BOTH",
+        avg=Decimal("0.07"),
+        pnl=None,
+        include_pnl=False,
+    )
+    assert result.status == "done"
+    _assert_no_exchange_info(transport)
+    conn.close()
+
+    # 2) exit first-flat recovery (no exit_cancel_pending)
+    conn = open_db(tmp_path / "z-exit-first.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08", "position_side": "BOTH"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    insert_exec_log(conn, intent_id=rid, step="exit_market", endpoint="/fapi/v1/order", created_at_ms=ts)
+    handlers = {
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms_value=ts + 1000,
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, rid)
+    assert row is not None and row["status"] == "done"
+    _assert_no_exchange_info(transport)
+    conn.close()
+
+    # 3) exit pending-retry recovery
+    conn = open_db(tmp_path / "z-exit-retry.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08", "position_side": "BOTH"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    insert_exec_log(conn, intent_id=rid, step="exit_market", endpoint="/fapi/v1/order", created_at_ms=ts)
+    insert_exec_log(
+        conn, intent_id=rid, step="exit_cancel_pending", endpoint="/fapi/v1/algoOrder", created_at_ms=ts
+    )
+    handlers = {
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms_value=ts + 1000,
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, rid)
+    assert row is not None and row["status"] == "done"
+    _assert_no_exchange_info(transport)
+    conn.close()
+
+    # 4) reduce pending-retry recovery
+    conn = open_db(tmp_path / "z-reduce-retry.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="reduce",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08", "close_qty": "100", "leave_qty": "0"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    insert_exec_log(conn, intent_id=rid, step="reduce_market", endpoint="/fapi/v1/order", created_at_ms=ts)
+    insert_exec_log(
+        conn, intent_id=rid, step="exit_cancel_pending", endpoint="/fapi/v1/algoOrder", created_at_ms=ts
+    )
+    handlers = {
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms_value=ts + 1000,
+        send=lambda *_a, **_k: True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, rid)
+    assert row is not None and row["status"] == "done"
+    _assert_no_exchange_info(transport)
+    conn.close()

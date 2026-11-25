@@ -3332,7 +3332,7 @@ def _finish_flat_exit(
         text,
         cancel.leftover_orders,
         symbol=symbol,
-        tick=_tick_size_or_none(trade, symbol),
+        tick=_tick_size_or_none(trade, symbol) if cancel.leftover_orders else None,
     )
     return _exec_result(text, status="done")
 
@@ -5521,7 +5521,7 @@ def _recover_exit_intent(
                 f"✅ ปิด {symbol}",
                 cancel.leftover_orders,
                 symbol=symbol,
-                tick=_tick_size_or_none(trade, symbol),
+                tick=_tick_size_or_none(trade, symbol) if cancel.leftover_orders else None,
             )
             _recovery_notify(
                 send,
@@ -5578,7 +5578,7 @@ def _recover_exit_intent(
                 text,
                 cancel.leftover_orders,
                 symbol=symbol,
-                tick=_tick_size_or_none(trade, symbol),
+                tick=_tick_size_or_none(trade, symbol) if cancel.leftover_orders else None,
             )
         _recovery_notify(
             send,
@@ -5727,7 +5727,7 @@ def _recover_reduce_intent(
                 f"✅ ปิด {symbol}",
                 cancel.leftover_orders,
                 symbol=symbol,
-                tick=_tick_size_or_none(trade, symbol),
+                tick=_tick_size_or_none(trade, symbol) if cancel.leftover_orders else None,
             )
             _recovery_notify(
                 send,
