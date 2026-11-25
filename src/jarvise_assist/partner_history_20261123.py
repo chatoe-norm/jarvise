@@ -233,14 +233,15 @@ def _pinned_golden_values(nav_pre: Decimal) -> dict[str, Any]:
 
 
 def _prior_hist_diffs(conn: sqlite3.Connection) -> list[dict[str, object]]:
-    """Validate the permitted 19 Nov hist row. Its created_at may be after the top-up."""
+    """Validate the permitted 19 Nov hist row. Compare every column except created_at_ms."""
     diffs: list[dict[str, object]] = []
     row = conn.execute("SELECT * FROM partner_event WHERE id = ?", (PRIOR_HIST_EVENT_ID,)).fetchone()
     if row is None:
         diffs.append(_diff("prior_hist_event", PRIOR_HIST_EVENT_ID, None))
         return diffs
-    if str(row["kind"]) != "owner_redeem":
-        diffs.append(_diff("prior_hist_kind", "owner_redeem", str(row["kind"])))
+    admin = ps.admin_partner(conn)
+    expected_partner = str(admin["id"]) if admin is not None else None
+    nav_pre = ph_l1._pinned_nav()
     eff = row["effective_at_ms"]
     if eff is None or not ph_l1.effective_in_window(int(eff)):
         diffs.append(
@@ -251,19 +252,27 @@ def _prior_hist_diffs(conn: sqlite3.Connection) -> list[dict[str, object]]:
             )
         )
     pins: list[tuple[str, object, object]] = [
-        ("prior_hist.cash_micro", ph_l1.CASH_MICRO, int(row["cash_micro"])),
-        ("prior_hist.units_delta_e8", ph_l1.UNITS_DELTA_E8, int(row["units_delta_e8"])),
+        ("prior_hist.partner_id", expected_partner, str(row["partner_id"])),
+        ("prior_hist.kind", "owner_redeem", str(row["kind"])),
+        ("prior_hist.request_id", None, row["request_id"]),
+        ("prior_hist.related_event_id", None, row["related_event_id"]),
         ("prior_hist.account_value_micro", ph_l1.AV_MICRO, int(row["account_value_micro"])),
+        ("prior_hist.total_units_before_e8", ph_l1.TOTAL_UNITS_E8, int(row["total_units_before_e8"])),
+        ("prior_hist.nav", format(nav_pre, "f"), str(row["nav"])),
+        ("prior_hist.units_delta_e8", ph_l1.UNITS_DELTA_E8, int(row["units_delta_e8"])),
+        ("prior_hist.cost_delta_micro", ph_l1.COST_DELTA_MICRO, int(row["cost_delta_micro"])),
+        ("prior_hist.cash_micro", ph_l1.CASH_MICRO, int(row["cash_micro"])),
         ("prior_hist.fee_micro", 0, int(row["fee_micro"])),
-        ("prior_hist.origin", "manual", row["origin"]),
+        ("prior_hist.units_after_e8", ph_l1.ADMIN_UNITS_AFTER_E8, int(row["units_after_e8"])),
+        ("prior_hist.cost_after_micro", ph_l1.ADMIN_COST_AFTER_MICRO, int(row["cost_after_micro"])),
         ("prior_hist.actor", "admin", str(row["actor"])),
+        ("prior_hist.note", ph_l1.NOTE, row["note"]),
+        ("prior_hist.origin", "manual", row["origin"]),
+        ("prior_hist.payouts_due_micro", 0, row["payouts_due_micro"]),
     ]
     for field, expected, actual in pins:
         if actual != expected:
             diffs.append(_diff(field, expected, actual))
-    note = str(row["note"] or "")
-    if PRIOR_TRAN_ID not in note:
-        diffs.append(_diff("prior_hist.note_tran", PRIOR_TRAN_ID, note[:80]))
     return diffs
 
 
@@ -665,20 +674,7 @@ def apply_historical(
             },
             "verify": {"ok": True, "mismatches": []},
         }
-    _clear_audit_fingerprint(conn, TRAN_ID)
+    from jarvise_assist import partner_unrecorded as pu
+
+    pu.remove_booked_tran(conn, TRAN_ID)
     return payload
-
-
-def _clear_audit_fingerprint(conn: sqlite3.Connection, tran_id: str) -> None:
-    """Best-effort drop the booked transfer from partner_audit_state.json."""
-    from pathlib import Path
-
-    from jarvise_assist.partner_audit import remove_open_unrecorded_for_tran
-
-    row = conn.execute("PRAGMA database_list").fetchone()
-    if row is None:
-        return
-    db_file = str(row["file"] if hasattr(row, "keys") else row[2] or "")
-    if not db_file:
-        return
-    remove_open_unrecorded_for_tran(Path(db_file).with_name("partner_audit_state.json"), tran_id)

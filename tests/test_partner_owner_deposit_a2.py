@@ -323,6 +323,46 @@ def test_a2_prior_created_after_topup_still_applies(tmp_path: Path) -> None:
     check.close()
 
 
+def test_a2_prior_row_pin_refuses_nav_due_request(tmp_path: Path) -> None:
+    """Exempted prior row must still match every pinned column (except created_at)."""
+    from jarvise_assist import partner_history_20261123 as a2
+
+    path = tmp_path / "prior_pin.db"
+    conn = _a2_ready(path)
+    conn.execute("DROP TRIGGER IF EXISTS partner_event_append_only_update")
+
+    conn.execute("UPDATE partner_event SET nav = '999' WHERE id = ?", (L1_HIST_ID,))
+    conn.commit()
+    diffs = a2._prior_hist_diffs(conn)
+    assert any(d["field"] == "prior_hist.nav" for d in diffs)
+    dry = _invoke(path, "--json")
+    assert dry.exit_code != 0
+    assert _json_out(dry)["ok"] is False
+
+    # restore nav, break payouts_due
+    conn.execute(
+        "UPDATE partner_event SET nav = ?, payouts_due_micro = NULL WHERE id = ?",
+        (format(a2.ph_l1._pinned_nav(), "f"), L1_HIST_ID),
+    )
+    conn.commit()
+    diffs2 = a2._prior_hist_diffs(conn)
+    assert any(d["field"] == "prior_hist.payouts_due_micro" for d in diffs2)
+    dry2 = _invoke(path, "--json")
+    assert dry2.exit_code != 0
+
+    # restore due, set a request link
+    conn.execute(
+        "UPDATE partner_event SET payouts_due_micro = 0, request_id = 'pr_bogus' WHERE id = ?",
+        (L1_HIST_ID,),
+    )
+    conn.commit()
+    diffs3 = a2._prior_hist_diffs(conn)
+    assert any(d["field"] == "prior_hist.request_id" for d in diffs3)
+    dry3 = _invoke(path, "--json")
+    assert dry3.exit_code != 0
+    conn.close()
+
+
 def test_a2_apply_clears_open_unrecorded_fingerprint(tmp_path: Path) -> None:
     from jarvise_assist.partner_audit import load_state, save_state
 
