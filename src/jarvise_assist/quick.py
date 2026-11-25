@@ -355,7 +355,7 @@ def sync_quick_trades(
     if not open_regs and not open_trades:
         return {}
 
-    info: dict[str, Any] = {"tagged": 0, "expired": 0, "updated": 0}
+    info: dict[str, Any] = {"tagged": 0, "expired": 0, "updated": 0, "closed": []}
 
     tagged_trade_ids: set[str] = set()
     for reg in open_regs:
@@ -454,6 +454,21 @@ def sync_quick_trades(
         info["tagged"] += 1
         _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
         if str(rebuilt.get("status")) == "closed":
+            raw_closed = rebuilt.get("closed_at_ms")
+            try:
+                closed_at = int(raw_closed) if raw_closed is not None else None
+            except (TypeError, ValueError):
+                closed_at = None
+            if closed_at is not None and closed_at <= 0:
+                closed_at = None
+            info["closed"].append(
+                {
+                    "symbol": sym,
+                    "side": side,
+                    "closed_at_ms": closed_at,
+                    "trade_id": trade_id,
+                }
+            )
             _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     # Rebuild already-open trades (skip ones tagged earlier in this run)
@@ -495,6 +510,21 @@ def sync_quick_trades(
         )
         info["updated"] += 1
         if was_open and str(rebuilt.get("status")) == "closed":
+            raw_closed = rebuilt.get("closed_at_ms")
+            try:
+                closed_at = int(raw_closed) if raw_closed is not None else None
+            except (TypeError, ValueError):
+                closed_at = None
+            if closed_at is not None and closed_at <= 0:
+                closed_at = None
+            info["closed"].append(
+                {
+                    "symbol": sym,
+                    "side": side,
+                    "closed_at_ms": closed_at,
+                    "trade_id": trade_id,
+                }
+            )
             _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     return {k: v for k, v in info.items() if v}
@@ -699,23 +729,30 @@ def _send_close_notice(
         lines = [
             (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว {via} — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
         ]
+        from jarvise_assist.execute import assist_cancel_owner_enabled, assist_execute_mode
         from jarvise_assist.order_lines import is_symbol_protective_leftover
 
-        leftovers: list[dict[str, Any]] = []
-        try:
-            if client is not None and hasattr(client, "all_open_orders"):
-                leftovers = [
-                    o for o in client.all_open_orders(symbol=sym) if is_symbol_protective_leftover(o)
-                ]
-        except Exception:  # noqa: BLE001
-            lines.append("อ่านคำสั่งค้างไม่ได้ — ตรวจในแอป")
-        else:
-            if leftovers:
-                lines.append(f"คำสั่งที่ยังค้างบน {sym}:")
-                tick = None
-                for o in leftovers:
-                    lines.append(format_closing_order_line(o, tick=tick))
-                lines.append("✋ ยังค้างอยู่ — ลบในแอป")
+        # Watch owns the one cancel/list attempt when flag on AND live execute.
+        # Flag on + testnet/off still lists leftovers here. Flag on + live skips
+        # listing here (watch owns it) — watch must still warn if it cannot
+        # obtain a trade client (missing key); silence is not acceptable.
+        skip_leftover_list = assist_cancel_owner_enabled() and assist_execute_mode() == "live"
+        if not skip_leftover_list:
+            leftovers: list[dict[str, Any]] = []
+            try:
+                if client is not None and hasattr(client, "all_open_orders"):
+                    leftovers = [
+                        o for o in client.all_open_orders(symbol=sym) if is_symbol_protective_leftover(o)
+                    ]
+            except Exception:  # noqa: BLE001
+                lines.append("อ่านคำสั่งค้างไม่ได้ — ตรวจในแอป")
+            else:
+                if leftovers:
+                    lines.append(f"คำสั่งที่ยังค้างบน {sym}:")
+                    tick = None
+                    for o in leftovers:
+                        lines.append(format_closing_order_line(o, tick=tick))
+                    lines.append("✋ ยังค้างอยู่ — ลบในแอป")
         lines.append(quick_mode_tag())
         send("\n".join(lines))
     except Exception:  # noqa: BLE001

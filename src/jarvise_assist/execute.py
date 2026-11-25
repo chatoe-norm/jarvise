@@ -12,7 +12,7 @@ from dataclasses import replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from urllib.parse import urlencode
 
 import httpx
@@ -149,6 +149,9 @@ MSG_MOVE_STOP_OLD_UNREADABLE = "เลื่อน stop ไม่ได้ — �
 MSG_CANCELLED = "ยกเลิกแล้ว"
 OWNER_CLOSING_ORDER_NOTE = "✋ คุณตั้งเอง — จะยังค้างอยู่ ลบในแอป"
 OWNER_CLOSING_HEADER = "stop/TP ที่คุณตั้งเอง (บอทจะไม่ยกเลิก):"
+# Confirm-card copy when JARVISE_ASSIST_CANCEL_OWNER=on (after-close / leftover lists keep NOTE above).
+OWNER_CLOSING_HEADER_WILL_CANCEL = "stop/TP ที่คุณตั้งเอง (หลังปิดหมด บอทจะยกเลิกให้):"
+OWNER_CLOSING_ORDER_NOTE_WILL_CANCEL = "✋ คุณตั้งเอง — หลังปิดหมดบอทจะยกเลิก"
 MSG_MENU_EXIT_EXPIRED = "หมดเวลา — กด 🔄 อัปเดต หรือเปิด 📋 ไม้ที่ถืออยู่ใหม่"
 MSG_MENU_LIVE_ONLY = "ปุ่มปิดไม้ใช้ได้เฉพาะโหมดเงินจริง — ยังไม่ได้ส่งคำสั่ง ปิดในแอป Binance"
 MSG_MENU_POSITION_CHANGED = "ไม้เปลี่ยนไป — ไม่ปิด"
@@ -185,6 +188,8 @@ MSG_RECOVER_STALE_UNREADABLE = (
 MSG_RECOVER_SIDE_MISMATCH = "position {symbol} ไม่ตรงกับไม้นี้ — บอทไม่แตะ"
 MSG_RECOVER_MOVE_STOP_FAILED = "เลื่อน stop ไม่สำเร็จ — ไม่ได้ยกเลิก stop เดิม"
 MSG_CANCEL_OLD_FAILED = "⚠️ ยกเลิก stop/TP เดิมไม่สำเร็จ — ลบในแอป"
+MSG_REOPEN_LEFTOVERS = "⚠️ ไม้กลับมาแล้ว — คำสั่งค้างยังอยู่ ลบในแอป"
+MSG_RECOVER_LEFTOVER_GIVE_UP = "⚠️ มี stop/TP ค้างอยู่บน {symbol} (บอทหรือคุณตั้งเอง) — ลบในแอปก่อน"
 _BANGKOK = timezone(timedelta(hours=7))
 _STOP_TAGS = ("slr", "sl0", "sl1")
 _FINAL_ORDER_STATUSES = frozenset({"FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED"})
@@ -231,6 +236,14 @@ def msg_cancel_old_failed(client_ids: list[str]) -> str:
     return f"{MSG_CANCEL_OLD_FAILED} {ids}"
 
 
+def msg_reopen_leftovers(client_ids: list[str] | None = None) -> str:
+    """Position reappeared during leftover cancel — orders were not (fully) attempted."""
+    ids = [c for c in (client_ids or []) if c]
+    if ids:
+        return f"{MSG_REOPEN_LEFTOVERS} {', '.join(ids)}"
+    return MSG_REOPEN_LEFTOVERS
+
+
 _TRADE_AUTH_REASON_TH: dict[str, str] = {
     "no_key": MSG_NO_TRADE_KEY,
     "no_path": MSG_NO_TRADE_KEY,
@@ -257,6 +270,11 @@ def assist_execute_mode() -> str:
 def assist_reduce_enabled() -> bool:
     """JARVISE_ASSIST_REDUCE=on (strip/lower). Still requires EXECUTE=live at the call site."""
     return (os.environ.get("JARVISE_ASSIST_REDUCE") or "off").strip().lower() == "on"
+
+
+def assist_cancel_owner_enabled() -> bool:
+    """JARVISE_ASSIST_CANCEL_OWNER=on (strip/lower). Independent of REDUCE; default off."""
+    return (os.environ.get("JARVISE_ASSIST_CANCEL_OWNER") or "off").strip().lower() == "on"
 
 
 def execution_buttons_enabled(conn: Any) -> bool:
@@ -709,6 +727,13 @@ class BinanceTradeClient:
         return self.signed_delete(
             "/fapi/v1/algoOrder",
             {"symbol": symbol.upper(), "clientAlgoId": client_algo_id},
+        )
+
+    def cancel_order(self, *, symbol: str, order_id: str | int) -> Any:
+        """DELETE a regular (non-algo) order. Never send this id to /fapi/v1/algoOrder."""
+        return self.signed_delete(
+            "/fapi/v1/order",
+            {"symbol": symbol.upper(), "orderId": order_id},
         )
 
     def realized_pnl_for_order(self, *, symbol: str, order_id: Any) -> Decimal:
@@ -3051,6 +3076,79 @@ def run_move_stop_sequence(
     return _exec_result(head, status="done")
 
 
+class ExitCancelResult(NamedTuple):
+    """Outcome of jv- (and optional owner) leftover cancel after a verified flat.
+
+    On aborted_reopen, ok is True even if the jv- phase had failures: the close
+    stays done with no exit_cancel_pending; those ids remain in failed_ids /
+    the reopen warning. Do not flip that to unknown.
+
+    leftover_orders are list-only (missing / post-anchor create time): keep them
+    uncancelled and status done when the cancel phase was otherwise ok. Do not
+    add exit_cancel_pending for list-only leftovers.
+    """
+
+    ok: bool
+    failed_ids: list[str]
+    aborted_reopen: bool = False
+    leftover_orders: tuple[dict[str, Any], ...] = ()
+
+
+class OwnerCancelResult(NamedTuple):
+    """Outcome of cancel_owner_reducing_orders_for_symbol."""
+
+    ok: bool
+    aborted_reopen: bool
+    read_failed: bool
+    cancelled: list[str]
+    leftover_orders: list[dict[str, Any]]
+    failed_ids: list[str]
+    already_gone: list[str]
+
+
+def _flat_cancel_anchor_ms(conn: Any, intent_id: str) -> int | None:
+    """created_at_ms of exit_market / reduce_market for the creation-time rule."""
+    row = conn.execute(
+        """
+        SELECT created_at_ms FROM assist_exec_log
+        WHERE intent_id=? AND step IN ('exit_market', 'reduce_market')
+        ORDER BY created_at_ms DESC
+        LIMIT 1
+        """,
+        (intent_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row["created_at_ms"] if hasattr(row, "keys") else row[0]
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _owner_order_create_ms(order: dict[str, Any]) -> int | None:
+    """Binance create time: `createTime` (algo) then `time` (regular). No updateTime."""
+    for key in ("createTime", "time"):
+        raw = order.get(key)
+        if raw in (None, "", 0, "0"):
+            continue
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _reduce_only_flag(order: dict[str, Any]) -> bool:
+    """Parse reduceOnly like closePosition — string \"false\" must be false."""
+    raw = order.get("reduceOnly")
+    if raw is True:
+        return True
+    if raw is False:
+        return False
+    return str(raw or "").lower() in {"true", "1"}
+
+
 def _cancel_exit_stops_and_tp(
     trade: BinanceTradeClient,
     *,
@@ -3059,14 +3157,20 @@ def _cancel_exit_stops_and_tp(
     symbol: str,
     side: str,
     position_side: str,
-) -> tuple[bool, list[str]]:
-    """Cancel jv- stop/TP after a flat exit. Failed client ids are returned."""
+) -> ExitCancelResult:
+    """Cancel jv- stop/TP after a flat exit; optionally owner leftovers when flag on.
+
+    The jv- phase is identical under both flag states (same endpoints / calls).
+    Failed client ids are returned. Position reopen during the owner phase is
+    aborted_reopen=True with ok=True (close stays done; no exit_cancel_pending),
+    even when the jv- phase had failures — those ids stay in failed_ids / warning.
+    """
     all_ok = True
     failed_ids: list[str] = []
     try:
         orders = trade.all_open_orders(symbol=symbol)
     except Exception:  # noqa: BLE001
-        return False, failed_ids
+        return ExitCancelResult(ok=False, failed_ids=failed_ids)
     for order in orders:
         cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
         if not cid.startswith("jv-"):
@@ -3112,7 +3216,62 @@ def _cancel_exit_stops_and_tp(
         except Exception:  # noqa: BLE001
             all_ok = False
             failed_ids.append(cid)
-    return all_ok, failed_ids
+
+    if not assist_cancel_owner_enabled():
+        return ExitCancelResult(ok=all_ok, failed_ids=failed_ids)
+
+    anchor = _flat_cancel_anchor_ms(conn, intent_id)
+    if anchor is None:
+        return ExitCancelResult(ok=all_ok, failed_ids=failed_ids)
+
+    owner = cancel_owner_reducing_orders_for_symbol(
+        trade,
+        symbol=symbol,
+        side=side,
+        position_side=position_side,
+        anchor_ms=anchor,
+        conn=conn,
+        intent_id=intent_id,
+    )
+    if owner.aborted_reopen:
+        leftover_ids = [
+            str(o.get("clientAlgoId") or o.get("clientOrderId") or o.get("algoId") or o.get("orderId") or "?")
+            for o in owner.leftover_orders
+        ]
+        return ExitCancelResult(
+            ok=True,
+            failed_ids=failed_ids + leftover_ids + owner.failed_ids,
+            aborted_reopen=True,
+            leftover_orders=tuple(owner.leftover_orders),
+        )
+    if owner.read_failed or not owner.ok:
+        return ExitCancelResult(
+            ok=False,
+            failed_ids=failed_ids + owner.failed_ids,
+            aborted_reopen=False,
+            leftover_orders=tuple(owner.leftover_orders),
+        )
+    return ExitCancelResult(
+        ok=all_ok,
+        failed_ids=failed_ids,
+        leftover_orders=tuple(owner.leftover_orders),
+    )
+
+
+def _append_exit_retained_leftovers(
+    base: str,
+    leftover_orders: list[dict[str, Any]],
+    *,
+    symbol: str,
+    tick: Decimal | None = None,
+) -> str:
+    """Append list-only retained owner leftovers (still open; not a failed DELETE)."""
+    if not leftover_orders:
+        return base
+    lines = [base, f"คำสั่งที่ยังค้างบน {symbol}:"]
+    for order in leftover_orders:
+        lines.append(_format_owner_order_line(order, tick=tick))
+    return "\n".join(lines)
 
 
 def _finish_flat_exit(
@@ -3128,7 +3287,7 @@ def _finish_flat_exit(
     include_pnl: bool,
 ) -> ExecResult:
     """Cancel stops after a flat exit. A failed cancel stays unknown for recovery."""
-    cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+    cancel = _cancel_exit_stops_and_tp(
         trade,
         conn=conn,
         intent_id=intent_id,
@@ -3146,8 +3305,11 @@ def _finish_flat_exit(
         text = f"✅ ปิด {symbol}{pnl_bit}"
     else:
         text = f"✅ ปิด {symbol}"
-    if not cancel_ok:
-        warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+    if cancel.aborted_reopen:
+        warning = msg_reopen_leftovers(cancel.failed_ids)
+        return _exec_result(f"{text}\n{warning}", status="done")
+    if not cancel.ok:
+        warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
         text = f"{text}\n{warning}"
         _log_write(
             conn,
@@ -3156,6 +3318,8 @@ def _finish_flat_exit(
             endpoint="/fapi/v1/algoOrder",
         )
         return _exec_result(text, status="unknown")
+    # List-only leftovers (missing create time) stay open; status stays done.
+    text = _append_exit_retained_leftovers(text, list(cancel.leftover_orders), symbol=symbol)
     return _exec_result(text, status="done")
 
 
@@ -3169,6 +3333,26 @@ def _open_jv_client_ids(trade: BinanceTradeClient, symbol: str) -> list[str]:
         cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
         if cid.startswith("jv-"):
             ids.append(cid)
+    return ids
+
+
+def _open_leftover_client_ids(trade: BinanceTradeClient, symbol: str) -> list[str]:
+    """jv- and owner leftover client/algo/order ids still open on the symbol."""
+    try:
+        orders = trade.all_open_orders(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return []
+    ids: list[str] = []
+    for order in orders:
+        label = str(
+            order.get("clientAlgoId")
+            or order.get("clientOrderId")
+            or order.get("algoId")
+            or order.get("orderId")
+            or ""
+        )
+        if label:
+            ids.append(label)
     return ids
 
 
@@ -3524,6 +3708,174 @@ def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> tuple
     return cancelled, all_ok
 
 
+def cancel_owner_reducing_orders_for_symbol(
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    side: str,
+    position_side: str,
+    anchor_ms: int,
+    conn: Any | None = None,
+    intent_id: str | None = None,
+) -> OwnerCancelResult:
+    """Cancel owner reduce-only / closePosition leftovers after a verified flat.
+
+    Fail-closed: a position re-read that raises aborts with read_failed. Re-read
+    before the batch and before each DELETE; abort remaining if not flat.
+    Creation-time rule: only cancel when create time <= anchor_ms; missing time
+    → list only. Dispatch by list source — never send a regular orderId to algo.
+    """
+    cancelled: list[str] = []
+    leftover: list[dict[str, Any]] = []
+    failed_ids: list[str] = []
+    already_gone: list[str] = []
+
+    def _label(order: dict[str, Any]) -> str:
+        return str(
+            order.get("clientAlgoId")
+            or order.get("clientOrderId")
+            or order.get("algoId")
+            or order.get("orderId")
+            or "?"
+        )
+
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001 — never treat a failed read as flat
+        return OwnerCancelResult(
+            ok=False,
+            aborted_reopen=False,
+            read_failed=True,
+            cancelled=cancelled,
+            leftover_orders=leftover,
+            failed_ids=failed_ids,
+            already_gone=already_gone,
+        )
+    if positions:
+        return OwnerCancelResult(
+            ok=True,
+            aborted_reopen=True,
+            read_failed=False,
+            cancelled=cancelled,
+            leftover_orders=leftover,
+            failed_ids=failed_ids,
+            already_gone=already_gone,
+        )
+
+    try:
+        regular = trade.open_orders(symbol=symbol, strict=True)
+        algos = trade.open_algo_orders(symbol=symbol, strict=True)
+    except Exception:  # noqa: BLE001
+        return OwnerCancelResult(
+            ok=False,
+            aborted_reopen=False,
+            read_failed=True,
+            cancelled=cancelled,
+            leftover_orders=leftover,
+            failed_ids=failed_ids,
+            already_gone=already_gone,
+        )
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for order in regular:
+        if _is_owner_reducing_order(order, position_side=position_side, trade_side=side):
+            candidates.append(("regular", order))
+    for order in algos:
+        if _is_owner_reducing_order(order, position_side=position_side, trade_side=side):
+            candidates.append(("algo", order))
+
+    for idx, (source, order) in enumerate(candidates):
+        create_ms = _owner_order_create_ms(order)
+        if create_ms is None or create_ms > int(anchor_ms):
+            leftover.append(order)
+            continue
+        try:
+            still = trade.position_risk(symbol=symbol)
+        except Exception:  # noqa: BLE001
+            rest = [o for _, o in candidates[idx:]]
+            return OwnerCancelResult(
+                ok=False,
+                aborted_reopen=False,
+                read_failed=True,
+                cancelled=cancelled,
+                leftover_orders=leftover + rest,
+                failed_ids=failed_ids,
+                already_gone=already_gone,
+            )
+        if still:
+            leftover.extend(o for _, o in candidates[idx:])
+            return OwnerCancelResult(
+                ok=True,
+                aborted_reopen=True,
+                read_failed=False,
+                cancelled=cancelled,
+                leftover_orders=leftover,
+                failed_ids=failed_ids,
+                already_gone=already_gone,
+            )
+
+        label = _label(order)
+        try:
+            if source == "algo":
+                algo_id = order.get("algoId")
+                if algo_id is None:
+                    leftover.append(order)
+                    continue
+                trade.cancel_algo(symbol=symbol, algo_id=algo_id)
+                endpoint = "/fapi/v1/algoOrder"
+                order_ref = str(algo_id)
+            else:
+                order_id = order.get("orderId")
+                if order_id is None:
+                    leftover.append(order)
+                    continue
+                trade.cancel_order(symbol=symbol, order_id=order_id)
+                endpoint = "/fapi/v1/order"
+                order_ref = str(order_id)
+            cancelled.append(label)
+            if conn is not None and intent_id is not None:
+                _log_write(
+                    conn,
+                    intent_id=intent_id,
+                    step="exit_cancel_owner",
+                    endpoint=endpoint,
+                    http_status=200,
+                    order_or_algo_id=order_ref,
+                )
+        except TradeClientError as exc:
+            if conn is not None and intent_id is not None:
+                _log_write(
+                    conn,
+                    intent_id=intent_id,
+                    step="exit_cancel_owner",
+                    endpoint=("/fapi/v1/algoOrder" if source == "algo" else "/fapi/v1/order"),
+                    http_status=exc.http_status,
+                    binance_code=exc.binance_code,
+                    order_or_algo_id=str(
+                        order.get("algoId") if source == "algo" else order.get("orderId") or ""
+                    ),
+                )
+            if exc.binance_code in {-2011, -2013}:
+                already_gone.append(label)
+            else:
+                failed_ids.append(label)
+                leftover.append(order)
+        except Exception:  # noqa: BLE001
+            failed_ids.append(label)
+            leftover.append(order)
+
+    ok = not failed_ids
+    return OwnerCancelResult(
+        ok=ok,
+        aborted_reopen=False,
+        read_failed=False,
+        cancelled=cancelled,
+        leftover_orders=leftover,
+        failed_ids=failed_ids,
+        already_gone=already_gone,
+    )
+
+
 def _close_position_flag(order: dict[str, Any]) -> bool:
     raw = order.get("closePosition")
     if raw is True:
@@ -3540,7 +3892,7 @@ def _is_owner_reducing_order(
     cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
     if cid.startswith("jv-"):
         return False
-    reduce_only = bool(order.get("reduceOnly")) or _close_position_flag(order)
+    reduce_only = _reduce_only_flag(order) or _close_position_flag(order)
     if not reduce_only:
         return False
     close_side = "SELL" if trade_side == "long" else "BUY"
@@ -3583,7 +3935,12 @@ def _order_list_price(order: dict[str, Any]) -> Decimal | None:
     return dec if dec > 0 else None
 
 
-def _format_owner_order_line(order: dict[str, Any], *, tick: Decimal | None) -> str:
+def _format_owner_order_line(
+    order: dict[str, Any],
+    *,
+    tick: Decimal | None,
+    note: str = OWNER_CLOSING_ORDER_NOTE,
+) -> str:
     otype = order_type(order)
     side = str(order.get("side") or "").upper()
     px = _order_list_price(order)
@@ -3597,7 +3954,7 @@ def _format_owner_order_line(order: dict[str, Any], *, tick: Decimal | None) -> 
     else:
         raw_qty = order.get("origQty") or order.get("quantity")
         qty_s = fmt_qty(Decimal(str(raw_qty))) if raw_qty not in (None, "") else "?"
-    return f"• {otype} {side} {px_s} · {qty_s} · {OWNER_CLOSING_ORDER_NOTE}"
+    return f"• {otype} {side} {px_s} · {qty_s} · {note}"
 
 
 def _exit_advice_active(
@@ -3646,9 +4003,15 @@ def _format_menu_exit_confirm(
     lines.append(unrealized_line)
     if owner_orders:
         lines.append("")
-        lines.append(OWNER_CLOSING_HEADER)
+        if assist_cancel_owner_enabled():
+            header = OWNER_CLOSING_HEADER_WILL_CANCEL
+            note = OWNER_CLOSING_ORDER_NOTE_WILL_CANCEL
+        else:
+            header = OWNER_CLOSING_HEADER
+            note = OWNER_CLOSING_ORDER_NOTE
+        lines.append(header)
         for order in owner_orders:
-            lines.append(_format_owner_order_line(order, tick=tick))
+            lines.append(_format_owner_order_line(order, tick=tick, note=note))
     lines.append("💰 เงินจริง")
     return "\n".join(lines)
 
@@ -4245,7 +4608,14 @@ def handle_exec_callback(
                 result_text = str(result)
                 if prefix == "xx:" and menu_exit:
                     result_text = _menu_exit_result_text(result_text)
-                    if status == "done" and result_text.startswith("✅"):
+                    # _finish_flat_exit already appends list-only leftovers when
+                    # the flag-on cancel phase retained them; skip a second list.
+                    if (
+                        status == "done"
+                        and result_text.startswith("✅")
+                        and "คำสั่งที่ยังค้างบน" not in result_text
+                        and OWNER_CLOSING_ORDER_NOTE not in result_text
+                    ):
                         tick_menu: Decimal | None = None
                         try:
                             tick_menu = client.symbol_filters(str(intent["symbol"])).tick_size
@@ -4266,7 +4636,15 @@ def handle_exec_callback(
                         )
                 if prefix == "xr:":
                     result_text = _menu_exit_result_text(result_text)
-                    if status == "done" and result_text.startswith("✅ ปิด ") and "ปิดครึ่ง" not in result_text:
+                    # _finish_flat_exit already appends list-only leftovers when
+                    # the flag-on cancel phase retained them; skip a second list.
+                    if (
+                        status == "done"
+                        and result_text.startswith("✅ ปิด ")
+                        and "ปิดครึ่ง" not in result_text
+                        and "คำสั่งที่ยังค้างบน" not in result_text
+                        and OWNER_CLOSING_ORDER_NOTE not in result_text
+                    ):
                         tick_menu = None
                         try:
                             tick_menu = client.symbol_filters(str(intent["symbol"])).tick_size
@@ -5087,8 +5465,8 @@ def _recover_exit_intent(
             return
         if pending_positions:
             if not _has_log_step(conn, intent_id, "exit_cancel_gave_up"):
-                ids = _open_jv_client_ids(trade, symbol)
-                text = f"⚠️ มี stop/TP ของบอทค้างอยู่บน {symbol} — ลบในแอปก่อน"
+                ids = _open_leftover_client_ids(trade, symbol)
+                text = MSG_RECOVER_LEFTOVER_GIVE_UP.format(symbol=symbol)
                 if ids:
                     text = f"{text} {', '.join(ids)}"
                 _log_write(
@@ -5106,7 +5484,7 @@ def _recover_exit_intent(
                     expect_status="recovering",
                 )
             return
-        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        cancel = _cancel_exit_stops_and_tp(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -5114,17 +5492,32 @@ def _recover_exit_intent(
             side=side,
             position_side="BOTH",
         )
-        if cancel_ok:
+        if cancel.aborted_reopen:
+            warning = msg_reopen_leftovers(cancel.failed_ids)
             _recovery_notify(
                 send,
                 conn,
                 intent_id,
                 status="done",
-                text=f"✅ ปิด {symbol}",
+                text=f"✅ ปิด {symbol}\n{warning}",
+                expect_status="recovering",
+            )
+        elif cancel.ok:
+            text = _append_exit_retained_leftovers(
+                f"✅ ปิด {symbol}",
+                list(cancel.leftover_orders),
+                symbol=symbol,
+            )
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="done",
+                text=text,
                 expect_status="recovering",
             )
         else:
-            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
             _recovery_notify(
                 send,
                 conn,
@@ -5138,7 +5531,7 @@ def _recover_exit_intent(
         fill = queried.order if queried.kind == QueryResultKind.FOUND else None
         avg = _positive_fill_price(fill)
         pos_side = "BOTH"
-        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        cancel = _cancel_exit_stops_and_tp(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -5151,8 +5544,11 @@ def _recover_exit_intent(
         else:
             text = f"✅ ปิด {symbol}"
         status = "done"
-        if not cancel_ok:
-            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+        if cancel.aborted_reopen:
+            warning = msg_reopen_leftovers(cancel.failed_ids)
+            text = f"{text}\n{warning}"
+        elif not cancel.ok:
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
             text = f"{text}\n{warning}"
             _log_write(
                 conn,
@@ -5161,6 +5557,9 @@ def _recover_exit_intent(
                 endpoint="/fapi/v1/algoOrder",
             )
             status = "unknown"
+        else:
+            # List-only leftovers stay open; status stays done.
+            text = _append_exit_retained_leftovers(text, list(cancel.leftover_orders), symbol=symbol)
         _recovery_notify(
             send,
             conn,
@@ -5271,8 +5670,8 @@ def _recover_reduce_intent(
     if _has_log_step(conn, intent_id, "exit_cancel_pending"):
         if positions:
             if not _has_log_step(conn, intent_id, "exit_cancel_gave_up"):
-                ids = _open_jv_client_ids(trade, symbol)
-                text = f"⚠️ มี stop/TP ของบอทค้างอยู่บน {symbol} — ลบในแอปก่อน"
+                ids = _open_leftover_client_ids(trade, symbol)
+                text = MSG_RECOVER_LEFTOVER_GIVE_UP.format(symbol=symbol)
                 if ids:
                     text = f"{text} {', '.join(ids)}"
                 _log_write(conn, intent_id=intent_id, step="exit_cancel_gave_up", endpoint="local")
@@ -5285,7 +5684,7 @@ def _recover_reduce_intent(
                     expect_status="recovering",
                 )
             return
-        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        cancel = _cancel_exit_stops_and_tp(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -5293,17 +5692,32 @@ def _recover_reduce_intent(
             side=side,
             position_side="BOTH",
         )
-        if cancel_ok:
+        if cancel.aborted_reopen:
+            warning = msg_reopen_leftovers(cancel.failed_ids)
             _recovery_notify(
                 send,
                 conn,
                 intent_id,
                 status="done",
-                text=f"✅ ปิด {symbol}",
+                text=f"✅ ปิด {symbol}\n{warning}",
+                expect_status="recovering",
+            )
+        elif cancel.ok:
+            text = _append_exit_retained_leftovers(
+                f"✅ ปิด {symbol}",
+                list(cancel.leftover_orders),
+                symbol=symbol,
+            )
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="done",
+                text=text,
                 expect_status="recovering",
             )
         else:
-            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
             _recovery_notify(
                 send,
                 conn,
@@ -5316,7 +5730,7 @@ def _recover_reduce_intent(
     if not positions:
         fill = queried.order if queried.kind == QueryResultKind.FOUND else None
         avg = _positive_fill_price(fill)
-        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+        cancel = _cancel_exit_stops_and_tp(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -5329,8 +5743,11 @@ def _recover_reduce_intent(
         else:
             text = f"✅ ปิด {symbol}"
         status = "done"
-        if not cancel_ok:
-            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+        if cancel.aborted_reopen:
+            warning = msg_reopen_leftovers(cancel.failed_ids)
+            text = f"{text}\n{warning}"
+        elif not cancel.ok:
+            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
             text = f"{text}\n{warning}"
             _log_write(
                 conn,
