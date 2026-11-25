@@ -1104,6 +1104,11 @@ def test_cb_edit_fails_sends_one_card(tmp_path: Path, monkeypatch: Any, env_chat
 
 
 def test_isolation_portal_does_not_load_partner_audit() -> None:
+    """Portal may import partner_unrecorded (tri-state only), never partner_audit at load.
+
+    After ``import partner_portal``, ``partner_audit`` must stay out of sys.modules.
+    Portal may only see a boolean/tri-state — never guard text or amounts.
+    """
     import os
 
     repo = Path(__file__).resolve().parents[1]
@@ -1113,7 +1118,8 @@ def test_isolation_portal_does_not_load_partner_audit() -> None:
         [
             sys.executable,
             "-c",
-            "import sys, jarvise_assist.partner_portal; assert 'jarvise_assist.partner_audit' not in sys.modules",
+            "import sys, jarvise_assist.partner_portal; "
+            "assert 'jarvise_assist.partner_audit' not in sys.modules",
         ],
         check=False,
         capture_output=True,
@@ -1121,19 +1127,27 @@ def test_isolation_portal_does_not_load_partner_audit() -> None:
         cwd=str(repo),
         env=env,
     )
+    # partner_unrecorded is lazy-imported inside helpers; audit must stay out at load
     assert proc.returncode == 0, proc.stderr + proc.stdout
 
 
 def test_isolation_no_module_level_partner_audit_import() -> None:
+    """Architectural rule: portal must not import partner_audit at module level.
+
+    Allowed: ``partner_unrecorded`` (read-only tri-state / state hint). Portal still
+    must not import partner_audit at load; assert stays on sys.modules after import.
+    """
     admin = Path("src/jarvise_assist/partner_admin.py").read_text(encoding="utf-8")
     for line in admin.splitlines():
         if not line or line[0] in " \t":
             continue
         assert "partner_audit" not in line or line.lstrip().startswith("#")
-    # TYPE_CHECKING block may mention partner_audit indented — already skipped by column-0 check
     portal_text = Path("src/jarvise_assist/partner_portal.py").read_text(encoding="utf-8")
     for line in portal_text.splitlines():
         stripped = line.strip()
         if stripped.startswith("from ") or stripped.startswith("import "):
             assert "partner_audit" not in stripped
-            assert "guard" not in stripped
+            # partner_unrecorded is the allowed read-only facade
+            if "partner_unrecorded" in stripped:
+                continue
+            assert "guard" not in stripped or "partner_unrecorded" in stripped
