@@ -12,6 +12,7 @@ import pytest
 from jarvise_assist import partner_admin as pa
 from jarvise_assist import partner_portal as portal
 from jarvise_assist import partner_store as ps
+from jarvise_assist import partner_unrecorded as pu
 from jarvise_assist.partner_audit import (
     Finding,
     GuardResult,
@@ -754,8 +755,8 @@ def test_portal_request_gate_clears_stale_clear_cache(
     assert "ยอดสุทธิ" in clear_text
     assert "206.15" in clear_text
     assert "+6.15" in clear_text
-    assert portal._guard_cache is not None
-    assert portal._guard_cache[1] == "clear"
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "clear"
 
     # Switch to unsafe evidence, then refuse convert (fresh request gate)
     if after_mode == "exception":
@@ -795,10 +796,10 @@ def test_portal_request_gate_clears_stale_clear_cache(
     )
     # Stale clear must be gone (None for unknown/raise; "unrecorded" when stored)
     if after_mode == "unrecorded":
-        assert portal._guard_cache is not None
-        assert portal._guard_cache[1] == "unrecorded"
+        assert pu._display_cache is not None
+        assert pu._display_cache[1] == "unrecorded"
     else:
-        assert portal._guard_cache is None
+        assert pu._display_cache is None
 
     # Exception variant keeps boom_status so card/Profile/preview also fail closed.
     _assert_displays_locked_after_refuse(
@@ -875,8 +876,8 @@ def test_portal_request_gate_key_raise_clears_stale_clear(
     clear_text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
     assert "ยอดสุทธิ" in clear_text
     assert "206.15" in clear_text
-    assert portal._guard_cache is not None
-    assert portal._guard_cache[1] == "clear"
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "clear"
 
     mode["v"] = after_mode
     real_key = pu.ledger_cache_key
@@ -912,8 +913,10 @@ def test_portal_request_gate_key_raise_clears_stale_clear(
         == 0
     )
     # Mid-check key raise must have dropped the prior clear (not left it intact).
-    assert portal._guard_cache is None
-    assert calls["n"] == 1
+    # note_fresh_guard may store "unrecorded" after consuming the flaky first key
+    # call; unknown/raise paths leave None. Never clear.
+    assert pu._display_cache is None or pu._display_cache[1] != "clear"
+    assert calls["n"] >= 1
 
     # Key recovers; display must stay locked / re-run guard (no stale clear).
     _assert_displays_locked_after_refuse(
@@ -953,8 +956,8 @@ def test_portal_display_key_raise_clears_cache(tmp_path: Path, monkeypatch: Any)
     monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _clear)
     text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
     assert "ยอดสุทธิ" in text
-    assert portal._guard_cache is not None
-    assert portal._guard_cache[1] == "clear"
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "clear"
 
     def boom_key(_c: Any) -> tuple[str, int, int, int]:
         raise sqlite3.OperationalError("display key boom")
@@ -965,7 +968,7 @@ def test_portal_display_key_raise_clears_cache(tmp_path: Path, monkeypatch: Any)
     )
     with pytest.raises(sqlite3.OperationalError, match="display key boom"):
         portal._unrecorded_status_for_card(conn, FakeClient(), now_ms=NOW + 1)
-    assert portal._guard_cache is None
+    assert pu._display_cache is None
     conn.close()
 
 
@@ -1543,17 +1546,15 @@ def test_portal_cache_does_not_store_unknown(tmp_path: Path, monkeypatch: Any) -
     text1, _m1 = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
     assert "กำลังตรวจยอด" in text1
     assert calls["n"] == 1
-    assert portal._guard_cache is None  # unknown must not be stored
+    assert pu._display_cache is None  # unknown must not be stored
     text2, _m2 = portal._build_card(conn, row, av, now_ms=NOW + 1, futures=FakeClient())
     assert calls["n"] == 2
     assert "กำลังตรวจยอด" not in text2
     assert "ยอดสุทธิ" in text2
 
     # Even a poisoned unknown cache entry must not be returned (hit filter)
-    from jarvise_assist import partner_unrecorded as pu
-
     key = pu.ledger_cache_key(conn)
-    portal._guard_cache = (key, "unknown", NOW + 2)
+    pu._display_cache = (key, "unknown", NOW + 2)
     calls["n"] = 0
 
     def _clear_only(conn: Any, client: Any, *, now_ms: int) -> GuardResult:
@@ -1565,4 +1566,314 @@ def test_portal_cache_does_not_store_unknown(tmp_path: Path, monkeypatch: Any) -
     assert calls["n"] == 1
     assert "กำลังตรวจยอด" not in text3
     assert "ยอดสุทธิ" in text3
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "after_mode",
+    ("unrecorded", "read_failed", "exception"),
+)
+def test_admin_overview_invalidates_portal_display_cache(
+    tmp_path: Path, monkeypatch: Any, after_mode: str
+) -> None:
+    """Codex r6: admin overview fresh evidence must drop a portal cached clear.
+
+    Warm portal clear → admin overview sees unrecorded / read_failed / raised
+    guard → next portal card/Profile/preview re-runs the guard or stays locked
+    (no net/%/fee).
+    """
+    from jarvise_assist import partner_unrecorded as pu
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    db = tmp_path / f"r6_ov_{after_mode}.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+    finding = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:r6ov",
+        time_ms=NOW - 1000,
+        amount=D("123"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+    mode = {"v": "clear"}
+
+    def _guard(conn: Any, client: Any, *, now_ms: int, **_k: Any) -> GuardResult:
+        if mode["v"] == "clear":
+            return GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False)
+        if mode["v"] == "unrecorded":
+            return GuardResult(
+                status="ok",
+                checked_at_ms=int(now_ms),
+                findings=[finding],
+                warn=True,
+            )
+        return GuardResult(
+            status="read_failed",
+            checked_at_ms=int(now_ms),
+            findings=[],
+            warn=True,
+            error="xfer",
+        )
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _guard)
+
+    clear_text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "ยอดสุทธิ" in clear_text
+    assert "206.15" in clear_text
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "clear"
+
+    if after_mode == "exception":
+
+        def boom_status(*_a: Any, **_k: Any) -> str:
+            raise RuntimeError("overview guard boom")
+
+        monkeypatch.setattr(
+            "jarvise_assist.partner_unrecorded.guard_unrecorded_status",
+            boom_status,
+        )
+    else:
+        mode["v"] = after_mode
+
+    # Admin overview must see the fresh evidence (and invalidate portal cache).
+    if after_mode == "exception":
+        with pytest.raises(RuntimeError, match="overview guard boom"):
+            pa._open_unrecorded_overview(conn, FakeClient(), now_ms=NOW + 1)
+    else:
+        status, _n = pa._open_unrecorded_overview(conn, FakeClient(), now_ms=NOW + 1)
+        if after_mode == "unrecorded":
+            assert status == "unrecorded"
+        else:
+            assert status == "unknown"
+
+    # Stale clear must be gone so portal display re-queries / stays locked.
+    assert pu._display_cache is None or pu._display_cache[1] != "clear"
+    _assert_displays_locked_after_refuse(
+        conn,
+        row,
+        monkeypatch=monkeypatch,
+        av=av,
+        futures=FakeClient(),
+        now_ms=NOW + 2,
+    )
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "after_mode",
+    ("unrecorded", "read_failed", "exception"),
+)
+def test_admin_confirm_invalidates_portal_display_cache(
+    tmp_path: Path, env_chat: None, monkeypatch: Any, after_mode: str
+) -> None:
+    """Codex r6: admin cv/wd/close refuse on unrecorded/unknown must drop portal clear."""
+    from jarvise_assist import partner_unrecorded as pu
+
+    db = tmp_path / f"r6_cf_{after_mode}.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+    finding = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:r6cf",
+        time_ms=NOW - 1000,
+        amount=D("50"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+    mode = {"v": "clear"}
+
+    def _guard(conn: Any, client: Any, *, now_ms: int, **_k: Any) -> GuardResult:
+        if mode["v"] == "clear":
+            return GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False)
+        if mode["v"] == "unrecorded":
+            return GuardResult(
+                status="ok",
+                checked_at_ms=int(now_ms),
+                findings=[finding],
+                warn=True,
+            )
+        return GuardResult(
+            status="read_failed",
+            checked_at_ms=int(now_ms),
+            findings=[],
+            warn=True,
+            error="xfer",
+        )
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _guard)
+
+    clear_text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "ยอดสุทธิ" in clear_text
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "clear"
+
+    created = ps.create_request(conn, bob, "convert", NOW, source="admin")
+    assert created["ok"]
+    rid = str(created["request_id"])
+
+    if after_mode == "exception":
+
+        def boom_guard(*_a: Any, **_k: Any) -> tuple[Any, str]:
+            # Call through real path's exception handling by raising inside guard_check.
+            raise RuntimeError("should use guard_check boom")
+
+        def boom_check(*_a: Any, **_k: Any) -> GuardResult:
+            raise RuntimeError("confirm guard boom")
+
+        monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", boom_check)
+    else:
+        mode["v"] = after_mode
+
+    answers: list[str | None] = []
+    sent: list[dict[str, Any]] = []
+
+    def answer(_id: str, text: str | None = None) -> None:
+        answers.append(text)
+
+    def send(text: str, **kwargs: Any) -> None:
+        sent.append({"text": text, **kwargs})
+
+    def edit(_mid: int, text: str, **kwargs: Any) -> bool:
+        sent.append({"text": text, **kwargs})
+        return True
+
+    out = pa.handle_partner_callback(
+        conn,
+        f"pa:ry:{rid}",
+        callback=_owner_cb(f"pa:ry:{rid}"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        now_ms=NOW + 1,
+        futures=FakeClient(),
+    )
+    assert out["reason"] == "unrecorded_transfer"
+    assert (
+        conn.execute("SELECT status FROM partner_request WHERE id = ?", (rid,)).fetchone()["status"]
+        == "pending"
+    )
+    assert pu._display_cache is None or pu._display_cache[1] != "clear"
+
+    # Drop the pending admin request so portal preview is not blocked as "pending".
+    assert ps.reject_request(conn, rid, NOW + 1)["ok"]
+
+    # Keep unsafe evidence for the portal follow-up (exception path already boom_check).
+    if after_mode != "exception":
+        mode["v"] = after_mode
+    _assert_displays_locked_after_refuse(
+        conn,
+        row,
+        monkeypatch=monkeypatch,
+        av=av,
+        futures=FakeClient(),
+        now_ms=NOW + 2,
+    )
+    conn.close()
+
+
+def test_portal_request_gate_raise_requires_preclear(tmp_path: Path, monkeypatch: Any) -> None:
+    """Codex r6: when guard_unrecorded_status itself raises, portal layered clears matter.
+
+    Warm clear → gate raises → cache must be None and the next card re-queries.
+    Removing the pre-clear plus except/unknown clears in ``_money_request_blocked``
+    would leave a stale clear (note_fresh_guard never runs if the function raises).
+    """
+    from jarvise_assist import partner_unrecorded as pu
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    db = tmp_path / "r6_preclear.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+
+    def _clear(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(status="ok", checked_at_ms=NOW, findings=[], warn=False)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _clear)
+    clear_text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "ยอดสุทธิ" in clear_text
+    assert pu._display_cache is not None
+    assert pu._display_cache[1] == "clear"
+
+    def boom_status(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("gate boom before note")
+
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.guard_unrecorded_status",
+        boom_status,
+    )
+    out = portal._submit_request(
+        conn,
+        row,
+        "cv",
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: True,
+        send=lambda *_a, **_k: None,
+        msg={"message_id": 1, "chat": {"id": "99", "type": "private"}},
+        futures=FakeClient(),
+        now_ms=NOW + 1,
+    )
+    assert out["reason"] == "unrecorded_transfer"
+    assert pu._display_cache is None
+
+    # Card must re-query (boom still installed → fail closed / locked).
+    guard_calls = {"n": 0}
+    real_resolve = pu.resolve_unrecorded_status
+
+    def counting_resolve(*a: Any, **k: Any) -> str:
+        guard_calls["n"] += 1
+        # Still boom via guard_unrecorded_status inside resolve — use locked path.
+        try:
+            return real_resolve(*a, **k)
+        except RuntimeError:
+            return "unknown"
+
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.resolve_unrecorded_status",
+        counting_resolve,
+    )
+    # Drop the boom so resolve can run, but prove cache was empty so it re-queries.
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.guard_unrecorded_status",
+        lambda *_a, **_k: "unknown",
+    )
+    card_text, _cm = portal._build_card(conn, row, av, now_ms=NOW + 2, futures=FakeClient())
+    assert guard_calls["n"] >= 1
+    assert "กำลังตรวจยอด" in card_text
+    assert "206.15" not in card_text
     conn.close()

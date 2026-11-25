@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 _CACHE_TTL_MS = 30_000
-_GUARD_CACHE_TTL_MS = 10 * 60 * 1000
 _KYC_TOKEN_RE = re.compile(r"^pp:kyc:(ok|re):([0-9a-f]{8})$")
 _UNRECORDED_CARD = "กำลังตรวจยอด"
 _UNRECORDED_LOCK = Block(
@@ -62,22 +61,24 @@ _KIND_CODE = {"cv": "convert", "wd": "withdraw_profit", "cl": "close"}
 _BAD_DEP_TEXT = f"จำนวนไม่ถูกต้อง (ขั้นต่ำ {ps.MIN_DEPOSIT_USDT} USDT)"
 
 # Portal-only V cache: (AccountValue, read_at_ms, due_total, total_units) or None
+# Unrecorded display cache lives in partner_unrecorded (shared with admin).
 _value_cache: tuple[AccountValue, int, Decimal, Decimal] | None = None
-# Display cache: (ledger_key, status, checked_at_ms). Never caches "unknown".
-_guard_cache: tuple[tuple[str, int, int, int], str, int] | None = None
 
 
 def reset_value_cache() -> None:
     """Test hook: clear the portal AccountValue and unrecorded-guard caches."""
-    global _value_cache, _guard_cache
+    from jarvise_assist import partner_unrecorded as pu
+
+    global _value_cache
     _value_cache = None
-    _guard_cache = None
+    pu.reset_display_cache()
 
 
 def reset_guard_cache() -> None:
-    """Test hook: clear the portal unrecorded-transfer guard cache."""
-    global _guard_cache
-    _guard_cache = None
+    """Test hook: clear the shared unrecorded-transfer display cache."""
+    from jarvise_assist import partner_unrecorded as pu
+
+    pu.reset_display_cache()
 
 
 def _bangkok_stamp(now_ms: int) -> str:
@@ -162,62 +163,59 @@ def _unrecorded_status_for_card(conn: sqlite3.Connection, futures: Any, *, now_m
     """Tri-state for card display. Uses a 10-min ledger-keyed cache; never caches unknown."""
     from jarvise_assist import partner_unrecorded as pu
 
-    global _guard_cache
     try:
-        key = pu.ledger_cache_key(conn)
+        cached = pu.cached_display_status(conn, int(now_ms))
     except Exception:
         # Key lookup raised — drop any prior clear so display stays fail-closed.
-        _guard_cache = None
+        pu.invalidate_display_cache()
         raise
-    if _guard_cache is not None:
-        cached_key, status, at = _guard_cache
-        if cached_key == key and int(now_ms) - at < _GUARD_CACHE_TTL_MS and status != "unknown":
-            return status
+    if cached is not None:
+        return cached
     client = _resolve_client(futures)
     try:
         status = pu.resolve_unrecorded_status(conn, client, now_ms=int(now_ms))
+        key = pu.ledger_cache_key(conn)
     except Exception:
-        # Fresh check raised — drop any prior clear so display stays fail-closed.
-        _guard_cache = None
+        # Fresh check / key raised — drop any prior clear so display stays fail-closed.
+        pu.invalidate_display_cache()
         raise
-    if status == "clear" or status == "unrecorded":
-        _guard_cache = (key, status, int(now_ms))
-    else:
-        # unknown — never store as clear (and never cache unknown)
-        _guard_cache = None
+    # resolve/note_fresh_guard already applied live evidence; store final status
+    # (hint-raised unrecorded included) without ever caching unknown.
+    pu.store_display_status(key, status, int(now_ms))
     return status
 
 
 def _money_request_blocked(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> bool:
     """Fresh guard (no cache) before create_request. Fail closed unless clear.
 
-    Syncs the display cache with the fresh result: clear refreshes the entry;
-    unrecorded stores the lock; unknown or a raised check clears the cache so
-    a prior cached clear cannot keep card/Profile/preview unlocked.
+    Syncs the shared display cache with the fresh result: clear refreshes the
+    entry; unrecorded stores the lock; unknown or a raised check clears the
+    cache so a prior cached clear cannot keep card/Profile/preview unlocked.
 
     Cache is cleared *before* the fresh guard and key lookup so a mid-check
-    failure cannot leave a prior cached clear intact.
+    failure (or a raising ``guard_unrecorded_status`` stub) cannot leave a
+    prior cached clear intact. ``note_fresh_guard`` inside the real guard is
+    the structural path; these layered clears catch raise-through cases.
     """
     from jarvise_assist import partner_unrecorded as pu
 
-    global _guard_cache
     # Drop any prior clear before fallible work.
-    _guard_cache = None
+    pu.invalidate_display_cache()
     client = _resolve_client(futures)
     try:
         status = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
         key = pu.ledger_cache_key(conn)
     except Exception:
-        _guard_cache = None
+        pu.invalidate_display_cache()
         raise
     if status == "clear":
-        _guard_cache = (key, status, int(now_ms))
+        pu.store_display_status(key, status, int(now_ms))
         return False
     if status == "unrecorded":
-        _guard_cache = (key, status, int(now_ms))
+        pu.store_display_status(key, status, int(now_ms))
         return True
     # unknown — never store as clear
-    _guard_cache = None
+    pu.invalidate_display_cache()
     return True
 
 

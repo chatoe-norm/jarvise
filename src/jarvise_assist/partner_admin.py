@@ -448,7 +448,12 @@ def _transfer_guard(
     now_ms: int,
     req: sqlite3.Row | dict[str, Any],
 ) -> tuple[GuardResult, str]:
-    """Run confirm-time transfer guard. Lazy-imports partner_audit (never at module load)."""
+    """Run confirm-time transfer guard. Lazy-imports partner_audit (never at module load).
+
+    Notes fresh evidence into the shared display cache so a portal cached clear
+    cannot survive an admin confirm that saw unrecorded/unknown/error.
+    """
+    from jarvise_assist import partner_unrecorded as pu
     from jarvise_assist.partner_audit import GuardResult as _GuardResult
     from jarvise_assist.partner_audit import format_guard_th, guard_check, load_state
 
@@ -469,6 +474,7 @@ def _transfer_guard(
             deposit_amount=deposit_amount,
             deposit_partner=deposit_partner,
         )
+        pu.note_fresh_guard(result, conn=conn, now_ms=int(now_ms))
         last_ok_ms: int | None = None
         if result.status != "ok":
             row = conn.execute("PRAGMA database_list").fetchone()
@@ -482,6 +488,7 @@ def _transfer_guard(
         return result, format_guard_th(result, last_ok_ms=last_ok_ms)
     except Exception as exc:  # noqa: BLE001
         logger.warning("partner transfer guard error type=%s", type(exc).__name__)
+        pu.note_fresh_guard("unknown")
         err = _GuardResult(
             status="error",
             checked_at_ms=int(now_ms),
@@ -531,18 +538,30 @@ def _blocks_on_unrecorded(result: GuardResult) -> bool:
 
 
 def _open_unrecorded_overview(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> tuple[str, int]:
-    """Return (status, count). Live clear overrides a stale state-file list."""
+    """Return (status, count). Live clear overrides a stale state-file list.
+
+    Notes the resolved overview status so a portal cached clear cannot survive
+    admin-side discovery of unrecorded/unknown (including a raising guard stub).
+    """
     from jarvise_assist import partner_unrecorded as pu
 
     client = _resolve_client(futures)
-    live = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
+    try:
+        live = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
+    except Exception:
+        pu.note_fresh_guard("unknown")
+        raise
     hint = pu.open_unrecorded_hint(conn)
     if live == "clear":
+        pu.note_fresh_guard("clear", conn=conn, now_ms=int(now_ms))
         return "clear", 0
     if live == "unrecorded":
+        pu.note_fresh_guard("unrecorded", conn=conn, now_ms=int(now_ms))
         return "unrecorded", max(len(hint), 1)
     if hint:
+        pu.note_fresh_guard("unrecorded", conn=conn, now_ms=int(now_ms))
         return "unrecorded", len(hint)
+    pu.note_fresh_guard("unknown")
     return "unknown", 0
 
 
