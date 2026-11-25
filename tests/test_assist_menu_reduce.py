@@ -25,8 +25,10 @@ from jarvise_assist.execute import (
     MSG_MENU_LIVE_ONLY,
     MSG_MENU_POSITION_CHANGED,
     MSG_OUTCOME_UNKNOWN,
+    MSG_PARTIAL_BE_BUFFER,
     MSG_PARTIAL_BE_FLAG_OFF,
     MSG_PARTIAL_BE_NO_STOP,
+    MSG_PARTIAL_BE_NOT_TIGHTER,
     MSG_PARTIAL_BE_ORDERS_READ_FAIL,
     MSG_PARTIAL_BE_TICK,
     MSG_REDUCE_DUST,
@@ -34,6 +36,8 @@ from jarvise_assist.execute import (
     MSG_REDUCE_FLAG_OFF,
     MSG_STOP_COVERAGE_READ_FAIL,
     PREVIEW_TTL_MS,
+    RECOVER_NOT_FOUND_PASSES,
+    RECOVER_NOT_FOUND_SPAN_MS,
     BinanceTradeClient,
     _aged_read_snapshot,
     _maybe_offer_after_reduce,
@@ -55,6 +59,7 @@ from jarvise_assist.store import (
     insert_exec_intent,
     insert_exec_log,
     now_ms,
+    upsert_watch_position,
     write_settings,
 )
 from jarvise_ingest.db import open_db
@@ -625,6 +630,8 @@ def test_c1_be_profit_side() -> None:
     rounded = round_level_to_tick(raw, coarse, side="long", kind="stop")
     assert rounded <= Decimal("100")
     assert _quick_be_level(side="long", entry=Decimal("100"), tick=coarse) is None
+    # Short stop rounds up: entry 100 / tick 1 → BE lands at entry → refuse
+    assert _quick_be_level(side="short", entry=Decimal("100"), tick=Decimal("1")) is None
 
 
 def test_aged_snapshot_maps_reduce_to_rd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1358,7 +1365,6 @@ def test_main_no_tighter_advice_no_button(tmp_path: Path, monkeypatch: pytest.Mo
     conn = open_db(tmp_path / "no-adv.db")
     ts = now_ms()
     monkeypatch.setattr("jarvise_assist.execute.current_trail_advice", lambda **_k: None)
-    from jarvise_assist.store import upsert_watch_position
 
     upsert_watch_position(
         conn,
@@ -1428,6 +1434,26 @@ def test_main_no_tighter_advice_no_button(tmp_path: Path, monkeypatch: pytest.Mo
 def test_outside_universe_non_quick_no_be(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "outside.db")
     ts = now_ms()
+    # Seed a watch row so the ASSIST_SYMBOLS gate itself is exercised (not
+    # merely "no watch → early return").
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "PEPEUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 1.0,
+            "qty": 50.0,
+            "in_universe": 0,
+            "signal_id": None,
+            "initial_stop": 1.05,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts,
+            "closed_at_ms": None,
+        },
+    )
 
     class _Trade:
         def position_risk(self, **_k: Any) -> list[Any]:
@@ -1883,7 +1909,7 @@ def test_partial_be_place_then_cancel_owner_keep_tp(tmp_path: Path, monkeypatch:
     assert body.get("reduceOnly") in {"true", "True", True}
     assert Decimal(str(body["quantity"])) == Decimal("50")
     assert "closePosition" not in body
-    assert body.get("type") == "STOP_MARKET" or body.get("orderType") == "STOP_MARKET" or True
+    assert body.get("type") == "STOP_MARKET"
     # place before cancel
     post_i = next(i for i, c in enumerate(transport.calls) if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder")
     del_i = next(i for i, c in enumerate(transport.calls) if c[0] == "DELETE")
@@ -2315,13 +2341,13 @@ def test_preview_dust_just_below_2x_min_qty(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("JARVISE_ASSIST_REDUCE", "on")
     conn = open_db(tmp_path / "dust-2x.db")
     write_settings(conn, enabled=True)
-    # qty 1.5 steps with step=1 → floor half = 0 → refuse (or qty=1 already covered)
-    pos = _long_pos("DOGEUSDT", "1")  # == minQty
+    # min_qty 10, step 1, qty 19 → close floor(9.5)=9 < 10 → no half button
+    pos = _long_pos("DOGEUSDT", "19")
     fake = FakeFutures(
         positions=[pos],
         orders=[],
         steps={"DOGEUSDT": Decimal("1")},
-        min_qty={"DOGEUSDT": Decimal("1")},
+        min_qty={"DOGEUSDT": Decimal("10")},
         min_notional={"DOGEUSDT": Decimal("0")},
         marks={"DOGEUSDT": Decimal("10")},
     )
@@ -2378,4 +2404,672 @@ def test_preview_dust_min_notional_floor(tmp_path: Path, monkeypatch: pytest.Mon
     cbs = [b["callback_data"] for row in sent[0]["reply_markup"]["inline_keyboard"] for b in row]
     assert not any(c.startswith("xr:") for c in cbs)
     assert "✂️ ปิดครึ่งไม่ได้" in sent[0]["text"]
+    conn.close()
+
+
+# --- B2 fix2: Medium/Low test gaps + Low-10 main orders-read fail ---
+
+
+def test_quick_be_offer_e2e_planned_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Q3=b / Q-UI-2=a / Q-BE-3=a: after xr: success, offer BE with planned stop."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_REDUCE", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "be-offer-e2e.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    conn.execute(
+        """
+        INSERT INTO assist_quick_registration (
+            id, symbol, side, planned_entry, planned_stop, qty, status,
+            created_at_ms, expires_at_ms, updated_at_ms
+        ) VALUES ('reg1', 'DOGEUSDT', 'short', 1.0, 1.05, 50, 'open', ?, ?, ?)
+        """,
+        (ts, ts + 10_000_000, ts),
+    )
+    conn.commit()
+    rid = insert_exec_intent(
+        conn,
+        kind="reduce",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "qty": "100",
+            "entry": "1",
+            "close_qty": "50",
+            "leave_qty": "50",
+            "fraction": "0.5",
+            "source": "menu",
+            "confirm_text": "confirm",
+            "cohort": "quick",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    handlers = _half_handlers(mark="0.99", entry="1")
+    transport = RecordingTransport(handlers)
+    sent: list[dict[str, Any]] = []
+    handle_exec_callback(
+        conn,
+        f"xr:{rid}",
+        send=lambda t, **kw: sent.append({"text": t, **kw}) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    assert get_exec_intent(conn, rid)["status"] == "done"
+    assert sent, "expected a reduce result send"
+    last = sent[-1]
+    markup = last.get("reply_markup")
+    assert markup is not None
+    flat = [b for row in markup["inline_keyboard"] for b in row]
+    cbs = [b["callback_data"] for b in flat]
+    assert any(c.startswith("ms:") for c in cbs)
+    assert any(c.startswith("mn:") for c in cbs)
+    assert any("🛡 เลื่อน stop ส่วนที่เหลือ →" in str(b.get("text") or "") for b in flat)
+    move_row = conn.execute(
+        "SELECT id, created_at_ms, expires_at_ms, preview_json FROM assist_exec_intent WHERE kind='move_stop'"
+    ).fetchone()
+    assert move_row is not None
+    assert int(move_row[2]) - int(move_row[1]) == MOVE_STOP_TTL_MS
+    prev = json.loads(move_row[3])
+    assert prev.get("via") == "partial_be"
+    assert prev.get("source") == "partial_be"
+    assert prev.get("qty") == "50"
+    assert prev.get("entry") == "1"
+    conn.close()
+
+
+def _quick_offer_trade(
+    *,
+    side: str = "short",
+    entry: str = "1",
+    mark: str = "0.99",
+    tick: str = "0.00001",
+    amt: str = "-50",
+    orders: list[Any] | None = None,
+    orders_exc: Exception | None = None,
+) -> Any:
+    from jarvise_assist.futures import FuturesPosition, SymbolFilters
+
+    class _Trade:
+        def position_risk(self, **_k: Any) -> list[Any]:
+            return [
+                FuturesPosition(
+                    symbol="DOGEUSDT",
+                    position_side="BOTH",
+                    position_amt=Decimal(amt),
+                    entry_price=Decimal(entry),
+                    mark_price=Decimal(mark),
+                    update_time_ms=1,
+                )
+            ]
+
+        def symbol_filters(self, _s: str) -> Any:
+            return SymbolFilters(
+                step_size=Decimal("1"),
+                min_qty=Decimal("1"),
+                min_notional=Decimal("5"),
+                tick_size=Decimal(tick),
+            )
+
+        def mark_price(self, _s: str) -> Decimal:
+            return Decimal(mark)
+
+        def all_open_orders(self, **_k: Any) -> list[Any]:
+            if orders_exc is not None:
+                raise orders_exc
+            return list(orders or [])
+
+    return _Trade()
+
+
+def test_maybe_offer_buffer_no_button(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "offer-buf.db")
+    ts = now_ms()
+    conn.execute(
+        """
+        INSERT INTO assist_quick_registration (
+            id, symbol, side, planned_entry, planned_stop, qty, status,
+            created_at_ms, expires_at_ms, updated_at_ms
+        ) VALUES ('reg1', 'DOGEUSDT', 'short', 1.0, 1.05, 50, 'open', ?, ?, ?)
+        """,
+        (ts, ts + 10_000_000, ts),
+    )
+    conn.commit()
+    # Mark too close to BE (~0.998) → buffer fails
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _quick_offer_trade(mark="0.9975"),  # type: ignore[arg-type]
+        intent={"symbol": "DOGEUSDT", "side": "short"},
+        preview={"cohort": "quick"},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง DOGEUSDT",
+        now_ms_value=ts,
+        send=None,
+    )
+    assert MSG_PARTIAL_BE_BUFFER in text
+    assert markup is None and deferred is None
+    conn.close()
+
+
+def test_maybe_offer_not_tighter_no_button(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "offer-nt.db")
+    ts = now_ms()
+    placed = _verified_stop(client_id="owner-sl", trigger="0.997", qty="50")
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _quick_offer_trade(mark="0.99", orders=[placed]),  # type: ignore[arg-type]
+        intent={"symbol": "DOGEUSDT", "side": "short"},
+        preview={"cohort": "quick"},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง DOGEUSDT",
+        now_ms_value=ts,
+        send=None,
+    )
+    assert MSG_PARTIAL_BE_NOT_TIGHTER in text
+    assert markup is None and deferred is None
+    conn.close()
+
+
+def test_maybe_offer_no_stop_no_button(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "offer-ns.db")
+    ts = now_ms()
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _quick_offer_trade(mark="0.99", orders=[]),  # type: ignore[arg-type]
+        intent={"symbol": "DOGEUSDT", "side": "short"},
+        preview={"cohort": "quick"},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง DOGEUSDT",
+        now_ms_value=ts,
+        send=None,
+    )
+    assert MSG_PARTIAL_BE_NO_STOP in text
+    assert markup is None and deferred is None
+    conn.close()
+
+
+def test_partial_be_tap_planned_stop_no_placed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tap uses planned stop when no protective stop is placed (Q-BE-3=a)."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_REDUCE", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "pbe-planned.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    conn.execute(
+        """
+        INSERT INTO assist_quick_registration (
+            id, symbol, side, planned_entry, planned_stop, qty, status,
+            created_at_ms, expires_at_ms, updated_at_ms
+        ) VALUES ('reg1', 'DOGEUSDT', 'short', 1.0, 1.05, 50, 'open', ?, ?, ?)
+        """,
+        (ts, ts + 10_000_000, ts),
+    )
+    conn.commit()
+    mid = _insert_partial_be(conn, ts=ts, qty="50", entry="1", stop="0.998")
+    ms_cid = client_order_id(mid, "ms")
+    ms_row = _verified_stop(client_id=ms_cid, algo_id=100, trigger="0.998", qty="50")
+    n = {"i": 0}
+
+    def _open(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+        n["i"] += 1
+        if n["i"] == 1:
+            return (200, [])  # no placed stop
+        return (200, [ms_row])
+
+    handlers = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/positionRisk"): (
+            200,
+            [_open_pos(amt="-50", entry="1", mark="0.99")],
+        ),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.99"}),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): _open,
+        ("GET", "/fapi/v1/algoOrder"): (400, {"code": -2013, "msg": "Order does not exist."}),
+        ("POST", "/fapi/v1/algoOrder"): (200, {"algoId": 100}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"code": "200", "msg": "success"}),
+    }
+    transport = RecordingTransport(handlers)
+    handle_exec_callback(
+        conn,
+        f"ms:{mid}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    posts = [c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+    assert len(posts) == 1
+    assert posts[0][2].get("type") == "STOP_MARKET"
+    assert get_exec_intent(conn, mid)["status"] == "done"
+    conn.close()
+
+
+def test_c1_short_offer_coarse_tick(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "c1-short.db")
+    ts = now_ms()
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _quick_offer_trade(side="short", entry="100", mark="99", tick="1", amt="-50"),  # type: ignore[arg-type]
+        intent={"symbol": "DOGEUSDT", "side": "short"},
+        preview={"cohort": "quick"},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง DOGEUSDT",
+        now_ms_value=ts,
+        send=None,
+    )
+    assert MSG_PARTIAL_BE_TICK in text
+    assert markup is None and deferred is None
+    conn.close()
+
+
+def test_xr_in_flight_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_REDUCE", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "xr-inf.db")
+    ts = now_ms()
+    other = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "1", "source": "menu"},
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    finish_exec_intent(conn, other, status="unknown", result_text="u", expect_status="preview")
+    rid = insert_exec_intent(
+        conn,
+        kind="reduce",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "qty": "100",
+            "entry": "1",
+            "close_qty": "50",
+            "leave_qty": "50",
+            "source": "menu",
+            "confirm_text": "c",
+            "cohort": "quick",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    transport = RecordingTransport(_half_handlers())
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"xr:{rid}",
+        send=lambda t, **_: sent.append(t),
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    assert any("ยังไม่จบ" in t for t in sent)
+    assert not any(c[0] == "POST" for c in transport.calls)
+    assert get_exec_intent(conn, rid)["status"] == "preview"
+    conn.close()
+
+
+def test_xr_testnet_live_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setenv("JARVISE_ASSIST_REDUCE", "on")
+    conn = open_db(tmp_path / "xr-tn.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="reduce",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "qty": "100",
+            "entry": "1",
+            "close_qty": "50",
+            "leave_qty": "50",
+            "source": "menu",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    transport = RecordingTransport(_half_handlers())
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"xr:{rid}",
+        send=lambda t, **_: sent.append(t),
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    assert MSG_MENU_LIVE_ONLY in sent
+    assert not any(c[0] == "POST" for c in transport.calls)
+    conn.close()
+
+
+def test_recover_reduce_wrong_side_done_odd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "rec-side.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="reduce",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "1", "close_qty": "50", "leave_qty": "50"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    handlers = {
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "avgPrice": "0.07", "executedQty": "50", "status": "FILLED"},
+        ),
+        # Open position on the other side (long)
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos(amt="50", entry="1")]),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(conn, _client(transport), now_ms_value=ts + 1000)
+    row = get_exec_intent(conn, rid)
+    assert row["status"] == "done"
+    assert "ไม่ตรงที่ตั้งใจ" in str(row.get("result_text") or "")
+    conn.close()
+
+
+def test_recover_reduce_found_not_filled_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "rec-nf-exp.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="reduce",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "1", "close_qty": "50", "leave_qty": "50"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    handlers = {
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "avgPrice": "0", "executedQty": "0", "status": "EXPIRED"},
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos(amt="-100", entry="1")]),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+    }
+    transport = RecordingTransport(handlers)
+    run_exec_recovery(conn, _client(transport), now_ms_value=ts + 1000)
+    assert get_exec_intent(conn, rid)["status"] == "failed"
+    assert not any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in transport.calls)
+    conn.close()
+
+
+def test_recover_reduce_not_found_inside_span_not_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    conn = open_db(tmp_path / "rec-nf-span.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="reduce",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "1", "close_qty": "50", "leave_qty": "50"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    handlers = {
+        ("GET", "/fapi/v1/order"): (400, {"code": -2013, "msg": "Order does not exist."}),
+        ("GET", "/fapi/v3/positionRisk"): (200, [_open_pos(amt="-100", entry="1")]),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    # All passes inside the span → must not fail yet
+    for i in range(RECOVER_NOT_FOUND_PASSES):
+        run_exec_recovery(conn, trade, now_ms_value=ts + 1000 + i * 1000)
+    assert ts + 1000 + (RECOVER_NOT_FOUND_PASSES - 1) * 1000 - (ts + 1000) < RECOVER_NOT_FOUND_SPAN_MS
+    assert get_exec_intent(conn, rid)["status"] != "failed"
+    assert get_exec_intent(conn, rid)["status"] in {"unknown", "recovering"}
+    conn.close()
+
+
+def test_main_advice_not_tighter_no_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = open_db(tmp_path / "main-nt.db")
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.08,
+            "qty": 50.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.083,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts,
+            "closed_at_ms": None,
+        },
+    )
+    # Advice worse than placed stop (short: higher = not tighter)
+    monkeypatch.setattr(
+        "jarvise_assist.execute.current_trail_advice",
+        lambda **_k: (Decimal("0.080"), "trail"),
+    )
+    from jarvise_assist.futures import FuturesPosition, SymbolFilters
+
+    placed = _verified_stop(client_id="jv-old", trigger="0.079", qty="50", symbol="BTCUSDT")
+
+    class _Trade:
+        def position_risk(self, **_k: Any) -> list[Any]:
+            return [
+                FuturesPosition(
+                    symbol="BTCUSDT",
+                    position_side="BOTH",
+                    position_amt=Decimal("-50"),
+                    entry_price=Decimal("0.08"),
+                    mark_price=Decimal("0.076"),
+                    update_time_ms=1,
+                )
+            ]
+
+        def symbol_filters(self, _s: str) -> Any:
+            return SymbolFilters(
+                step_size=Decimal("1"),
+                min_qty=Decimal("1"),
+                min_notional=Decimal("5"),
+                tick_size=Decimal("0.00001"),
+            )
+
+        def mark_price(self, _s: str) -> Decimal:
+            return Decimal("0.076")
+
+        def all_open_orders(self, **_k: Any) -> list[Any]:
+            return [placed]
+
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _Trade(),  # type: ignore[arg-type]
+        intent={"symbol": "BTCUSDT", "side": "short"},
+        preview={},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง BTCUSDT",
+        now_ms_value=ts,
+        send=lambda *_a, **_k: None,
+    )
+    assert text == "✅ ปิดครึ่ง BTCUSDT"
+    assert markup is None and deferred is None
+    conn.close()
+
+
+def test_main_advice_buffer_blocks_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = open_db(tmp_path / "main-buf.db")
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.08,
+            "qty": 50.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.083,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts,
+            "closed_at_ms": None,
+        },
+    )
+    monkeypatch.setattr(
+        "jarvise_assist.execute.current_trail_advice",
+        lambda **_k: (Decimal("0.079"), "trail"),
+    )
+    from jarvise_assist.futures import FuturesPosition, SymbolFilters
+
+    class _Trade:
+        def position_risk(self, **_k: Any) -> list[Any]:
+            return [
+                FuturesPosition(
+                    symbol="BTCUSDT",
+                    position_side="BOTH",
+                    position_amt=Decimal("-50"),
+                    entry_price=Decimal("0.08"),
+                    mark_price=Decimal("0.07895"),
+                    update_time_ms=1,
+                )
+            ]
+
+        def symbol_filters(self, _s: str) -> Any:
+            return SymbolFilters(
+                step_size=Decimal("1"),
+                min_qty=Decimal("1"),
+                min_notional=Decimal("5"),
+                tick_size=Decimal("0.00001"),
+            )
+
+        def mark_price(self, _s: str) -> Decimal:
+            return Decimal("0.07895")
+
+        def all_open_orders(self, **_k: Any) -> list[Any]:
+            return []
+
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _Trade(),  # type: ignore[arg-type]
+        intent={"symbol": "BTCUSDT", "side": "short"},
+        preview={},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง BTCUSDT",
+        now_ms_value=ts,
+        send=lambda *_a, **_k: None,
+    )
+    assert markup is None and deferred is None
+    conn.close()
+
+
+def test_main_orders_read_fail_no_advice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Low-10: main-path open-orders read fail must not defer advice."""
+    conn = open_db(tmp_path / "main-ord-fail.db")
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.08,
+            "qty": 50.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.083,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts,
+            "closed_at_ms": None,
+        },
+    )
+    monkeypatch.setattr(
+        "jarvise_assist.execute.current_trail_advice",
+        lambda **_k: (Decimal("0.079"), "trail"),
+    )
+    from jarvise_assist.futures import FuturesPosition, SymbolFilters
+
+    class _Trade:
+        def position_risk(self, **_k: Any) -> list[Any]:
+            return [
+                FuturesPosition(
+                    symbol="BTCUSDT",
+                    position_side="BOTH",
+                    position_amt=Decimal("-50"),
+                    entry_price=Decimal("0.08"),
+                    mark_price=Decimal("0.076"),
+                    update_time_ms=1,
+                )
+            ]
+
+        def symbol_filters(self, _s: str) -> Any:
+            return SymbolFilters(
+                step_size=Decimal("1"),
+                min_qty=Decimal("1"),
+                min_notional=Decimal("5"),
+                tick_size=Decimal("0.00001"),
+            )
+
+        def mark_price(self, _s: str) -> Decimal:
+            return Decimal("0.076")
+
+        def all_open_orders(self, **_k: Any) -> list[Any]:
+            raise RuntimeError("orders boom")
+
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _Trade(),  # type: ignore[arg-type]
+        intent={"symbol": "BTCUSDT", "side": "short"},
+        preview={},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง BTCUSDT",
+        now_ms_value=ts,
+        send=lambda *_a, **_k: None,
+    )
+    assert text == "✅ ปิดครึ่ง BTCUSDT"
+    assert markup is None and deferred is None
     conn.close()

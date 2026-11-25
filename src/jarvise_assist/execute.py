@@ -1064,7 +1064,7 @@ def _maybe_offer_after_reduce(
     try:
         orders = trade.all_open_orders(symbol=symbol)
     except Exception:  # noqa: BLE001
-        orders = []
+        return result_text, None, None
     protective = find_protective_stop(orders, symbol=symbol, position_side=pos.position_side, trade_side=side)
     compare = protective if protective is not None else initial_stop
     if side == "long" and new_stop <= compare:
