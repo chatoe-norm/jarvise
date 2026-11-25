@@ -690,4 +690,277 @@ def test_overview_warns_unrecorded(tmp_path: Path, env_chat: None, monkeypatch: 
     text = pa._overview_text(conn, av, now_ms=NOW, futures=FakeClient())
     assert "มีเงินโอนที่ยังไม่บันทึก 2 รายการ" in text
     assert "ตัวเลข partner ยังไม่ถูกต้อง" in text
+    # Unrecorded: suppress per-partner net / %
+    assert "+10.00%" not in text
+    assert "220.00" not in text
+    conn.close()
+
+
+def test_overview_read_failed_hides_net_and_unknown_line(
+    tmp_path: Path, env_chat: None, monkeypatch: Any
+) -> None:
+    db = tmp_path / "ov_rf.db"
+    conn = open_db(db)
+    _seed(conn)
+    # No state hint → live read_failed → unknown
+
+    def _failed(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(status="read_failed", checked_at_ms=NOW, findings=[], warn=True, error="x")
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _failed)
+    av = AccountValue(value=D("1100"), wallet=D("1100"), unrealized=D("0"), open_positions=0, read_at_ms=NOW)
+    text = pa._overview_text(conn, av, now_ms=NOW, futures=FakeClient())
+    assert "กำลังตรวจยอดโอน" in text
+    assert "อาจยังไม่ถูกต้อง" in text
+    assert "+10.00%" not in text
+    assert "220.00" not in text
+    # Clear path still shows valuation
+    portal.reset_guard_cache()
+
+    def _ok(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(status="ok", checked_at_ms=NOW, findings=[], warn=False)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _ok)
+    clear = pa._overview_text(conn, av, now_ms=NOW + 1, futures=FakeClient())
+    assert "กำลังตรวจยอดโอน" not in clear
+    assert "+10.00%" in clear or "สุทธิ" in clear or "มูลค่า" in clear
+    conn.close()
+
+
+def test_admin_force_unknown_status_refused(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+    """GuardResult(status=unknown, warn=True) + pa:rf: must refuse; no confirm."""
+    conn = open_db(tmp_path / "force_unk.db")
+    _admin, bob = _seed(conn)
+    created = ps.create_request(conn, bob, "convert", NOW, source="admin")
+    assert created["ok"]
+    rid = str(created["request_id"])
+
+    def _fake(conn: Any, client: Any, *, now_ms: int, req: Any) -> tuple[GuardResult, str]:
+        return (
+            GuardResult(status="unknown", checked_at_ms=int(now_ms), findings=[], warn=True),
+            "unk",
+        )
+
+    monkeypatch.setattr(pa, "_transfer_guard", _fake)
+    answers: list[str | None] = []
+    sent: list[dict[str, Any]] = []
+
+    def answer(_id: str, text: str | None = None) -> None:
+        answers.append(text)
+
+    def send(text: str, **kwargs: Any) -> None:
+        sent.append({"text": text, **kwargs})
+
+    def edit(_mid: int, text: str, **kwargs: Any) -> bool:
+        sent.append({"text": text, **kwargs})
+        return True
+
+    out = pa.handle_partner_callback(
+        conn,
+        f"pa:rf:{rid}:{NOW // 1000}",
+        callback=_owner_cb(f"pa:rf:{rid}:{NOW // 1000}"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        now_ms=NOW,
+    )
+    assert out["reason"] == "unrecorded_transfer"
+    assert (
+        conn.execute("SELECT status FROM partner_request WHERE id = ?", (rid,)).fetchone()["status"]
+        == "pending"
+    )
+    conn.close()
+
+
+def test_portal_preview_locked_shows_no_numbers(tmp_path: Path, monkeypatch: Any) -> None:
+    """read_failed → convert/withdraw/close preview must not show fee/cost estimates."""
+    db = tmp_path / "prev.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+
+    def _failed(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(status="read_failed", checked_at_ms=NOW, findings=[], warn=True, error="x")
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _failed)
+    av = AccountValue(value=D("1000"), wallet=D("1000"), unrealized=D("0"), open_positions=0, read_at_ms=NOW)
+    _text, markup = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    flat = [b.get("callback_data") for row_b in (markup or {}).get("inline_keyboard") or [] for b in row_b]
+    assert "pp:lk" in flat
+    assert "pp:rq:cv" not in flat
+
+    answers: list[str | None] = []
+    edited: list[str] = []
+
+    def answer(text: str | None = None) -> None:
+        answers.append(text)
+
+    def edit(_mid: int, text: str, **_k: Any) -> bool:
+        edited.append(text)
+        return True
+
+    # cv/wd (cl may hit close_too_soon first when join is recent)
+    for code in ("cv", "wd"):
+        answers.clear()
+        edited.clear()
+        out = portal._preview_request(
+            conn,
+            row,
+            code,
+            answer=answer,
+            edit=edit,
+            send=lambda *_a, **_k: None,
+            msg={"message_id": 1, "chat": {"id": "99", "type": "private"}},
+            futures=FakeClient(),
+            now_ms=NOW,
+        )
+        assert out["reason"] == "unrecorded_transfer", code
+        body = " ".join(str(x) for x in answers + edited if x)
+        assert "20.00" not in body
+        assert "220.00" not in body
+        assert "ค่าธรรมเนียม" not in body
+        assert "ทุนใหม่" not in body
+        assert answers and "รอแอดมิน" in (answers[0] or "")
+    conn.close()
+
+
+def test_portal_card_exception_hides_net(tmp_path: Path, monkeypatch: Any) -> None:
+    db = tmp_path / "card_ex.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(value=D("1100"), wallet=D("1100"), unrealized=D("0"), open_positions=0, read_at_ms=NOW)
+
+    def boom(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("card boom")
+
+    monkeypatch.setattr(portal, "_unrecorded_status_for_card", boom)
+    text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "กำลังตรวจยอด" in text
+    assert "ยอดสุทธิ" not in text
+    assert "%" not in text
+    conn.close()
+
+
+def test_portal_request_gate_exception_refuses(tmp_path: Path, monkeypatch: Any) -> None:
+    db = tmp_path / "gate_ex.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+
+    def boom(*_a: Any, **_k: Any) -> bool:
+        raise RuntimeError("gate boom")
+
+    monkeypatch.setattr(portal, "_money_request_blocked", boom)
+    answers: list[str | None] = []
+
+    def answer(_id: str, text: str | None = None) -> None:
+        answers.append(text)
+
+    out = portal._submit_request(
+        conn,
+        row,
+        "cv",
+        answer=answer,
+        edit=lambda *_a, **_k: True,
+        send=lambda *_a, **_k: None,
+        msg={"message_id": 1, "chat": {"id": "99", "type": "private"}},
+        futures=FakeClient(),
+        now_ms=NOW,
+    )
+    assert out["reason"] == "unrecorded_transfer"
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM partner_request WHERE kind = 'convert' AND status = 'pending'"
+        ).fetchone()["n"]
+        == 0
+    )
+    conn.close()
+
+
+def test_portal_cache_invalidates_on_ledger_write(tmp_path: Path, monkeypatch: Any) -> None:
+    db = tmp_path / "cache_key.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(value=D("1000"), wallet=D("1000"), unrealized=D("0"), open_positions=0, read_at_ms=NOW)
+    calls = {"n": 0}
+
+    def _guard(conn: Any, client: Any, *, now_ms: int) -> GuardResult:
+        calls["n"] += 1
+        return GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _guard)
+    portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert calls["n"] == 1
+    # Same ledger key → cache hit
+    portal._build_card(conn, row, av, now_ms=NOW + 1, futures=FakeClient())
+    assert calls["n"] == 1
+    # New event changes ledger key → re-query
+    admin = ps.admin_partner(conn)
+    assert admin is not None
+    assert ps.apply_owner_deposit(
+        conn,
+        amount=D("10"),
+        account_value=D("1010"),
+        now_ms=NOW + 2,
+        note="owner tx via p owner; Binance TRANSFER tranId cache1",
+        event_id="pe_owner_trancache1",
+    )["ok"]
+    portal._build_card(conn, row, av, now_ms=NOW + 3, futures=FakeClient())
+    assert calls["n"] == 2
+    conn.close()
+
+
+def test_portal_cache_does_not_store_unknown(tmp_path: Path, monkeypatch: Any) -> None:
+    db = tmp_path / "cache_unk.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(value=D("1000"), wallet=D("1000"), unrealized=D("0"), open_positions=0, read_at_ms=NOW)
+    calls = {"n": 0}
+
+    def _guard(conn: Any, client: Any, *, now_ms: int) -> GuardResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return GuardResult(
+                status="read_failed", checked_at_ms=int(now_ms), findings=[], warn=True, error="x"
+            )
+        return GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _guard)
+    text1, _m1 = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "กำลังตรวจยอด" in text1
+    assert calls["n"] == 1
+    assert portal._guard_cache is None  # unknown must not be stored
+    text2, _m2 = portal._build_card(conn, row, av, now_ms=NOW + 1, futures=FakeClient())
+    assert calls["n"] == 2
+    assert "กำลังตรวจยอด" not in text2
+    assert "ยอดสุทธิ" in text2
+
+    # Even a poisoned unknown cache entry must not be returned (hit filter)
+    from jarvise_assist import partner_unrecorded as pu
+
+    key = pu.ledger_cache_key(conn)
+    portal._guard_cache = (key, "unknown", NOW + 2)
+    calls["n"] = 0
+
+    def _clear_only(conn: Any, client: Any, *, now_ms: int) -> GuardResult:
+        calls["n"] += 1
+        return GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _clear_only)
+    text3, _m3 = portal._build_card(conn, row, av, now_ms=NOW + 3, futures=FakeClient())
+    assert calls["n"] == 1
+    assert "กำลังตรวจยอด" not in text3
+    assert "ยอดสุทธิ" in text3
     conn.close()

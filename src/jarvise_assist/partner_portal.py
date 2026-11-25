@@ -185,8 +185,15 @@ def _money_request_blocked(conn: sqlite3.Connection, futures: Any, *, now_ms: in
     return pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms)) != "clear"
 
 
+def _money_callback(code: str, lock: Block | None) -> str:
+    """Unrecorded lock → ``pp:lk`` (toast only). Other locks keep ``pp:rq:*`` for their toast."""
+    if lock is not None and lock.code == "unrecorded_transfer":
+        return "pp:lk"
+    return f"pp:rq:{code}"
+
+
 def _card_buttons(locks: dict[str, Block] | None = None, *, kyc_saved: bool = False) -> dict[str, Any]:
-    """Active-card keyboard. Locked buttons change only ``text``; callbacks stay ``pp:rq:*``."""
+    """Active-card keyboard. Unrecorded locks use ``pp:lk`` so taps cannot open fee previews."""
     locks = locks or {}
     cv = locks.get("cv")
     wd = locks.get("wd")
@@ -202,13 +209,19 @@ def _card_buttons(locks: dict[str, Block] | None = None, *, kyc_saved: bool = Fa
                 {"text": "💰 แจ้งฝาก", "callback_data": "pp:dep"},
             ],
             [
-                {"text": cv.label if cv is not None else "🔁 ทบกำไร", "callback_data": "pp:rq:cv"},
-                {"text": wd.label if wd is not None else "💸 ถอนกำไร", "callback_data": "pp:rq:wd"},
+                {
+                    "text": cv.label if cv is not None else "🔁 ทบกำไร",
+                    "callback_data": _money_callback("cv", cv),
+                },
+                {
+                    "text": wd.label if wd is not None else "💸 ถอนกำไร",
+                    "callback_data": _money_callback("wd", wd),
+                },
             ],
             [
                 {
                     "text": cl.label if cl is not None else "🚪 ปิดพอร์ต",
-                    "callback_data": "pp:rq:cl",
+                    "callback_data": _money_callback("cl", cl),
                 }
             ],
             [{"text": "📊 ไม้ที่เปิดอยู่", "callback_data": "pp:pos"}],
@@ -775,6 +788,20 @@ def _preview_request(
     now_ms: int,
 ) -> dict[str, Any]:
     kind = _KIND_CODE[code]
+    # Non-money rules first (kyc / closed / pending) — same order as submit.
+    early = partner_rules.block(conn, row, kind, nav=None, now_ms=now_ms)
+    if early is not None:
+        answer(early.toast)
+        return {"ok": False, "reason": early.code}
+    try:
+        status = _unrecorded_status_for_card(conn, futures, now_ms=now_ms)
+        if status != "clear":
+            answer(_UNRECORDED_LOCK.toast)
+            return {"ok": False, "reason": "unrecorded_transfer"}
+    except Exception:  # noqa: BLE001
+        logger.warning("portal preview unrecorded check failed")
+        answer(_UNRECORDED_LOCK.toast)
+        return {"ok": False, "reason": "unrecorded_transfer"}
     av = _read_v_cached(conn, futures, now_ms=now_ms)
     nav: Decimal | None = None
     if isinstance(av, AccountValue):
@@ -1013,6 +1040,10 @@ def handle_portal_callback(
                 pass
         send_to_partner(send, row, text, reply_markup=markup)
         return {"ok": True, "cmd": "cancel_preview"}
+
+    if data == "pp:lk":
+        _answer(_UNRECORDED_LOCK.toast)
+        return {"ok": False, "reason": "unrecorded_transfer"}
 
     if data.startswith("pp:rq:"):
         code = data[len("pp:rq:") :]
