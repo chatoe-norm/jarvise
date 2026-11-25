@@ -1479,6 +1479,8 @@ def _apply_owner_tx(
     amount: Decimal,
     account_value: Decimal,
     now_ms: int,
+    effective_at_ms: int | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
     """Book one owner_redeem or owner_deposit on the admin. No transfer guard."""
     refused = _owner_amount_refusal(amount)
@@ -1532,6 +1534,7 @@ def _apply_owner_tx(
         minted = plan_d.units_issued
     admin_id = str(admin["id"])
     eid = _new_event_id()
+    eff_ms = int(now_ms) if effective_at_ms is None else int(effective_at_ms)
     _update_partner(conn, admin_id, units=units_after, cost=cost_after, now_ms=now_ms)
     _insert_event(
         conn,
@@ -1549,8 +1552,9 @@ def _apply_owner_tx(
         cost_after=cost_after,
         now_ms=now_ms,
         payouts_due=due,
-        effective_at_ms=int(now_ms),
+        effective_at_ms=eff_ms,
         origin="manual",
+        note=note,
         actor="admin",
     )
     verified_after = verify_ledger(conn)
@@ -1583,6 +1587,8 @@ def apply_owner_redeem(
     amount: Decimal,
     account_value: Decimal,
     now_ms: int,
+    effective_at_ms: int | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
     """Owner withdrawal already out of the wallet. ``account_value`` is the reading after."""
     try:
@@ -1593,6 +1599,8 @@ def apply_owner_redeem(
                 amount=amount,
                 account_value=account_value,
                 now_ms=now_ms,
+                effective_at_ms=effective_at_ms,
+                note=note,
             )
     except _OwnerWriteRefused as exc:
         return exc.payload
@@ -1604,6 +1612,8 @@ def apply_owner_deposit(
     amount: Decimal,
     account_value: Decimal,
     now_ms: int,
+    effective_at_ms: int | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
     """Owner deposit already in the wallet. ``account_value`` is the reading after."""
     try:
@@ -1614,6 +1624,8 @@ def apply_owner_deposit(
                 amount=amount,
                 account_value=account_value,
                 now_ms=now_ms,
+                effective_at_ms=effective_at_ms,
+                note=note,
             )
     except _OwnerWriteRefused as exc:
         return exc.payload
