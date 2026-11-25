@@ -827,6 +827,183 @@ def test_portal_preview_locked_shows_no_numbers(tmp_path: Path, monkeypatch: Any
     conn.close()
 
 
+def _profile_callback(tg: str = "99", mid: int = 1) -> dict[str, Any]:
+    return {
+        "id": "cb_pf",
+        "from": {"id": int(tg)},
+        "message": {
+            "message_id": mid,
+            "chat": {"id": int(tg), "type": "private"},
+            "text": "card",
+        },
+        "data": "pp:pf",
+    }
+
+
+def _open_profile(
+    conn: Any,
+    *,
+    monkeypatch: Any,
+    futures: Any = None,
+    now_ms: int = NOW,
+) -> str:
+    edited: list[str] = []
+
+    def edit(_mid: int, text: str, **_k: Any) -> bool:
+        edited.append(text)
+        return True
+
+    monkeypatch.setattr(
+        portal,
+        "_read_v_cached",
+        lambda *_a, **_k: AccountValue(
+            value=D("1100"), wallet=D("1100"), unrealized=D("0"), open_positions=0, read_at_ms=now_ms
+        ),
+    )
+    out = portal.handle_portal_callback(
+        conn,
+        "pp:pf",
+        callback=_profile_callback(),
+        send=lambda *_a, **_k: None,
+        answer=lambda *_a, **_k: True,
+        edit=edit,
+        futures=futures if futures is not None else FakeClient(),
+        now_ms=now_ms,
+    )
+    assert out.get("ok") is True
+    assert out.get("cmd") == "profile"
+    assert edited
+    return edited[-1]
+
+
+def test_portal_profile_hides_net_when_not_clear(tmp_path: Path, monkeypatch: Any) -> None:
+    """pp:pf must apply the same fail-closed unrecorded gate before valuation."""
+    from jarvise_assist import partner_unrecorded as pu
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    db = tmp_path / "pf_gate.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+
+    def _live_status(c: Any, f: Any, *, now_ms: int) -> str:
+        return pu.resolve_unrecorded_status(c, portal._resolve_client(f), now_ms=int(now_ms))
+
+    # clear → net/profit present (baseline; V=1100 → Bob net 210 / +10)
+    monkeypatch.setattr(portal, "_unrecorded_status_for_card", lambda *_a, **_k: "clear")
+    clear_text = _open_profile(conn, monkeypatch=monkeypatch, now_ms=NOW)
+    assert "ยอดสุทธิ" in clear_text
+    assert "กำไร" in clear_text
+    assert "210.00" in clear_text
+    assert "+10.00" in clear_text
+    assert "กำลังตรวจยอด" not in clear_text
+    assert "ทุน" in clear_text
+
+    # read_failed → unknown → no net/profit numbers
+    def _failed(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(status="read_failed", checked_at_ms=NOW + 1, findings=[], warn=True, error="x")
+
+    portal.reset_guard_cache()
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _failed)
+    monkeypatch.setattr(portal, "_unrecorded_status_for_card", _live_status)
+    failed_text = _open_profile(conn, monkeypatch=monkeypatch, now_ms=NOW + 1)
+    assert "กำลังตรวจยอด" in failed_text
+    assert "ยอดสุทธิ" not in failed_text
+    assert "กำไร" not in failed_text
+    assert "ทุน" in failed_text
+    assert "210.00" not in failed_text
+    assert "+10.00" not in failed_text
+
+    # real unrecorded finding
+    portal.reset_guard_cache()
+    finding = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:pf1",
+        time_ms=NOW - HOUR,
+        amount=D("50"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+
+    def _unrec_guard(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(
+            status="ok",
+            checked_at_ms=NOW + 2,
+            findings=[finding],
+            warn=True,
+        )
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _unrec_guard)
+    monkeypatch.setattr(portal, "_unrecorded_status_for_card", _live_status)
+    unrec_text = _open_profile(conn, monkeypatch=monkeypatch, now_ms=NOW + 2)
+    assert "กำลังตรวจยอด" in unrec_text
+    assert "ยอดสุทธิ" not in unrec_text
+    assert "กำไร" not in unrec_text
+    assert "ทุน" in unrec_text
+    assert "210.00" not in unrec_text
+    assert "+10.00" not in unrec_text
+
+    # exception in status helper → same fail-closed
+    portal.reset_guard_cache()
+
+    def boom(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("profile boom")
+
+    monkeypatch.setattr(portal, "_unrecorded_status_for_card", boom)
+    boom_text = _open_profile(conn, monkeypatch=monkeypatch, now_ms=NOW + 3)
+    assert "กำลังตรวจยอด" in boom_text
+    assert "ยอดสุทธิ" not in boom_text
+    assert "กำไร" not in boom_text
+    assert "ทุน" in boom_text
+    conn.close()
+
+
+def test_portal_preview_exception_refuses_no_numbers(tmp_path: Path, monkeypatch: Any) -> None:
+    db = tmp_path / "preview_ex.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+
+    def boom(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("preview boom")
+
+    monkeypatch.setattr(portal, "_unrecorded_status_for_card", boom)
+    answers: list[str | None] = []
+    edited: list[str] = []
+
+    def answer(text: str | None = None) -> None:
+        answers.append(text)
+
+    def edit(_mid: int, text: str, **_k: Any) -> bool:
+        edited.append(text)
+        return True
+
+    out = portal._preview_request(
+        conn,
+        row,
+        "cv",
+        answer=answer,
+        edit=edit,
+        send=lambda *_a, **_k: None,
+        msg={"message_id": 1, "chat": {"id": "99", "type": "private"}},
+        futures=FakeClient(),
+        now_ms=NOW,
+    )
+    assert out["reason"] == "unrecorded_transfer"
+    body = " ".join(str(x) for x in answers + edited if x)
+    assert "20.00" not in body
+    assert "220.00" not in body
+    assert "ค่าธรรมเนียม" not in body
+    assert "ทุนใหม่" not in body
+    assert answers and "รอแอดมิน" in (answers[0] or "")
+    conn.close()
+
+
 def test_portal_card_exception_hides_net(tmp_path: Path, monkeypatch: Any) -> None:
     db = tmp_path / "card_ex.db"
     conn = open_db(db)
@@ -886,6 +1063,8 @@ def test_portal_request_gate_exception_refuses(tmp_path: Path, monkeypatch: Any)
 
 
 def test_portal_cache_invalidates_on_ledger_write(tmp_path: Path, monkeypatch: Any) -> None:
+    from jarvise_assist import partner_unrecorded as pu
+
     db = tmp_path / "cache_key.db"
     conn = open_db(db)
     _admin, bob = _seed(conn)
@@ -917,6 +1096,76 @@ def test_portal_cache_invalidates_on_ledger_write(tmp_path: Path, monkeypatch: A
     )["ok"]
     portal._build_card(conn, row, av, now_ms=NOW + 3, futures=FakeClient())
     assert calls["n"] == 2
+
+    # Independent component: payouts_due alone (no units / rowid change)
+    key_before_due = pu.ledger_cache_key(conn)
+    conn.execute(
+        """
+        INSERT INTO partner_request (
+            id, partner_id, kind, status, created_at_ms, expires_at_ms,
+            payout_micro, payout_state
+        ) VALUES (?, ?, 'convert', 'confirmed', ?, ?, 5_000_000, 'due')
+        """,
+        ("pr_cache_due_only", bob, NOW + 4, NOW + 4 + HOUR),
+    )
+    conn.commit()
+    key_after_due = pu.ledger_cache_key(conn)
+    assert key_after_due[0] == key_before_due[0]
+    assert key_after_due[1] == key_before_due[1]  # units unchanged
+    assert key_after_due[3] == key_before_due[3]  # latest event rowid unchanged
+    assert key_after_due[2] != key_before_due[2]  # due changed
+    portal._build_card(conn, row, av, now_ms=NOW + 5, futures=FakeClient())
+    assert calls["n"] == 3
+
+    # Independent component: latest event rowid alone (zero unit/due change)
+    key_before_ev = pu.ledger_cache_key(conn)
+    admin_id = str(admin["id"])
+    units_e8 = int(
+        conn.execute("SELECT units_e8 FROM partner WHERE id = ?", (admin_id,)).fetchone()["units_e8"]
+    )
+    cost_micro = int(
+        conn.execute("SELECT cost_micro FROM partner WHERE id = ?", (admin_id,)).fetchone()["cost_micro"]
+    )
+    total_e8 = int(conn.execute("SELECT COALESCE(SUM(units_e8), 0) AS s FROM partner").fetchone()["s"])
+    due_micro = key_before_ev[2]
+    conn.execute(
+        """
+        INSERT INTO partner_event (
+            id, partner_id, kind, request_id, related_event_id,
+            account_value_micro, total_units_before_e8, nav,
+            units_delta_e8, cost_delta_micro, cash_micro, fee_micro,
+            units_after_e8, cost_after_micro, actor, note, created_at_ms,
+            effective_at_ms, origin, payouts_due_micro
+        ) VALUES (
+            'pe_cache_rowid_only', ?, 'owner_deposit', NULL, NULL,
+            1010000000, ?, '1', 0, 0, 0, 0, ?, ?, 'admin',
+            'cache rowid pin', ?, NULL, 'manual', ?
+        )
+        """,
+        (admin_id, total_e8, units_e8, cost_micro, NOW + 6, due_micro),
+    )
+    conn.commit()
+    key_after_ev = pu.ledger_cache_key(conn)
+    assert key_after_ev[0] == key_before_ev[0]
+    assert key_after_ev[1] == key_before_ev[1]
+    assert key_after_ev[2] == key_before_ev[2]
+    assert key_after_ev[3] != key_before_ev[3]
+    portal._build_card(conn, row, av, now_ms=NOW + 7, futures=FakeClient())
+    assert calls["n"] == 4
+
+    # Independent component: db file path alone (fresh identical ledgers)
+    db_x = tmp_path / "cache_key_x.db"
+    db_y = tmp_path / "cache_key_y.db"
+    conn_x = open_db(db_x)
+    conn_y = open_db(db_y)
+    _seed(conn_x)
+    _seed(conn_y)
+    key_x = pu.ledger_cache_key(conn_x)
+    key_y = pu.ledger_cache_key(conn_y)
+    assert key_x[0] != key_y[0]
+    assert key_x[1:] == key_y[1:]
+    conn_x.close()
+    conn_y.close()
     conn.close()
 
 

@@ -360,6 +360,18 @@ def test_a2_prior_row_pin_refuses_nav_due_request(tmp_path: Path) -> None:
     assert any(d["field"] == "prior_hist.request_id" for d in diffs3)
     dry3 = _invoke(path, "--json")
     assert dry3.exit_code != 0
+
+    # restore request, break note (mutation pin for prior_hist.note)
+    conn.execute(
+        "UPDATE partner_event SET request_id = NULL, note = ? WHERE id = ?",
+        ("tampered prior note", L1_HIST_ID),
+    )
+    conn.commit()
+    diffs4 = a2._prior_hist_diffs(conn)
+    assert any(d["field"] == "prior_hist.note" for d in diffs4)
+    dry4 = _invoke(path, "--json")
+    assert dry4.exit_code != 0
+    assert _json_out(dry4)["ok"] is False
     conn.close()
 
 

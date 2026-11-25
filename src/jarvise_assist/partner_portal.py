@@ -1119,11 +1119,25 @@ def handle_portal_callback(
     if data == "pp:pf":
         _answer()
         account_value = None
+        valuation_pending = False
         if str(row["status"]) == "active":
-            av = _read_v_cached(conn, futures, now_ms=now_ms)
-            account_value = av.value if isinstance(av, AccountValue) else None
+            try:
+                status = _unrecorded_status_for_card(conn, futures, now_ms=now_ms)
+                valuation_pending = status != "clear"
+            except Exception:  # noqa: BLE001
+                logger.warning("portal profile unrecorded check failed")
+                valuation_pending = True
+            if not valuation_pending:
+                av = _read_v_cached(conn, futures, now_ms=now_ms)
+                account_value = av.value if isinstance(av, AccountValue) else None
         text = profile.render_profile(
-            profile.profile_data(conn, str(row["id"]), now_ms, account_value=account_value)
+            profile.profile_data(
+                conn,
+                str(row["id"]),
+                now_ms,
+                account_value=account_value,
+                valuation_pending=valuation_pending,
+            )
         )
         markup = {"inline_keyboard": [[{"text": "⬅️ กลับ", "callback_data": "pp:v"}]]}
         return _edit_or_unchanged(
