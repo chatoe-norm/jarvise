@@ -812,6 +812,163 @@ def test_portal_request_gate_clears_stale_clear_cache(
     conn.close()
 
 
+@pytest.mark.parametrize("after_mode", ("unrecorded", "unknown"))
+def test_portal_request_gate_key_raise_clears_stale_clear(
+    tmp_path: Path, monkeypatch: Any, after_mode: str
+) -> None:
+    """Codex r5: key lookup raise after fresh unrecorded/unknown must not leave clear.
+
+    Warm cached clear → fresh guard returns unrecorded|unknown → ledger_cache_key
+    raises once → submit refuses → after key recovers, card/Profile/preview stay
+    locked (no net/%/fee) or re-run the guard.
+    """
+    import sqlite3
+
+    from jarvise_assist import partner_unrecorded as pu
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    db = tmp_path / f"key_raise_{after_mode}.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+    finding = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:r5key",
+        time_ms=NOW - 1000,
+        amount=D("123"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+    mode = {"v": "clear"}
+
+    def _guard(conn: Any, client: Any, *, now_ms: int) -> GuardResult:
+        if mode["v"] == "clear":
+            return GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[], warn=False)
+        if mode["v"] == "unrecorded":
+            return GuardResult(
+                status="ok",
+                checked_at_ms=int(now_ms),
+                findings=[finding],
+                warn=True,
+            )
+        return GuardResult(
+            status="read_failed",
+            checked_at_ms=int(now_ms),
+            findings=[],
+            warn=True,
+            error="xfer",
+        )
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _guard)
+
+    clear_text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "ยอดสุทธิ" in clear_text
+    assert "206.15" in clear_text
+    assert portal._guard_cache is not None
+    assert portal._guard_cache[1] == "clear"
+
+    mode["v"] = after_mode
+    real_key = pu.ledger_cache_key
+    calls = {"n": 0}
+
+    def flaky_key(c: Any) -> tuple[str, int, int, int]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("ledger key boom")
+        return real_key(c)
+
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.ledger_cache_key",
+        flaky_key,
+    )
+
+    out = portal._submit_request(
+        conn,
+        row,
+        "cv",
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: True,
+        send=lambda *_a, **_k: None,
+        msg={"message_id": 1, "chat": {"id": "99", "type": "private"}},
+        futures=FakeClient(),
+        now_ms=NOW + 1,
+    )
+    assert out["reason"] == "unrecorded_transfer"
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM partner_request WHERE kind = 'convert' AND status = 'pending'"
+        ).fetchone()["n"]
+        == 0
+    )
+    # Mid-check key raise must have dropped the prior clear (not left it intact).
+    assert portal._guard_cache is None
+    assert calls["n"] == 1
+
+    # Key recovers; display must stay locked / re-run guard (no stale clear).
+    _assert_displays_locked_after_refuse(
+        conn,
+        row,
+        monkeypatch=monkeypatch,
+        av=av,
+        futures=FakeClient(),
+        now_ms=NOW + 2,
+    )
+    conn.close()
+
+
+def test_portal_display_key_raise_clears_cache(tmp_path: Path, monkeypatch: Any) -> None:
+    """Codex r5: display helper key lookup raise must clear a prior cached clear."""
+    import sqlite3
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
+    db = tmp_path / "display_key_raise.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(
+        value=D("1061.5"),
+        wallet=D("1061.5"),
+        unrealized=D("0"),
+        open_positions=0,
+        read_at_ms=NOW,
+    )
+
+    def _clear(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(status="ok", checked_at_ms=NOW, findings=[], warn=False)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _clear)
+    text, _m = portal._build_card(conn, row, av, now_ms=NOW, futures=FakeClient())
+    assert "ยอดสุทธิ" in text
+    assert portal._guard_cache is not None
+    assert portal._guard_cache[1] == "clear"
+
+    def boom_key(_c: Any) -> tuple[str, int, int, int]:
+        raise sqlite3.OperationalError("display key boom")
+
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.ledger_cache_key",
+        boom_key,
+    )
+    with pytest.raises(sqlite3.OperationalError, match="display key boom"):
+        portal._unrecorded_status_for_card(conn, FakeClient(), now_ms=NOW + 1)
+    assert portal._guard_cache is None
+    conn.close()
+
+
 def test_live_clear_overrides_stale_state_hint(tmp_path: Path, monkeypatch: Any) -> None:
     db = tmp_path / "hint.db"
     conn = open_db(db)

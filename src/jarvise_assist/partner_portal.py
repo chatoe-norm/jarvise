@@ -163,7 +163,12 @@ def _unrecorded_status_for_card(conn: sqlite3.Connection, futures: Any, *, now_m
     from jarvise_assist import partner_unrecorded as pu
 
     global _guard_cache
-    key = pu.ledger_cache_key(conn)
+    try:
+        key = pu.ledger_cache_key(conn)
+    except Exception:
+        # Key lookup raised — drop any prior clear so display stays fail-closed.
+        _guard_cache = None
+        raise
     if _guard_cache is not None:
         cached_key, status, at = _guard_cache
         if cached_key == key and int(now_ms) - at < _GUARD_CACHE_TTL_MS and status != "unknown":
@@ -189,17 +194,22 @@ def _money_request_blocked(conn: sqlite3.Connection, futures: Any, *, now_ms: in
     Syncs the display cache with the fresh result: clear refreshes the entry;
     unrecorded stores the lock; unknown or a raised check clears the cache so
     a prior cached clear cannot keep card/Profile/preview unlocked.
+
+    Cache is cleared *before* the fresh guard and key lookup so a mid-check
+    failure cannot leave a prior cached clear intact.
     """
     from jarvise_assist import partner_unrecorded as pu
 
     global _guard_cache
+    # Drop any prior clear before fallible work.
+    _guard_cache = None
     client = _resolve_client(futures)
     try:
         status = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
+        key = pu.ledger_cache_key(conn)
     except Exception:
         _guard_cache = None
         raise
-    key = pu.ledger_cache_key(conn)
     if status == "clear":
         _guard_cache = (key, status, int(now_ms))
         return False
