@@ -36,8 +36,8 @@ from jarvise_assist.execute import (
     MSG_REDUCE_FLAG_OFF,
     MSG_STOP_COVERAGE_READ_FAIL,
     PREVIEW_TTL_MS,
+    RECOVER_LEASE_MS,
     RECOVER_NOT_FOUND_PASSES,
-    RECOVER_NOT_FOUND_SPAN_MS,
     BinanceTradeClient,
     _aged_read_snapshot,
     _maybe_offer_after_reduce,
@@ -1431,7 +1431,7 @@ def test_main_no_tighter_advice_no_button(tmp_path: Path, monkeypatch: pytest.Mo
     conn.close()
 
 
-def test_outside_universe_non_quick_no_be(tmp_path: Path) -> None:
+def test_outside_universe_non_quick_no_be(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     conn = open_db(tmp_path / "outside.db")
     ts = now_ms()
     # Seed a watch row so the ASSIST_SYMBOLS gate itself is exercised (not
@@ -1453,6 +1453,13 @@ def test_outside_universe_non_quick_no_be(tmp_path: Path) -> None:
             "last_seen_ms": ts,
             "closed_at_ms": None,
         },
+    )
+    # Stub trail advice so removing the ASSIST_SYMBOLS gate would defer a card
+    # (tighter than initial 1.05, buffer-ok vs mark 0.99). Without the stub,
+    # advice is None and the universe check is not exercised.
+    monkeypatch.setattr(
+        "jarvise_assist.execute.current_trail_advice",
+        lambda **_k: (Decimal("1.02"), "trail"),
     )
 
     class _Trade:
@@ -2856,12 +2863,47 @@ def test_recover_reduce_not_found_inside_span_not_failed(
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
-    # All passes inside the span → must not fail yet
+    # Space passes past the 4-min recovery lease so each pass can write
+    # recover_not_found; last pass is ~10 min, still inside the 15-min span.
     for i in range(RECOVER_NOT_FOUND_PASSES):
-        run_exec_recovery(conn, trade, now_ms_value=ts + 1000 + i * 1000)
-    assert ts + 1000 + (RECOVER_NOT_FOUND_PASSES - 1) * 1000 - (ts + 1000) < RECOVER_NOT_FOUND_SPAN_MS
+        run_exec_recovery(
+            conn,
+            trade,
+            now_ms_value=ts + 1000 + i * (RECOVER_LEASE_MS + 60_000),
+        )
+    n = conn.execute(
+        "SELECT COUNT(*) FROM assist_exec_log WHERE intent_id=? AND step='recover_not_found'",
+        (rid,),
+    ).fetchone()[0]
+    assert n == RECOVER_NOT_FOUND_PASSES
     assert get_exec_intent(conn, rid)["status"] != "failed"
     assert get_exec_intent(conn, rid)["status"] in {"unknown", "recovering"}
+    conn.close()
+
+
+def test_maybe_offer_long_not_tighter_no_button(tmp_path: Path) -> None:
+    """F3: Quick long-side not-tighter (execute.py:1014) must suppress the BE button."""
+    conn = open_db(tmp_path / "offer-nt-long.db")
+    ts = now_ms()
+    placed = _verified_stop(client_id="owner-sl", trigger="1.003", qty="50", side="SELL")
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _quick_offer_trade(
+            side="long",
+            entry="1",
+            mark="1.01",
+            amt="50",
+            orders=[placed],
+        ),  # type: ignore[arg-type]
+        intent={"symbol": "DOGEUSDT", "side": "long"},
+        preview={"cohort": "quick"},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง DOGEUSDT",
+        now_ms_value=ts,
+        send=None,
+    )
+    assert MSG_PARTIAL_BE_NOT_TIGHTER in text
+    assert markup is None and deferred is None
     conn.close()
 
 
@@ -2926,6 +2968,85 @@ def test_main_advice_not_tighter_no_deferred(tmp_path: Path, monkeypatch: pytest
         conn,
         _Trade(),  # type: ignore[arg-type]
         intent={"symbol": "BTCUSDT", "side": "short"},
+        preview={},
+        reduce_intent_id="r1",
+        result_text="✅ ปิดครึ่ง BTCUSDT",
+        now_ms_value=ts,
+        send=lambda *_a, **_k: None,
+    )
+    assert text == "✅ ปิดครึ่ง BTCUSDT"
+    assert markup is None and deferred is None
+    conn.close()
+
+
+def test_main_advice_long_not_tighter_no_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F3: main long-side not-tighter (execute.py:1070) must not defer advice."""
+    conn = open_db(tmp_path / "main-nt-long.db")
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 0.08,
+            "qty": 50.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.077,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts,
+            "closed_at_ms": None,
+        },
+    )
+    # Advice worse than placed stop (long: lower = not tighter)
+    monkeypatch.setattr(
+        "jarvise_assist.execute.current_trail_advice",
+        lambda **_k: (Decimal("0.079"), "trail"),
+    )
+    from jarvise_assist.futures import FuturesPosition, SymbolFilters
+
+    placed = _verified_stop(
+        client_id="jv-old",
+        trigger="0.0795",
+        qty="50",
+        side="SELL",
+        symbol="BTCUSDT",
+    )
+
+    class _Trade:
+        def position_risk(self, **_k: Any) -> list[Any]:
+            return [
+                FuturesPosition(
+                    symbol="BTCUSDT",
+                    position_side="BOTH",
+                    position_amt=Decimal("50"),
+                    entry_price=Decimal("0.08"),
+                    mark_price=Decimal("0.084"),
+                    update_time_ms=1,
+                )
+            ]
+
+        def symbol_filters(self, _s: str) -> Any:
+            return SymbolFilters(
+                step_size=Decimal("1"),
+                min_qty=Decimal("1"),
+                min_notional=Decimal("5"),
+                tick_size=Decimal("0.00001"),
+            )
+
+        def mark_price(self, _s: str) -> Decimal:
+            return Decimal("0.084")
+
+        def all_open_orders(self, **_k: Any) -> list[Any]:
+            return [placed]
+
+    text, markup, deferred = _maybe_offer_after_reduce(
+        conn,
+        _Trade(),  # type: ignore[arg-type]
+        intent={"symbol": "BTCUSDT", "side": "long"},
         preview={},
         reduce_intent_id="r1",
         result_text="✅ ปิดครึ่ง BTCUSDT",
