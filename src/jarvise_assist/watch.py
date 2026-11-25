@@ -1257,11 +1257,19 @@ def run_assist_watch(
     """Poll open futures positions and emit no-stop / move / exit advice."""
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     send_fn = send or _default_send
-    settings = ensure_settings(conn)
+    try:
+        settings = ensure_settings(conn)
+    except Exception:
+        # Settings are required; emit degraded cutoff (Binance never reached) then re-raise.
+        _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=False)
+        raise
     assist_enabled = bool(settings["enabled"])
     # Off = no new signals / no pause auto-resume; protective watch still runs.
     if assist_enabled:
-        maybe_auto_resume(conn, now_ms=ts, send=send_fn)
+        try:
+            maybe_auto_resume(conn, now_ms=ts, send=send_fn)
+        except Exception:  # noqa: BLE001 — resume must not skip cutoff or protective watch
+            logger.exception("assist maybe_auto_resume failed")
     else:
         _log_decision(decision="watch_only", reason="assist_disabled")
 

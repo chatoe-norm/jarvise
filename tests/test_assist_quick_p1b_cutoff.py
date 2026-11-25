@@ -571,6 +571,143 @@ def test_watch_assert_key_safe_network_raises(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_watch_ensure_settings_raises_sends_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SHOULD 5: ensure_settings raise → degraded cutoff then re-raise."""
+    conn = open_db(tmp_path / "es.db")
+    _seed_trade_and_reg(conn)
+    monkeypatch.setattr(
+        "jarvise_assist.watch.ensure_settings",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("settings")),
+    )
+    sent: list[str] = []
+
+    def capture(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    with pytest.raises(RuntimeError, match="settings"):
+        run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_233100, send=capture)
+    _assert_one_trade_and_degraded_reg(sent)
+    trade = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='tw'").fetchone()
+    reg = conn.execute("SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'").fetchone()
+    assert trade["cutoff_notice_day"] == "2026-11-23"
+    assert reg["cutoff_notice_day"] == "2026-11-23"
+    conn.close()
+
+
+def test_watch_maybe_auto_resume_raises_still_alerts_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SHOULD 5: maybe_auto_resume raise → log+continue; healthy cutoff via real sync_ok."""
+    conn = open_db(tmp_path / "ar.db")
+    _seed_trade_and_reg(conn)
+    called = {"n": 0}
+
+    def boom_resume(*_a: Any, **_k: Any) -> None:
+        called["n"] += 1
+        raise RuntimeError("resume")
+
+    monkeypatch.setattr("jarvise_assist.watch.maybe_auto_resume", boom_resume)
+    monkeypatch.setattr("jarvise_assist.watch.sync_quick_trades", lambda *_a, **_k: {})
+    sent: list[str] = []
+
+    def capture(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    out = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_233100, send=capture)
+    assert out["ok"] is True
+    assert called["n"] == 1
+    trades = _trade_alerts(sent)
+    regs = _reg_alerts(sent)
+    assert len(trades) == 1
+    assert "ถือมา 0:02" in trades[0]
+    assert regs == [REG_ALERT]
+    assert REG_DEGRADED not in sent
+    trade = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='tw'").fetchone()
+    reg = conn.execute("SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'").fetchone()
+    assert trade["cutoff_notice_day"] == "2026-11-23"
+    assert reg["cutoff_notice_day"] == "2026-11-23"
+    conn.close()
+
+
+def test_watch_ensure_settings_raises_outside_window_no_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SHOULD 5: ensure_settings raise outside window — no claim, no cutoff text."""
+    conn = open_db(tmp_path / "eo.db")
+    _seed_trade_and_reg(conn)
+    monkeypatch.setattr(
+        "jarvise_assist.watch.ensure_settings",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("settings")),
+    )
+    sent: list[str] = []
+
+    def capture(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    with pytest.raises(RuntimeError, match="settings"):
+        run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_232959, send=capture)
+    assert _trade_alerts(sent) == []
+    assert _reg_alerts(sent) == []
+    trade = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='tw'").fetchone()
+    reg = conn.execute("SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'").fetchone()
+    assert trade["cutoff_notice_day"] is None
+    assert reg["cutoff_notice_day"] is None
+    conn.close()
+
+
+def test_watch_ensure_settings_raise_then_later_tick_heals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SHOULD 5: failed first emit leaves day unclaimed; later tick still alerts."""
+    conn = open_db(tmp_path / "heal.db")
+    _seed_trade_and_reg(conn)
+    # Keep reg unexpired at T_233500 so the healthy second tick still alerts it.
+    conn.execute(
+        "UPDATE assist_quick_registration SET expires_at_ms=? WHERE id='reg1'",
+        (T_235500,),
+    )
+    conn.commit()
+    sent: list[str] = []
+
+    def capture(msg: str, **_k: Any) -> bool:
+        sent.append(msg)
+        return True
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "jarvise_assist.watch.ensure_settings",
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("settings")),
+        )
+        m.setattr(
+            "jarvise_assist.watch.maybe_send_cutoff_alerts",
+            lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
+        )
+        with pytest.raises(RuntimeError, match="settings"):
+            run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_233100, send=capture)
+
+    assert sent == []
+    trade = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='tw'").fetchone()
+    reg = conn.execute("SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'").fetchone()
+    assert trade["cutoff_notice_day"] is None
+    assert reg["cutoff_notice_day"] is None
+
+    monkeypatch.setattr("jarvise_assist.watch.sync_quick_trades", lambda *_a, **_k: {})
+    out = run_assist_watch(conn, futures=FakeFutures(), now_ms_value=T_233500, send=capture)
+    assert out["ok"] is True
+    trades = _trade_alerts(sent)
+    regs = _reg_alerts(sent)
+    assert len(trades) == 1
+    assert regs == [REG_ALERT]
+    trade = conn.execute("SELECT cutoff_notice_day FROM assist_quick_trade WHERE id='tw'").fetchone()
+    reg = conn.execute("SELECT cutoff_notice_day FROM assist_quick_registration WHERE id='reg1'").fetchone()
+    assert trade["cutoff_notice_day"] == "2026-11-23"
+    assert reg["cutoff_notice_day"] == "2026-11-23"
+    conn.close()
+
+
 def test_watch_key_unsafe_returns_with_cutoff(tmp_path: Path) -> None:
     """Item 2: key-unsafe early return — one trade alert + degraded reg."""
     conn = open_db(tmp_path / "ku.db")
