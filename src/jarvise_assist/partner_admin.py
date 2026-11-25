@@ -48,6 +48,8 @@ _GUARD_MARKER = "\n\n⚠️ ตรวจยอดโอน"
 _OWNER_TX_MAX_AGE_MS = 6 * 60 * 60 * 1000
 _OWNER_TX_MAX_INCOME = Decimal("1")
 _OWNER_HIST_HINT = "ใช้เครื่องมือบันทึกย้อนหลัง (historical one-off) แทน"
+_UNRECORDED_MSG = "มีเงินโอนเข้า/ออกที่ยังไม่บันทึก — บันทึกด้วย p owner ก่อน"
+_GUARD_FETCH_BLOCK = frozenset({"no_client", "read_failed", "incomplete", "bad_payload", "error"})
 
 _CENT = Decimal("0.01")
 _NAV_Q = Decimal("0.000001")
@@ -512,6 +514,27 @@ def _guard_ok_suffix(result: GuardResult) -> str:
     return line
 
 
+def _blocks_on_unrecorded(result: GuardResult) -> bool:
+    """cv/wd/close confirm: fail closed on unrecorded transfers or guard fetch failure."""
+    if result.status in _GUARD_FETCH_BLOCK:
+        return True
+    return any(f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded") for f in result.findings)
+
+
+def _open_unrecorded_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    db_file = ""
+    if row is not None:
+        db_file = str(row["file"] if hasattr(row, "keys") else row[2] or "")
+    if not db_file:
+        return 0
+    from jarvise_assist.partner_audit import load_state
+
+    state = load_state(Path(db_file).with_name("partner_audit_state.json"))
+    open_list = state.get("open_unrecorded") or []
+    return len(open_list) if isinstance(open_list, list) else 0
+
+
 def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, Any]]:
     """Render admin message text from the DB row (never from callback message.text)."""
     empty: dict[str, Any] = {"inline_keyboard": []}
@@ -709,6 +732,9 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
         ).fetchone()["n"]
     )
     lines.append(f"รายการค้าง {pending_n}")
+    unrecorded_n = _open_unrecorded_count(conn)
+    if unrecorded_n > 0:
+        lines.append(f"⚠️ มีเงินโอนที่ยังไม่บันทึก {unrecorded_n} รายการ — ตัวเลข partner ยังไม่ถูกต้อง")
     verify = ps.verify_ledger(conn)
     mism = len(verify.get("mismatches") or [])
     if verify.get("ok"):
@@ -2203,17 +2229,32 @@ def handle_partner_callback(
 
             client = _resolve_client(futures)
             guard_suffix = ""
+            # Always run the guard for cv/wd/close so unrecorded transfers and
+            # fetch failures cannot be force-confirmed (including forged pa:rf:).
+            guard_result, guard_text = _transfer_guard(conn, client, now_ms=now_ms, req=req)
+            if _blocks_on_unrecorded(guard_result):
+                _answer(_UNRECORDED_MSG)
+                text = _merge_guard_text(str(msg.get("text") or ""), guard_text)
+                # No force button — owner must book with p owner first.
+                refuse_markup: dict[str, Any] = {
+                    "inline_keyboard": [[{"text": "✖️ ปฏิเสธ", "callback_data": f"pa:rn:{rid}"}]]
+                }
+                edited_ok = False
+                if mid is not None:
+                    edited_ok = bool(edit(int(mid), text, reply_markup=refuse_markup))
+                if mid is None or not edited_ok:
+                    send(text, reply_markup=refuse_markup)
+                return {"ok": False, "reason": "unrecorded_transfer"}
             if _should_run_guard(force=force, ts_s=ts_s, now_ms=now_ms):
-                guard_result, guard_text = _transfer_guard(conn, client, now_ms=now_ms, req=req)
                 if guard_result.warn:
                     _answer("มีเรื่องยอดโอน — อ่านบนการ์ดก่อนยืนยัน")
                     text = _merge_guard_text(str(msg.get("text") or ""), guard_text)
-                    buttons = _guard_request_buttons(rid, int(now_ms) // 1000)
+                    warn_markup = _guard_request_buttons(rid, int(now_ms) // 1000)
                     edited_ok = False
                     if mid is not None:
-                        edited_ok = bool(edit(int(mid), text, reply_markup=buttons))
+                        edited_ok = bool(edit(int(mid), text, reply_markup=warn_markup))
                     if mid is None or not edited_ok:
-                        send(text, reply_markup=buttons)
+                        send(text, reply_markup=warn_markup)
                     return {"ok": False, "reason": "guard_warn"}
                 guard_suffix = _guard_ok_suffix(guard_result)
             else:

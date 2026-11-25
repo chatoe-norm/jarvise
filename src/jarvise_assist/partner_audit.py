@@ -805,6 +805,7 @@ def _empty_state() -> dict[str, Any]:
     return {
         "v": 1,
         "alerted": {},
+        "open_unrecorded": [],
         "last_ok_ms": None,
         "fail_since_ms": None,
         "fail_alerted": False,
@@ -833,6 +834,10 @@ def load_state(path: Path) -> dict[str, Any]:
         except (TypeError, ValueError):
             continue
     out["alerted"] = clean_alerted
+    raw_open = data.get("open_unrecorded")
+    if isinstance(raw_open, list):
+        out["open_unrecorded"] = [str(x) for x in raw_open if str(x)]
+    # Old state files without open_unrecorded stay as [].
     lok = data.get("last_ok_ms")
     out["last_ok_ms"] = int(lok) if isinstance(lok, (int, float)) else None
     fs = data.get("fail_since_ms")
@@ -994,6 +999,13 @@ def run_partner_audit_job(
     state["last_ok_ms"] = int(now_ms)
     state["fail_since_ms"] = None
     state["alerted"] = {fp: ms for fp, ms in alerted_map.items() if int(now_ms) - int(ms) <= PRUNE_MS}
+    state["open_unrecorded"] = sorted(
+        {
+            str(f.fingerprint)
+            for f in findings
+            if f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded")
+        }
+    )
     save_state(state_path, state)
 
     return {

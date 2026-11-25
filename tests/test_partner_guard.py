@@ -531,23 +531,25 @@ def test_cb_pa_ry_warn_blocks_confirm(tmp_path: Path, monkeypatch: Any, env_chat
     out, sent, edited, answers = _pa_cb(
         conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=t_xfer + 60_000
     )
-    assert out == {"ok": False, "reason": "guard_warn"}
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
     req = ps.get_request(conn, rid)
     assert req is not None and str(req["status"]) == "pending"
     assert req["payout_state"] in (None, "none") or str(req["payout_state"]) == "none"
     assert client.balance_calls == 0  # no _read_v
     assert edited
-    assert "ตรวจยอดโอนก่อนยืนยัน" in edited[0]["text"]
     assert "ยังไม่อยู่ในสมุด" in edited[0]["text"]
     kb = edited[0]["reply_markup"]["inline_keyboard"]
-    assert kb[0][0]["callback_data"].startswith(f"pa:rf:{rid}:")
+    flat = [b["callback_data"] for row in kb for b in row]
+    assert not any(str(c).startswith("pa:rf:") for c in flat)
+    assert any(str(c).startswith("pa:rn:") for c in flat)
     assert sent == []
-    assert "มีเรื่องยอดโอน" in (answers[0][1] or "")
+    assert answers and "p owner" in (answers[0][1] or "")
     assert len(client.calls) > n_income_before
     conn.close()
 
 
-def test_cb_pa_rf_within_900_confirms(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+def test_cb_pa_rf_unrecorded_still_refused(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    """B2: forged/force confirm cannot override unrecorded transfers on cv/wd/close."""
     conn = open_db(tmp_path / "rf_ok.db")
     bob_id = _setup_bob_with_profit(conn)
     created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
@@ -557,10 +559,9 @@ def test_cb_pa_rf_within_900_confirms(tmp_path: Path, monkeypatch: Any, env_chat
     client.wallet = _PROFIT_V
     now = t_xfer + 60_000
     out1, _s1, edited1, _a1 = _pa_cb(conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now)
-    assert out1["reason"] == "guard_warn"
-    stamp = edited1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
-    # force within 900s (same second window)
-    out2, sent2, edited2, _a2 = _pa_cb(
+    assert out1["reason"] == "unrecorded_transfer"
+    stamp = str(now // 1000)
+    out2, _sent2, _edited2, _a2 = _pa_cb(
         conn,
         f"pa:rf:{rid}:{stamp}",
         client=client,
@@ -568,16 +569,14 @@ def test_cb_pa_rf_within_900_confirms(tmp_path: Path, monkeypatch: Any, env_chat
         now_ms=now + 1000,
         text=edited1[0]["text"],
     )
-    assert out2.get("ok") is True
-    assert "ยืนยันทั้งที่มีคำเตือนยอดโอน" in edited2[0]["text"]
-    assert str(ps.get_request(conn, rid)["status"]) == "confirmed"
-    # partner notify has no guard text
-    partner_msgs = [s for s in sent2 if s.get("chat_id")]
-    assert partner_msgs == [] or all("ตรวจยอดโอน" not in s["text"] for s in partner_msgs)
+    assert out2 == {"ok": False, "reason": "unrecorded_transfer"}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
     conn.close()
 
 
-def test_cb_pa_rf_after_901_reruns_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+def test_cb_pa_rf_after_901_unrecorded_still_refused(
+    tmp_path: Path, monkeypatch: Any, env_chat: None
+) -> None:
     conn = open_db(tmp_path / "rf_old.db")
     bob_id = _setup_bob_with_profit(conn)
     created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
@@ -587,8 +586,8 @@ def test_cb_pa_rf_after_901_reruns_guard(tmp_path: Path, monkeypatch: Any, env_c
     client.wallet = _PROFIT_V
     now = t_xfer + 60_000
     out1, _s, edited1, _a = _pa_cb(conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now)
-    assert out1["reason"] == "guard_warn"
-    old_stamp = int(edited1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1])
+    assert out1["reason"] == "unrecorded_transfer"
+    old_stamp = now // 1000
     later = now + 901_000
     out2, _s2, edited2, _a2 = _pa_cb(
         conn,
@@ -598,11 +597,10 @@ def test_cb_pa_rf_after_901_reruns_guard(tmp_path: Path, monkeypatch: Any, env_c
         now_ms=later,
         text=edited1[0]["text"],
     )
-    assert out2 == {"ok": False, "reason": "guard_warn"}
+    assert out2 == {"ok": False, "reason": "unrecorded_transfer"}
     assert str(ps.get_request(conn, rid)["status"]) == "pending"
-    new_stamp = int(edited2[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1])
-    assert new_stamp == later // 1000
-    assert new_stamp != old_stamp
+    flat = [b["callback_data"] for row in edited2[0]["reply_markup"]["inline_keyboard"] for b in row]
+    assert not any(str(c).startswith("pa:rf:") for c in flat)
     conn.close()
 
 
@@ -710,7 +708,7 @@ def test_cb_guard_raising_warns_type_only(tmp_path: Path, monkeypatch: Any, env_
     out, _s, edited, _a = _pa_cb(
         conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 20
     )
-    assert out == {"ok": False, "reason": "guard_warn"}
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
     assert "RuntimeError" in edited[0]["text"]
     assert "secret detail" not in edited[0]["text"]
     assert str(ps.get_request(conn, rid)["status"]) == "pending"
@@ -726,9 +724,10 @@ def test_cb_second_warning_replaces_marker_once(tmp_path: Path, monkeypatch: Any
     client = FakeClient([_xfer(time_ms=t_xfer, amount="40", tran_id="orphan_rep")])
     client.wallet = _PROFIT_V
     now = t_xfer + 60_000
-    _o1, _s1, edited1, _a1 = _pa_cb(conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now)
+    o1, _s1, edited1, _a1 = _pa_cb(conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now)
+    assert o1["reason"] == "unrecorded_transfer"
     assert edited1[0]["text"].count("⚠️ ตรวจยอดโอน") == 1
-    _o2, _s2, edited2, _a2 = _pa_cb(
+    o2, _s2, edited2, _a2 = _pa_cb(
         conn,
         f"pa:ry:{rid}",
         client=client,
@@ -736,6 +735,7 @@ def test_cb_second_warning_replaces_marker_once(tmp_path: Path, monkeypatch: Any
         now_ms=now + 1000,
         text=edited1[0]["text"],
     )
+    assert o2["reason"] == "unrecorded_transfer"
     assert edited2[0]["text"].count("\n\n⚠️ ตรวจยอดโอน") == 1
     assert edited2[0]["text"].count("⚠️ ตรวจยอดโอนก่อนยืนยัน") == 1
     conn.close()
@@ -750,9 +750,10 @@ def test_cb_portal_request_pa_ry_runs_guard(tmp_path: Path, monkeypatch: Any, en
     code = str(invite["code"])
     bound = ps.bind_invite(conn, code, "501", admin_chat_id=ADMIN, now_ms=NOW + 6)
     assert bound.get("ok")
-    client = FakeClient([_xfer(time_ms=NOW + 12, amount="33", tran_id="portal_orphan")])
-    client.wallet = _PROFIT_V
-    _patch_read(monkeypatch, client)
+    # Portal create must see a clean book; orphan arrives only at admin confirm.
+    clean = FakeClient()
+    clean.wallet = _PROFIT_V
+    _patch_read(monkeypatch, clean)
     portal.reset_value_cache()
     sent, send = _send_capture()
     portal.handle_portal_callback(
@@ -767,23 +768,25 @@ def test_cb_portal_request_pa_ry_runs_guard(tmp_path: Path, monkeypatch: Any, en
         send=send,
         answer=_answer_capture()[1],
         edit=_edit_capture()[1],
-        futures=client,
+        futures=clean,
         now_ms=NOW + 15,
     )
     admin_cards = [s for s in sent if "chat_id" not in s and "reply_markup" in s and s["reply_markup"]]
     assert admin_cards
     rid = admin_cards[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
     assert rid.startswith("pr_")
+    orphan = FakeClient([_xfer(time_ms=NOW + 12, amount="33", tran_id="portal_orphan")])
+    orphan.wallet = _PROFIT_V
     out, _s, edited, _a = _pa_cb(
         conn,
         f"pa:ry:{rid}",
-        client=client,
+        client=orphan,
         monkeypatch=monkeypatch,
         now_ms=NOW + 16,
         text=admin_cards[0]["text"],
     )
-    assert out == {"ok": False, "reason": "guard_warn"}
-    assert "ตรวจยอดโอนก่อนยืนยัน" in edited[0]["text"]
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
+    assert "ยังไม่อยู่ในสมุด" in edited[0]["text"]
     conn.close()
 
 
@@ -839,7 +842,7 @@ def test_cb_pa_dy_warn_then_df_override(tmp_path: Path, monkeypatch: Any, env_ch
     conn.close()
 
 
-def test_cb_force_future_stamp_reruns_guard(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+def test_cb_force_future_stamp_unrecorded_refused(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "rf_future.db")
     bob_id = _setup_bob_with_profit(conn)
     created = ps.create_request(conn, bob_id, "convert", NOW + 10, source="admin")
@@ -857,13 +860,15 @@ def test_cb_force_future_stamp_reruns_guard(tmp_path: Path, monkeypatch: Any, en
         monkeypatch=monkeypatch,
         now_ms=now,
     )
-    assert out == {"ok": False, "reason": "guard_warn"}
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
     assert client.calls != []
     assert str(ps.get_request(conn, rid)["status"]) == "pending"
     conn.close()
 
 
-def test_cb_ry_warn_bound_partner_gets_nothing(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+def test_cb_ry_unrecorded_bound_partner_gets_nothing(
+    tmp_path: Path, monkeypatch: Any, env_chat: None
+) -> None:
     conn = open_db(tmp_path / "ry_bound.db")
     bob_id = _setup_bob_with_profit(conn)
     _bind_partner(conn, bob_id, tg="501", now_ms=NOW + 3)
@@ -877,11 +882,11 @@ def test_cb_ry_warn_bound_partner_gets_nothing(tmp_path: Path, monkeypatch: Any,
     out1, sent1, edited1, _a1 = _pa_cb(
         conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now
     )
-    assert out1 == {"ok": False, "reason": "guard_warn"}
+    assert out1 == {"ok": False, "reason": "unrecorded_transfer"}
     assert sent1 == []
-    stamp = edited1[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":")[-1]
+    stamp = str(now // 1000)
     client.calls.clear()
-    out2, sent2, edited2, _a2 = _pa_cb(
+    out2, sent2, _edited2, _a2 = _pa_cb(
         conn,
         f"pa:rf:{rid}:{stamp}",
         client=client,
@@ -889,21 +894,9 @@ def test_cb_ry_warn_bound_partner_gets_nothing(tmp_path: Path, monkeypatch: Any,
         now_ms=now + 1000,
         text=edited1[0]["text"],
     )
-    assert out2.get("ok") is True
-    assert str(ps.get_request(conn, rid)["payout_state"]) == "due"
-    partner_msgs = [s["text"] for s in sent2 if s.get("chat_id") == "501"]
-    assert len(partner_msgs) == 1
-    cash = ps.usdt_from_micro(int(ps.get_request(conn, rid)["payout_micro"]))
-    fee_row = conn.execute(
-        "SELECT fee_micro FROM partner_event WHERE request_id = ? AND kind = 'withdraw_profit'",
-        (rid,),
-    ).fetchone()
-    assert fee_row is not None
-    fee = ps.usdt_from_micro(int(fee_row["fee_micro"]))
-    expected = f"✅ แอดมินยืนยันถอนกำไร {pa.fmt_usdt(cash)} USDT (ค่าธรรมเนียม {pa.fmt_usdt(fee)}) · รอโอน"
-    assert partner_msgs[0] == expected
-    assert "ตรวจยอดโอน" not in partner_msgs[0]
-    assert "⚠️ ยืนยันทั้งที่" not in partner_msgs[0]
+    assert out2 == {"ok": False, "reason": "unrecorded_transfer"}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    assert sent2 == [] or all(s.get("chat_id") != "501" for s in sent2)
     conn.close()
 
 
@@ -1047,7 +1040,7 @@ def test_cb_read_failure_shows_last_ok(tmp_path: Path, monkeypatch: Any, env_cha
     out, _s, edited, _a = _pa_cb(
         conn, f"pa:ry:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 20
     )
-    assert out == {"ok": False, "reason": "guard_warn"}
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
     text = edited[0]["text"]
     assert "ตรวจยอดโอนไม่ได้ตอนนี้" in text
     assert "ConnectionError" in text
@@ -1098,10 +1091,12 @@ def test_cb_edit_fails_sends_one_card(tmp_path: Path, monkeypatch: Any, env_chat
         futures=client,
         now_ms=t_xfer + 60_000,
     )
-    assert out == {"ok": False, "reason": "guard_warn"}
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
     assert len(sent) == 1
     assert "chat_id" not in sent[0]
-    assert sent[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].startswith(f"pa:rf:{rid}:")
+    flat = [b["callback_data"] for row in sent[0]["reply_markup"]["inline_keyboard"] for b in row]
+    assert not any(str(c).startswith("pa:rf:") for c in flat)
+    assert any(str(c).startswith(f"pa:rn:{rid}") for c in flat)
     conn.close()
 
 
