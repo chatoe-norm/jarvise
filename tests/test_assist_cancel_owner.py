@@ -2058,7 +2058,9 @@ def test_o_exit_recovery_list_only_leftovers_notified(
     ]
     assert owner_deletes == []
     joined = "\n".join(sent)
-    assert "owner-ut-only" in joined or "ลบในแอป" in joined or "ค้าง" in joined
+    assert "คำสั่งที่ยังค้างบน" in joined
+    assert any(ln.strip().startswith("•") for ln in joined.splitlines())
+    assert "อ่านคำสั่งค้างไม่ได้" not in joined
     bare = [m for m in sent if m.strip() == "✅ ปิด DOGEUSDT"]
     assert not bare, f"must not notify only bare close, got {sent!r}"
     conn.close()
@@ -2067,7 +2069,7 @@ def test_o_exit_recovery_list_only_leftovers_notified(
 def test_o_finish_flat_exit_list_only_leftovers_notified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Medium 3: advice/non-menu finish path lists updateTime-only leftovers, status done."""
+    """Medium 3: menu xx: lists updateTime-only leftovers once; status done."""
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
     monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
     monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
@@ -2080,9 +2082,6 @@ def test_o_finish_flat_exit_list_only_leftovers_notified(
         symbol="DOGEUSDT",
         side="short",
         preview={
-            # Non-menu advice would also hit _finish_flat_exit; menu source is
-            # the stable xx: confirm path. Listing comes from finish_flat (menu
-            # skip avoids a second append when leftovers are already present).
             "source": "menu",
             "qty": "100",
             "entry": "0.08",
@@ -2128,7 +2127,10 @@ def test_o_finish_flat_exit_list_only_leftovers_notified(
     ]
     assert owner_deletes == []
     result_text = str(row.get("result_text") or "")
-    assert "owner-ut-finish" in result_text or "ลบในแอป" in result_text or "ค้าง" in result_text
+    assert "คำสั่งที่ยังค้างบน" in result_text
+    bullets = [ln for ln in result_text.splitlines() if ln.strip().startswith("•")]
+    assert len(bullets) == 1, f"expected one leftover bullet, got {bullets!r}"
+    assert "อ่านคำสั่งค้างไม่ได้" not in result_text
     assert result_text.strip() != "✅ ปิด DOGEUSDT"
     conn.close()
 
@@ -2297,9 +2299,10 @@ def test_q_l3_real_normalization_zero_closed_at_lists(
     )
     assert "55" not in trade.cancelled_algo
     assert "77" not in trade.cancelled_order
-    assert any("ค้าง" in m or "owner-sl" in m or "owner-lim" in m or "ลบในแอป" in m for m in sent), (
-        f"expected leftover listing after None anchor, got {sent!r}"
-    )
+    listing = [m for m in sent if "คำสั่งที่ยังค้างบน" in m]
+    assert listing, f"expected leftover listing after None anchor, got {sent!r}"
+    assert any(ln.strip().startswith("•") for ln in listing[0].splitlines())
+    assert all("อ่านคำสั่งค้างไม่ได้" not in m for m in listing)
     conn.close()
 
 
@@ -2429,4 +2432,380 @@ def test_r_prebatch_only_raise_unknown_pending_zero_owner_deletes(
     ]
     assert owner_deletes == []
     assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is True
+    conn.close()
+
+
+def test_s_reduce_pending_retry_lists_leftovers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reduce exit_cancel_pending retry success lists updateTime-only leftovers."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    conn = open_db(tmp_path / "s-reduce-retry.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="reduce",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08", "close_qty": "100", "leave_qty": "0"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    insert_exec_log(conn, intent_id=rid, step="reduce_market", endpoint="/fapi/v1/order", created_at_ms=ts)
+    insert_exec_log(
+        conn, intent_id=rid, step="exit_cancel_pending", endpoint="/fapi/v1/algoOrder", created_at_ms=ts
+    )
+    owner_ut = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "orderType": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-ut-reduce-retry",
+        "updateTime": ts - 10_000,
+    }
+    handlers = {
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, [owner_ut]),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"code": "200", "msg": "success"}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+
+    def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms_value=ts + 1000,
+        send=lambda t, **_k: sent.append(str(t)) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, rid)
+    assert row is not None and row["status"] == "done"
+    owner_deletes = [
+        c
+        for c in transport.calls
+        if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and str(c[2].get("algoId")) == "55"
+    ]
+    assert owner_deletes == []
+    joined = "\n".join(sent)
+    assert "คำสั่งที่ยังค้างบน" in joined
+    assert any(ln.strip().startswith("•") for ln in joined.splitlines())
+    assert "อ่านคำสั่งค้างไม่ได้" not in joined
+    bare = [m for m in sent if m.strip() == "✅ ปิด DOGEUSDT"]
+    assert not bare, f"must not notify only bare close, got {sent!r}"
+    conn.close()
+
+
+def test_t_xr_and_xx_full_close_one_leftover_bullet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """xr: and xx: full close list a list-only leftover exactly once (dedup pin)."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_REDUCE", "on")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+
+    def _one_bullet_close(*, kind: str, prefix: str, db_name: str, preview: dict[str, Any]) -> None:
+        conn = open_db(tmp_path / db_name)
+        ts = now_ms()
+        intent_id = insert_exec_intent(
+            conn,
+            kind=kind,
+            symbol="DOGEUSDT",
+            side="short",
+            preview=preview,
+            created_at_ms=ts,
+            expires_at_ms=ts + PREVIEW_TTL_MS,
+        )
+        owner_ut = {
+            "symbol": "DOGEUSDT",
+            "algoId": 55,
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "stopPrice": "0.09",
+            "origQty": "100",
+            "reduceOnly": True,
+            "positionSide": "BOTH",
+            "clientAlgoId": "owner-ut-dedup",
+            "updateTime": ts - 10_000,
+        }
+        if kind == "reduce":
+            state = {"n": 0}
+
+            def _pos(_clean: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+                state["n"] += 1
+                if state["n"] <= 1:
+                    return (200, [_open_pos(amt="-100", entry="1", mark="1")])
+                return (200, [])
+
+            handlers: dict[tuple[str, str], Any] = {
+                ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+                ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+                ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+                ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+                ("GET", "/fapi/v3/positionRisk"): _pos,
+                ("GET", "/fapi/v1/openOrders"): (200, []),
+                ("GET", "/fapi/v1/openAlgoOrders"): (200, [owner_ut]),
+                ("GET", "/fapi/v1/userTrades"): (200, [{"realizedPnl": "1"}]),
+                ("POST", "/fapi/v1/order"): (
+                    200,
+                    {"orderId": 42, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+                ),
+                ("GET", "/fapi/v1/order"): (
+                    200,
+                    {"orderId": 42, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+                ),
+                ("DELETE", "/fapi/v1/algoOrder"): (200, {"code": "200", "msg": "success"}),
+            }
+        else:
+            handlers = _menu_close_handlers(open_orders=(200, []))
+            handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_ut])
+            handlers[("DELETE", "/fapi/v1/algoOrder")] = (200, {"code": "200", "msg": "success"})
+        transport = RecordingTransport(handlers)
+        handle_exec_callback(
+            conn,
+            f"{prefix}{intent_id}",
+            send=lambda *_a, **_k: True,
+            answer=lambda *_a, **_k: None,
+            edit=lambda *_a, **_k: None,
+            trade=_client(transport),
+            now_ms_value=ts,
+            message={"message_id": 1},
+        )
+        row = get_exec_intent(conn, intent_id)
+        assert row is not None and row["status"] == "done"
+        result_text = str(row.get("result_text") or "")
+        assert "คำสั่งที่ยังค้างบน" in result_text
+        bullets = [ln for ln in result_text.splitlines() if ln.strip().startswith("•")]
+        assert len(bullets) == 1, f"{prefix} expected one leftover bullet, got {bullets!r} in {result_text!r}"
+        assert "อ่านคำสั่งค้างไม่ได้" not in result_text
+        owner_deletes = [
+            c
+            for c in transport.calls
+            if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and str(c[2].get("algoId")) == "55"
+        ]
+        assert owner_deletes == []
+        conn.close()
+
+    _one_bullet_close(
+        kind="exit",
+        prefix="xx:",
+        db_name="t-xx-dedup.db",
+        preview={
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+    )
+    _one_bullet_close(
+        kind="reduce",
+        prefix="xr:",
+        db_name="t-xr-dedup.db",
+        preview={
+            # Half preview; post-fill position is flat → full-close finish + listing.
+            "qty": "100",
+            "entry": "1",
+            "close_qty": "50",
+            "leave_qty": "50",
+            "source": "menu",
+            "confirm_text": "c",
+            "position_side": "BOTH",
+        },
+    )
+
+
+def test_u_flag_off_missing_client_silent_on_watch_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag off + live + watch close + missing trade client → no leftover warning."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "off")
+    monkeypatch.setattr(
+        "jarvise_assist.watch.build_trade_client",
+        lambda: (None, "missing_trade_key"),
+    )
+    conn = open_db(tmp_path / "u-flag-off-missing.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 1.0,
+            "qty": 1.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.9,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts - 10_000,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts - 5_000,
+            "closed_at_ms": None,
+        },
+    )
+    sent: list[str] = []
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert result["ok"] is True
+    assert not any("อ่านคำสั่งค้างไม่ได้" in m for m in sent), f"flag-off must stay silent, got {sent!r}"
+    assert not any("คำสั่งที่ยังค้างบน" in m for m in sent)
+    assert not any("🧹 หลังปิด" in m for m in sent)
+    conn.close()
+
+
+def test_v_non_menu_finish_flat_exit_lists_leftovers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Advice/non-menu xx: listing comes from _finish_flat_exit (no menu fallback)."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "v-non-menu-finish.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_ut = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-ut-advice",
+        "updateTime": ts - 10_000,
+    }
+    handlers = _menu_close_handlers(open_orders=(200, []))
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_ut])
+    handlers[("DELETE", "/fapi/v1/algoOrder")] = (200, {"code": "200", "msg": "success"})
+    transport = RecordingTransport(handlers)
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "done"
+    owner_deletes = [
+        c
+        for c in transport.calls
+        if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and str(c[2].get("algoId")) == "55"
+    ]
+    assert owner_deletes == []
+    result_text = str(row.get("result_text") or "")
+    assert "คำสั่งที่ยังค้างบน" in result_text
+    assert any(ln.strip().startswith("•") for ln in result_text.splitlines())
+    assert "อ่านคำสั่งค้างไม่ได้" not in result_text
+    conn.close()
+
+
+def test_w_exit_pending_retry_lists_leftovers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit exit_cancel_pending retry success lists updateTime-only leftovers."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    conn = open_db(tmp_path / "w-exit-retry.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08", "position_side": "BOTH"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    insert_exec_log(conn, intent_id=rid, step="exit_market", endpoint="/fapi/v1/order", created_at_ms=ts)
+    insert_exec_log(
+        conn, intent_id=rid, step="exit_cancel_pending", endpoint="/fapi/v1/algoOrder", created_at_ms=ts
+    )
+    owner_ut = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "orderType": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-ut-exit-retry",
+        "updateTime": ts - 10_000,
+    }
+    handlers = {
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, [owner_ut]),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"code": "200", "msg": "success"}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+
+    def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms_value=ts + 1000,
+        send=lambda t, **_k: sent.append(str(t)) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, rid)
+    assert row is not None and row["status"] == "done"
+    owner_deletes = [
+        c
+        for c in transport.calls
+        if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and str(c[2].get("algoId")) == "55"
+    ]
+    assert owner_deletes == []
+    joined = "\n".join(sent)
+    assert "คำสั่งที่ยังค้างบน" in joined
+    assert any(ln.strip().startswith("•") for ln in joined.splitlines())
+    assert "อ่านคำสั่งค้างไม่ได้" not in joined
+    bare = [m for m in sent if m.strip() == "✅ ปิด DOGEUSDT"]
+    assert not bare, f"must not notify only bare close, got {sent!r}"
     conn.close()

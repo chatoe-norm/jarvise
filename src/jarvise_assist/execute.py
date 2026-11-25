@@ -3091,7 +3091,7 @@ class ExitCancelResult(NamedTuple):
     ok: bool
     failed_ids: list[str]
     aborted_reopen: bool = False
-    leftover_orders: list[dict[str, Any]] = []
+    leftover_orders: tuple[dict[str, Any], ...] = ()
 
 
 class OwnerCancelResult(NamedTuple):
@@ -3242,19 +3242,19 @@ def _cancel_exit_stops_and_tp(
             ok=True,
             failed_ids=failed_ids + leftover_ids + owner.failed_ids,
             aborted_reopen=True,
-            leftover_orders=list(owner.leftover_orders),
+            leftover_orders=tuple(owner.leftover_orders),
         )
     if owner.read_failed or not owner.ok:
         return ExitCancelResult(
             ok=False,
             failed_ids=failed_ids + owner.failed_ids,
             aborted_reopen=False,
-            leftover_orders=list(owner.leftover_orders),
+            leftover_orders=tuple(owner.leftover_orders),
         )
     return ExitCancelResult(
         ok=all_ok,
         failed_ids=failed_ids,
-        leftover_orders=list(owner.leftover_orders),
+        leftover_orders=tuple(owner.leftover_orders),
     )
 
 
@@ -4636,7 +4636,15 @@ def handle_exec_callback(
                         )
                 if prefix == "xr:":
                     result_text = _menu_exit_result_text(result_text)
-                    if status == "done" and result_text.startswith("✅ ปิด ") and "ปิดครึ่ง" not in result_text:
+                    # _finish_flat_exit already appends list-only leftovers when
+                    # the flag-on cancel phase retained them; skip a second list.
+                    if (
+                        status == "done"
+                        and result_text.startswith("✅ ปิด ")
+                        and "ปิดครึ่ง" not in result_text
+                        and "คำสั่งที่ยังค้างบน" not in result_text
+                        and OWNER_CLOSING_ORDER_NOTE not in result_text
+                    ):
                         tick_menu = None
                         try:
                             tick_menu = client.symbol_filters(str(intent["symbol"])).tick_size
@@ -5695,12 +5703,17 @@ def _recover_reduce_intent(
                 expect_status="recovering",
             )
         elif cancel.ok:
+            text = _append_exit_retained_leftovers(
+                f"✅ ปิด {symbol}",
+                list(cancel.leftover_orders),
+                symbol=symbol,
+            )
             _recovery_notify(
                 send,
                 conn,
                 intent_id,
                 status="done",
-                text=f"✅ ปิด {symbol}",
+                text=text,
                 expect_status="recovering",
             )
         else:

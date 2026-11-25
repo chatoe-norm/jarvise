@@ -1633,10 +1633,12 @@ def run_assist_watch(
                         except Exception:  # noqa: BLE001
                             logger.exception("quick leftover error notice failed")
         elif need_trade:
-            # Missing trade client: never cancel; still warn (one-shot path).
+            # Missing trade client: never cancel. Flag-on only: warn for watch
+            # closes and for Quick closes not in open_syms (flag-off stays silent).
             open_syms = {s for s, _ in open_keys}
-            warn_syms: list[str] = [sym for sym, _ps in closed]
+            warn_syms: list[str] = []
             if assist_cancel_owner_enabled():
+                warn_syms = [sym for sym, _ps in closed]
                 for qrow in quick_info.get("closed") or []:
                     qsym = str(qrow.get("symbol") or "").upper()
                     if qsym and qsym not in open_syms and qsym not in warn_syms:
