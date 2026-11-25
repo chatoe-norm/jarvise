@@ -284,7 +284,11 @@ def test_size_signal_2r_long_and_short() -> None:
 
 
 def test_size_signal_includes_round_trip_fees_audit_case() -> None:
-    from jarvise_assist.sizing import real_stop_loss_usdt
+    from jarvise_assist.sizing import (
+        floor_to_step,
+        real_stop_loss_usdt,
+        round_trip_fee_rate,
+    )
 
     sized = size_signal(
         symbol="BTCUSDT",
@@ -296,10 +300,22 @@ def test_size_signal_includes_round_trip_fees_audit_case() -> None:
         step_size=Decimal("0.001"),
     )
     assert sized is not None
-    # Fee-blind would be 500; fee-aware is well below.
-    assert sized.qty < Decimal("500")
-    assert sized.qty == Decimal("312.500")
-    assert real_stop_loss_usdt(qty=sized.qty, entry=Decimal("100"), stop=Decimal("99.8")) <= Decimal("100")
+    # Pin the fee-aware closed form, not only the final qty. A fee-blind
+    # denominator (raw = risk/r = 500) plus the post-check loop still lands
+    # on 312.5, but leaves leverage=5 and a "step" reduce reason. The
+    # fee-aware formula must size 312.5 on the first shot.
+    entry, stop, step = Decimal("100"), Decimal("99.8"), Decimal("0.001")
+    r = (entry - stop).copy_abs()
+    expected = floor_to_step(
+        Decimal("100") / (r + round_trip_fee_rate() * entry),
+        step,
+    )
+    assert expected == Decimal("312.500")
+    assert sized.qty == expected
+    assert sized.leverage == 4
+    assert sized.leverage_capped is False
+    assert sized.reduce_reasons == ()
+    assert real_stop_loss_usdt(qty=sized.qty, entry=entry, stop=stop) <= Decimal("100")
 
 
 def test_size_signal_after_5x_cap_real_risk_within_budget() -> None:
