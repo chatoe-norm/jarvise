@@ -22,6 +22,7 @@ from jarvise_assist.quick_card import (
     _hhmm,
     _refusal_week_loss,
 )
+from jarvise_assist.quick_cutoff import cutoff_block_text, in_entry_block
 from jarvise_assist.quick_errors import (
     STOP_STEP_HINT,
     e_draft_stop_pct_range,
@@ -490,6 +491,11 @@ def _handle_qk_register(
         answer(MSG_CARD_QUOTE_EXPIRED)
         return {"ok": False, "quote_expired": True}
 
+    if in_entry_block(now_ms):
+        send(cutoff_block_text(now_ms))
+        answer(None)
+        return {"ok": False, "reason": "cutoff_block"}
+
     sym = str(row["symbol"]).upper()
     side = str(row["side"])
 
@@ -812,6 +818,10 @@ def handle_quick_trade_callback(
         if pct_s not in STOP_PRESETS:
             answer(MSG_BAD_BUTTON)
             return {"ok": False, "stale": True}
+        if in_entry_block(now_ms):
+            answer(None)
+            send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup(card_id))
+            return {"ok": False, "reason": "cutoff_block"}
         cur = conn.execute(
             """
             UPDATE assist_quick_card
@@ -865,10 +875,18 @@ def handle_quick_trade_callback(
             answer(None)
             return {"ok": False, "stop_wrong_side": True}
         if not rebuilt.get("ok"):
+            reason = rebuilt.get("reason")
+            if reason == "cutoff_block":
+                send(
+                    str(rebuilt.get("text") or cutoff_block_text(now_ms)),
+                    reply_markup=_refresh_only_markup(card_id),
+                )
+                answer(None)
+                return {"ok": False, "reason": "cutoff_block"}
             body = _decorate_card_text(str(rebuilt.get("text") or REFUSAL.get("read_failed", "")))
             _edit(body, _refresh_only_markup(card_id))
             answer(None)
-            return {"ok": False, "reason": rebuilt.get("reason")}
+            return {"ok": False, "reason": reason}
         _persist_quote(
             conn,
             card_id,
@@ -1035,6 +1053,9 @@ def handle_quick_draft_text(
                     edit=edit,
                 )
                 return {"handled": True, "rejected": True}
+            if in_entry_block(now_ms):
+                send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup(card_id))
+                return {"handled": True, "rejected": True}
             cur = conn.execute(
                 """
                 UPDATE assist_quick_card
@@ -1082,6 +1103,9 @@ def handle_quick_draft_text(
                 send(e_draft_stop_token(token))
                 return {"handled": True, "rejected": True}
             return None
+        if in_entry_block(now_ms):
+            send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup(card_id))
+            return {"handled": True, "rejected": True}
         far_pct: Decimal | None = None
         if futures is not None:
             try:

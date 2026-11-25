@@ -34,6 +34,7 @@ from jarvise_assist.quick import (
     RISK_ALLOWED,
     get_quick_settings,
 )
+from jarvise_assist.quick_cutoff import cutoff_block_text, in_entry_block
 from jarvise_assist.quick_minlot import (
     SizeOfferResult,
     fmt_pct,
@@ -148,6 +149,10 @@ def _refusal_bad_data() -> str:
     return "ข้อมูลปุ่มไม่ถูกต้อง — พิมพ์คำสั่ง q ใหม่"
 
 
+def _refusal_cutoff_block() -> str:
+    return "❌ หลัง 23:30 ไม่ลงทะเบียน quick ใหม่ · 👉 เริ่มใหม่ได้หลัง 00:00"
+
+
 REFUSAL: dict[str, str] = {
     "quick_open": _refusal_quick_open(),
     "main_position": _refusal_main_position(),
@@ -165,6 +170,7 @@ REFUSAL: dict[str, str] = {
     "card_expired": _refusal_card_expired(),
     "bad_data": _refusal_bad_data(),
     "stop_far": _refusal_stop_far(),
+    "cutoff_block": _refusal_cutoff_block(),
 }
 
 
@@ -602,6 +608,9 @@ def build_quick_card(
     week_until = main_week_loss_pause_until(conn, now_ms=now_ms)
     if week_until is not None:
         return _fail("week_loss_pause", _refusal_week_loss(week_until, now_ms=now_ms))
+
+    if in_entry_block(now_ms):
+        return _fail("cutoff_block", cutoff_block_text(now_ms))
 
     if sym in quick_symbols(conn):
         return _fail("quick_open", _quick_open_text(conn, sym, now_ms=now_ms))
