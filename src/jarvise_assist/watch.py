@@ -92,6 +92,7 @@ from jarvise_assist.trail_advice import (
     candle_extremes_after_entry,
     current_trail_advice,
     entry_bar_15m_label,
+    loss_side_risk,
     post_entry_extremes,
 )
 from jarvise_ingest.db import load_candles_in_range, load_latest_analysis
@@ -313,6 +314,7 @@ __all__ = (
     "current_trail_advice",
     "flush_held_watch_advice",
     "initial_atr_stop",
+    "loss_side_risk",
     "run_assist_watch",
 )
 
@@ -324,7 +326,7 @@ def approx_r_multiple(
     initial_stop: Decimal,
     mark: Decimal,
 ) -> Decimal:
-    risk = abs(entry - initial_stop)
+    risk = loss_side_risk(side=side, entry=entry, stop=initial_stop)
     if risk <= 0:
         return Decimal("0")
     if side == "long":
@@ -555,7 +557,7 @@ def _exit_reason(
     mark: Decimal,
     now_ms: int,
 ) -> str | None:
-    risk = abs(entry - initial_stop)
+    risk = loss_side_risk(side=side, entry=entry, stop=initial_stop)
     if risk > 0:
         if side == "long" and mark >= entry + TARGET_R * risk:
             return "target_2r"
@@ -1200,7 +1202,7 @@ def _process_universe_position(
         now_ms=now_ms,
     )
     best_extreme = best_high if pos.side == "long" else best_low
-    risk = abs(pos.entry_price - stop_dec)
+    risk = loss_side_risk(side=pos.side, entry=pos.entry_price, stop=stop_dec)
     r_now_val = approx_r_multiple(side=pos.side, entry=pos.entry_price, initial_stop=stop_dec, mark=mark)
     _log_decision(
         symbol=pos.symbol,

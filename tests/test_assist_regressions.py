@@ -605,7 +605,8 @@ def test_side_flip_or_closed_row_still_resets_watch(tmp_path: Path) -> None:
 
 
 def test_add_wrong_side_of_kept_stop_keeps_stop_no_2r(tmp_path: Path) -> None:
-    from jarvise_assist.watch import _exit_reason, approx_r_multiple
+    from jarvise_assist.menu import compute_position_unrealized
+    from jarvise_assist.watch import approx_r_multiple
 
     conn = open_db(tmp_path / "wrong_side.db")
     t1 = _ms_bangkok(2026, 11, 1, 12, 0)
@@ -667,26 +668,161 @@ def test_add_wrong_side_of_kept_stop_keeps_stop_no_2r(tmp_path: Path) -> None:
     assert second is not None
     assert abs(float(second["initial_stop"]) - 66850) < 1e-6
     assert abs(float(second["entry"]) - 66800) < 1e-6
-    # Stop on the profit side of the new avg: 2R must not fire at the mark.
-    assert (
-        _exit_reason(
-            conn,
-            symbol="BTCUSDT",
-            side="long",
-            entry=Decimal("66800"),
-            initial_stop=Decimal("66850"),
-            mark=Decimal("66800"),
-            now_ms=t2,
-        )
-        != "target_2r"
+
+    # At mark 66905 abs(entry−stop) would look like ~+2.1R; loss-side risk is ≤0 so
+    # no progress and no 2R exit, stop stays, menu R unknown.
+    t3 = t2 + 60_000
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="long", confidence=0.9, invalidation=66500.0, ts=t3 - 60_000
     )
-    # Distance is non-zero so approx_r still returns a number; product rule is keep stop.
+    sent: list[str] = []
+
+    def capture(text: str, **_kw: object) -> bool:
+        sent.append(text)
+        return True
+
+    mark_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.2"),
+        entry_price=Decimal("66800"),
+        mark_price=Decimal("66905"),
+        update_time_ms=t3 - 30_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[mark_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t3,
+        send=capture,
+    )
+    third = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert third is not None
+    assert abs(float(third["initial_stop"]) - 66850) < 1e-6
     assert approx_r_multiple(
         side="long",
         entry=Decimal("66800"),
         initial_stop=Decimal("66850"),
-        mark=Decimal("66800"),
+        mark=Decimal("66905"),
     ) == Decimal("0")
+    joined = "\n".join(sent)
+    assert "2R" not in joined
+    assert "+1.5R" not in joined
+    assert "ถึง +" not in joined
+    line, r_mult, _risk = compute_position_unrealized(
+        conn, pos=mark_pos, orders=[], now_ms=t3, tick=Decimal("0.1")
+    )
+    assert r_mult is None
+    assert "R unknown" in line
+    conn.close()
+
+
+def test_add_wrong_side_of_kept_stop_short_mirror(tmp_path: Path) -> None:
+    from jarvise_assist.menu import compute_position_unrealized
+    from jarvise_assist.watch import approx_r_multiple
+
+    conn = open_db(tmp_path / "wrong_side_short.db")
+    t1 = _ms_bangkok(2026, 11, 1, 12, 0)
+    _seed_candle(
+        conn,
+        symbol="BTCUSDT",
+        ts=t1 - 2 * FOUR_H_MS,
+        open_=67000,
+        high=67100,
+        low=66900,
+        close=67000,
+        atr=200,
+    )
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="short", confidence=0.9, invalidation=67500.0, ts=t1 - 60_000
+    )
+    first_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-0.1"),
+        entry_price=Decimal("67000"),
+        mark_price=Decimal("67000"),
+        update_time_ms=t1 - 600_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[first_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t1,
+        send=lambda _t: True,
+    )
+    first = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert first is not None
+    # Kept stop below the coming avg → profit-side for a short.
+    conn.execute(
+        "UPDATE assist_watch_position SET initial_stop=?, initial_stop_source='signal' WHERE symbol=?",
+        (66750.0, "BTCUSDT"),
+    )
+    conn.commit()
+    t2 = t1 + 60_000
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="short", confidence=0.9, invalidation=67500.0, ts=t2 - 60_000
+    )
+    add_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-0.2"),
+        entry_price=Decimal("66800"),
+        mark_price=Decimal("66800"),
+        update_time_ms=t2 - 30_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[add_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t2,
+        send=lambda _t: True,
+    )
+    second = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert second is not None
+    assert abs(float(second["initial_stop"]) - 66750) < 1e-6
+    assert abs(float(second["entry"]) - 66800) < 1e-6
+
+    t3 = t2 + 60_000
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="short", confidence=0.9, invalidation=67500.0, ts=t3 - 60_000
+    )
+    sent: list[str] = []
+
+    def capture(text: str, **_kw: object) -> bool:
+        sent.append(text)
+        return True
+
+    # Mark 66700 with abs risk 50 would look like +2.0R; loss-side ≤0 → silent.
+    mark_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("-0.2"),
+        entry_price=Decimal("66800"),
+        mark_price=Decimal("66700"),
+        update_time_ms=t3 - 30_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[mark_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t3,
+        send=capture,
+    )
+    third = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert third is not None
+    assert abs(float(third["initial_stop"]) - 66750) < 1e-6
+    assert approx_r_multiple(
+        side="short",
+        entry=Decimal("66800"),
+        initial_stop=Decimal("66750"),
+        mark=Decimal("66700"),
+    ) == Decimal("0")
+    joined = "\n".join(sent)
+    assert "2R" not in joined
+    assert "+1.5R" not in joined
+    assert "ถึง +" not in joined
+    line, r_mult, _risk = compute_position_unrealized(
+        conn, pos=mark_pos, orders=[], now_ms=t3, tick=Decimal("0.1")
+    )
+    assert r_mult is None
+    assert "R unknown" in line
     conn.close()
 
 

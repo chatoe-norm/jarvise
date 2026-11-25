@@ -1960,10 +1960,11 @@ def _confirm_guards_entry(
         return "margin_cap"
     final = admitted[0].sized
     # Persist resized confirm fields before run_entry_sequence reads preview["qty"].
+    # Keep card entry for signal-drift analytics; confirm_entry is the live mark used to size.
     updated_preview = {
         **preview,
         "qty": str(final.qty),
-        "entry": str(final.entry),
+        "confirm_entry": str(final.entry),
         "stop": str(stop),
         "target": str(preview_target),
         "notional": str(final.notional),

@@ -1941,9 +1941,11 @@ def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.Mon
     conn = open_db(tmp_path / "cap_sui.db")
     _seed_settings(conn)
     write_quick_settings(conn, risk_pct=1.0, cap_pct=0.5)
+    # available 80: fee-aware 1% qty needs more margin than 80, so the margin→offer
+    # path shrinks to the 0.5% cap (not the deleted risk>cap offer branch).
     c_half = build_quick_card(
         conn,
-        _sui_fake(Decimal("100")),
+        _sui_fake(Decimal("80")),
         symbol="SUIUSDT",
         side="short",
         stop=Decimal("10.2004"),
@@ -1979,6 +1981,37 @@ def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.Mon
     assert "risk จริง: −9.98 USDT = 1.00% ของ Futures 1000 USDT (เป้า 1%)" in double_text
     assert "เพดาน quick 2%" in double_text
     assert "ลองใหม่" not in double_text
+    conn.close()
+
+
+def test_card_risk_over_cap_refuses_quick_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Risk > cap with ample margin must refuse (base quick_cap), not offer a shrink."""
+    _forbid_trade_client(monkeypatch)
+    conn = open_db(tmp_path / "risk_over_cap.db")
+    _seed_settings(conn)
+    write_quick_settings(conn, risk_pct=1.5, cap_pct=1.0)
+    # Mark 2 / stop 1.98: fee-aware 1.5% fits wallet+available 1000; still over cap 1%.
+    fake = QuickFake(
+        balance=Decimal("1000"),
+        available=Decimal("1000"),
+        marks={"SUIUSDT": Decimal("2.0")},
+        ticks={"SUIUSDT": Decimal("0.0001")},
+        steps={"SUIUSDT": Decimal("0.1")},
+        min_qty={"SUIUSDT": Decimal("0.1")},
+        min_notional={"SUIUSDT": Decimal("5")},
+    )
+    card = build_quick_card(
+        conn,
+        fake,
+        symbol="SUIUSDT",
+        side="long",
+        stop=Decimal("1.98"),
+        now_ms=NOW,
+        allow_offer=True,
+    )
+    assert card["ok"] is False
+    assert card["reason"] == "quick_cap"
+    assert "margin ไม่พอ" not in str(card.get("text") or "")
     conn.close()
 
 

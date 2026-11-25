@@ -123,7 +123,8 @@ def test_confirm_resizes_at_chase_cap_never_above_preview(
     sent_qty = Decimal(str(refreshed["preview"]["qty"]))
     assert sent_qty <= preview_qty
     assert real_stop_loss_usdt(qty=sent_qty, entry=mark, stop=Decimal("99")) <= Decimal("100")
-    assert Decimal(str(refreshed["preview"]["entry"])) == mark
+    assert str(refreshed["preview"]["entry"]) == "100"
+    assert Decimal(str(refreshed["preview"]["confirm_entry"])) == mark
     assert Decimal(str(refreshed["preview"]["stop"])) == Decimal("99")
     assert Decimal(str(refreshed["preview"]["target"])) == preview_sized.target
     conn.close()

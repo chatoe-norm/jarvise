@@ -72,7 +72,7 @@ from jarvise_assist.store import (
     latest_seen_idea,
     write_settings,
 )
-from jarvise_assist.trail_advice import current_trail_advice
+from jarvise_assist.trail_advice import current_trail_advice, loss_side_risk
 from jarvise_assist.trend_view import (
     build_trend_rows,
     fit_telegram,
@@ -456,7 +456,8 @@ def compute_position_unrealized(
                 risk = abs(entry - placed)
                 r_note = " (จาก stop จริง)"
     elif initial_stop is not None:
-        risk = abs(entry - initial_stop)
+        risk_d = loss_side_risk(side=pos.side, entry=Decimal(str(entry)), stop=Decimal(str(initial_stop)))
+        risk = float(risk_d) if risk_d > 0 else 0.0
     elif stop_info is not None:
         placed = float(stop_info.price)
         loss_side = (pos.side == "long" and placed < entry) or (pos.side == "short" and placed > entry)

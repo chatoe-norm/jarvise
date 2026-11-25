@@ -283,6 +283,54 @@ def test_size_signal_2r_long_and_short() -> None:
     )
 
 
+def test_build_existing_ideas_counts_sent_risk_including_fees(tmp_path: Path) -> None:
+    """Sent/held signal risk must include fees (price-only would count 62.5)."""
+    from jarvise_assist.signals import build_existing_ideas
+    from jarvise_assist.sizing import IDEA_LOOKBACK_MS, SizedSignal, real_stop_loss_usdt
+
+    conn = open_db(tmp_path / "ideas_fees.db")
+    now = _ms_bangkok(2026, 11, 2, 12, 0)
+    sized = SizedSignal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("99.8"),
+        target=Decimal("100.4"),
+        qty=Decimal("312.5"),
+        notional=Decimal("31250"),
+        leverage=4,
+        loss_at_stop=Decimal("62.5"),  # price-only; admission must use fees → 100
+        risk_pct=Decimal("1"),
+        r_distance=Decimal("0.2"),
+        leverage_capped=False,
+        uncapped_leverage=4,
+        analysis_id=None,
+        step_size=Decimal("0.001"),
+    )
+    insert_signal(
+        conn,
+        sized,
+        status="sent",
+        created_at_ms=now - 60_000,
+        expires_at_ms=now + IDEA_LOOKBACK_MS,
+        sent_at_ms=now - 60_000,
+    )
+    ideas = build_existing_ideas(
+        conn,
+        positions=[],
+        orders=[],
+        balance=Decimal("10000"),
+        risk_pct=Decimal("1"),
+        now_ms=now,
+    )
+    assert len(ideas) == 1
+    expected = real_stop_loss_usdt(qty=Decimal("312.5"), entry=Decimal("100"), stop=Decimal("99.8"))
+    assert expected == Decimal("100")
+    assert ideas[0].risk_usdt == expected
+    assert ideas[0].risk_usdt != Decimal("62.5")
+    conn.close()
+
+
 def test_size_signal_includes_round_trip_fees_audit_case() -> None:
     from jarvise_assist.sizing import (
         floor_to_step,

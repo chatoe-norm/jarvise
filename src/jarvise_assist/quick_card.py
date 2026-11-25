@@ -919,32 +919,6 @@ def build_quick_card(
 
     new_risk = sized.loss_at_stop
     cap_usdt = balance * (cap_pct / Decimal("100"))
-    if quick_open + new_risk > cap_usdt and allow_offer and size_mode == "risk":
-        # Fee-aware risk qty can fit margin yet still exceed cap_pct; shrink via
-        # size_offer (max_real_risk_pct=cap) before refusing — same path the
-        # old fee-blind margin buffer used to trigger coincidentally.
-        offered, size_mode_o, offer_fail, offer_bound_o = _try_quick_size_offer(
-            allow_offer=True,
-            sym=sym,
-            side_l=side_l,
-            mark=mark,
-            stop_level=stop_level,
-            balance=balance,
-            available=available,
-            risk_pct=risk_pct,
-            step=step,
-            filters=filters,
-            sized=sized,
-            risk_qty=sized.qty,
-            cap_pct=cap_pct,
-        )
-        if offer_fail is not None:
-            return offer_fail
-        if offered is not None:
-            sized = offered
-            size_mode = size_mode_o
-            offer_bound = offer_bound_o
-            new_risk = sized.loss_at_stop
     if quick_open + new_risk > cap_usdt:
         preset = quick_errors.suggest_quick_preset(
             balance=balance,
