@@ -16,7 +16,7 @@ from jarvise_ingest.db import (
 )
 from jarvise_paper.approval import approve_approval, enqueue_approval, expire_approvals
 from jarvise_paper.engine import apply_signal
-from jarvise_risk.caps import RiskCaps, check_caps, load_risk_caps, utc_day_bounds_ms
+from jarvise_risk.caps import RiskCaps, bangkok_day_bounds_ms, check_caps, load_risk_caps
 
 
 def _seed_candle(conn, symbol: str, timeframe: str, close: float, ts: int = 1_700_000_000_000) -> None:
@@ -115,7 +115,7 @@ def test_check_caps_daily_loss_is_utc_day_not_lifetime() -> None:
     )
 
 
-def test_enqueue_daily_loss_ignores_prior_utc_days(tmp_path: Path, monkeypatch) -> None:
+def test_enqueue_daily_loss_ignores_prior_bangkok_days(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("JARVISE_MAX_DAILY_LOSS_USD", "100")
     monkeypatch.setenv("JARVISE_MAX_NOTIONAL_PER_ORDER", "5000")
     monkeypatch.setenv("JARVISE_DRAWDOWN_LOCK_PCT", "50")
@@ -125,7 +125,7 @@ def test_enqueue_daily_loss_ignores_prior_utc_days(tmp_path: Path, monkeypatch) 
     set_paper_account_value(conn, "equity", 9_850.0)
     set_paper_account_value(conn, "cash", 9_850.0)
     now_ms = 1_702_000_000_000
-    day_start, _day_end = utc_day_bounds_ms(now_ms)
+    day_start, _day_end = bangkok_day_bounds_ms(now_ms)
     _seed_candle(conn, "BTCUSDT", "4h", 100.0, ts=now_ms)
     insert_paper_order(
         conn,

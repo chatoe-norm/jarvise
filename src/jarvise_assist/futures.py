@@ -696,6 +696,42 @@ class BinanceFuturesClient:
             raise ValueError("unexpected income response type")
         return list(payload)
 
+    def asset_usdt_close_1m(self, asset: str, fill_time_ms: int) -> float | None:
+        """Public 1m ``{asset}USDT`` close covering ``fill_time_ms``. No API key.
+
+        Soft-fails to None on any error so callers leave the fee incomplete
+        rather than inventing a rate.
+        """
+        sym = str(asset or "").upper()
+        if not sym or sym == "USDT":
+            return None
+        pair = f"{sym}USDT"
+        minute = (int(fill_time_ms) // 60_000) * 60_000
+        try:
+            payload = get_json(
+                f"{FAPI_BASE}/fapi/v1/klines",
+                params={
+                    "symbol": pair,
+                    "interval": "1m",
+                    "startTime": minute,
+                    "endTime": minute + 60_000 - 1,
+                    "limit": 1,
+                },
+                provider="binance_fapi_kline_fee",
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(payload, list) or not payload:
+            return None
+        row = payload[0]
+        if not isinstance(row, (list, tuple)) or len(row) < 5:
+            return None
+        try:
+            close = float(row[4])
+        except (TypeError, ValueError):
+            return None
+        return close if close > 0 else None
+
     def user_trades(
         self,
         symbol: str,

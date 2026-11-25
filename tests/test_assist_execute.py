@@ -2764,14 +2764,15 @@ def test_size_for_execution_returns_margin_shrunk_qty(
     trade = _client(transport)
     sized, reason = size_for_execution(conn, trade=trade, symbol="DOGEUSDT", side="short", now_ms_value=now)
     assert reason is None and sized is not None
-    assert sized.qty == Decimal("1250")
-    assert sized.notional == Decimal("100")
-    assert sized.loss_at_stop == Decimal("1250") * Decimal("0.003")
+    # available 20 × 0.95 / (1/5 + 6bps) ≈ 94.72 → qty floors to 1183 at entry 0.08.
+    assert sized.qty == Decimal("1183")
+    assert sized.notional == Decimal("1183") * Decimal("0.08")
+    assert sized.loss_at_stop == Decimal("1183") * Decimal("0.003")
     assert sized.leverage == 5
     preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
     assert preview["ok"] is True
-    assert "ขนาด: 1250" in str(preview["text"])
-    assert preview["sized"].qty == Decimal("1250")
+    assert "ขนาด: 1183" in str(preview["text"])
+    assert preview["sized"].qty == Decimal("1183")
     conn.close()
 
 

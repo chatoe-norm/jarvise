@@ -642,9 +642,14 @@ def test_sync_keeps_each_trades_own_atr(tmp_path: Path, monkeypatch: pytest.Monk
     conn.commit()
 
     def fake_build(
-        db: Any, _client: Any, *, since_ms: int, until_ms: int | None = None
+        db: Any,
+        _client: Any,
+        *,
+        since_ms: int,
+        until_ms: int | None = None,
+        asset_prices: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
-        del since_ms, until_ms
+        del since_ms, until_ms, asset_prices
         rows: list[dict[str, Any]] = []
         for oid, entry_ms in (("pre", t_pre), ("t1", t1), ("t2", t2)):
             row = dict.fromkeys(_INSERT_COLS)

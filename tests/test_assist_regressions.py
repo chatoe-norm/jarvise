@@ -162,6 +162,8 @@ def test_side_flip_between_polls_resets_initial_stop(tmp_path: Path) -> None:
 
 
 def test_margin_shrink_floors_to_lot_size() -> None:
+    from jarvise_assist.sizing import ASSIST_FEE_BPS_PER_SIDE, MAX_LEVERAGE, shared_leverage_needed
+
     sized = size_signal(
         symbol="DOGEUSDT",
         side="long",
@@ -173,11 +175,19 @@ def test_margin_shrink_floors_to_lot_size() -> None:
     )
     assert sized is not None
     cand = SignalCandidate(sized=sized, confidence=0.7, symbol_rank=0)
-    kept, dropped = assign_shared_leverage([cand], available_balance=Decimal("100"))
+    available = Decimal("100")
+    kept, dropped = assign_shared_leverage([cand], available_balance=available)
     assert dropped == []
     qty = kept[0].sized.qty
-    assert qty == Decimal("7142")  # 500 / 0.07 = 7142.86 -> whole lots
-    assert kept[0].sized.notional == qty * Decimal("0.07")
+    notional = kept[0].sized.notional
+    open_fee_rate = ASSIST_FEE_BPS_PER_SIDE / Decimal("10000")
+    max_notional = (available * Decimal("0.95")) / ((Decimal("1") / Decimal(MAX_LEVERAGE)) + open_fee_rate)
+    assert qty == (qty // 1) * 1  # whole lot
+    assert notional <= max_notional
+    assert shared_leverage_needed(total_notional=notional, available_balance=available) <= MAX_LEVERAGE
+    # Old pin was qty==7142 from available*5/0.07; buffer+fee must shrink below that.
+    assert qty < Decimal("7142")
+    assert notional == qty * Decimal("0.07")
 
 
 def test_no_available_margin_drops_the_idea() -> None:

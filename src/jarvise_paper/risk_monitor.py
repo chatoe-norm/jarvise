@@ -19,7 +19,7 @@ from jarvise_notify.telegram import notify_risk_candle_fresh, notify_risk_candle
 from jarvise_paper.marking import mark_to_market
 from jarvise_paper.profit_lock import run_profit_lock
 from jarvise_paper.stops import run_stop_monitor
-from jarvise_risk import check_caps, engage_kill_switch, load_risk_caps, utc_day_bounds_ms
+from jarvise_risk import bangkok_day_bounds_ms, check_caps, engage_kill_switch, load_risk_caps
 
 CANDLE_STALE_KEY = "risk_monitor_candle_stale"
 
@@ -112,7 +112,7 @@ def run_risk_monitor(conn: Any, *, now_ms: int | None = None) -> dict[str, Any]:
     mtm_after = mark_to_market(conn, now_ms=ts + 1, persist=True)
     caps = load_risk_caps()
     acct = get_paper_account(conn)
-    day_start, _end = utc_day_bounds_ms(ts)
+    day_start, _end = bangkok_day_bounds_ms(ts)
     open_eq = day_open_equity(conn, day_start)
     if open_eq is None:
         open_eq = float(acct["starting_equity"])
