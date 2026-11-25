@@ -201,7 +201,8 @@ def test_owner_preview_match_none_multi_and_confirm(tmp_path: Path, env_chat: No
     assert out["tran_id"] == "t_one"
     assert "reply_markup" in sent[-1]
     cb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
-    assert cb.startswith("pa:oy:dep:t_one:")
+    assert cb.startswith("pa:oy:d:t_one:")
+    assert cb.endswith(":100000000")  # 100 USDT micro
 
     # confirm
     answers: list[str | None] = []
@@ -232,6 +233,7 @@ def test_owner_preview_match_none_multi_and_confirm(tmp_path: Path, env_chat: No
         "SELECT * FROM partner_event WHERE kind = 'owner_deposit' ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
     assert row is not None
+    assert str(row["id"]) == "pe_owner_trant_one"
     assert int(row["effective_at_ms"]) == t0
     assert "tranId t_one" in str(row["note"])
     assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == n_before + 1
@@ -272,6 +274,7 @@ def test_owner_preview_match_none_multi_and_confirm(tmp_path: Path, env_chat: No
     assert out["reason"] == "ambiguous"
     assert "ระบุ tranId" in sent[-1]["text"]
     sent.clear()
+    # Selecting one while another remains unrecorded must refuse (no partial V book).
     out = pa.handle_partner_text(
         multi_db,
         "p owner dep 50 a2",
@@ -280,8 +283,8 @@ def test_owner_preview_match_none_multi_and_confirm(tmp_path: Path, env_chat: No
         futures=multi,
         now_ms=NOW,
     )
-    assert out["ok"] is True
-    assert out["tran_id"] == "a2"
+    assert out["reason"] == "unsafe"
+    assert "ย้อนหลัง" in sent[-1]["text"] or "historical" in sent[-1]["text"]
     multi_db.close()
     conn.close()
 
@@ -412,6 +415,310 @@ def test_owner_wd_and_near_tol_and_refusals(tmp_path: Path, env_chat: None) -> N
     conn.close()
     _ = admin
     _ = AccountValue
+
+
+def test_owner_refuses_multi_unrecorded_and_open_pos(tmp_path: Path, env_chat: None) -> None:
+    """Codex repro: two unrecorded deposits must not mint from current V."""
+    conn = open_db(tmp_path / "multi_u.db")
+    t_init = NOW - 10 * HOUR
+    _init(conn, wallet="400", now_ms=t_init)
+    t0 = NOW - HOUR
+    client = FakeClient(
+        [
+            _xfer(time_ms=t0, amount="100", tran_id="u_a"),
+            _xfer(time_ms=t0 + 1000, amount="100", tran_id="u_b"),
+        ],
+        wallet="600",
+    )
+    sent: list[str] = []
+
+    def send(text: str, **_k: Any) -> None:
+        sent.append(text)
+
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 100 u_a",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert out["reason"] == "unsafe"
+    assert "historical one-off" in sent[-1] or "ย้อนหลัง" in sent[-1]
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind = 'owner_deposit'").fetchone()["n"]
+        == 0
+    )
+    # Never minted 80 units (V=600, NAV would falsely become 1.25)
+    admin = ps.admin_partner(conn)
+    assert admin is not None
+    assert int(admin["units_e8"]) == 40_000_000_000
+
+    # open position refuses even for a single match
+    single_db = open_db(tmp_path / "open_pos.db")
+    _init(single_db, wallet="400", now_ms=t_init)
+    open_client = FakeClient(
+        [_xfer(time_ms=t0, amount="100", tran_id="op1")],
+        wallet="500",
+        unrealized="5",
+    )
+    sent.clear()
+    out2 = pa.handle_partner_text(
+        single_db,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=open_client,
+        now_ms=NOW,
+    )
+    assert out2["reason"] == "unsafe"
+    assert "โพซิชัน" in sent[-1]
+    single_db.close()
+    conn.close()
+
+
+def test_owner_confirm_ts_and_amount_integrity(tmp_path: Path, env_chat: None) -> None:
+    conn = open_db(tmp_path / "ts.db")
+    t_init = NOW - 10 * HOUR
+    _init(conn, wallet="400", now_ms=t_init)
+    t0 = NOW - HOUR
+    client = FakeClient([_xfer(time_ms=t0, amount="100", tran_id="ts1")], wallet="500")
+    sent: list[dict[str, Any]] = []
+
+    def send(text: str, **kwargs: Any) -> None:
+        sent.append({"text": text, **kwargs})
+
+    def answer(_id: str, text: str | None = None) -> None:
+        sent.append({"answer": text})
+
+    def edit(_mid: int, text: str, **_k: Any) -> bool:
+        sent.append({"edit": text})
+        return True
+
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert out["ok"] is True
+    good_cb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+
+    # forged old ts
+    old = pa.handle_partner_callback(
+        conn,
+        "pa:oy:d:ts1:1000000000:100000000",
+        callback=_owner_cb("x"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert old["reason"] == "stale_confirm"
+
+    # future ts
+    future_s = NOW // 1000 + 120
+    fut = pa.handle_partner_callback(
+        conn,
+        f"pa:oy:d:ts1:{future_s}:100000000",
+        callback=_owner_cb("x"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert fut["reason"] == "stale_confirm"
+
+    # amount mismatch
+    bad_amt = good_cb.rsplit(":", 1)[0] + ":999000000"
+    mism = pa.handle_partner_callback(
+        conn,
+        bad_amt,
+        callback=_owner_cb("x"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert mism["reason"] == "amount_mismatch"
+
+    # cancel stays harmless
+    cancel = pa.handle_partner_callback(
+        conn,
+        "pa:on:d:ts1",
+        callback=_owner_cb("x"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert cancel["cmd"] == "owner_cancel"
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind = 'owner_deposit'").fetchone()["n"]
+        == 0
+    )
+    conn.close()
+
+
+def test_owner_idempotent_race_and_tran_prefix(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "race.db")
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)["partner_id"]
+    assert ps.apply_deposit(conn, admin, D("400"), D("400"), NOW)["ok"]
+    note = "owner tx via p owner; Binance TRANSFER tranId 100"
+    # prefix must not match
+    assert (
+        ps.apply_owner_deposit(
+            conn,
+            amount=D("10"),
+            account_value=D("410"),
+            now_ms=NOW + 1,
+            note="owner tx via p owner; Binance TRANSFER tranId 1001",
+            event_id="pe_owner_tran1001",
+        )["ok"]
+        is True
+    )
+    assert not ps._note_has_exact_tran_id("tranId 1001", "100")
+    assert ps._note_has_exact_tran_id("tranId 1001", "1001")
+    assert not pa._owner_already_recorded(conn, side="dep", tran_id="100")
+
+    # two apply calls with same event_id → one row
+    r1 = ps.apply_owner_deposit(
+        conn,
+        amount=D("50"),
+        account_value=D("460"),
+        now_ms=NOW + 2,
+        note=note,
+        event_id="pe_owner_tran100",
+    )
+    assert r1["ok"] is True and r1.get("reason") != "already_recorded"
+    r2 = ps.apply_owner_deposit(
+        conn,
+        amount=D("50"),
+        account_value=D("460"),
+        now_ms=NOW + 3,
+        note=note,
+        event_id="pe_owner_tran100",
+    )
+    assert r2.get("reason") == "already_recorded"
+    n = conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE id = 'pe_owner_tran100'").fetchone()["n"]
+    assert int(n) == 1
+
+    # Two connections: skip in-tx recheck so the second hits PRIMARY KEY → already_recorded
+    path = tmp_path / "race2.db"
+    c1 = open_db(path)
+    adm = ps.create_partner(c1, name="admin", is_admin=True, now_ms=NOW)["partner_id"]
+    assert ps.apply_deposit(c1, adm, D("400"), D("400"), NOW)["ok"]
+    c1.close()
+
+    import jarvise_assist.partner_store as store_mod
+
+    real_check = store_mod._owner_tx_already_in_ledger
+
+    def _race_check(conn: Any, **kwargs: Any) -> bool:
+        # First writer: normal. After one row exists, still claim clear so insert races.
+        n = conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE id = 'pe_owner_tranrace'").fetchone()[
+            "n"
+        ]
+        if int(n) == 0:
+            return False
+        return False  # force IntegrityError path on second insert
+
+    store_mod._owner_tx_already_in_ledger = _race_check  # type: ignore[assignment]
+    try:
+        a = open_db(path)
+        b = open_db(path)
+        ra = ps.apply_owner_deposit(
+            a,
+            amount=D("25"),
+            account_value=D("425"),
+            now_ms=NOW + 10,
+            note="owner tx via p owner; Binance TRANSFER tranId race",
+            event_id="pe_owner_tranrace",
+        )
+        rb = ps.apply_owner_deposit(
+            b,
+            amount=D("25"),
+            account_value=D("425"),
+            now_ms=NOW + 11,
+            note="owner tx via p owner; Binance TRANSFER tranId race",
+            event_id="pe_owner_tranrace",
+        )
+        assert ra["ok"] is True and ra.get("reason") != "already_recorded"
+        assert rb.get("reason") == "already_recorded"
+        n_race = a.execute(
+            "SELECT COUNT(*) AS n FROM partner_event WHERE id = 'pe_owner_tranrace'"
+        ).fetchone()["n"]
+        assert int(n_race) == 1
+        a.close()
+        b.close()
+    finally:
+        store_mod._owner_tx_already_in_ledger = real_check  # type: ignore[assignment]
+    conn.close()
+    _ = real_check
+
+
+def test_owner_b1_clears_open_unrecorded_fingerprint(tmp_path: Path, env_chat: None) -> None:
+    from jarvise_assist.partner_audit import load_state, save_state
+
+    db = tmp_path / "b1fp.db"
+    conn = open_db(db)
+    t_init = NOW - 10 * HOUR
+    _init(conn, wallet="400", now_ms=t_init)
+    t0 = NOW - HOUR
+    client = FakeClient([_xfer(time_ms=t0, amount="100", tran_id="fp1")], wallet="500")
+    save_state(
+        db.with_name("partner_audit_state.json"),
+        {
+            "v": 1,
+            "alerted": {},
+            "open_unrecorded": ["bx:TRANSFER:fp1", "bx:TRANSFER:keep"],
+            "last_ok_ms": None,
+            "fail_since_ms": None,
+            "fail_alerted": False,
+        },
+    )
+    sent: list[dict[str, Any]] = []
+
+    def send(text: str, **kwargs: Any) -> None:
+        sent.append({"text": text, **kwargs})
+
+    def answer(_id: str, text: str | None = None) -> None:
+        return None
+
+    def edit(_mid: int, text: str, **_k: Any) -> bool:
+        return True
+
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert out["ok"] is True
+    cb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    conf = pa.handle_partner_callback(
+        conn,
+        cb,
+        callback=_owner_cb(cb),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert conf["ok"] is True
+    state = load_state(db.with_name("partner_audit_state.json"))
+    assert "bx:TRANSFER:fp1" not in state["open_unrecorded"]
+    assert "bx:TRANSFER:keep" in state["open_unrecorded"]
+    conn.close()
 
 
 def test_apply_owner_passthrough_effective_and_note(tmp_path: Path) -> None:

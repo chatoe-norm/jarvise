@@ -39,15 +39,20 @@ _AMOUNT_RE = re.compile(r"^(?:[0-9]{1,9}(?:\.[0-9]{1,6})?|[0-9]{1,3}(?:,[0-9]{3}
 _CMD_RE = re.compile(r"^\s*p(\s|$)", re.IGNORECASE)
 _REQ_ID_RE = re.compile(r"^pr_[0-9a-f]{16}$")
 _GUARD_FORCE_RE = re.compile(r"^(pr_[0-9a-f]{16}):([0-9]{10})$")
-_OWNER_CONFIRM_RE = re.compile(r"^pa:oy:(dep|wd):([A-Za-z0-9_.-]{1,32}):([0-9]{10})$")
-_OWNER_CANCEL_RE = re.compile(r"^pa:on:(dep|wd):([A-Za-z0-9_.-]{1,32})$")
+# Short side codes keep confirm callback_data ≤ 64 bytes with amount micro.
+_OWNER_CONFIRM_RE = re.compile(r"^pa:oy:(d|w):([A-Za-z0-9_.-]{1,32}):([0-9]{10}):([0-9]{1,12})$")
+_OWNER_CANCEL_RE = re.compile(r"^pa:on:(d|w):([A-Za-z0-9_.-]{1,32})$")
 _TRAN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+_OWNER_SIDE = {"d": "dep", "w": "wd"}
+_OWNER_SIDE_CB = {"dep": "d", "wd": "w"}
 _GUARD_OVERRIDE_S = 900
 _GUARD_FUTURE_S = 60
 _GUARD_MARKER = "\n\n⚠️ ตรวจยอดโอน"
 _OWNER_TX_MAX_AGE_MS = 6 * 60 * 60 * 1000
 _OWNER_TX_MAX_INCOME = Decimal("1")
 _OWNER_HIST_HINT = "ใช้เครื่องมือบันทึกย้อนหลัง (historical one-off) แทน"
+_OWNER_MULTI_MSG = f"มีเงินโอนอื่นที่ยังไม่บันทึก — {_OWNER_HIST_HINT}"
+_OWNER_OPEN_POS_MSG = f"มีโพซิชันเปิดอยู่ — uPnL อาจเพี้ยน · {_OWNER_HIST_HINT}"
 _UNRECORDED_MSG = "มีเงินโอนเข้า/ออกที่ยังไม่บันทึก — บันทึกด้วย p owner ก่อน"
 _GUARD_FETCH_BLOCK = frozenset({"no_client", "read_failed", "incomplete", "bad_payload", "error"})
 
@@ -521,18 +526,20 @@ def _blocks_on_unrecorded(result: GuardResult) -> bool:
     return any(f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded") for f in result.findings)
 
 
-def _open_unrecorded_count(conn: sqlite3.Connection) -> int:
-    row = conn.execute("PRAGMA database_list").fetchone()
-    db_file = ""
-    if row is not None:
-        db_file = str(row["file"] if hasattr(row, "keys") else row[2] or "")
-    if not db_file:
-        return 0
-    from jarvise_assist.partner_audit import load_state
+def _open_unrecorded_overview(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> tuple[str, int]:
+    """Return (status, count). Live clear overrides a stale state-file list."""
+    from jarvise_assist import partner_unrecorded as pu
 
-    state = load_state(Path(db_file).with_name("partner_audit_state.json"))
-    open_list = state.get("open_unrecorded") or []
-    return len(open_list) if isinstance(open_list, list) else 0
+    client = _resolve_client(futures)
+    live = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
+    hint = pu.open_unrecorded_hint(conn)
+    if live == "clear":
+        return "clear", 0
+    if live == "unrecorded":
+        return "unrecorded", max(len(hint), 1)
+    if hint:
+        return "unrecorded", len(hint)
+    return "unknown", 0
 
 
 def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, Any]]:
@@ -642,7 +649,13 @@ def _fee_if_closed(view: dict[str, Any]) -> Decimal:
     return Decimal(view.get("fee") or 0)
 
 
-def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueError, *, now_ms: int) -> str:
+def _overview_text(
+    conn: sqlite3.Connection,
+    av: AccountValue | AccountValueError,
+    *,
+    now_ms: int,
+    futures: Any = None,
+) -> str:
     lines: list[str] = [f"พอร์ตร่วม · {_bangkok_stamp(now_ms)}"]
     if not _has_events(conn):
         lines.append("ยังไม่ได้ตั้งต้น")
@@ -732,9 +745,11 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
         ).fetchone()["n"]
     )
     lines.append(f"รายการค้าง {pending_n}")
-    unrecorded_n = _open_unrecorded_count(conn)
-    if unrecorded_n > 0:
+    status, unrecorded_n = _open_unrecorded_overview(conn, futures, now_ms=now_ms)
+    if status == "unrecorded" and unrecorded_n > 0:
         lines.append(f"⚠️ มีเงินโอนที่ยังไม่บันทึก {unrecorded_n} รายการ — ตัวเลข partner ยังไม่ถูกต้อง")
+    elif status == "unknown":
+        lines.append("⚠️ กำลังตรวจยอดโอน — ตัวเลข partner อาจยังไม่ถูกต้อง")
     verify = ps.verify_ledger(conn)
     mism = len(verify.get("mismatches") or [])
     if verify.get("ok"):
@@ -744,12 +759,20 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
     return "\n".join(lines)
 
 
-def _owner_buttons(side: str, tran_id: str, ts_s: int) -> dict[str, Any]:
+def _owner_event_id(tran_id: str) -> str:
+    return f"pe_owner_tran{tran_id}"
+
+
+def _owner_buttons(side: str, tran_id: str, ts_s: int, amount_micro: int) -> dict[str, Any]:
+    cb_side = _OWNER_SIDE_CB[side]
     return {
         "inline_keyboard": [
             [
-                {"text": "✅ ยืนยัน", "callback_data": f"pa:oy:{side}:{tran_id}:{ts_s}"},
-                {"text": "❌ ยกเลิก", "callback_data": f"pa:on:{side}:{tran_id}"},
+                {
+                    "text": "✅ ยืนยัน",
+                    "callback_data": f"pa:oy:{cb_side}:{tran_id}:{ts_s}:{int(amount_micro)}",
+                },
+                {"text": "❌ ยกเลิก", "callback_data": f"pa:on:{cb_side}:{tran_id}"},
             ]
         ]
     }
@@ -760,17 +783,39 @@ def _owner_note(tran_id: str) -> str:
 
 
 def _owner_already_recorded(conn: sqlite3.Connection, *, side: str, tran_id: str) -> bool:
+    eid = _owner_event_id(tran_id)
+    if conn.execute("SELECT 1 AS n FROM partner_event WHERE id = ?", (eid,)).fetchone() is not None:
+        return True
     kind = "owner_deposit" if side == "dep" else "owner_redeem"
-    needle = f"tranId {tran_id}"
-    row = conn.execute(
+    rows = conn.execute(
         """
-        SELECT 1 AS n FROM partner_event
-        WHERE kind = ? AND note IS NOT NULL AND instr(note, ?) > 0
-        LIMIT 1
+        SELECT note FROM partner_event
+        WHERE kind = ? AND note IS NOT NULL
         """,
-        (kind, needle),
-    ).fetchone()
-    return row is not None
+        (kind,),
+    ).fetchall()
+    return any(ps._note_has_exact_tran_id(str(row["note"]), tran_id) for row in rows)
+
+
+def _owner_confirm_ts_ok(ts_s: int, *, now_ms: int) -> bool:
+    now_s = int(now_ms) // 1000
+    if int(ts_s) > now_s + _GUARD_FUTURE_S:
+        return False
+    if now_s - int(ts_s) > _GUARD_OVERRIDE_S:
+        return False
+    return True
+
+
+def _clear_owner_audit_fp(conn: sqlite3.Connection, tran_id: str) -> None:
+    from jarvise_assist.partner_audit import remove_open_unrecorded_for_tran
+
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if row is None:
+        return
+    db_file = str(row["file"] if hasattr(row, "keys") else row[2] or "")
+    if not db_file:
+        return
+    remove_open_unrecorded_for_tran(Path(db_file).with_name("partner_audit_state.json"), tran_id)
 
 
 def _owner_match_amount(wanted: Decimal, found: Decimal) -> bool:
@@ -804,16 +849,34 @@ def _owner_unrecorded_matches(
     return out
 
 
+def _owner_other_unrecorded(findings: list[Any], selected: Any) -> bool:
+    """True when another in/out unrecorded finding exists besides the selected one."""
+    sel_fp = str(getattr(selected, "fingerprint", "") or "")
+    for f in findings:
+        if str(f.code) not in ("transfer_in_unrecorded", "transfer_out_unrecorded"):
+            continue
+        if sel_fp and str(f.fingerprint or "") == sel_fp:
+            continue
+        return True
+    return False
+
+
 def _owner_safety_refuse(
     conn: sqlite3.Connection,
     client: Any,
     *,
     finding: Any,
+    findings: list[Any],
     now_ms: int,
 ) -> str | None:
     """Return a Thai refuse message, or None when live booking is safe."""
     from jarvise_assist.real_trades import IncomeIncompleteError, fetch_all_income
 
+    if _owner_other_unrecorded(findings, finding):
+        return _OWNER_MULTI_MSG
+    av = _read_v(client, now_ms=now_ms)
+    if isinstance(av, AccountValue) and int(av.open_positions) > 0:
+        return _OWNER_OPEN_POS_MSG
     t_ms = int(finding.time_ms)
     if int(now_ms) - t_ms > _OWNER_TX_MAX_AGE_MS:
         return f"เงินโอนเก่าเกิน 6 ชม. — {_OWNER_HIST_HINT}"
@@ -858,15 +921,6 @@ def _owner_safety_refuse(
             return f"อ่านรายได้หลังเงินโอนไม่สำเร็จ — {_OWNER_HIST_HINT}"
     if abs(income_sum) > _OWNER_TX_MAX_INCOME:
         return f"มียอดเทรดหลังเงินโอนเกิน 1 USDT — {_OWNER_HIST_HINT}"
-    av = _read_v(client, now_ms=now_ms)
-    if isinstance(av, AccountValue) and int(av.open_positions) > 0:
-        # Newer unmatched transfer means V is not the post-transfer flat value.
-        from jarvise_assist.partner_audit import guard_check
-
-        newer = guard_check(conn, client, now_ms=int(now_ms))
-        for f in newer.findings:
-            if f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded") and int(f.time_ms) > t_ms:
-                return f"มีเงินโอนใหม่กว่านี้ขณะเปิดโพซิชัน — {_OWNER_HIST_HINT}"
     return None
 
 
@@ -910,7 +964,7 @@ def _handle_owner_tx(
     if _owner_already_recorded(conn, side=side, tran_id=tid):
         send("บันทึก tranId นี้แล้ว")
         return {"ok": True, "cmd": "owner", "reason": "already_recorded"}
-    refuse = _owner_safety_refuse(conn, client, finding=finding, now_ms=now_ms)
+    refuse = _owner_safety_refuse(conn, client, finding=finding, findings=list(guard.findings), now_ms=now_ms)
     if refuse is not None:
         send(refuse)
         return {"ok": False, "reason": "unsafe"}
@@ -965,13 +1019,16 @@ def _handle_owner_tx(
         f"V ตอนนี้ {fmt_usdt(av.value)} · NAV ก่อน {fmt_nav(nav_pre)}\n"
         f"{units_line} · ทุนหลัง {fmt_usdt(cost_after)}"
     )
-    send(text, reply_markup=_owner_buttons(side, tid, int(now_ms) // 1000))
+    send(
+        text,
+        reply_markup=_owner_buttons(side, tid, int(now_ms) // 1000, ps.usdt_to_micro(amount_q)),
+    )
     return {"ok": True, "cmd": "owner", "tran_id": tid, "side": side}
 
 
 def _handle_overview(conn: sqlite3.Connection, *, send: Any, futures: Any, now_ms: int) -> dict[str, Any]:
     av = _read_v(futures, now_ms=now_ms)
-    send(_overview_text(conn, av, now_ms=now_ms))
+    send(_overview_text(conn, av, now_ms=now_ms, futures=futures))
     return {"ok": True, "cmd": "overview"}
 
 
@@ -1920,11 +1977,17 @@ def handle_partner_callback(
             return {"ok": True, "cmd": "owner_cancel"}
         owner_confirm = _OWNER_CONFIRM_RE.match(data)
         if owner_confirm is not None:
-            side, tran_id, _ts_s = (
+            side_code, tran_id, owner_ts_s, amount_micro_s = (
                 owner_confirm.group(1),
                 owner_confirm.group(2),
-                owner_confirm.group(3),
+                int(owner_confirm.group(3)),
+                owner_confirm.group(4),
             )
+            side = _OWNER_SIDE[side_code]
+            preview_micro = int(amount_micro_s)
+            if not _owner_confirm_ts_ok(owner_ts_s, now_ms=now_ms):
+                _answer("การ์ดหมดอายุแล้ว — พิมพ์คำสั่งใหม่")
+                return {"ok": False, "reason": "stale_confirm"}
             if _owner_already_recorded(conn, side=side, tran_id=tran_id):
                 _answer("บันทึกแล้ว")
                 if mid is not None:
@@ -1949,7 +2012,17 @@ def handle_partner_callback(
             if finding is None:
                 _answer("ไม่พบเงินโอนที่ยังไม่บันทึก")
                 return {"ok": False, "reason": "no_match"}
-            refuse = _owner_safety_refuse(conn, client, finding=finding, now_ms=now_ms)
+            amount = Decimal(finding.amount)
+            if ps.usdt_to_micro(amount) != preview_micro:
+                _answer("จำนวนไม่ตรงกับที่ตรวจแล้ว — พิมพ์คำสั่งใหม่")
+                return {"ok": False, "reason": "amount_mismatch"}
+            refuse = _owner_safety_refuse(
+                conn,
+                client,
+                finding=finding,
+                findings=list(guard.findings),
+                now_ms=now_ms,
+            )
             if refuse is not None:
                 _answer(refuse)
                 return {"ok": False, "reason": "unsafe"}
@@ -1957,8 +2030,8 @@ def handle_partner_callback(
             if isinstance(av, AccountValueError):
                 _answer(thai_reason(av.reason, detail=av.detail))
                 return {"ok": False, "reason": av.reason}
-            amount = Decimal(finding.amount)
             note = _owner_note(tran_id)
+            eid = _owner_event_id(tran_id)
             if side == "dep":
                 result = ps.apply_owner_deposit(
                     conn,
@@ -1967,6 +2040,7 @@ def handle_partner_callback(
                     now_ms=now_ms,
                     effective_at_ms=int(finding.time_ms),
                     note=note,
+                    event_id=eid,
                 )
             else:
                 result = ps.apply_owner_redeem(
@@ -1976,11 +2050,18 @@ def handle_partner_callback(
                     now_ms=now_ms,
                     effective_at_ms=int(finding.time_ms),
                     note=note,
+                    event_id=eid,
                 )
+            if result.get("reason") == "already_recorded":
+                _answer("บันทึกแล้ว")
+                if mid is not None:
+                    edit(int(mid), "บันทึกแล้ว", reply_markup={"inline_keyboard": []})
+                return {"ok": True, "cmd": "owner_confirm", "reason": "already_recorded"}
             if not result.get("ok"):
                 reason = str(result.get("reason") or "")
                 _answer(thai_reason(reason))
                 return {"ok": False, "reason": reason}
+            _clear_owner_audit_fp(conn, tran_id)
             _answer()
             if side == "dep":
                 body = (
@@ -2188,14 +2269,14 @@ def handle_partner_callback(
 
         if data.startswith("pa:ry:") or data.startswith("pa:rf:"):
             force = data.startswith("pa:rf:")
-            ts_s = None
+            force_ts: int | None = None
             if force:
                 m = _GUARD_FORCE_RE.match(data[len("pa:rf:") :])
                 if m is None:
                     _answer("รายการนี้ปิดไปแล้ว")
                     return {"ok": False, "reason": "bad_id"}
                 rid = m.group(1)
-                ts_s = int(m.group(2))
+                force_ts = int(m.group(2))
             else:
                 rid = data[len("pa:ry:") :]
                 if not _REQ_ID_RE.match(rid):
@@ -2245,7 +2326,7 @@ def handle_partner_callback(
                 if mid is None or not edited_ok:
                     send(text, reply_markup=refuse_markup)
                 return {"ok": False, "reason": "unrecorded_transfer"}
-            if _should_run_guard(force=force, ts_s=ts_s, now_ms=now_ms):
+            if _should_run_guard(force=force, ts_s=force_ts, now_ms=now_ms):
                 if guard_result.warn:
                     _answer("มีเรื่องยอดโอน — อ่านบนการ์ดก่อนยืนยัน")
                     text = _merge_guard_text(str(msg.get("text") or ""), guard_text)
