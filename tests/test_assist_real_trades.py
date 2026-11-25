@@ -11,6 +11,7 @@ import pytest
 from tests.test_assist import _ms_bangkok
 
 from jarvise_assist.futures import FAPI_HISTORY_WINDOW_MS, SymbolFilters
+from jarvise_assist.pause import day_bot_net_r
 from jarvise_assist.real_trades import (
     SPEC_START_MS,
     adverse_bps,
@@ -1660,7 +1661,7 @@ def test_second_sync_no_duplicate_skips_income_refetch(tmp_path: Path) -> None:
 
 
 def test_non_usdt_excluded_from_mean_r(tmp_path: Path) -> None:
-    """Without a BNBUSDT price the fee stays other and mean R stays incomplete."""
+    """Without a BNBUSDT price the fee stays other; day-loss still gets known R."""
     conn = open_db(tmp_path / "bnb.db")
     _seed_jv_entry(
         conn,
@@ -1749,11 +1750,100 @@ def test_non_usdt_excluded_from_mean_r(tmp_path: Path) -> None:
     ).fetchone()
     assert row is not None
     assert row[0]  # commission_other_asset set
-    assert row[1] is None  # net_r_real incomplete for day-loss
+    assert row[1] == -1.0  # known parts still feed day-loss R
     s = summarize_real_vs_virtual(conn)
     assert s["closed_n"] == 1
     assert s["non_usdt_fee_n"] == 1
     assert s["mean_net_r"] is None
+    conn.close()
+
+
+def test_unpriced_bnb_fee_still_counts_in_day_bot_net_r(tmp_path: Path) -> None:
+    """Unpriced BNB fee must not hide a -1R bot stop-out from day-loss."""
+    conn = open_db(tmp_path / "bnb_day.db")
+    _seed_jv_entry(
+        conn,
+        intent_id="aei_bnb_day",
+        client_id="jv-bnbday-mkt",
+        preview={
+            "entry": "100",
+            "stop": "90",
+            "target": "120",
+            "qty": "0.1",
+            "loss_at_stop": "1",
+            "signal_id": "as_bnb_day",
+            "leverage": 5,
+        },
+        ref_price="100",
+    )
+    t0 = SPEC_START_MS + 60_000
+    orders = [
+        {
+            "orderId": 701,
+            "clientOrderId": "jv-bnbday-mkt",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "MARKET",
+            "time": t0,
+            "status": "FILLED",
+            "reduceOnly": False,
+        },
+        {
+            "orderId": 702,
+            "clientOrderId": "jv-bnbday-sl0",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "type": "MARKET",
+            "stopPrice": "",
+            "time": t0 + 1000,
+            "status": "FILLED",
+            "reduceOnly": True,
+        },
+    ]
+    trades = [
+        {
+            "id": 1,
+            "orderId": 701,
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "price": "100",
+            "qty": "0.1",
+            "time": t0,
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "realizedPnl": "0",
+        },
+        {
+            "id": 2,
+            "orderId": 702,
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "price": "90",
+            "qty": "0.1",
+            "time": t0 + 1000,
+            "commission": "0",
+            "commissionAsset": "USDT",
+            "realizedPnl": "-1",
+        },
+    ]
+    income = [
+        {
+            "symbol": "BTCUSDT",
+            "incomeType": "REALIZED_PNL",
+            "income": "-1",
+            "time": t0 + 1000,
+            "tradeId": 2,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "incomeType": "FUNDING_FEE",
+            "income": "0",
+            "time": t0 + 500,
+        },
+    ]
+    fake = FakeFutures(trades=trades, orders=orders, income=income)
+    sync_real_trades(conn, fake, since_ms=SPEC_START_MS, until_ms=t0 + 5000)  # type: ignore[arg-type]
+    assert day_bot_net_r(conn, now_ms=t0 + 5000) == Decimal("-1.0000")
     conn.close()
 
 

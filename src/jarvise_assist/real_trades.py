@@ -229,17 +229,19 @@ class IncomeIncompleteError(RuntimeError):
 
 
 def _income_dedupe_key(row: dict[str, Any]) -> tuple[str, ...]:
-    """Stable key for income rows. Prefer (incomeType, tranId)."""
-    itype = str(row.get("incomeType") or "")
-    tran = row.get("tranId")
-    if tran is not None and str(tran) != "":
-        return (itype, str(tran))
+    """Full-row key so a shared tranId across trades stays distinct.
+
+    Matches ``_income_row_key`` fields plus ``asset``. An identical row
+    returned on two overlapping cursor pages collapses to one.
+    """
     return (
-        itype,
+        str(row.get("symbol") or "").upper(),
+        str(row.get("incomeType") or ""),
         str(row.get("time") or ""),
+        str(row.get("tradeId") or ""),
         str(row.get("income") or ""),
+        str(row.get("tranId") or ""),
         str(row.get("asset") or ""),
-        str(row.get("symbol") or ""),
     )
 
 
@@ -256,8 +258,8 @@ def fetch_all_income(
     """Page ``/fapi/v1/income`` until a short page. Never sends ``page``.
 
     Advances ``startTime`` to the last row's ``time`` (inclusive) and dedupes
-    by ``(incomeType, tranId)`` (fallback: type + time + income + asset +
-    symbol). Windows stay within ``time_windows`` (7-day max). Raises
+    by the full row key (symbol, type, time, tradeId, income, tranId, asset).
+    Windows stay within ``time_windows`` (7-day max). Raises
     ``IncomeIncompleteError`` when ``page_cap`` is hit so callers do not
     treat a truncated book as complete.
     """
@@ -1084,8 +1086,10 @@ def build_real_rows(
             loss = entry.get("loss_at_stop")
             net_usdt = realized + commission_usdt + funding_usdt
             net_r_real = None
-            # Incomplete non-USDT fees must not feed day-loss R as if complete.
-            if closed and loss is not None and float(loss) > 0 and not other_assets:
+            # Known parts only (realized + converted USDT fees + funding). A
+            # missing non-USDT fee slightly overstates net so day-loss still
+            # counts the loss; commission_other_asset keeps mean-R excluded.
+            if closed and loss is not None and float(loss) > 0:
                 net_r_real = net_usdt / float(loss)
             risk_actual, net_r_actual = _risk_actual(
                 closed=closed,

@@ -207,6 +207,66 @@ def test_calc5_page_cap_returns_income_incomplete(tmp_path: Path) -> None:
     conn.close()
 
 
+class _SharedTranIdThenOverlapFutures:
+    """Two COMMISSION rows share tranId=777; page 2 re-returns the second row."""
+
+    def __init__(self, *, start_ms: int) -> None:
+        self.start_ms = start_ms
+        self.calls: list[dict[str, Any]] = []
+        self._rows = [
+            {
+                "incomeType": "COMMISSION",
+                "income": "-0.30",
+                "asset": "USDT",
+                "symbol": "BTCUSDT",
+                "time": start_ms + 1_000,
+                "tradeId": 11,
+                "tranId": 777,
+            },
+            {
+                "incomeType": "COMMISSION",
+                "income": "-0.25",
+                "asset": "USDT",
+                "symbol": "ETHUSDT",
+                "time": start_ms + 2_000,
+                "tradeId": 12,
+                "tranId": 777,
+            },
+            {
+                "incomeType": "COMMISSION",
+                "income": "-0.10",
+                "asset": "USDT",
+                "symbol": "BTCUSDT",
+                "time": start_ms + 3_000,
+                "tradeId": 13,
+                "tranId": 778,
+            },
+        ]
+
+    def income_history(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(dict(kwargs))
+        start = int(kwargs.get("start_ms") or 0)
+        end = int(kwargs.get("end_ms") or 0)
+        limit = int(kwargs.get("limit") or 1000)
+        out = [r for r in self._rows if start <= int(r["time"]) <= end]
+        return out[:limit]
+
+
+def test_calc5_dedupe_keeps_shared_tranid_and_drops_page_overlap() -> None:
+    """Shared (incomeType, tranId) stays distinct; identical overlap drops once."""
+    start = _ms_bangkok(2026, 11, 23, 0, 0)
+    end = _ms_bangkok(2026, 11, 23, 1, 0)
+    fake = _SharedTranIdThenOverlapFutures(start_ms=start)
+    rows = fetch_all_income(fake, start_ms=start, end_ms=end, limit=2)
+    assert len(rows) == 3
+    assert len(fake.calls) >= 2
+    by_trade = {int(r["tradeId"]): Decimal(str(r["income"])) for r in rows}
+    assert by_trade[11] == Decimal("-0.30")
+    assert by_trade[12] == Decimal("-0.25")
+    assert by_trade[13] == Decimal("-0.10")
+    assert sum(by_trade.values()) == Decimal("-0.65")
+
+
 # ---------------------------------------------------------------------------
 # CALC-6 — paper day = Bangkok 00:00
 # ---------------------------------------------------------------------------
