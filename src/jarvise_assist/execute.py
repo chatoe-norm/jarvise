@@ -188,6 +188,8 @@ MSG_RECOVER_STALE_UNREADABLE = (
 MSG_RECOVER_SIDE_MISMATCH = "position {symbol} ไม่ตรงกับไม้นี้ — บอทไม่แตะ"
 MSG_RECOVER_MOVE_STOP_FAILED = "เลื่อน stop ไม่สำเร็จ — ไม่ได้ยกเลิก stop เดิม"
 MSG_CANCEL_OLD_FAILED = "⚠️ ยกเลิก stop/TP เดิมไม่สำเร็จ — ลบในแอป"
+MSG_REOPEN_LEFTOVERS = "⚠️ ไม้กลับมาแล้ว — คำสั่งค้างยังอยู่ ลบในแอป"
+MSG_RECOVER_LEFTOVER_GIVE_UP = "⚠️ มี stop/TP ค้างอยู่บน {symbol} (บอทหรือคุณตั้งเอง) — ลบในแอปก่อน"
 _BANGKOK = timezone(timedelta(hours=7))
 _STOP_TAGS = ("slr", "sl0", "sl1")
 _FINAL_ORDER_STATUSES = frozenset({"FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED"})
@@ -232,6 +234,14 @@ def msg_recover_true_state(
 def msg_cancel_old_failed(client_ids: list[str]) -> str:
     ids = ", ".join(client_ids)
     return f"{MSG_CANCEL_OLD_FAILED} {ids}"
+
+
+def msg_reopen_leftovers(client_ids: list[str] | None = None) -> str:
+    """Position reappeared during leftover cancel — orders were not (fully) attempted."""
+    ids = [c for c in (client_ids or []) if c]
+    if ids:
+        return f"{MSG_REOPEN_LEFTOVERS} {', '.join(ids)}"
+    return MSG_REOPEN_LEFTOVERS
 
 
 _TRADE_AUTH_REASON_TH: dict[str, str] = {
@@ -3067,7 +3077,12 @@ def run_move_stop_sequence(
 
 
 class ExitCancelResult(NamedTuple):
-    """Outcome of jv- (and optional owner) leftover cancel after a verified flat."""
+    """Outcome of jv- (and optional owner) leftover cancel after a verified flat.
+
+    On aborted_reopen, ok is True even if the jv- phase had failures: the close
+    stays done with no exit_cancel_pending; those ids remain in failed_ids /
+    the reopen warning. Do not flip that to unknown.
+    """
 
     ok: bool
     failed_ids: list[str]
@@ -3107,8 +3122,8 @@ def _flat_cancel_anchor_ms(conn: Any, intent_id: str) -> int | None:
 
 
 def _owner_order_create_ms(order: dict[str, Any]) -> int | None:
-    """Binance create time: `time` on openOrders, `createTime` on openAlgoOrders."""
-    for key in ("createTime", "time", "updateTime"):
+    """Binance create time: `createTime` (algo) then `time` (regular). No updateTime."""
+    for key in ("createTime", "time"):
         raw = order.get(key)
         if raw in (None, "", 0, "0"):
             continue
@@ -3142,7 +3157,8 @@ def _cancel_exit_stops_and_tp(
 
     The jv- phase is identical under both flag states (same endpoints / calls).
     Failed client ids are returned. Position reopen during the owner phase is
-    aborted_reopen=True with ok=True (close stays done; no exit_cancel_pending).
+    aborted_reopen=True with ok=True (close stays done; no exit_cancel_pending),
+    even when the jv- phase had failures — those ids stay in failed_ids / warning.
     """
     all_ok = True
     failed_ids: list[str] = []
@@ -3263,7 +3279,7 @@ def _finish_flat_exit(
     else:
         text = f"✅ ปิด {symbol}"
     if cancel.aborted_reopen:
-        warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+        warning = msg_reopen_leftovers(cancel.failed_ids)
         return _exec_result(f"{text}\n{warning}", status="done")
     if not cancel.ok:
         warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
@@ -3288,6 +3304,26 @@ def _open_jv_client_ids(trade: BinanceTradeClient, symbol: str) -> list[str]:
         cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
         if cid.startswith("jv-"):
             ids.append(cid)
+    return ids
+
+
+def _open_leftover_client_ids(trade: BinanceTradeClient, symbol: str) -> list[str]:
+    """jv- and owner leftover client/algo/order ids still open on the symbol."""
+    try:
+        orders = trade.all_open_orders(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return []
+    ids: list[str] = []
+    for order in orders:
+        label = str(
+            order.get("clientAlgoId")
+            or order.get("clientOrderId")
+            or order.get("algoId")
+            or order.get("orderId")
+            or ""
+        )
+        if label:
+            ids.append(label)
     return ids
 
 
@@ -3792,7 +3828,6 @@ def cancel_owner_reducing_orders_for_symbol(
                 )
             if exc.binance_code in {-2011, -2013}:
                 already_gone.append(label)
-                cancelled.append(label)
             else:
                 failed_ids.append(label)
                 leftover.append(order)
@@ -5386,8 +5421,8 @@ def _recover_exit_intent(
             return
         if pending_positions:
             if not _has_log_step(conn, intent_id, "exit_cancel_gave_up"):
-                ids = _open_jv_client_ids(trade, symbol)
-                text = f"⚠️ มี stop/TP ของบอทค้างอยู่บน {symbol} — ลบในแอปก่อน"
+                ids = _open_leftover_client_ids(trade, symbol)
+                text = MSG_RECOVER_LEFTOVER_GIVE_UP.format(symbol=symbol)
                 if ids:
                     text = f"{text} {', '.join(ids)}"
                 _log_write(
@@ -5414,7 +5449,7 @@ def _recover_exit_intent(
             position_side="BOTH",
         )
         if cancel.aborted_reopen:
-            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+            warning = msg_reopen_leftovers(cancel.failed_ids)
             _recovery_notify(
                 send,
                 conn,
@@ -5461,7 +5496,7 @@ def _recover_exit_intent(
             text = f"✅ ปิด {symbol}"
         status = "done"
         if cancel.aborted_reopen:
-            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+            warning = msg_reopen_leftovers(cancel.failed_ids)
             text = f"{text}\n{warning}"
         elif not cancel.ok:
             warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
@@ -5583,8 +5618,8 @@ def _recover_reduce_intent(
     if _has_log_step(conn, intent_id, "exit_cancel_pending"):
         if positions:
             if not _has_log_step(conn, intent_id, "exit_cancel_gave_up"):
-                ids = _open_jv_client_ids(trade, symbol)
-                text = f"⚠️ มี stop/TP ของบอทค้างอยู่บน {symbol} — ลบในแอปก่อน"
+                ids = _open_leftover_client_ids(trade, symbol)
+                text = MSG_RECOVER_LEFTOVER_GIVE_UP.format(symbol=symbol)
                 if ids:
                     text = f"{text} {', '.join(ids)}"
                 _log_write(conn, intent_id=intent_id, step="exit_cancel_gave_up", endpoint="local")
@@ -5606,7 +5641,7 @@ def _recover_reduce_intent(
             position_side="BOTH",
         )
         if cancel.aborted_reopen:
-            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+            warning = msg_reopen_leftovers(cancel.failed_ids)
             _recovery_notify(
                 send,
                 conn,
@@ -5652,7 +5687,7 @@ def _recover_reduce_intent(
             text = f"✅ ปิด {symbol}"
         status = "done"
         if cancel.aborted_reopen:
-            warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED
+            warning = msg_reopen_leftovers(cancel.failed_ids)
             text = f"{text}\n{warning}"
         elif not cancel.ok:
             warning = msg_cancel_old_failed(cancel.failed_ids) if cancel.failed_ids else MSG_CANCEL_OLD_FAILED

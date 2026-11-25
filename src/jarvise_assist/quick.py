@@ -454,11 +454,18 @@ def sync_quick_trades(
         info["tagged"] += 1
         _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
         if str(rebuilt.get("status")) == "closed":
+            raw_closed = rebuilt.get("closed_at_ms")
+            try:
+                closed_at = int(raw_closed) if raw_closed is not None else None
+            except (TypeError, ValueError):
+                closed_at = None
+            if closed_at is not None and closed_at <= 0:
+                closed_at = None
             info["closed"].append(
                 {
                     "symbol": sym,
                     "side": side,
-                    "closed_at_ms": int(rebuilt.get("closed_at_ms") or now_ms),
+                    "closed_at_ms": closed_at,
                     "trade_id": trade_id,
                 }
             )
@@ -503,11 +510,18 @@ def sync_quick_trades(
         )
         info["updated"] += 1
         if was_open and str(rebuilt.get("status")) == "closed":
+            raw_closed = rebuilt.get("closed_at_ms")
+            try:
+                closed_at = int(raw_closed) if raw_closed is not None else None
+            except (TypeError, ValueError):
+                closed_at = None
+            if closed_at is not None and closed_at <= 0:
+                closed_at = None
             info["closed"].append(
                 {
                     "symbol": sym,
                     "side": side,
-                    "closed_at_ms": int(rebuilt.get("closed_at_ms") or now_ms),
+                    "closed_at_ms": closed_at,
                     "trade_id": trade_id,
                 }
             )
@@ -715,11 +729,13 @@ def _send_close_notice(
         lines = [
             (f"🏁 ไม้ quick {sym} {label} ปิดแล้ว {via} — สุทธิ {net_usdt:+.2f} USDT · {r_line}"),
         ]
-        from jarvise_assist.execute import assist_cancel_owner_enabled
+        from jarvise_assist.execute import assist_cancel_owner_enabled, assist_execute_mode
         from jarvise_assist.order_lines import is_symbol_protective_leftover
 
-        # When CANCEL_OWNER is on, watch reports leftovers after the one cancel attempt.
-        if not assist_cancel_owner_enabled():
+        # Watch owns the one cancel attempt only when flag on AND live execute.
+        # Flag on + testnet/off (or missing trade key) still lists leftovers here.
+        skip_leftover_list = assist_cancel_owner_enabled() and assist_execute_mode() == "live"
+        if not skip_leftover_list:
             leftovers: list[dict[str, Any]] = []
             try:
                 if client is not None and hasattr(client, "all_open_orders"):

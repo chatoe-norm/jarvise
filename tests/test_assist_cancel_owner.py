@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +27,10 @@ from jarvise_assist.execute import (
     RECOVER_MAX_AGE_MS,
     BinanceTradeClient,
     _format_menu_exit_confirm,
+    _owner_order_create_ms,
     assist_cancel_owner_enabled,
     cancel_jv_orders_for_symbol,
+    cancel_owner_reducing_orders_for_symbol,
     handle_exec_callback,
     run_exec_recovery,
 )
@@ -172,8 +176,9 @@ def test_flag_on_cancels_owner_regular_limit(tmp_path: Path, monkeypatch: pytest
         c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and str(c[2].get("algoId")) == "77"
         for c in transport.calls
     )
-    # Replay: no second market, no second DELETE of the same id.
+    # Replay: no second market, no second DELETE of the same regular id.
     n_posts = len([c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"])
+    n_order_dels = len(order_deletes)
     handle_exec_callback(
         conn,
         f"xx:{intent_id}",
@@ -185,6 +190,12 @@ def test_flag_on_cancels_owner_regular_limit(tmp_path: Path, monkeypatch: pytest
         message={"message_id": 1},
     )
     assert len([c for c in transport.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]) == n_posts
+    replay_order_dels = [
+        c
+        for c in transport.calls
+        if c[0] == "DELETE" and c[1] == "/fapi/v1/order" and str(c[2].get("orderId")) == "77"
+    ]
+    assert len(replay_order_dels) == n_order_dels
     conn.close()
 
 
@@ -456,7 +467,8 @@ def test_post_anchor_and_missing_create_time_listed_only(
     algo_deletes = [c for c in transport.calls if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder"]
     assert algo_deletes == []
     text = str(get_exec_intent(conn, intent_id)["result_text"])
-    assert OWNER_CLOSING_ORDER_NOTE in text or "ลบในแอป" in text
+    assert OWNER_CLOSING_ORDER_NOTE in text
+    assert "STOP_MARKET" in text and "TAKE_PROFIT_MARKET" in text
     conn.close()
 
 
@@ -615,7 +627,9 @@ def test_reappeared_position_done_no_pending(tmp_path: Path, monkeypatch: pytest
         for r in conn.execute("SELECT step FROM assist_exec_log WHERE intent_id=?", (intent_id,)).fetchall()
     ]
     assert "exit_cancel_pending" not in steps
-    assert "ลบในแอป" in str(row["result_text"]) or "ยกเลิก" in str(row["result_text"])
+    result_text = str(row["result_text"])
+    assert "ไม้กลับมาแล้ว" in result_text
+    assert "ลบในแอป" in result_text
     # Only the first owner cancel should have fired before abort.
     owner_dels = [c for c in transport.calls if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder"]
     assert len(owner_dels) == 1
@@ -980,10 +994,20 @@ class _FakeTrade:
     cancelled_algo: list[str] = []
     cancelled_order: list[str] = []
 
-    def __init__(self, *, close_side: str = "BUY") -> None:
+    def __init__(
+        self,
+        *,
+        close_side: str = "BUY",
+        positions: list[Any] | None = None,
+        extra_algos: list[dict[str, Any]] | None = None,
+        owner_create_ms: int = 1,
+    ) -> None:
         type(self).cancelled_algo = []
         type(self).cancelled_order = []
         self._close_side = close_side.upper()
+        self._positions = list(positions) if positions is not None else []
+        self._extra_algos = list(extra_algos or [])
+        self._owner_create_ms = int(owner_create_ms)
 
     @classmethod
     def reset(cls) -> None:
@@ -991,7 +1015,7 @@ class _FakeTrade:
         cls.cancelled_order = []
 
     def position_risk(self, **_k: Any) -> list[Any]:
-        return []
+        return list(self._positions)
 
     def open_orders(self, *, symbol: str | None = None, strict: bool = False) -> list[Any]:
         sym = (symbol or "DOGEUSDT").upper()
@@ -1006,13 +1030,13 @@ class _FakeTrade:
                 "reduceOnly": True,
                 "positionSide": "BOTH",
                 "clientOrderId": "owner-lim",
-                "time": 1,
+                "time": self._owner_create_ms,
             }
         ]
 
     def open_algo_orders(self, *, symbol: str | None = None, strict: bool = False) -> list[Any]:
         sym = (symbol or "DOGEUSDT").upper()
-        return [
+        out: list[dict[str, Any]] = [
             {
                 "symbol": sym,
                 "algoId": 55,
@@ -1023,9 +1047,13 @@ class _FakeTrade:
                 "reduceOnly": True,
                 "positionSide": "BOTH",
                 "clientAlgoId": "owner-sl",
-                "createTime": 1,
+                "createTime": self._owner_create_ms,
             }
         ]
+        for algo in self._extra_algos:
+            if str(algo.get("symbol") or "").upper() == sym:
+                out.append(algo)
+        return out
 
     def cancel_algo(self, *, symbol: str, algo_id: str | int) -> Any:
         self.cancelled_algo.append(str(algo_id))
@@ -1037,3 +1065,793 @@ class _FakeTrade:
 
     def all_open_orders(self, **_k: Any) -> list[Any]:
         return [*self.open_orders(**_k), *self.open_algo_orders(**_k)]
+
+
+def _pepe_pos() -> FuturesPosition:
+    return FuturesPosition(
+        symbol="PEPEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("1000000"),
+        entry_price=Decimal("0.00001"),
+        mark_price=Decimal("0.00001"),
+    )
+
+
+def _jv_algo_901(symbol: str = "PEPEUSDT") -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "algoId": 901,
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "stopPrice": "0.000009",
+        "origQty": "1000000",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "jv-pepe-sl0",
+        "createTime": 1,
+    }
+
+
+def test_h1_quick_close_while_position_open_must_not_delete_jv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: Quick closed while PEPEUSDT still open → zero DELETEs of 901/55/77."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    pepe = _pepe_pos()
+    trade = _FakeTrade(
+        close_side="SELL",
+        positions=[pepe],
+        extra_algos=[_jv_algo_901()],
+        owner_create_ms=1,
+    )
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "h1-pepe.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "PEPEUSDT",
+                    "side": "long",
+                    "closed_at_ms": ts,
+                    "trade_id": "aqt_pepe",
+                }
+            ]
+        },
+    )
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[pepe]),
+        now_ms_value=ts,
+        send=lambda *_a, **_k: True,
+    )
+    assert result["ok"] is True
+    assert trade.cancelled_algo == []
+    assert trade.cancelled_order == []
+    assert "901" not in trade.cancelled_algo
+    assert "55" not in trade.cancelled_algo
+    assert "77" not in trade.cancelled_order
+    conn.close()
+
+
+def test_quick_flat_cancels_jv_algo_when_flag_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan case 1: flat Quick close DELETEs jv- algo when flag on."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    trade = _FakeTrade(
+        close_side="BUY",
+        positions=[],
+        extra_algos=[_jv_algo_901("DOGEUSDT")],
+        owner_create_ms=1,
+    )
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "quick-jv-flat.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "short",
+                    "closed_at_ms": ts,
+                    "trade_id": "aqt_jv",
+                }
+            ]
+        },
+    )
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda *_a, **_k: True,
+    )
+    assert result["ok"] is True
+    assert "901" in trade.cancelled_algo
+    assert "55" in trade.cancelled_algo
+    assert "77" in trade.cancelled_order
+    conn.close()
+
+
+def test_m3_watch_anchor_lists_post_last_seen_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner createTime after last_seen_ms but <= tick → listed, not DELETEd."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    last_seen = 1_000_000
+    tick = 1_000_000 + 60_000
+    create_ms = last_seen + 30_000  # after last_seen, before tick
+    trade = _FakeTrade(close_side="SELL", owner_create_ms=create_ms)
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "anchor-watch.db")
+    write_settings(conn, enabled=False)
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "XRPUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 0.5,
+            "qty": 10.0,
+            "in_universe": 0,
+            "signal_id": None,
+            "initial_stop": 0.4,
+            "initial_stop_source": "signal",
+            "entry_time_ms": last_seen - 10_000,
+            "no_stop_latched": 0,
+            "last_seen_ms": last_seen,
+            "closed_at_ms": None,
+        },
+    )
+    sent: list[str] = []
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=tick,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert result["ok"] is True
+    assert trade.cancelled_algo == []
+    assert trade.cancelled_order == []
+    assert any("XRPUSDT" in m and ("owner-sl" in m or "owner-lim" in m or "ค้าง" in m) for m in sent)
+    conn.close()
+
+
+def test_m3_quick_anchor_lists_post_closed_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Quick: createTime > closed_at_ms → listed only, not cancelled."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    closed_at = 2_000_000
+    trade = _FakeTrade(close_side="BUY", owner_create_ms=closed_at + 50_000)
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "anchor-quick.db")
+    write_settings(conn, enabled=True)
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "short",
+                    "closed_at_ms": closed_at,
+                    "trade_id": "aqt_anchor",
+                }
+            ]
+        },
+    )
+    sent: list[str] = []
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=closed_at + 100_000,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert trade.cancelled_order == []
+    assert "55" not in trade.cancelled_algo
+    assert any("DOGEUSDT" in m for m in sent)
+    conn.close()
+
+
+def test_m3_in_flight_skip_with_matching_close_side(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADAUSDT short → close side BUY; in-flight → zero owner DELETEs, no 🧹."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    trade = _FakeTrade(close_side="BUY")  # short → close BUY
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "inflight-buy.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "ADAUSDT",
+            "position_side": "BOTH",
+            "side": "short",
+            "entry": 0.4,
+            "qty": 100.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.43,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts - 5_000,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts - 1_000,
+            "closed_at_ms": None,
+        },
+    )
+    eid = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="ADAUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.4"},
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    finish_exec_intent(conn, eid, status="unknown", result_text="u", expect_status="preview")
+    assert symbol_has_in_flight_exec(conn, "ADAUSDT") is True
+    sent: list[str] = []
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts + 1,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert trade.cancelled_order == []
+    assert "55" not in trade.cancelled_algo
+    assert not any("🧹" in m and "ADAUSDT" in m for m in sent)
+    conn.close()
+
+
+def test_flag_off_watch_and_quick_no_owner_delete_but_lists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag off + live: zero owner DELETEs; Quick close notice still lists leftovers."""
+    from tests.test_assist_quick_guards import _insert_quick_trade
+
+    from jarvise_assist.quick import _send_close_notice
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.delenv("JARVISE_ASSIST_CANCEL_OWNER", raising=False)
+    trade = _FakeTrade(close_side="BUY", owner_create_ms=1)
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "flag-off-list.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 1.0,
+            "qty": 1.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.9,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts - 10_000,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts - 5_000,
+            "closed_at_ms": None,
+        },
+    )
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "short",
+                    "closed_at_ms": ts,
+                    "trade_id": "aqt_flag_off",
+                }
+            ]
+        },
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda *_a, **_k: True,
+    )
+    assert trade.cancelled_algo == []
+    assert trade.cancelled_order == []
+
+    # Flag off → Quick notice still lists leftovers (M2c / flag-off listing).
+    tid = _insert_quick_trade(conn, symbol="DOGEUSDT", side="short", now_ms=ts, status="closed")
+    conn.execute("UPDATE assist_quick_trade SET close_notice_at_ms=NULL WHERE id=?", (tid,))
+    conn.commit()
+
+    class _ListClient:
+        def all_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+            return [
+                {
+                    "symbol": "DOGEUSDT",
+                    "algoId": 55,
+                    "type": "STOP_MARKET",
+                    "side": "BUY",
+                    "stopPrice": "0.09",
+                    "origQty": "100",
+                    "reduceOnly": True,
+                    "positionSide": "BOTH",
+                    "clientAlgoId": "owner-sl",
+                    "clientOrderId": "owner-sl",
+                }
+            ]
+
+    quick_sent: list[str] = []
+    _send_close_notice(
+        conn,
+        lambda t, **_k: quick_sent.append(t) or True,
+        trade_id=tid,
+        client=_ListClient(),
+        payload={
+            "symbol": "DOGEUSDT",
+            "side": "short",
+            "status": "closed",
+            "closed_at_ms": ts,
+            "net_usdt": 0.0,
+            "net_r": 0.0,
+            "entry_time_ms": ts - 1,
+        },
+        now_ms=ts + 1,
+    )
+    assert any("ค้าง" in m and "DOGEUSDT" in m for m in quick_sent)
+    conn.close()
+
+
+def test_m1_watch_db_error_must_not_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """M1: DB error in owner lookups must not raise out of run_assist_watch."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    trade = _FakeTrade(close_side="SELL")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "m1-db.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 1.0,
+            "qty": 1.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.9,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts - 10_000,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts - 5_000,
+            "closed_at_ms": None,
+        },
+    )
+    journal_calls: list[Any] = []
+
+    def _boom_in_flight(*_a: Any, **_k: Any) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("jarvise_assist.watch.symbol_has_in_flight_exec", _boom_in_flight)
+    monkeypatch.setattr(
+        "jarvise_assist.watch.journal_on_close",
+        lambda *a, **k: journal_calls.append((a, k)) or {},
+    )
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda *_a, **_k: True,
+    )
+    assert result["ok"] is True
+    assert journal_calls, "journal_on_close must still run after DB error in owner block"
+    conn.close()
+
+
+def test_m2_read_failure_must_notify(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """M2(a): read failure on Quick path → notice with อ่านคำสั่งค้างไม่ได้."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+
+    class _BoomTrade(_FakeTrade):
+        def position_risk(self, **_k: Any) -> list[Any]:
+            raise RuntimeError("positionRisk down")
+
+        def open_orders(self, **_k: Any) -> list[Any]:
+            raise RuntimeError("orders down")
+
+        def open_algo_orders(self, **_k: Any) -> list[Any]:
+            raise RuntimeError("algos down")
+
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (_BoomTrade(), None))
+    conn = open_db(tmp_path / "m2-read.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "short",
+                    "closed_at_ms": ts,
+                    "trade_id": "aqt_m2",
+                }
+            ]
+        },
+    )
+    sent: list[str] = []
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert result["ok"] is True
+    assert any("อ่านคำสั่งค้างไม่ได้" in m for m in sent)
+    conn.close()
+
+
+def test_owner_delete_fail_unknown_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L6.3: owner DELETE non −2011/−2013 → unknown + pending + in-flight."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "owner-del-fail.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_algo = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-sl-1",
+        "createTime": ts - 1,
+    }
+    handlers = _menu_close_handlers(open_orders=(200, []))
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_algo])
+    handlers[("DELETE", "/fapi/v1/algoOrder")] = (400, {"code": -1000, "msg": "unknown error"})
+    transport = RecordingTransport(handlers)
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "unknown"
+    steps = [
+        r[0]
+        for r in conn.execute(
+            "SELECT step FROM assist_exec_log WHERE intent_id=? ORDER BY id", (intent_id,)
+        ).fetchall()
+    ]
+    assert "exit_cancel_pending" in steps
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is True
+    conn.close()
+
+
+def test_l2_update_time_only_listed_not_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L2: updateTime alone is not create time → list only."""
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    order = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-ut",
+        "updateTime": 1_000,
+    }
+    assert _owner_order_create_ms(order) is None
+
+    class _UtTrade:
+        def position_risk(self, **_k: Any) -> list[Any]:
+            return []
+
+        def open_orders(self, **_k: Any) -> list[Any]:
+            return []
+
+        def open_algo_orders(self, **_k: Any) -> list[Any]:
+            return [order]
+
+        def cancel_algo(self, **_k: Any) -> Any:
+            raise AssertionError("must not cancel updateTime-only order")
+
+        def cancel_order(self, **_k: Any) -> Any:
+            raise AssertionError("must not cancel")
+
+    result = cancel_owner_reducing_orders_for_symbol(
+        _UtTrade(),  # type: ignore[arg-type]
+        symbol="DOGEUSDT",
+        side="short",
+        position_side="BOTH",
+        anchor_ms=2_000,
+    )
+    assert result.cancelled == []
+    assert any(o.get("clientAlgoId") == "owner-ut" for o in result.leftover_orders)
+
+
+def test_l3_quick_missing_closed_at_lists_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L3: Quick closed_at_ms missing/0 → list only, no owner cancel."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    trade = _FakeTrade(close_side="BUY", owner_create_ms=1)
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "l3-none.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "short",
+                    "closed_at_ms": None,
+                    "trade_id": "aqt_none",
+                }
+            ]
+        },
+    )
+    sent: list[str] = []
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    # No anchor → owner phase lists only; never DELETE owner 55/77.
+    assert "55" not in trade.cancelled_algo
+    assert "77" not in trade.cancelled_order
+    conn.close()
+
+
+def test_l5_already_gone_not_also_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L5.3: −2011/−2013 → already_gone only, not also cancelled."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "gone.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_algo = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-sl-1",
+        "createTime": ts - 1,
+    }
+    handlers = _menu_close_handlers(open_orders=(200, []))
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_algo])
+    handlers[("DELETE", "/fapi/v1/algoOrder")] = (400, {"code": -2011, "msg": "Unknown order sent."})
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda t, **_k: sent.append(str(t)) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "done"
+
+    # Direct helper check for structured lists.
+    class _GoneTrade:
+        def position_risk(self, **_k: Any) -> list[Any]:
+            return []
+
+        def open_orders(self, **_k: Any) -> list[Any]:
+            return []
+
+        def open_algo_orders(self, **_k: Any) -> list[Any]:
+            return [owner_algo]
+
+        def cancel_algo(self, **_k: Any) -> Any:
+            from jarvise_assist.execute import TradeClientError
+
+            raise TradeClientError("gone", http_status=400, binance_code=-2011)
+
+        def cancel_order(self, **_k: Any) -> Any:
+            raise AssertionError("unexpected")
+
+    got = cancel_owner_reducing_orders_for_symbol(
+        _GoneTrade(),  # type: ignore[arg-type]
+        symbol="DOGEUSDT",
+        side="short",
+        position_side="BOTH",
+        anchor_ms=ts,
+    )
+    assert "owner-sl-1" in got.already_gone
+    assert "owner-sl-1" not in got.cancelled
+    conn.close()
+
+
+def test_mid_loop_reread_raise_unknown_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mid-loop positionRisk raise is independently fail-closed (L6.5)."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "mid-raise.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_a = {
+        "symbol": "DOGEUSDT",
+        "algoId": 10,
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "50",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-a",
+        "createTime": ts - 1,
+    }
+    owner_b = {
+        "symbol": "DOGEUSDT",
+        "algoId": 11,
+        "type": "TAKE_PROFIT_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.05",
+        "origQty": "50",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-b",
+        "createTime": ts - 1,
+    }
+    state = {"n": 0}
+
+    def _pos(_clean: dict[str, Any]) -> Any:
+        state["n"] += 1
+        if state["n"] <= 1:
+            return (200, [_open_pos()])
+        if state["n"] <= 3:
+            # post-fill flat + pre-batch flat
+            return (200, [])
+        # mid-loop re-read before second DELETE
+        raise RuntimeError("mid-loop down")
+
+    handlers = _menu_close_handlers(open_orders=(200, []))
+    handlers[("GET", "/fapi/v3/positionRisk")] = _pos
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_a, owner_b])
+    handlers[("DELETE", "/fapi/v1/algoOrder")] = (200, {"code": "200", "msg": "success"})
+    transport = RecordingTransport(handlers)
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "unknown"
+    steps = [
+        r[0]
+        for r in conn.execute("SELECT step FROM assist_exec_log WHERE intent_id=?", (intent_id,)).fetchall()
+    ]
+    assert "exit_cancel_pending" in steps
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is True
+    conn.close()
+
+
+# --- L6.1 flag-on twins (must pass unchanged with CANCEL_OWNER=on) ---
+
+
+def test_twin_successful_partial_zero_algo_posts_flag_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    from tests.test_assist_menu_reduce import test_successful_partial_zero_algo_posts
+
+    test_successful_partial_zero_algo_posts(tmp_path, monkeypatch)
+
+
+def test_twin_xr_reduces_once_reduce_only_flag_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    from tests.test_assist_menu_reduce import test_xr_reduces_once_reduce_only
+
+    test_xr_reduces_once_reduce_only(tmp_path, monkeypatch)
+
+
+def test_twin_partial_be_place_then_cancel_owner_keep_tp_flag_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    from tests.test_assist_menu_reduce import test_partial_be_place_then_cancel_owner_keep_tp
+
+    test_partial_be_place_then_cancel_owner_keep_tp(tmp_path, monkeypatch)
+
+
+def test_twin_recover_partial_be_cancels_owner_keeps_tp_flag_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    from tests.test_assist_menu_reduce import test_recover_partial_be_cancels_owner_keeps_tp
+
+    test_recover_partial_be_cancels_owner_keeps_tp(tmp_path, monkeypatch)
+
+
+def test_twin_reduce_coverage_lines_flag_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    from tests.test_assist_menu_reduce import test_reduce_coverage_lines
+
+    test_reduce_coverage_lines(tmp_path, monkeypatch)
+
+
+def test_twin_orphan_cancels_only_jv_flag_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    from tests.test_assist_execute import test_orphan_cancels_only_jv
+
+    test_orphan_cancels_only_jv(tmp_path)
