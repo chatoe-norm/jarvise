@@ -24,9 +24,10 @@ from jarvise_assist.sizing import (
     size_signal,
 )
 from jarvise_assist.store import get_watch_position, insert_signal, list_held_signals
+from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_assist.watch import run_assist_watch
 from jarvise_assist.weekly import run_assist_weekly
-from jarvise_ingest.db import open_db
+from jarvise_ingest.db import load_candles_in_range, open_db
 
 
 def _analysis_at(ts: int) -> dict[str, object]:
@@ -823,6 +824,143 @@ def test_add_wrong_side_of_kept_stop_short_mirror(tmp_path: Path) -> None:
     )
     assert r_mult is None
     assert "R unknown" in line
+    conn.close()
+
+
+def test_add_wrong_side_of_kept_stop_no_trail_or_be_advice(tmp_path: Path) -> None:
+    """H1 trail gate: profit-side kept stop must not emit move-stop / BE advice."""
+    conn = open_db(tmp_path / "wrong_side_trail.db")
+    t1 = _ms_bangkok(2026, 11, 1, 12, 0)
+    _seed_candle(
+        conn,
+        symbol="BTCUSDT",
+        ts=t1 - 2 * FOUR_H_MS,
+        open_=67000,
+        high=67100,
+        low=66900,
+        close=67000,
+        atr=200,
+    )
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="long", confidence=0.9, invalidation=66500.0, ts=t1 - 60_000
+    )
+    first_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.1"),
+        entry_price=Decimal("67000"),
+        mark_price=Decimal("67000"),
+        update_time_ms=t1 - 600_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[first_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t1,
+        send=lambda _t: True,
+    )
+    first = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert first is not None
+    conn.execute(
+        "UPDATE assist_watch_position SET initial_stop=?, initial_stop_source='signal' WHERE symbol=?",
+        (66850.0, "BTCUSDT"),
+    )
+    conn.commit()
+    t2 = t1 + 60_000
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="long", confidence=0.9, invalidation=66500.0, ts=t2 - 60_000
+    )
+    add_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.2"),
+        entry_price=Decimal("66800"),
+        mark_price=Decimal("66800"),
+        update_time_ms=t2 - 30_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[add_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t2,
+        send=lambda _t: True,
+    )
+    second = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert second is not None
+    assert abs(float(second["initial_stop"]) - 66850) < 1e-6
+    assert abs(float(second["entry"]) - 66800) < 1e-6
+
+    hour = 3_600_000
+    _seed_candle(
+        conn,
+        symbol="BTCUSDT",
+        ts=t1,
+        open_=66800,
+        high=66930,
+        low=66790,
+        close=66860,
+        atr=200,
+        timeframe="1h",
+    )
+    _seed_candle(
+        conn,
+        symbol="BTCUSDT",
+        ts=t1 + hour,
+        open_=66860,
+        high=66900,
+        low=66840,
+        close=66860,
+        atr=200,
+        timeframe="1h",
+    )
+    t3 = t1 + 2 * hour + 60_000
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="long", confidence=0.9, invalidation=66500.0, ts=t3 - 60_000
+    )
+    sent: list[str] = []
+
+    def capture(text: str, **_kw: object) -> bool:
+        sent.append(text)
+        return True
+
+    mark_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.2"),
+        entry_price=Decimal("66800"),
+        mark_price=Decimal("66860"),
+        update_time_ms=t3 - 30_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[mark_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t3,
+        send=capture,
+    )
+    entry_time_ms = int(second["entry_time_ms"])
+    candles_1h = load_candles_in_range(conn, "BTCUSDT", "1h", since_ms=entry_time_ms, until_ms=int(t3))
+    assert (
+        current_trail_advice(
+            side="long",
+            entry=Decimal("66800"),
+            initial_stop=Decimal("66850"),
+            candles_1h=candles_1h,
+            entry_time_ms=entry_time_ms,
+            now_ms=t3,
+            tick=Decimal("0.1"),
+            symbol="BTCUSDT",
+        )
+        is None
+    )
+    joined = "\n".join(sent)
+    assert "→" not in joined
+    assert "ล็อก" not in joined
+    rows = conn.execute(
+        "SELECT kind FROM assist_exec_intent WHERE symbol=? AND kind='move_stop'",
+        ("BTCUSDT",),
+    ).fetchall()
+    assert rows == []
+    third = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert third is not None
+    assert abs(float(third["initial_stop"]) - 66850) < 1e-6
     conn.close()
 
 
