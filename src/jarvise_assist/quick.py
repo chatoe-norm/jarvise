@@ -732,8 +732,10 @@ def _send_close_notice(
         from jarvise_assist.execute import assist_cancel_owner_enabled, assist_execute_mode
         from jarvise_assist.order_lines import is_symbol_protective_leftover
 
-        # Watch owns the one cancel attempt only when flag on AND live execute.
-        # Flag on + testnet/off (or missing trade key) still lists leftovers here.
+        # Watch owns the one cancel/list attempt when flag on AND live execute.
+        # Flag on + testnet/off still lists leftovers here. Flag on + live skips
+        # listing here (watch owns it) — watch must still warn if it cannot
+        # obtain a trade client (missing key); silence is not acceptable.
         skip_leftover_list = assist_cancel_owner_enabled() and assist_execute_mode() == "live"
         if not skip_leftover_list:
             leftovers: list[dict[str, Any]] = []

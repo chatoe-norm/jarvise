@@ -256,6 +256,21 @@ def _cleanup_flat_symbol_leftovers(
     except Exception:  # noqa: BLE001 — must not raise out of run_assist_watch
         logger.exception("watch leftover cleanup failed for %s", symbol)
         out["error"] = True
+        if not out.get("notice"):
+            warn = _watch_leftover_notice(
+                symbol=symbol,
+                cancelled=[],
+                already_gone=[],
+                leftover_orders=[],
+                failed_ids=[],
+                read_failed=True,
+            )
+            if warn is not None:
+                try:
+                    send(warn)
+                    out["notice"] = True
+                except Exception:  # noqa: BLE001
+                    logger.exception("watch leftover error notice failed for %s", symbol)
         return out
 
 
@@ -1560,6 +1575,19 @@ def run_assist_watch(
                         )
                     except Exception:  # noqa: BLE001
                         logger.exception("watch owner leftover cleanup failed for %s", sym)
+                        try:
+                            warn = _watch_leftover_notice(
+                                symbol=sym,
+                                cancelled=[],
+                                already_gone=[],
+                                leftover_orders=[],
+                                failed_ids=[],
+                                read_failed=True,
+                            )
+                            if warn is not None:
+                                send_fn(warn)
+                        except Exception:  # noqa: BLE001
+                            logger.exception("watch lookup error notice failed for %s", sym)
             if assist_cancel_owner_enabled():
                 open_syms = {s for s, _ in open_keys}
                 for qrow in quick_info.get("closed") or []:
@@ -1589,6 +1617,44 @@ def run_assist_watch(
                             orphan_cancelled.append({"symbol": qsym, "algo_id": str(algo_id)})
                     except Exception:  # noqa: BLE001
                         logger.exception("quick leftover cleanup failed")
+                        try:
+                            qsym = str(qrow.get("symbol") or "").upper()
+                            if qsym:
+                                warn = _watch_leftover_notice(
+                                    symbol=qsym,
+                                    cancelled=[],
+                                    already_gone=[],
+                                    leftover_orders=[],
+                                    failed_ids=[],
+                                    read_failed=True,
+                                )
+                                if warn is not None:
+                                    send_fn(warn)
+                        except Exception:  # noqa: BLE001
+                            logger.exception("quick leftover error notice failed")
+        elif need_trade:
+            # Missing trade client: never cancel; still warn (one-shot path).
+            open_syms = {s for s, _ in open_keys}
+            warn_syms: list[str] = [sym for sym, _ps in closed]
+            if assist_cancel_owner_enabled():
+                for qrow in quick_info.get("closed") or []:
+                    qsym = str(qrow.get("symbol") or "").upper()
+                    if qsym and qsym not in open_syms and qsym not in warn_syms:
+                        warn_syms.append(qsym)
+            for wsym in warn_syms:
+                try:
+                    warn = _watch_leftover_notice(
+                        symbol=wsym,
+                        cancelled=[],
+                        already_gone=[],
+                        leftover_orders=[],
+                        failed_ids=[],
+                        read_failed=True,
+                    )
+                    if warn is not None:
+                        send_fn(warn)
+                except Exception:  # noqa: BLE001
+                    logger.exception("watch missing-client notice failed for %s", wsym)
     try:
         journal_on_close(conn, closed, futures=client, now_ms_value=ts)
     except Exception:  # noqa: BLE001 — a journal failure must not stop advice or orphan cancel

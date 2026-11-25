@@ -3082,11 +3082,16 @@ class ExitCancelResult(NamedTuple):
     On aborted_reopen, ok is True even if the jv- phase had failures: the close
     stays done with no exit_cancel_pending; those ids remain in failed_ids /
     the reopen warning. Do not flip that to unknown.
+
+    leftover_orders are list-only (missing / post-anchor create time): keep them
+    uncancelled and status done when the cancel phase was otherwise ok. Do not
+    add exit_cancel_pending for list-only leftovers.
     """
 
     ok: bool
     failed_ids: list[str]
     aborted_reopen: bool = False
+    leftover_orders: list[dict[str, Any]] = []
 
 
 class OwnerCancelResult(NamedTuple):
@@ -3237,14 +3242,36 @@ def _cancel_exit_stops_and_tp(
             ok=True,
             failed_ids=failed_ids + leftover_ids + owner.failed_ids,
             aborted_reopen=True,
+            leftover_orders=list(owner.leftover_orders),
         )
     if owner.read_failed or not owner.ok:
         return ExitCancelResult(
             ok=False,
             failed_ids=failed_ids + owner.failed_ids,
             aborted_reopen=False,
+            leftover_orders=list(owner.leftover_orders),
         )
-    return ExitCancelResult(ok=all_ok, failed_ids=failed_ids)
+    return ExitCancelResult(
+        ok=all_ok,
+        failed_ids=failed_ids,
+        leftover_orders=list(owner.leftover_orders),
+    )
+
+
+def _append_exit_retained_leftovers(
+    base: str,
+    leftover_orders: list[dict[str, Any]],
+    *,
+    symbol: str,
+    tick: Decimal | None = None,
+) -> str:
+    """Append list-only retained owner leftovers (still open; not a failed DELETE)."""
+    if not leftover_orders:
+        return base
+    lines = [base, f"คำสั่งที่ยังค้างบน {symbol}:"]
+    for order in leftover_orders:
+        lines.append(_format_owner_order_line(order, tick=tick))
+    return "\n".join(lines)
 
 
 def _finish_flat_exit(
@@ -3291,6 +3318,8 @@ def _finish_flat_exit(
             endpoint="/fapi/v1/algoOrder",
         )
         return _exec_result(text, status="unknown")
+    # List-only leftovers (missing create time) stay open; status stays done.
+    text = _append_exit_retained_leftovers(text, list(cancel.leftover_orders), symbol=symbol)
     return _exec_result(text, status="done")
 
 
@@ -4579,7 +4608,14 @@ def handle_exec_callback(
                 result_text = str(result)
                 if prefix == "xx:" and menu_exit:
                     result_text = _menu_exit_result_text(result_text)
-                    if status == "done" and result_text.startswith("✅"):
+                    # _finish_flat_exit already appends list-only leftovers when
+                    # the flag-on cancel phase retained them; skip a second list.
+                    if (
+                        status == "done"
+                        and result_text.startswith("✅")
+                        and "คำสั่งที่ยังค้างบน" not in result_text
+                        and OWNER_CLOSING_ORDER_NOTE not in result_text
+                    ):
                         tick_menu: Decimal | None = None
                         try:
                             tick_menu = client.symbol_filters(str(intent["symbol"])).tick_size
@@ -5459,12 +5495,17 @@ def _recover_exit_intent(
                 expect_status="recovering",
             )
         elif cancel.ok:
+            text = _append_exit_retained_leftovers(
+                f"✅ ปิด {symbol}",
+                list(cancel.leftover_orders),
+                symbol=symbol,
+            )
             _recovery_notify(
                 send,
                 conn,
                 intent_id,
                 status="done",
-                text=f"✅ ปิด {symbol}",
+                text=text,
                 expect_status="recovering",
             )
         else:
@@ -5508,6 +5549,9 @@ def _recover_exit_intent(
                 endpoint="/fapi/v1/algoOrder",
             )
             status = "unknown"
+        else:
+            # List-only leftovers stay open; status stays done.
+            text = _append_exit_retained_leftovers(text, list(cancel.leftover_orders), symbol=symbol)
         _recovery_notify(
             send,
             conn,

@@ -1634,6 +1634,9 @@ def test_l3_quick_missing_closed_at_lists_only(tmp_path: Path, monkeypatch: pyte
     # No anchor → owner phase lists only; never DELETE owner 55/77.
     assert "55" not in trade.cancelled_algo
     assert "77" not in trade.cancelled_order
+    assert any("ค้าง" in m or "owner-sl" in m or "owner-lim" in m or "ลบในแอป" in m for m in sent), (
+        f"expected leftover listing, got {sent!r}"
+    )
     conn.close()
 
 
@@ -1855,3 +1858,575 @@ def test_twin_orphan_cancels_only_jv_flag_on(tmp_path: Path, monkeypatch: pytest
     from tests.test_assist_execute import test_orphan_cancels_only_jv
 
     test_orphan_cancels_only_jv(tmp_path)
+
+
+# --- Fix-up #2: Medium reporting holes + Low test tightenings ---
+
+
+def test_m_missing_trade_client_must_warn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Medium 1: flag-on + live + no trade client → warn, zero DELETEs, watch ok."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    monkeypatch.setattr(
+        "jarvise_assist.watch.build_trade_client",
+        lambda: (None, "missing_trade_key"),
+    )
+    conn = open_db(tmp_path / "m-missing-client.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "short",
+                    "closed_at_ms": ts,
+                    "trade_id": "aqt_miss",
+                }
+            ]
+        },
+    )
+    sent: list[str] = []
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert result["ok"] is True
+    assert any("อ่านคำสั่งค้างไม่ได้" in m for m in sent), f"expected cleanup warning, got {sent!r}"
+    conn.close()
+
+
+def test_n_watch_lookup_db_error_must_notify(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Medium 2: DB error on watch lookup → notice, journal still runs, zero DELETEs."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    trade = _FakeTrade(close_side="SELL")
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "n-db-notify.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    upsert_watch_position(
+        conn,
+        {
+            "symbol": "BTCUSDT",
+            "position_side": "BOTH",
+            "side": "long",
+            "entry": 1.0,
+            "qty": 1.0,
+            "in_universe": 1,
+            "signal_id": None,
+            "initial_stop": 0.9,
+            "initial_stop_source": "signal",
+            "entry_time_ms": ts - 10_000,
+            "no_stop_latched": 0,
+            "last_seen_ms": ts - 5_000,
+            "closed_at_ms": None,
+        },
+    )
+    journal_calls: list[Any] = []
+
+    def _boom_in_flight(*_a: Any, **_k: Any) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("jarvise_assist.watch.symbol_has_in_flight_exec", _boom_in_flight)
+    monkeypatch.setattr(
+        "jarvise_assist.watch.journal_on_close",
+        lambda *a, **k: journal_calls.append((a, k)) or {},
+    )
+    sent: list[str] = []
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert result["ok"] is True
+    assert journal_calls, "journal_on_close must still run"
+    assert trade.cancelled_algo == []
+    assert trade.cancelled_order == []
+    assert any("อ่านคำสั่งค้างไม่ได้" in m for m in sent), f"expected read-failed notice, got {sent!r}"
+    conn.close()
+
+
+def test_n_helper_outer_except_must_notify(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Medium 2: helper outer except (Quick path) → notice, zero DELETEs, watch ok."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    trade = _FakeTrade(close_side="BUY", owner_create_ms=1)
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "n-helper-outer.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+
+    def _boom_in_flight(*_a: Any, **_k: Any) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("jarvise_assist.watch.symbol_has_in_flight_exec", _boom_in_flight)
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "DOGEUSDT",
+                    "side": "short",
+                    "closed_at_ms": ts,
+                    "trade_id": "aqt_n_outer",
+                }
+            ]
+        },
+    )
+    sent: list[str] = []
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert result["ok"] is True
+    assert trade.cancelled_algo == []
+    assert trade.cancelled_order == []
+    assert any("อ่านคำสั่งค้างไม่ได้" in m for m in sent), f"expected helper notice, got {sent!r}"
+    conn.close()
+
+
+def test_o_exit_recovery_list_only_leftovers_notified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Medium 3: updateTime-only owner stop → done, not DELETEd, leftover in notify text."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    conn = open_db(tmp_path / "o-recovery-list.db")
+    ts = now_ms()
+    rid = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={"qty": "100", "entry": "0.08", "position_side": "BOTH"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 1,
+    )
+    finish_exec_intent(conn, rid, status="unknown", result_text="u", expect_status="preview")
+    insert_exec_log(conn, intent_id=rid, step="exit_market", endpoint="/fapi/v1/order", created_at_ms=ts)
+    owner_ut = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "orderType": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-ut-only",
+        "updateTime": ts - 10_000,
+    }
+    handlers = {
+        ("GET", "/fapi/v1/order"): (
+            200,
+            {"orderId": 1, "avgPrice": "0.07", "executedQty": "100", "status": "FILLED"},
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, []),
+        ("GET", "/fapi/v1/openOrders"): (200, []),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, [owner_ut]),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _filters()),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "1"}),
+        ("DELETE", "/fapi/v1/algoOrder"): (200, {"code": "200", "msg": "success"}),
+    }
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+
+    def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    run_exec_recovery(
+        conn,
+        _client(transport),
+        now_ms_value=ts + 1000,
+        send=lambda t, **_k: sent.append(str(t)) or True,
+        sleep=_noop_sleep,
+    )
+    row = get_exec_intent(conn, rid)
+    assert row is not None and row["status"] == "done"
+    owner_deletes = [
+        c
+        for c in transport.calls
+        if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and str(c[2].get("algoId")) == "55"
+    ]
+    assert owner_deletes == []
+    joined = "\n".join(sent)
+    assert "owner-ut-only" in joined or "ลบในแอป" in joined or "ค้าง" in joined
+    bare = [m for m in sent if m.strip() == "✅ ปิด DOGEUSDT"]
+    assert not bare, f"must not notify only bare close, got {sent!r}"
+    conn.close()
+
+
+def test_o_finish_flat_exit_list_only_leftovers_notified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Medium 3: advice/non-menu finish path lists updateTime-only leftovers, status done."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "o-finish-flat.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            # Non-menu advice would also hit _finish_flat_exit; menu source is
+            # the stable xx: confirm path. Listing comes from finish_flat (menu
+            # skip avoids a second append when leftovers are already present).
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_ut = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-ut-finish",
+        "updateTime": ts - 10_000,
+    }
+    handlers = _menu_close_handlers(open_orders=(200, []))
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_ut])
+    handlers[("DELETE", "/fapi/v1/algoOrder")] = (200, {"code": "200", "msg": "success"})
+    transport = RecordingTransport(handlers)
+    sent: list[str] = []
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda t, **_k: sent.append(str(t)) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None and row["status"] == "done"
+    owner_deletes = [
+        c
+        for c in transport.calls
+        if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and str(c[2].get("algoId")) == "55"
+    ]
+    assert owner_deletes == []
+    result_text = str(row.get("result_text") or "")
+    assert "owner-ut-finish" in result_text or "ลบในแอป" in result_text or "ค้าง" in result_text
+    assert result_text.strip() != "✅ ปิด DOGEUSDT"
+    conn.close()
+
+
+def test_p_h1_stale_snapshot_fresh_open_blocks_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1 independent: open_keys flat but fresh position_risk open → zero DELETEs."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    pepe = _pepe_pos()
+    trade = _FakeTrade(
+        close_side="SELL",
+        positions=[pepe],
+        extra_algos=[_jv_algo_901()],
+        owner_create_ms=1,
+    )
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "p-stale-open.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "PEPEUSDT",
+                    "side": "long",
+                    "closed_at_ms": ts,
+                    "trade_id": "aqt_pepe_stale",
+                }
+            ]
+        },
+    )
+    # Futures snapshot is flat (Quick-only this tick); fresh trade read still open.
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda *_a, **_k: True,
+    )
+    assert result["ok"] is True
+    assert "901" not in trade.cancelled_algo
+    assert "55" not in trade.cancelled_algo
+    assert "77" not in trade.cancelled_order
+    conn.close()
+
+
+def test_p_h1_stale_snapshot_position_risk_raise_blocks_and_notifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1 independent: open_keys flat + position_risk raise → no DELETE + read-failed notice."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+
+    class _RaisePosTrade(_FakeTrade):
+        def position_risk(self, **_k: Any) -> list[Any]:
+            raise RuntimeError("positionRisk down")
+
+    trade = _RaisePosTrade(
+        close_side="SELL",
+        positions=[],
+        extra_algos=[_jv_algo_901()],
+        owner_create_ms=1,
+    )
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    conn = open_db(tmp_path / "p-stale-raise.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    monkeypatch.setattr(
+        "jarvise_assist.watch.sync_quick_trades",
+        lambda *_a, **_k: {
+            "closed": [
+                {
+                    "symbol": "PEPEUSDT",
+                    "side": "long",
+                    "closed_at_ms": ts,
+                    "trade_id": "aqt_pepe_raise",
+                }
+            ]
+        },
+    )
+    sent: list[str] = []
+    result = run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert result["ok"] is True
+    assert "901" not in trade.cancelled_algo
+    assert "55" not in trade.cancelled_algo
+    assert "77" not in trade.cancelled_order
+    assert any("อ่านคำสั่งค้างไม่ได้" in m for m in sent)
+    conn.close()
+
+
+def test_q_l3_real_normalization_zero_closed_at_lists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L3: real sync_quick_trades normalizes closed_at_ms=0 → None; watch lists, no owner DELETE."""
+    from jarvise_assist.quick import sync_quick_trades
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    conn = open_db(tmp_path / "q-l3-norm.db")
+    write_settings(conn, enabled=True)
+    ts = now_ms()
+    _insert_quick_reg(
+        conn, reg_id="r-l3", symbol="DOGEUSDT", side="short", planned_stop=0.09, planned_entry=0.08
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_quick_trade (
+            id, registration_id, symbol, side, status,
+            entry_avg, entry_qty, risk_usdt, entry_time_ms, updated_at_ms, planned_stop,
+            entry_trade_ids
+        ) VALUES (?, ?, ?, ?, 'open', 0.08, 100, 1, ?, ?, 0.09, ?)
+        """,
+        ("aqt_l3", "r-l3", "DOGEUSDT", "short", ts - 60_000, ts - 60_000, "[1]"),
+    )
+    conn.commit()
+
+    def _rebuild_closed(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return {
+            "status": "closed",
+            "closed_at_ms": 0,
+            "symbol": "DOGEUSDT",
+            "side": "short",
+        }
+
+    entry_fill = {
+        "id": 1,
+        "side": "SELL",
+        "price": "0.08",
+        "qty": "100",
+        "time": ts - 60_000,
+    }
+    monkeypatch.setattr("jarvise_assist.quick._rebuild_open_trade", _rebuild_closed)
+    monkeypatch.setattr(
+        "jarvise_assist.quick.fetch_all_user_trades",
+        lambda *_a, **_k: [entry_fill],
+    )
+    monkeypatch.setattr(
+        "jarvise_assist.quick._send_close_notice",
+        lambda *_a, **_k: None,
+    )
+
+    class _SyncClient:
+        pass
+
+    info = sync_quick_trades(conn, _SyncClient(), now_ms=ts, send=lambda *_a, **_k: True)
+    closed = info.get("closed") or []
+    assert closed, "expected a closed Quick row from sync"
+    assert closed[0].get("closed_at_ms") is None
+
+    trade = _FakeTrade(close_side="BUY", owner_create_ms=1)
+    monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade, None))
+    monkeypatch.setattr("jarvise_assist.watch.sync_quick_trades", lambda *_a, **_k: info)
+    sent: list[str] = []
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[]),
+        now_ms_value=ts,
+        send=lambda t, **_k: sent.append(t) or True,
+    )
+    assert "55" not in trade.cancelled_algo
+    assert "77" not in trade.cancelled_order
+    assert any("ค้าง" in m or "owner-sl" in m or "owner-lim" in m or "ลบในแอป" in m for m in sent), (
+        f"expected leftover listing after None anchor, got {sent!r}"
+    )
+    conn.close()
+
+
+def test_q_l3_real_normalization_missing_closed_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L3: real sync normalizes missing closed_at_ms → None."""
+    from jarvise_assist.quick import sync_quick_trades
+
+    conn = open_db(tmp_path / "q-l3-missing.db")
+    ts = now_ms()
+    _insert_quick_reg(
+        conn, reg_id="r-l3m", symbol="DOGEUSDT", side="short", planned_stop=0.09, planned_entry=0.08
+    )
+    conn.execute(
+        """
+        INSERT INTO assist_quick_trade (
+            id, registration_id, symbol, side, status,
+            entry_avg, entry_qty, risk_usdt, entry_time_ms, updated_at_ms, planned_stop,
+            entry_trade_ids
+        ) VALUES (?, ?, ?, ?, 'open', 0.08, 100, 1, ?, ?, 0.09, ?)
+        """,
+        ("aqt_l3m", "r-l3m", "DOGEUSDT", "short", ts - 60_000, ts - 60_000, "[1]"),
+    )
+    conn.commit()
+
+    def _rebuild_missing(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return {"status": "closed", "symbol": "DOGEUSDT", "side": "short"}
+
+    entry_fill = {
+        "id": 1,
+        "side": "SELL",
+        "price": "0.08",
+        "qty": "100",
+        "time": ts - 60_000,
+    }
+    monkeypatch.setattr("jarvise_assist.quick._rebuild_open_trade", _rebuild_missing)
+    monkeypatch.setattr(
+        "jarvise_assist.quick.fetch_all_user_trades",
+        lambda *_a, **_k: [entry_fill],
+    )
+    monkeypatch.setattr("jarvise_assist.quick._send_close_notice", lambda *_a, **_k: None)
+    info = sync_quick_trades(conn, object(), now_ms=ts, send=lambda *_a, **_k: True)
+    closed = info.get("closed") or []
+    assert closed and closed[0].get("closed_at_ms") is None
+    conn.close()
+
+
+def test_r_prebatch_only_raise_unknown_pending_zero_owner_deletes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pre-batch owner-phase read fails; later reads flat → zero owner DELETEs + pending."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    monkeypatch.setattr(BinanceTradeClient, "assert_trade_key_safe", lambda self, **_: {"ok": True})
+    monkeypatch.setattr(BinanceTradeClient, "assert_account_modes", lambda self: None)
+    conn = open_db(tmp_path / "r-prebatch-only.db")
+    ts = now_ms()
+    intent_id = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="DOGEUSDT",
+        side="short",
+        preview={
+            "source": "menu",
+            "qty": "100",
+            "entry": "0.08",
+            "position_side": "BOTH",
+            "confirm_text": "c",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + PREVIEW_TTL_MS,
+    )
+    owner_algo = {
+        "symbol": "DOGEUSDT",
+        "algoId": 55,
+        "type": "STOP_MARKET",
+        "side": "BUY",
+        "stopPrice": "0.09",
+        "origQty": "100",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+        "clientAlgoId": "owner-sl-1",
+        "createTime": ts - 1,
+    }
+    state = {"n": 0}
+
+    def _pos(_clean: dict[str, Any]) -> Any:
+        state["n"] += 1
+        if state["n"] <= 1:
+            return (200, [_open_pos()])
+        if state["n"] == 2:
+            return (200, [])  # post-fill flat
+        if state["n"] == 3:
+            # Pre-batch owner-phase read fails once.
+            raise RuntimeError("pre-batch positionRisk down")
+        # Subsequent per-DELETE reads would be flat — must never reach them.
+        return (200, [])
+
+    handlers = _menu_close_handlers(open_orders=(200, []))
+    handlers[("GET", "/fapi/v3/positionRisk")] = _pos
+    handlers[("GET", "/fapi/v1/openAlgoOrders")] = (200, [owner_algo])
+    handlers[("DELETE", "/fapi/v1/algoOrder")] = (200, {"code": "200", "msg": "success"})
+    transport = RecordingTransport(handlers)
+    handle_exec_callback(
+        conn,
+        f"xx:{intent_id}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=_client(transport),
+        now_ms_value=ts,
+        message={"message_id": 1},
+    )
+    row = get_exec_intent(conn, intent_id)
+    assert row is not None
+    assert row["status"] == "unknown"
+    steps = [
+        r[0]
+        for r in conn.execute(
+            "SELECT step FROM assist_exec_log WHERE intent_id=? ORDER BY id", (intent_id,)
+        ).fetchall()
+    ]
+    assert "exit_cancel_pending" in steps
+    owner_deletes = [
+        c
+        for c in transport.calls
+        if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and str(c[2].get("algoId")) == "55"
+    ]
+    assert owner_deletes == []
+    assert symbol_has_in_flight_exec(conn, "DOGEUSDT") is True
+    conn.close()
