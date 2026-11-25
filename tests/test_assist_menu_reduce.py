@@ -824,6 +824,7 @@ def test_recover_reduce_flat_cancels_jv_lists_owner(tmp_path: Path, monkeypatch:
 
 
 def test_recover_reduce_not_found_counts_then_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1: pin n >= RECOVER_NOT_FOUND_PASSES (3); two past-span passes must not fail."""
     from jarvise_assist.execute import RECOVER_NOT_FOUND_PASSES, RECOVER_NOT_FOUND_SPAN_MS
 
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
@@ -849,30 +850,27 @@ def test_recover_reduce_not_found_counts_then_fails(tmp_path: Path, monkeypatch:
     }
     transport = RecordingTransport(handlers)
     trade = _client(transport)
-    # Passes before threshold — stay recovering / unknown claimable
-    for i in range(RECOVER_NOT_FOUND_PASSES - 1):
-        run_exec_recovery(conn, trade, now_ms_value=ts + 1000 + i * 1000)
-        assert get_exec_intent(conn, rid)["status"] in {"unknown", "recovering"}
-    n = conn.execute(
-        "SELECT COUNT(*) FROM assist_exec_log WHERE intent_id=? AND step='recover_not_found'",
-        (rid,),
-    ).fetchone()[0]
-    assert n >= 1
-    # After passes + span → failed
+    # Pass 1 early; pass 2 after the 15-min span — still below count of 3.
+    run_exec_recovery(conn, trade, now_ms_value=ts + 1000)
+    assert get_exec_intent(conn, rid)["status"] in {"unknown", "recovering"}
     run_exec_recovery(
         conn,
         trade,
         now_ms_value=ts + RECOVER_NOT_FOUND_SPAN_MS + 60_000,
     )
-    # May need one more pass if first timestamps just set
-    for _ in range(RECOVER_NOT_FOUND_PASSES + 1):
-        if get_exec_intent(conn, rid)["status"] == "failed":
-            break
-        run_exec_recovery(
-            conn,
-            trade,
-            now_ms_value=ts + RECOVER_NOT_FOUND_SPAN_MS + 120_000,
-        )
+    assert get_exec_intent(conn, rid)["status"] in {"unknown", "recovering"}
+    assert get_exec_intent(conn, rid)["status"] != "failed"
+    n = conn.execute(
+        "SELECT COUNT(*) FROM assist_exec_log WHERE intent_id=? AND step='recover_not_found'",
+        (rid,),
+    ).fetchone()[0]
+    assert n == RECOVER_NOT_FOUND_PASSES - 1
+    # Pass 3 past the 4-min lease, span already exceeded → failed at count 3.
+    run_exec_recovery(
+        conn,
+        trade,
+        now_ms_value=ts + RECOVER_NOT_FOUND_SPAN_MS + 60_000 + RECOVER_LEASE_MS + 60_000,
+    )
     assert get_exec_intent(conn, rid)["status"] == "failed"
     assert not any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in transport.calls)
     conn.close()
