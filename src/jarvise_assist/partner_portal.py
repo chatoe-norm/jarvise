@@ -169,20 +169,46 @@ def _unrecorded_status_for_card(conn: sqlite3.Connection, futures: Any, *, now_m
         if cached_key == key and int(now_ms) - at < _GUARD_CACHE_TTL_MS and status != "unknown":
             return status
     client = _resolve_client(futures)
-    status = pu.resolve_unrecorded_status(conn, client, now_ms=int(now_ms))
-    if status != "unknown":
+    try:
+        status = pu.resolve_unrecorded_status(conn, client, now_ms=int(now_ms))
+    except Exception:
+        # Fresh check raised — drop any prior clear so display stays fail-closed.
+        _guard_cache = None
+        raise
+    if status == "clear" or status == "unrecorded":
         _guard_cache = (key, status, int(now_ms))
     else:
+        # unknown — never store as clear (and never cache unknown)
         _guard_cache = None
     return status
 
 
 def _money_request_blocked(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> bool:
-    """Fresh guard (no cache) before create_request. Fail closed unless clear."""
+    """Fresh guard (no cache) before create_request. Fail closed unless clear.
+
+    Syncs the display cache with the fresh result: clear refreshes the entry;
+    unrecorded stores the lock; unknown or a raised check clears the cache so
+    a prior cached clear cannot keep card/Profile/preview unlocked.
+    """
     from jarvise_assist import partner_unrecorded as pu
 
+    global _guard_cache
     client = _resolve_client(futures)
-    return pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms)) != "clear"
+    try:
+        status = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
+    except Exception:
+        _guard_cache = None
+        raise
+    key = pu.ledger_cache_key(conn)
+    if status == "clear":
+        _guard_cache = (key, status, int(now_ms))
+        return False
+    if status == "unrecorded":
+        _guard_cache = (key, status, int(now_ms))
+        return True
+    # unknown — never store as clear
+    _guard_cache = None
+    return True
 
 
 def _money_callback(code: str, lock: Block | None) -> str:
