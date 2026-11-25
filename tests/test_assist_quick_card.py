@@ -296,13 +296,13 @@ def test_card_happy_path_sui(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         now_ms=NOW,
     )
     assert card["ok"] is True
-    assert card["qty"] == Decimal("833.3")
+    assert card["qty"] == Decimal("595.2")
     assert abs(float(card["entry"]) - 2.0) < 1e-9
     assert float(card["stop"]) == pytest.approx(1.994)
     assert int(card["leverage"]) == 2
     text = card["text"]
-    assert "833.3" in text
-    assert "1666.60" in text or "1666.6" in text
+    assert "595.2" in text
+    assert "1190.4" in text or "1190.40" in text
     assert "0.40" in text or "0.4" in text
     assert "2.0060" in text
     assert "2.0090" in text
@@ -815,8 +815,8 @@ def test_refusal_margin_cap_available_300(tmp_path: Path, monkeypatch: pytest.Mo
         reason="margin_cap",
         monkeypatch=monkeypatch,
         text_has=(
-            "❌ margin ไม่พอ — ขนาดตาม risk 1666.6 SUI ≈ 3333.2 USDT "
-            "ต้องใช้ ≈ 666.64 USDT ที่ 5x มี 300 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+            "❌ margin ไม่พอ — ขนาดตาม risk 1190.4 SUI ≈ 2380.8 USDT "
+            "ต้องใช้ ≈ 476.16 USDT ที่ 5x มี 300 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
         ),
     )
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
@@ -824,7 +824,7 @@ def test_refusal_margin_cap_available_300(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_refusal_leverage_cap_stop_19984(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """1b: stop 1.9984 needs >5x on risk size — refuse, do not shrink qty."""
+    """1b: stop tighter than fee-aware 5x budget — refuse, do not shrink qty."""
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "lc.db")
     _seed_settings(conn)
@@ -834,14 +834,14 @@ def test_refusal_leverage_cap_stop_19984(tmp_path: Path, monkeypatch: pytest.Mon
         fake,
         symbol="SUIUSDT",
         side="long",
-        stop=Decimal("1.9984"),
+        stop=Decimal("1.9985"),
         now_ms=NOW,
     )
     assert card["ok"] is False
     assert card["reason"] == "leverage_cap"
     assert card["text"] == (
         "❌ stop ห่าง 0.08% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
-        "ค่าธรรมเนียมไป-กลับ ≈ 1.50R · "
+        "ค่าธรรมเนียมไป-กลับ ≈ 1.60R · "
         "👉 ขยาย stop ≥ 0.20% (≤ 1.9960) หรือลดความเสี่ยงในเมนู ⚡ Quick"
     )
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
@@ -863,8 +863,8 @@ def test_card_ok_available_340_lone_survivor_5x(tmp_path: Path, monkeypatch: pyt
         now_ms=NOW,
     )
     assert card["ok"] is True
-    assert card["qty"] == Decimal("833.3")
-    assert int(card["leverage"]) == 5
+    assert card["qty"] == Decimal("595.2")
+    assert int(card["leverage"]) == 4
     conn.close()
 
 
@@ -892,8 +892,8 @@ def test_qr_tap_refuses_when_available_drops_to_300(tmp_path: Path, monkeypatch:
     assert len(answers) == 1
     assert len(sent) == 1
     assert sent[0]["text"] == (
-        "❌ margin ไม่พอ — ขนาดตาม risk 1666.6 SUI ≈ 3333.2 USDT "
-        "ต้องใช้ ≈ 666.64 USDT ที่ 5x มี 300 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+        "❌ margin ไม่พอ — ขนาดตาม risk 1190.4 SUI ≈ 2380.8 USDT "
+        "ต้องใช้ ≈ 476.16 USDT ที่ 5x มี 300 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
     )
     assert conn.execute("SELECT COUNT(*) FROM assist_quick_registration").fetchone()[0] == 0
     conn.close()
@@ -910,11 +910,11 @@ def test_happy_sui_fee_and_target_lines(tmp_path: Path, monkeypatch: pytest.Monk
     )
     assert card["ok"] is True
     text = card["text"]
-    assert "ถ้าชน stop: −7 USDT ≈ −1.40R รวมค่าธรรมเนียม (ราคา −5 USDT = 1R · ค่าธรรมเนียม ≈ 2 USDT)" in text
-    assert "ค่าธรรมเนียมไป-กลับ ≈ 0.40R ≈ 2 USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)" in text
+    assert "ถ้าชน stop: −5 USDT ≈ −1.40R รวมค่าธรรมเนียม (ราคา −3.57 USDT = 1R · ค่าธรรมเนียม ≈ 1.43 USDT)" in text
+    assert "ค่าธรรมเนียมไป-กลับ ≈ 0.40R ≈ 1.43 USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)" in text
     assert "เป้า 1R: 2.0060 → สุทธิ +0.60R · ต้องชนะ ≥ 70% ถึงคุ้มทุน" in text
     assert "เป้า 1.5R: 2.0090 → สุทธิ +1.10R · ต้องชนะ ≥ 56% ถึงคุ้มทุน" in text
-    assert "risk จริง: −7 USDT = 0.70% ของ Futures 1000 USDT (เป้า 0.5%)" in text
+    assert "risk จริง: −5 USDT = 0.50% ของ Futures 1000 USDT (เป้า 0.5%)" in text
     assert "ลองใหม่" not in text
     conn.close()
 
@@ -930,12 +930,12 @@ def test_sui_stop_1993_fee_and_target_lines(tmp_path: Path, monkeypatch: pytest.
     )
     assert card["ok"] is True
     text = card["text"]
-    assert "ถ้าชน stop: −6.71 USDT ≈ −1.34R รวมค่าธรรมเนียม (ราคา −5 USDT = 1R · ค่าธรรมเนียม ≈ 1.71 USDT)" in text
-    assert "ค่าธรรมเนียมไป-กลับ ≈ 0.34R ≈ 1.71 USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)" in text
+    assert "ถ้าชน stop: −5 USDT ≈ −1.34R รวมค่าธรรมเนียม (ราคา −3.72 USDT = 1R · ค่าธรรมเนียม ≈ 1.28 USDT)" in text
+    assert "ค่าธรรมเนียมไป-กลับ ≈ 0.34R ≈ 1.28 USDT (โมเดล 6 bps/ข้าง — ยังไม่อ่านค่าจริงจากบัญชี)" in text
     assert "เป้า 1R: 2.0070 → สุทธิ +0.66R · ต้องชนะ ≥ 68% ถึงคุ้มทุน" in text
     assert "เป้า 1.5R: 2.0105 → สุทธิ +1.16R · ต้องชนะ ≥ 54% ถึงคุ้มทุน" in text
     assert "0.3428571428571428571428571429R" not in text
-    assert "risk จริง: −6.71 USDT = 0.67% ของ Futures 1000 USDT (เป้า 0.5%)" in text
+    assert "risk จริง: −5 USDT = 0.50% ของ Futures 1000 USDT (เป้า 0.5%)" in text
     assert "ลองใหม่" not in text
     conn.close()
 
@@ -952,13 +952,11 @@ def test_fee_ge_k_no_profit_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert card["ok"] is True
     text = card["text"]
     assert "⚠ ค่าธรรมเนียมสูงเทียบระยะ stop — reward < 3× ค่าไป-กลับ" in text
-    assert (
-        "ถ้าชน stop: −6.25 USDT ≈ −2.50R รวมค่าธรรมเนียม (ราคา −2.5 USDT = 1R · ค่าธรรมเนียม ≈ 3.75 USDT)" in text
-    )
+    assert "ถ้าชน stop: −2.5 USDT ≈ −2.50R รวมค่าธรรมเนียม (ราคา −1 USDT = 1R · ค่าธรรมเนียม ≈ 1.5 USDT)" in text
     assert "เป้า 1R: 2.0016 → สุทธิ −0.50R · ชนะทุกไม้ก็ไม่มีกำไร" in text
     assert "เป้า 1.5R: 2.0024 → สุทธิ 0.00R · ชนะทุกไม้ก็ไม่มีกำไร" in text
     assert "+-0.5" not in text
-    assert "risk จริง: −6.25 USDT = 0.63% ของ Futures 1000 USDT (เป้า 0.25%)" in text
+    assert "risk จริง: −2.5 USDT = 0.25% ของ Futures 1000 USDT (เป้า 0.25%)" in text
     assert "ลองใหม่" not in text
     conn.close()
 

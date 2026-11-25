@@ -63,7 +63,7 @@ BTC_AVAILABLE = Decimal("43.32")
 BTC_STEP = Decimal("0.001")
 BTC_MIN_QTY = Decimal("0.001")
 BTC_MIN_NOTIONAL = Decimal("100")
-BTC_RISK_QTY = Decimal("0.006")
+BTC_RISK_QTY = Decimal("0.004")
 
 BUG3_SHORT = (
     "❌ ไม่เปิด — ขั้นต่ำ 0.001 BTC เสี่ยง 2.74 USDT (1.93%) "
@@ -979,8 +979,8 @@ def test_card_available_zero_refusal_text(tmp_path: Path, monkeypatch: pytest.Mo
     )
     assert legacy["reason"] == "margin_cap"
     assert legacy["text"] == (
-        "❌ margin ไม่พอ — ขนาดตาม risk 0.006 BTC ≈ 372.6 USDT "
-        "ต้องใช้ ≈ 74.52 USDT ที่ 5x มี 0 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+        "❌ margin ไม่พอ — ขนาดตาม risk 0.004 BTC ≈ 248.4 USDT "
+        "ต้องใช้ ≈ 49.68 USDT ที่ 5x มี 0 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
     )
     assert "ลองใหม่" not in "\n".join([offered["text"], legacy["text"]])
     conn.close()
@@ -996,22 +996,20 @@ def test_card_must1_offer_and_legacy_p(tmp_path: Path, monkeypatch: pytest.Monke
         conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62440"), now_ms=NOW, allow_offer=True
     )
     assert offered["ok"] is True
-    assert offered["size_mode"] == "fit_margin"
+    assert offered["size_mode"] == "risk"
     assert offered["qty"] == Decimal("0.0028")
-    assert "(ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ 1%)" in offered["text"]
     assert "= 0.97%" in offered["text"]
     assert "margin ≈ 34.78" in offered["text"]
-    assert offered["qty"] < Decimal("0.0035")
-    assert MUST1_LEV_LINE in offered["text"].splitlines()
+    assert "Leverage ที่ต้องใช้: 5x · margin ≈ 34.78 USDT" in offered["text"].splitlines()
     legacy = build_quick_card(
         conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("62440"), now_ms=NOW, allow_offer=False
     )
     assert legacy["ok"] is True
     assert legacy.get("size_mode", "risk") == "risk"
-    assert legacy["qty"] == Decimal("0.0035")
-    assert "ขนาด: 0.0035 BTC ≈ 217.35 USDT" in legacy["text"]
-    assert "Leverage ที่ต้องใช้: 5x · margin ≈ 43.47 USDT" in legacy["text"]
-    assert "risk จริง: −1.45 USDT = 1.21% ของ Futures 120 USDT (เป้า 1%)" in legacy["text"]
+    assert legacy["qty"] == Decimal("0.0028")
+    assert "ขนาด: 0.0028 BTC ≈ 173.88 USDT" in legacy["text"]
+    assert "Leverage ที่ต้องใช้: 5x · margin ≈ 34.78 USDT" in legacy["text"]
+    assert "risk จริง: −1.16 USDT = 0.97% ของ Futures 120 USDT (เป้า 1%)" in legacy["text"]
     assert "ตั้งใน Binance" not in legacy["text"]
     assert "ลองใหม่" not in legacy["text"]
     conn.close()
@@ -1043,8 +1041,8 @@ def test_card_e1_sui_offer_and_legacy(tmp_path: Path, monkeypatch: pytest.Monkey
         now_ms=NOW,
         allow_offer=True,
     )
-    assert c_a["size_mode"] == "fit_margin"
-    assert c_a["qty"] == Decimal("24.3")
+    assert c_a["size_mode"] == "risk"
+    assert c_a["qty"] == Decimal("23.5")
     write_quick_settings(conn, risk_pct=1.0)
     c_b = build_quick_card(
         conn,
@@ -1056,7 +1054,7 @@ def test_card_e1_sui_offer_and_legacy(tmp_path: Path, monkeypatch: pytest.Monkey
         allow_offer=True,
     )
     assert c_b["qty"] == Decimal("47.0")
-    assert "(ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ 1%)" in c_b["text"]
+    assert c_b["size_mode"] == "risk"
     assert "= 1.00%" in c_b["text"]
     write_quick_settings(conn, risk_pct=0.5)
     leg_a = build_quick_card(
@@ -1078,10 +1076,10 @@ def test_card_e1_sui_offer_and_legacy(tmp_path: Path, monkeypatch: pytest.Monkey
         now_ms=NOW,
         allow_offer=False,
     )
-    assert leg_a["qty"] == Decimal("24.9")
-    assert leg_b["qty"] == Decimal("49.9")
-    assert "risk จริง: −5.29 USDT = 0.53% ของ Futures 1000 USDT (เป้า 0.5%)" in leg_a["text"]
-    assert "risk จริง: −10.6 USDT = 1.06% ของ Futures 1000 USDT (เป้า 1%)" in leg_b["text"]
+    assert leg_a["qty"] == Decimal("23.5")
+    assert leg_b["qty"] == Decimal("47.0")
+    assert "risk จริง: −4.99 USDT = 0.50% ของ Futures 1000 USDT (เป้า 0.5%)" in leg_a["text"]
+    assert "risk จริง: −9.98 USDT = 1.00% ของ Futures 1000 USDT (เป้า 1%)" in leg_b["text"]
     assert "ลองใหม่" not in "\n".join([leg_a["text"], leg_b["text"]])
     conn.close()
 
@@ -1101,13 +1099,14 @@ def test_card_leverage_cap_boundary_q(tmp_path: Path, monkeypatch: pytest.Monkey
         min_notional={"BTCUSDT": Decimal("5")},
     )
     ok = build_quick_card(
-        conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("59454.7"), now_ms=NOW, allow_offer=True
+        conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("59377.6"), now_ms=NOW, allow_offer=True
     )
     assert ok["ok"] is True
     assert ok["qty"] == Decimal("0.011")
     assert ok["size_mode"] == "risk"
+    assert int(ok["leverage"]) == 5
     bad = build_quick_card(
-        conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("59442.9"), now_ms=NOW, allow_offer=True
+        conn, fake, symbol="BTCUSDT", side="short", stop=Decimal("59371.7"), now_ms=NOW, allow_offer=True
     )
     assert bad["reason"] == "leverage_cap"
     conn.close()
@@ -1131,7 +1130,7 @@ def test_card_item2_margin_boundary_r(tmp_path: Path, monkeypatch: pytest.Monkey
         conn, fake, symbol="BTCUSDT", side="long", stop=Decimal("97"), now_ms=NOW, allow_offer=True
     )
     assert ok["ok"] is True
-    assert ok["size_mode"] == "risk"
+    assert ok["size_mode"] == "min_lot"
     assert ok["qty"] == Decimal("1")
     fake.available = Decimal("20.11")
     bad = build_quick_card(
@@ -1303,12 +1302,14 @@ def test_flow_mark_move_fit_margin_u2(tmp_path: Path, monkeypatch: pytest.Monkey
     conn = open_db(tmp_path / "u2.db")
     _seed_settings(conn)
     write_quick_settings(conn, risk_pct=1.0)
-    fake = _must1_fake()
+    # Fee-aware risk qty fits in ~34.78 USDT margin; keep available under that
+    # so the card starts as fit_margin (qty_mismatch / mode drift still apply).
+    fake = _must1_fake(available=Decimal("34"))
     parsed = {"symbol": "BTCUSDT", "side": "short", "stop": Decimal("62440")}
     cid, card = create_card_from_typed_command(conn, fake, parsed, now_ms=NOW)
     assert card["size_mode"] == "fit_margin"
-    assert card["qty"] == Decimal("0.0028")
-    fake.marks["BTCUSDT"] = Decimal("62150")
+    assert card["qty"] == Decimal("0.0026")
+    fake.marks["BTCUSDT"] = Decimal("62000")
     sent, answers, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
     assert out.get("reason") == "size_changed"
     assert sent[0]["text"] == MSG_SIZE_CHANGED
@@ -1346,7 +1347,7 @@ def test_flow_mode_drift_risk_to_offer_w(tmp_path: Path, monkeypatch: pytest.Mon
     fake = _must1_fake(available=Decimal("100"))
     cid, card = create_card_from_typed_command(conn, fake, parsed, now_ms=NOW)
     assert card.get("size_mode", "risk") == "risk"
-    fake.available = Decimal("43.5")
+    fake.available = Decimal("34")
     sent, _, out, _ = _run_qk(conn, f"qk:rg:{cid}", fake)
     assert out.get("reason") == "size_changed"
     assert sent[0]["text"] == MSG_SIZE_CHANGED
@@ -1360,7 +1361,7 @@ def test_flow_mode_drift_offer_to_risk_w(tmp_path: Path, monkeypatch: pytest.Mon
     _seed_settings(conn)
     write_quick_settings(conn, risk_pct=1.0)
     parsed = {"symbol": "BTCUSDT", "side": "short", "stop": Decimal("62440")}
-    fake = _must1_fake(available=Decimal("43.5"))
+    fake = _must1_fake(available=Decimal("34"))
     cid, card = create_card_from_typed_command(conn, fake, parsed, now_ms=NOW)
     assert card["size_mode"] == "fit_margin"
     fake.available = Decimal("100")
@@ -1395,7 +1396,7 @@ def test_flow_qk_rf_after_available_grows_x(tmp_path: Path, monkeypatch: pytest.
     _seed_settings(conn)
     write_quick_settings(conn, risk_pct=1.0)
     parsed = {"symbol": "BTCUSDT", "side": "short", "stop": Decimal("62440")}
-    fake = _must1_fake(available=Decimal("43.5"))
+    fake = _must1_fake(available=Decimal("34"))
     cid, card = create_card_from_typed_command(conn, fake, parsed, now_ms=NOW)
     fake.available = Decimal("100")
     _, _, out, edits = _run_qk(conn, f"qk:rf:{cid}", fake)
@@ -1404,7 +1405,7 @@ def test_flow_qk_rf_after_available_grows_x(tmp_path: Path, monkeypatch: pytest.
         "SELECT size_mode, quote_qty, registration_id FROM assist_quick_card WHERE id=?", (cid,)
     ).fetchone()
     assert row["size_mode"] in (None, "risk")
-    assert Decimal(str(row["quote_qty"])) == Decimal("0.0035")
+    assert Decimal(str(row["quote_qty"])) == Decimal("0.0028")
     assert row["registration_id"] is None
     assert edits
     assert edits[-1]["reply_markup"] == _quoted_markup_for(cid, "risk")
@@ -1430,8 +1431,8 @@ def test_legacy_qr_margin_below_min_same_side_y(tmp_path: Path, monkeypatch: pyt
     )
     assert card_m["reason"] == "margin_cap"
     assert card_m["text"] == (
-        "❌ margin ไม่พอ — ขนาดตาม risk 0.0035 BTC ≈ 217.35 USDT "
-        "ต้องใช้ ≈ 43.47 USDT ที่ 5x มี 0.01 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+        "❌ margin ไม่พอ — ขนาดตาม risk 0.0028 BTC ≈ 173.88 USDT "
+        "ต้องใช้ ≈ 34.78 USDT ที่ 5x มี 0.01 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
     )
 
     write_quick_settings(conn, risk_pct=0.25)
@@ -1747,16 +1748,16 @@ def test_card_bound_risk_guard_head_line(tmp_path: Path, monkeypatch: pytest.Mon
     conn = open_db(tmp_path / "at.db")
     _seed_settings(conn)
     write_quick_settings(conn, risk_pct=1.0)
-    fake = _must1_fake()
+    fake = _must1_fake(available=Decimal("34"))
     kwargs = dict(
         mark=Decimal("62100"),
         stop=Decimal("62440"),
         wallet_balance=Decimal("120"),
-        available=Decimal("43.5"),
+        available=Decimal("34"),
         min_qty=Decimal("0.001"),
         min_notional=Decimal("100"),
         step=Decimal("0.0001"),
-        risk_qty=Decimal("0.0035"),
+        risk_qty=Decimal("0.0028"),
     )
     real = size_offer(**kwargs)
 
@@ -1971,12 +1972,12 @@ def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.Mon
         allow_offer=True,
     )
     assert c_double["ok"] is True
-    assert c_double["size_mode"] == "fit_margin"
-    assert c_double["qty"] == Decimal("48.7")
+    # Fee-aware 1% risk fits margin at available=100 → plain risk mode.
+    assert c_double["size_mode"] == "risk"
+    assert c_double["qty"] == Decimal("47.0")
     double_text = c_double["text"]
-    assert "(ใหญ่สุดที่ margin พอที่ 5x)" in double_text
-    assert "risk จริง: −10.34 USDT = 1.03% ของ Futures 1000 USDT (เป้า 1% · เพดาน 2%)" in double_text
-    assert "≤ 1%)" not in double_text
+    assert "risk จริง: −9.98 USDT = 1.00% ของ Futures 1000 USDT (เป้า 1%)" in double_text
+    assert "เพดาน quick 2%" in double_text
     assert "ลองใหม่" not in double_text
     conn.close()
 

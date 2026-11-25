@@ -440,13 +440,11 @@ def _ensure_watch_row(
 ) -> dict[str, Any]:
     existing = get_watch_position(conn, pos.symbol, pos.position_side)
     if existing is not None and (
-        existing.get("closed_at_ms") is not None
-        or str(existing.get("side") or "") != pos.side
-        or (existing.get("closed_at_ms") is None and _entry_shifted(existing, pos))
+        existing.get("closed_at_ms") is not None or str(existing.get("side") or "") != pos.side
     ):
-        # A new trade on the same symbol: never reuse the old stop, entry time,
-        # signal link or no-stop latch. Entry shift >0.05% is add/reopen
-        # (partial closes keep Binance entryPrice).
+        # Closed row or side flip: never reuse the old stop, entry time, signal
+        # link or no-stop latch. Same-side open entry shift (>0.05%) is an add —
+        # keep initial_stop / R anchor and only refresh entry/qty below.
         reset_watch_position(conn, pos.symbol, pos.position_side)
         existing = None
     entry_time = pos.update_time_ms

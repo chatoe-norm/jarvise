@@ -219,8 +219,8 @@ def test_held_row_without_stop_shows_no_distance(tmp_path: Path) -> None:
 
 def test_explain_risk_rejections_kinds() -> None:
     balance = Decimal("1000")
-    # 31 + ~30 > 60 (cap 6%) so the top candidate fails risk_budget.
-    existing = [ExistingIdea(symbol="BTCUSDT", side="long", risk_usdt=Decimal("31"))]
+    # Fee-aware hi is ~28 USDT; 35 + ~28 > 60 (cap 6%) so the top fails risk_budget.
+    existing = [ExistingIdea(symbol="BTCUSDT", side="long", risk_usdt=Decimal("35"))]
     hi = size_signal(
         symbol="ETHUSDT",
         side="short",
@@ -262,7 +262,7 @@ def test_explain_risk_rejections_kinds() -> None:
         balance=balance,
         max_risk_pct=cap,
     )
-    # 31 + ~30 > 60 → ETH/SOL risk_budget; ADA (~1%) would fit → no_backfill.
+    # 35 + fee-aware ~28 > 60 → ETH/SOL risk_budget; ADA (~1%) would fit → no_backfill.
     explains = explain_risk_rejections(existing, candidates, rejected, balance, max_risk_pct=cap)
     assert explains["ETHUSDT"].kind == "risk_budget"
     assert explains["SOLUSDT"].kind == "risk_budget"

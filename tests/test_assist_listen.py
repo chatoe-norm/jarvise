@@ -596,7 +596,7 @@ def test_signal_and_morning_return_streak_pause(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "sigpause.db")
     now = _ms_bangkok(2026, 10, 27, 12, 0)
     write_settings(conn, paused_until_ms=now + 3_600_000)
-    fake = FakeFutures(marks={"BTCUSDT": Decimal("100")})
+    fake = FakeFutures(marks={"BTCUSDT": Decimal("100")}, steps={"BTCUSDT": Decimal("0.001")})
     _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=now - 60_000)
     p = run_assist_signals(conn, futures=fake, now_ms_value=now, send=lambda *_a, **_k: True)
     assert p["skipped"] == "streak_pause"
@@ -1790,6 +1790,9 @@ def test_declined_level_is_not_resent_tighter_and_new_trade_are(tmp_path: Path, 
         expires_at_ms=new_entry + 86_400_000,
         sent_at_ms=new_entry,
     )
+    # Close then reopen (true new trade). Same-side entry shift alone keeps the stop (CALC-2).
+    fake.positions = []
+    run_assist_watch(conn, futures=fake, now_ms_value=new_entry, send=send)
     fake.positions = [
         FuturesPosition(
             symbol="DOGEUSDT",

@@ -453,7 +453,7 @@ def test_partial_stop_sends_thai_warning(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_entry_price_shift_resets_watch_row(tmp_path: Path) -> None:
+def test_entry_price_shift_keeps_initial_stop_on_add(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "entry_shift.db")
     t1 = _ms_bangkok(2026, 11, 1, 12, 0)
     _seed_candle(
@@ -477,7 +477,7 @@ def test_entry_price_shift_resets_watch_row(tmp_path: Path) -> None:
     assert first is not None
     first_stop = first["initial_stop"]
     first_entry_time = first["entry_time_ms"]
-    # Same poll window, Binance entry moved >0.05% (add / reopen).
+    # Same-side open, Binance entry moved >0.05% (add): keep stop / entry time.
     t2 = t1 + 60_000
     _seed_analysis(conn, symbol="DOGEUSDT", action="flat", confidence=0.9, invalidation=None, ts=t2 - 60_000)
     sent: list[str] = []
@@ -489,11 +489,204 @@ def test_entry_price_shift_resets_watch_row(tmp_path: Path) -> None:
     )
     second = get_watch_position(conn, "DOGEUSDT", "BOTH")
     assert second is not None
-    assert abs(second["initial_stop"] - 0.073) < 1e-9
-    assert second["initial_stop"] != first_stop
-    assert second["entry_time_ms"] == t2 - 30_000
-    assert second["entry_time_ms"] != first_entry_time
-    assert any("ไม่มี stop" in t for t in sent)
+    assert second["initial_stop"] == first_stop
+    assert second["entry_time_ms"] == first_entry_time
+    assert abs(float(second["entry"]) - 0.07) < 1e-12
+    # Add alone must not force a fresh "ไม่มี stop" / ATR replace.
+    assert not any("ไม่มี stop" in t for t in sent)
+    conn.close()
+
+
+def test_audit_shaped_add_keeps_stop_and_updates_avg(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "audit_add.db")
+    t1 = _ms_bangkok(2026, 11, 1, 12, 0)
+    _seed_candle(
+        conn,
+        symbol="BTCUSDT",
+        ts=t1 - 2 * FOUR_H_MS,
+        open_=67000,
+        high=67100,
+        low=66900,
+        close=67000,
+        atr=500,
+    )
+    _seed_analysis(conn, symbol="BTCUSDT", action="flat", confidence=0.9, invalidation=None, ts=t1 - 60_000)
+    first_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.1"),
+        entry_price=Decimal("67000"),
+        mark_price=Decimal("67000"),
+        update_time_ms=t1 - 600_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[first_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t1,
+        send=lambda _t: True,
+    )
+    first = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert first is not None
+    assert first["initial_stop"] is not None
+    kept_stop = first["initial_stop"]
+    kept_time = first["entry_time_ms"]
+    # Avg after 0.1@67000 + 0.1@67500 = 67250; shift ≈ 0.373% > 0.05%.
+    t2 = t1 + 60_000
+    _seed_analysis(conn, symbol="BTCUSDT", action="flat", confidence=0.9, invalidation=None, ts=t2 - 60_000)
+    add_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.2"),
+        entry_price=Decimal("67250"),
+        mark_price=Decimal("67250"),
+        update_time_ms=t2 - 30_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[add_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t2,
+        send=lambda _t: True,
+    )
+    second = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert second is not None
+    assert second["initial_stop"] == kept_stop
+    assert second["entry_time_ms"] == kept_time
+    assert abs(float(second["entry"]) - 67250) < 1e-6
+    assert abs(float(second["qty"]) - 0.2) < 1e-12
+    conn.close()
+
+
+def test_side_flip_or_closed_row_still_resets_watch(tmp_path: Path) -> None:
+    conn = open_db(tmp_path / "flip_reset.db")
+    t1 = _ms_bangkok(2026, 11, 1, 12, 0)
+    _seed_candle(
+        conn,
+        symbol="DOGEUSDT",
+        ts=t1 - 2 * FOUR_H_MS,
+        open_=0.08,
+        high=0.081,
+        low=0.079,
+        close=0.08,
+        atr=0.002,
+    )
+    _seed_analysis(conn, symbol="DOGEUSDT", action="flat", confidence=0.9, invalidation=None, ts=t1 - 60_000)
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[_short_pos("0.08", t1 - 600_000)]),
+        now_ms_value=t1,
+        send=lambda _t: True,
+    )
+    first = get_watch_position(conn, "DOGEUSDT", "BOTH")
+    assert first is not None
+    first_stop = first["initial_stop"]
+    # Side flip long → reset and freeze a long ATR stop.
+    t2 = t1 + 60_000
+    _seed_analysis(conn, symbol="DOGEUSDT", action="flat", confidence=0.9, invalidation=None, ts=t2 - 60_000)
+    long_pos = FuturesPosition(
+        symbol="DOGEUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("100"),
+        entry_price=Decimal("0.08"),
+        mark_price=Decimal("0.08"),
+        update_time_ms=t2 - 30_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[long_pos]),
+        now_ms_value=t2,
+        send=lambda _t: True,
+    )
+    flipped = get_watch_position(conn, "DOGEUSDT", "BOTH")
+    assert flipped is not None
+    assert flipped["side"] == "long"
+    assert flipped["initial_stop"] != first_stop
+    assert flipped["initial_stop"] < 0.08
+    conn.close()
+
+
+def test_add_wrong_side_of_kept_stop_keeps_stop_no_2r(tmp_path: Path) -> None:
+    from jarvise_assist.watch import _exit_reason, approx_r_multiple
+
+    conn = open_db(tmp_path / "wrong_side.db")
+    t1 = _ms_bangkok(2026, 11, 1, 12, 0)
+    _seed_candle(
+        conn,
+        symbol="BTCUSDT",
+        ts=t1 - 2 * FOUR_H_MS,
+        open_=67000,
+        high=67100,
+        low=66900,
+        close=67000,
+        atr=200,
+    )
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="long", confidence=0.9, invalidation=66500.0, ts=t1 - 60_000
+    )
+    first_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.1"),
+        entry_price=Decimal("67000"),
+        mark_price=Decimal("67000"),
+        update_time_ms=t1 - 600_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[first_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t1,
+        send=lambda _t: True,
+    )
+    first = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert first is not None
+    # Force a kept stop above the coming avg so the add puts entry on the wrong side.
+    conn.execute(
+        "UPDATE assist_watch_position SET initial_stop=?, initial_stop_source='signal' WHERE symbol=?",
+        (66850.0, "BTCUSDT"),
+    )
+    conn.commit()
+    t2 = t1 + 60_000
+    _seed_analysis(
+        conn, symbol="BTCUSDT", action="long", confidence=0.9, invalidation=66500.0, ts=t2 - 60_000
+    )
+    # New avg 66800 < kept stop 66850 → stop no longer loss-side for a long.
+    add_pos = FuturesPosition(
+        symbol="BTCUSDT",
+        position_side="BOTH",
+        position_amt=Decimal("0.2"),
+        entry_price=Decimal("66800"),
+        mark_price=Decimal("66800"),
+        update_time_ms=t2 - 30_000,
+    )
+    run_assist_watch(
+        conn,
+        futures=FakeFutures(positions=[add_pos], steps={"BTCUSDT": Decimal("0.001")}),
+        now_ms_value=t2,
+        send=lambda _t: True,
+    )
+    second = get_watch_position(conn, "BTCUSDT", "BOTH")
+    assert second is not None
+    assert abs(float(second["initial_stop"]) - 66850) < 1e-6
+    assert abs(float(second["entry"]) - 66800) < 1e-6
+    # Stop on the profit side of the new avg: 2R must not fire at the mark.
+    assert (
+        _exit_reason(
+            conn,
+            symbol="BTCUSDT",
+            side="long",
+            entry=Decimal("66800"),
+            initial_stop=Decimal("66850"),
+            mark=Decimal("66800"),
+            now_ms=t2,
+        )
+        != "target_2r"
+    )
+    # Distance is non-zero so approx_r still returns a number; product rule is keep stop.
+    assert approx_r_multiple(
+        side="long",
+        entry=Decimal("66800"),
+        initial_stop=Decimal("66850"),
+        mark=Decimal("66800"),
+    ) == Decimal("0")
     conn.close()
 
 

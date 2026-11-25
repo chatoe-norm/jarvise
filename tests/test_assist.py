@@ -248,6 +248,8 @@ def test_floor_to_step_rounds_down() -> None:
 
 
 def test_size_signal_2r_long_and_short() -> None:
+    from jarvise_assist.sizing import real_stop_loss_usdt
+
     long_s = size_signal(
         symbol="BTCUSDT",
         side="long",
@@ -259,8 +261,10 @@ def test_size_signal_2r_long_and_short() -> None:
     )
     assert long_s is not None
     assert long_s.target == Decimal("120")  # 2R
-    assert long_s.qty == Decimal("2.000")  # 20 / 10
-    assert long_s.loss_at_stop == Decimal("20.00")
+    # Fee-aware: 20 / (10 + 0.0012*100) → floor 1.976; loss_at_stop stays price risk.
+    assert long_s.qty == Decimal("1.976")
+    assert long_s.loss_at_stop == Decimal("19.76")
+    assert real_stop_loss_usdt(qty=long_s.qty, entry=Decimal("100"), stop=Decimal("90")) <= Decimal("20")
 
     short_s = size_signal(
         symbol="DOGEUSDT",
@@ -273,10 +277,83 @@ def test_size_signal_2r_long_and_short() -> None:
     )
     assert short_s is not None
     assert short_s.target == Decimal("0.0730")
-    assert short_s.qty == Decimal("5714")  # floor(20/0.0035)
+    assert short_s.qty == Decimal("5561")  # floor(20 / (0.0035 + 0.0012*0.08))
+    assert real_stop_loss_usdt(qty=short_s.qty, entry=Decimal("0.0800"), stop=Decimal("0.0835")) <= Decimal(
+        "20"
+    )
+
+
+def test_size_signal_includes_round_trip_fees_audit_case() -> None:
+    from jarvise_assist.sizing import real_stop_loss_usdt
+
+    sized = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("99.8"),
+        balance=Decimal("10000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("0.001"),
+    )
+    assert sized is not None
+    # Fee-blind would be 500; fee-aware is well below.
+    assert sized.qty < Decimal("500")
+    assert sized.qty == Decimal("312.500")
+    assert real_stop_loss_usdt(qty=sized.qty, entry=Decimal("100"), stop=Decimal("99.8")) <= Decimal("100")
+
+
+def test_size_signal_after_5x_cap_real_risk_within_budget() -> None:
+    from jarvise_assist.sizing import real_stop_loss_usdt
+
+    # r=0.07 → fee-aware raw qty would need >5x; cap then re-check real risk.
+    sized = size_signal(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("99.93"),
+        balance=Decimal("10000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("0.001"),
+    )
+    assert sized is not None
+    assert sized.leverage == 5
+    assert sized.leverage_capped is True
+    assert sized.notional <= Decimal("50000")
+    assert real_stop_loss_usdt(qty=sized.qty, entry=Decimal("100"), stop=Decimal("99.93")) <= Decimal("100")
+
+
+def test_size_signal_invalid_inputs_return_none() -> None:
+    base = dict(
+        symbol="BTCUSDT",
+        side="long",
+        entry=Decimal("100"),
+        stop=Decimal("99"),
+        balance=Decimal("1000"),
+        risk_pct=Decimal("1"),
+        step_size=Decimal("0.001"),
+    )
+    assert size_signal(**{**base, "entry": Decimal("0")}) is None
+    assert size_signal(**{**base, "stop": Decimal("101")}) is None  # long stop on wrong side
+    assert size_signal(**{**base, "balance": Decimal("0")}) is None
+    assert size_signal(**{**base, "risk_pct": Decimal("0")}) is None
+    # Qty floors to zero when step is larger than the raw size.
+    assert (
+        size_signal(
+            symbol="BTCUSDT",
+            side="long",
+            entry=Decimal("100"),
+            stop=Decimal("99"),
+            balance=Decimal("1"),
+            risk_pct=Decimal("1"),
+            step_size=Decimal("100"),
+        )
+        is None
+    )
 
 
 def test_leverage_cap_at_5x() -> None:
+    from jarvise_assist.sizing import real_stop_loss_usdt
+
     # Tight stop → huge qty → leverage would exceed 5x.
     sized = size_signal(
         symbol="BTCUSDT",
@@ -292,6 +369,7 @@ def test_leverage_cap_at_5x() -> None:
     assert sized.leverage_capped is True
     assert sized.uncapped_leverage > 5
     assert sized.notional <= Decimal("500")
+    assert real_stop_loss_usdt(qty=sized.qty, entry=Decimal("100"), stop=Decimal("99.9")) <= Decimal("2")
 
 
 def test_passes_signal_floor() -> None:
@@ -1089,13 +1167,13 @@ def test_two_fresh_3pct_ideas_both_admitted(tmp_path: Path) -> None:
 
 
 def test_older_higher_pct_position_binds_cap(tmp_path: Path) -> None:
-    """Open position risking 3% of balance: settings 2% rejects; 3% admits."""
+    """Open position risking ~3% of balance (price+fees): settings 2% rejects; 3% admits."""
     day = _ms_bangkok(2026, 10, 27, 12, 25)
-    # qty=0.3, entry=100, stop=90 → risk 3 USDT = 3% of 100
+    # qty chosen so real_stop_loss (price + 6bps×2 fees) ≈ 3 USDT = 3% of 100.
     btc = FuturesPosition(
         symbol="BTCUSDT",
         position_side="BOTH",
-        position_amt=Decimal("0.3"),
+        position_amt=Decimal("0.296"),
         entry_price=Decimal("100"),
         mark_price=Decimal("100"),
         update_time_ms=day - 60_000,
@@ -1107,7 +1185,7 @@ def test_older_higher_pct_position_binds_cap(tmp_path: Path) -> None:
         "positionSide": "BOTH",
         "reduceOnly": True,
         "triggerPrice": "90",
-        "quantity": "0.3",
+        "quantity": "0.296",
         "algoId": 1,
     }
 
@@ -2358,7 +2436,7 @@ def test_capped_leverage_note_sits_before_stop_instruction() -> None:
         entry=Decimal("100"),
         stop=Decimal("99.9"),
         balance=Decimal("100"),
-        risk_pct=Decimal("1"),
+        risk_pct=Decimal("2"),
         step_size=Decimal("0.001"),
     )
     assert sized is not None and sized.leverage_capped
@@ -2448,8 +2526,9 @@ def test_on_demand_requote_caps_loss_at_first_sent(tmp_path: Path) -> None:
     )
     assert reason is None and capped is not None
     expected = floor_to_step(first_loss / raw.r_distance, step)
-    assert capped.qty == expected
-    assert capped.qty > first_qty
+    # Fee-aware raw may already sit under the first-loss cap; never raise above raw.
+    assert capped.qty == min(raw.qty, expected)
+    assert capped.qty >= first_qty or capped.loss_at_stop <= first_loss
     assert capped.loss_at_stop <= first_loss
 
     _seed_analysis(
@@ -2470,8 +2549,8 @@ def test_on_demand_requote_caps_loss_at_first_sent(tmp_path: Path) -> None:
     assert "stop 0.0835" in text
     assert f"· {first_qty:g}" in text or f"· {int(first_qty)}" in text
     assert "ส่งครั้งแรก:" not in text
-    # Sized line uses the loss-capped qty; the prior line still cites the first qty.
-    assert f"ขนาด: {fmt_qty_local(expected)}" in text
+    # Sized line uses min(fee-aware raw, first-loss cap); prior line still cites first qty.
+    assert f"ขนาด: {fmt_qty_local(min(raw.qty, expected))}" in text
     conn.close()
 
 

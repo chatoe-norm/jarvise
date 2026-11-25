@@ -31,6 +31,51 @@ FOUR_H_MS = 4 * 3_600_000
 # the bar closes. Allow 10 more minutes for the run to finish. The assist jobs run
 # later than this (signal :25, morning 08:20), so they still require the newest bar.
 ANALYSIS_PUBLISH_LAG_MS = 70 * 60_000
+# Round-trip fee for main assist sizing (same default as Quick). Conservative vs
+# track.py VIP0 5 bps — slightly smaller size is preferred over understating risk.
+ASSIST_FEE_BPS_PER_SIDE = Decimal("6")
+
+
+def round_trip_fee_rate(fee_bps_per_side: Decimal = ASSIST_FEE_BPS_PER_SIDE) -> Decimal:
+    """Two-sided fee rate: ``2 * bps / 10000``."""
+    return Decimal("2") * fee_bps_per_side / Decimal("10000")
+
+
+def round_trip_fee_usdt(
+    *,
+    notional: Decimal,
+    fee_bps_per_side: Decimal = ASSIST_FEE_BPS_PER_SIDE,
+) -> Decimal:
+    """Round-trip fee in USDT for a given notional."""
+    return notional * round_trip_fee_rate(fee_bps_per_side)
+
+
+def real_stop_loss_usdt(
+    *,
+    qty: Decimal,
+    entry: Decimal,
+    stop: Decimal,
+    fee_bps_per_side: Decimal = ASSIST_FEE_BPS_PER_SIDE,
+) -> Decimal:
+    """Cash loss at stop including round-trip fees: price risk + fee_rt × qty × entry."""
+    return abs(entry - stop) * qty + round_trip_fee_usdt(
+        notional=qty * entry,
+        fee_bps_per_side=fee_bps_per_side,
+    )
+
+
+def sized_real_risk_usdt(
+    sized: SizedSignal,
+    *,
+    fee_bps_per_side: Decimal = ASSIST_FEE_BPS_PER_SIDE,
+) -> Decimal:
+    """Portfolio-admission risk for a sized idea (price risk + fees)."""
+    return real_stop_loss_usdt(
+        qty=sized.qty,
+        entry=sized.entry,
+        stop=sized.stop,
+        fee_bps_per_side=fee_bps_per_side,
+    )
 
 
 @dataclass(frozen=True)
@@ -207,8 +252,14 @@ def size_signal(
     risk_pct: Decimal,
     step_size: Decimal,
     analysis_id: str | None = None,
+    fee_bps_per_side: Decimal = ASSIST_FEE_BPS_PER_SIDE,
 ) -> SizedSignal | None:
-    """Return sized levels, or None when stop is invalid / qty rounds to zero."""
+    """Return sized levels, or None when stop is invalid / qty rounds to zero.
+
+    Sizes against price risk plus round-trip fees so real stop-out cash loss
+    stays at or under ``balance * risk_pct / 100``. ``loss_at_stop`` stays
+    price risk only (``qty * r``) for requote caps.
+    """
     side_l = side.lower()
     if side_l not in {"long", "short"}:
         return None
@@ -222,7 +273,11 @@ def size_signal(
     if r == 0:
         return None
     risk_usdt = balance * (risk_pct / Decimal("100"))
-    raw_qty = risk_usdt / r
+    fee_rt = round_trip_fee_rate(fee_bps_per_side)
+    denom = r + fee_rt * entry
+    if denom <= 0:
+        return None
+    raw_qty = risk_usdt / denom
     qty = floor_to_step(raw_qty, step_size)
     if qty <= 0:
         return None
@@ -244,6 +299,22 @@ def size_signal(
         leverage = MAX_LEVERAGE
     else:
         leverage = max(1, uncapped)
+    # After step / 5x cap, step down until real risk fits the budget.
+    while (
+        qty > 0
+        and real_stop_loss_usdt(
+            qty=qty,
+            entry=entry,
+            stop=stop,
+            fee_bps_per_side=fee_bps_per_side,
+        )
+        > risk_usdt
+    ):
+        qty = floor_to_step(qty - step_size, step_size)
+        if qty <= 0:
+            return None
+        reasons = _with_reason(reasons, "step")
+        notional = qty * entry
     loss = qty * r
     if side_l == "long":
         target = entry + TARGET_R * r
@@ -363,12 +434,18 @@ def position_risk_usdt(
     stop: Decimal | None,
     balance: Decimal,
     risk_pct: Decimal,
+    fee_bps_per_side: Decimal = ASSIST_FEE_BPS_PER_SIDE,
 ) -> Decimal:
-    """USDT at risk for an open idea. Falls back to risk_pct of balance."""
+    """USDT at risk for an open idea (price risk + fees). Falls back to risk_pct of balance."""
     if stop is not None and entry > 0 and qty > 0:
         r = abs(entry - stop)
         if r > 0:
-            return qty * r
+            return real_stop_loss_usdt(
+                qty=qty,
+                entry=entry,
+                stop=stop,
+                fee_bps_per_side=fee_bps_per_side,
+            )
     if balance > 0 and risk_pct > 0:
         return balance * (risk_pct / Decimal("100"))
     return Decimal("0")
@@ -391,8 +468,9 @@ def admit_signals(
 ) -> tuple[list[SignalCandidate], list[SignalCandidate]]:
     """Admit by confidence desc (symbol_rank asc tie-break) under max_risk_pct of balance.
 
-    Once one candidate fails a slot or risk budget, every lower-ranked candidate is
-    rejected — a smaller later idea is not backfilled.
+    Candidate risk is price risk plus round-trip fees. Once one candidate fails a
+    slot or risk budget, every lower-ranked candidate is rejected — a smaller
+    later idea is not backfilled.
     """
     budget = balance * (max_risk_pct / Decimal("100")) if balance > 0 else Decimal("0")
     used = sum((e.risk_usdt for e in existing), Decimal("0"))
@@ -405,7 +483,7 @@ def admit_signals(
         if blocked:
             rejected.append(cand)
             continue
-        next_used = used + cand.sized.loss_at_stop
+        next_used = used + sized_real_risk_usdt(cand.sized)
         if slots + 1 > max_ideas or next_used > budget:
             rejected.append(cand)
             blocked = True
