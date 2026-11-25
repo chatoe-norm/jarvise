@@ -130,6 +130,43 @@ def menu_exit_confirm_keyboard(intent_id: str) -> dict[str, Any]:
     }
 
 
+def menu_exit_reduce_confirm_keyboard(
+    exit_intent_id: str,
+    reduce_intent_id: str,
+    *,
+    full_qty: str,
+    leave_qty: str,
+) -> dict[str, Any]:
+    """Confirm card when REDUCE is on and a half close is legal (B2)."""
+    return {
+        "inline_keyboard": [
+            [{"text": f"✅ ปิดหมด {full_qty}", "callback_data": f"xx:{exit_intent_id}"}],
+            [
+                {
+                    "text": f"✂️ ปิดครึ่ง · เหลือ {leave_qty}",
+                    "callback_data": f"xr:{reduce_intent_id}",
+                }
+            ],
+            [{"text": "↩️ ยังไม่ปิด", "callback_data": f"en:{exit_intent_id}"}],
+        ]
+    }
+
+
+def partial_be_keyboard(intent_id: str, *, be_stop: str) -> dict[str, Any]:
+    """Manual Quick BE after a successful half close (Q3=b)."""
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"🛡 เลื่อน stop ส่วนที่เหลือ → {be_stop}",
+                    "callback_data": f"ms:{intent_id}",
+                },
+                {"text": "❌ ไม่เลื่อน", "callback_data": f"mn:{intent_id}"},
+            ]
+        ]
+    }
+
+
 def menu_close_refresh_keyboard(symbol: str, side: str) -> dict[str, Any]:
     side_code = "l" if side.lower() == "long" else "s"
     return {"inline_keyboard": [[{"text": "🔄 อัปเดต", "callback_data": f"xc:{symbol.upper()}:{side_code}"}]]}

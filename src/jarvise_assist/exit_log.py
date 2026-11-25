@@ -540,6 +540,13 @@ def record_intent_action(conn: Any, intent: dict[str, Any], *, action: str, acti
         preview = intent.get("preview")
         if kind == "exit" and isinstance(preview, dict) and preview.get("source") == "menu":
             return
+        # Quick partial-BE is not main trail advice telemetry.
+        if (
+            kind == "move_stop"
+            and isinstance(preview, dict)
+            and (preview.get("via") == "partial_be" or preview.get("source") == "partial_be")
+        ):
+            return
         response_kind = kind
         intent_id = str(intent.get("id") or "")
         if kind == "exit" and isinstance(preview, dict) and preview.get("source") == "progress":
