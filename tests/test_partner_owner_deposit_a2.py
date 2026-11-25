@@ -199,6 +199,15 @@ def test_a2_dry_run_golden_and_no_write(tmp_path: Path) -> None:
     golden = payload["golden"]
     assert golden["nav_pre_q"] == format(NAV_Q, "f")
     assert golden["nav_pre"].startswith("1.033046292003")
+    # Literals so a consistent edit of module constants cannot pass alone.
+    assert golden["units_delta_e8"] == 56_969_857_455
+    assert golden["admin_units_after_e8"] == 75_123_528_534
+    assert golden["admin_cost_after_micro"] == 770_061_710
+    assert golden["cash_micro"] == 588_525_000
+    assert golden["account_value_micro"] == 877_683_295
+    assert golden["total_units_before_e8"] == 27_990_836_155
+    assert golden["nav_pre_q"] == "1.03304629"
+    assert golden["nav_pre"].startswith("1.033046292003")
     assert golden["minted"] == format(MINTED, "f")
     assert golden["units_delta_e8"] == UNITS_DELTA_E8
     assert golden["admin_units_after_e8"] == ADMIN_UNITS_AFTER_E8
@@ -208,6 +217,9 @@ def test_a2_dry_run_golden_and_no_write(tmp_path: Path) -> None:
     assert golden["total_units_before_e8"] == TOTAL_UNITS_E8
     assert golden["tran_id"] == TRAN_ID
     assert abs(D(golden["nav_delta"])) < D("1e-9")
+    assert before["net"] == D("207.503011")
+    assert TOTO_NET_AFTER_V_NOW == D("101.806542")
+    assert V_NOW == D("897.03482611")
     assert _digest(path) == digest
     check = open_db(path)
     assert check.execute("SELECT 1 FROM partner_event WHERE id = ?", (HIST_EVENT_ID,)).fetchone() is None
@@ -273,6 +285,65 @@ def test_a2_apply_writes_pins_and_toto_net(tmp_path: Path) -> None:
     )
     assert not any(item.fingerprint == f"bx:TRANSFER:{TRAN_ID}" for item in audited.findings)
     check.close()
+
+
+def test_a2_prior_created_after_topup_still_applies(tmp_path: Path) -> None:
+    """Prod may stamp pe_hist_tran432610282749 created_at after the 23 Nov top-up."""
+    path = tmp_path / "late_prior.db"
+    conn = _a2_ready(path)
+    late_created = 1_795_520_000_000  # 2026-11-24 ICT-ish, after EFF_DEFAULT_MS
+    assert late_created > EFF_DEFAULT_MS
+    conn.execute("DROP TRIGGER IF EXISTS partner_event_append_only_update")
+    conn.execute(
+        "UPDATE partner_event SET created_at_ms = ? WHERE id = ?",
+        (late_created, L1_HIST_ID),
+    )
+    conn.commit()
+    before = ps.view_partner(conn, "pt_toto_l1", V_NOW)
+    assert before["net"] == TOTO_NET_BEFORE_V_NOW
+    conn.close()
+
+    dry = _invoke(path, "--json")
+    assert dry.exit_code == 0, dry.stdout + dry.stderr
+    payload = _json_out(dry)
+    assert payload["ok"] is True
+    assert payload["reason"] == "ready"
+    assert payload["golden"]["units_delta_e8"] == 56_969_857_455
+    assert payload["golden"]["admin_units_after_e8"] == 75_123_528_534
+    assert payload["golden"]["admin_cost_after_micro"] == 770_061_710
+
+    applied = _invoke(path, "--json", "--apply")
+    assert applied.exit_code == 0, applied.stdout + applied.stderr
+    body = _json_out(applied)
+    assert body["reason"] == "recorded"
+    assert body["golden"]["units_delta_e8"] == 56_969_857_455
+    check = open_db(path)
+    assert check.execute("SELECT 1 FROM partner_event WHERE id = ?", (HIST_EVENT_ID,)).fetchone()
+    assert ps.view_partner(check, "pt_toto_l1", V_NOW)["net"] == TOTO_NET_AFTER_V_NOW
+    check.close()
+
+
+def test_a2_apply_clears_open_unrecorded_fingerprint(tmp_path: Path) -> None:
+    from jarvise_assist.partner_audit import load_state, save_state
+
+    path = tmp_path / "clear_fp.db"
+    _a2_ready(path).close()
+    state_path = path.with_name("partner_audit_state.json")
+    save_state(
+        state_path,
+        {
+            "v": 1,
+            "alerted": {},
+            "open_unrecorded": [f"bx:TRANSFER:{TRAN_ID}", "bx:TRANSFER:other"],
+            "last_ok_ms": None,
+            "fail_since_ms": None,
+            "fail_alerted": False,
+        },
+    )
+    assert _invoke(path, "--json", "--apply").exit_code == 0
+    state = load_state(state_path)
+    assert f"bx:TRANSFER:{TRAN_ID}" not in state["open_unrecorded"]
+    assert "bx:TRANSFER:other" in state["open_unrecorded"]
 
 
 def test_a2_idempotent_conflict_window_schema(tmp_path: Path) -> None:

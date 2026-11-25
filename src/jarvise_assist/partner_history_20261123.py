@@ -15,12 +15,14 @@ import time
 from decimal import Decimal
 from typing import Any, Final
 
+from jarvise_assist import partner_history as ph_l1
 from jarvise_assist import partner_ledger as pl
 from jarvise_assist import partner_store as ps
 from jarvise_ingest.db import transaction
 
 HIST_EVENT_ID: Final = "pe_hist_tran434162178288"
 PRIOR_HIST_EVENT_ID: Final = "pe_hist_tran432610282749"
+PRIOR_TRAN_ID: Final = ph_l1.TRAN_ID
 TRAN_ID: Final = "434162178288"
 AMOUNT: Final = Decimal("588.525000")
 ACCOUNT_VALUE_AFTER: Final = Decimal("877.683295")
@@ -230,6 +232,41 @@ def _pinned_golden_values(nav_pre: Decimal) -> dict[str, Any]:
     }
 
 
+def _prior_hist_diffs(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    """Validate the permitted 19 Nov hist row. Its created_at may be after the top-up."""
+    diffs: list[dict[str, object]] = []
+    row = conn.execute("SELECT * FROM partner_event WHERE id = ?", (PRIOR_HIST_EVENT_ID,)).fetchone()
+    if row is None:
+        diffs.append(_diff("prior_hist_event", PRIOR_HIST_EVENT_ID, None))
+        return diffs
+    if str(row["kind"]) != "owner_redeem":
+        diffs.append(_diff("prior_hist_kind", "owner_redeem", str(row["kind"])))
+    eff = row["effective_at_ms"]
+    if eff is None or not ph_l1.effective_in_window(int(eff)):
+        diffs.append(
+            _diff(
+                "prior_hist_effective_at_ms",
+                f"{ph_l1.EFF_MIN_MS}..{ph_l1.EFF_MAX_MS}",
+                eff,
+            )
+        )
+    pins: list[tuple[str, object, object]] = [
+        ("prior_hist.cash_micro", ph_l1.CASH_MICRO, int(row["cash_micro"])),
+        ("prior_hist.units_delta_e8", ph_l1.UNITS_DELTA_E8, int(row["units_delta_e8"])),
+        ("prior_hist.account_value_micro", ph_l1.AV_MICRO, int(row["account_value_micro"])),
+        ("prior_hist.fee_micro", 0, int(row["fee_micro"])),
+        ("prior_hist.origin", "manual", row["origin"]),
+        ("prior_hist.actor", "admin", str(row["actor"])),
+    ]
+    for field, expected, actual in pins:
+        if actual != expected:
+            diffs.append(_diff(field, expected, actual))
+    note = str(row["note"] or "")
+    if PRIOR_TRAN_ID not in note:
+        diffs.append(_diff("prior_hist.note_tran", PRIOR_TRAN_ID, note[:80]))
+    return diffs
+
+
 def pre_state_diffs(conn: sqlite3.Connection, effective_at_ms: int) -> list[dict[str, object]]:
     """Field-by-field diff against the pinned 23 Nov pre-state. Empty means it matches."""
     diffs: list[dict[str, object]] = []
@@ -241,8 +278,8 @@ def pre_state_diffs(conn: sqlite3.Connection, effective_at_ms: int) -> list[dict
     prior = [row for row in events if str(row["id"]) == PRIOR_HIST_EVENT_ID]
     if len(prior) != 1:
         diffs.append(_diff("prior_hist_event", PRIOR_HIST_EVENT_ID, [str(r["id"]) for r in prior]))
-    elif str(prior[0]["kind"]) != "owner_redeem":
-        diffs.append(_diff("prior_hist_kind", "owner_redeem", str(prior[0]["kind"])))
+    else:
+        diffs.extend(_prior_hist_diffs(conn))
     kinds = [str(row["kind"]) for row in events]
     # Exactly two deposits + the 19 Nov historical redeem; nothing else.
     if len(events) != 3 or kinds.count("deposit") != 2 or kinds.count("owner_redeem") != 1:
@@ -280,13 +317,18 @@ def pre_state_diffs(conn: sqlite3.Connection, effective_at_ms: int) -> list[dict
     pending = conn.execute("SELECT COUNT(*) AS n FROM partner_request WHERE status = 'pending'").fetchone()
     if int(pending["n"]) != 0:
         diffs.append(_diff("pending_requests", 0, int(pending["n"])))
+    # Exempt PRIOR_HIST_EVENT_ID created_at (prod may stamp apply-time after the top-up).
+    # Still enforce chronology for every other event; prior effective is checked above.
     late_ev = conn.execute(
         """
         SELECT COUNT(*) AS n FROM partner_event
-        WHERE created_at_ms > ?
-           OR COALESCE(effective_at_ms, created_at_ms) > ?
+        WHERE id != ?
+          AND (
+            created_at_ms > ?
+            OR COALESCE(effective_at_ms, created_at_ms) > ?
+          )
         """,
-        (int(effective_at_ms), int(effective_at_ms)),
+        (PRIOR_HIST_EVENT_ID, int(effective_at_ms), int(effective_at_ms)),
     ).fetchone()
     if int(late_ev["n"]) != 0:
         diffs.append(_diff("event_after_effective", 0, int(late_ev["n"])))
@@ -600,7 +642,7 @@ def apply_historical(
                 }
             )
         idle_count = len(_split_partners(conn)["idle"])
-        return {
+        payload = {
             "ok": True,
             "reason": "recorded",
             "mode": "apply",
@@ -623,3 +665,20 @@ def apply_historical(
             },
             "verify": {"ok": True, "mismatches": []},
         }
+    _clear_audit_fingerprint(conn, TRAN_ID)
+    return payload
+
+
+def _clear_audit_fingerprint(conn: sqlite3.Connection, tran_id: str) -> None:
+    """Best-effort drop the booked transfer from partner_audit_state.json."""
+    from pathlib import Path
+
+    from jarvise_assist.partner_audit import remove_open_unrecorded_for_tran
+
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if row is None:
+        return
+    db_file = str(row["file"] if hasattr(row, "keys") else row[2] or "")
+    if not db_file:
+        return
+    remove_open_unrecorded_for_tran(Path(db_file).with_name("partner_audit_state.json"), tran_id)

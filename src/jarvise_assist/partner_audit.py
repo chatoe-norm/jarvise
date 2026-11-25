@@ -865,6 +865,34 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         raise
 
 
+def remove_open_unrecorded_for_tran(path: Path, tran_id: str) -> None:
+    """Best-effort drop booked ``bx:*:{tranId}`` fingerprints from the state file.
+
+    Never raises — booking must not fail when the audit-state write fails.
+    """
+    tid = str(tran_id or "").strip()
+    if not tid:
+        return
+    try:
+        state = load_state(path)
+        open_list = list(state.get("open_unrecorded") or [])
+        if not open_list:
+            return
+        kept = [
+            fp
+            for fp in open_list
+            if not (
+                str(fp) == f"bx:TRANSFER:{tid}" or (str(fp).startswith("bx:") and str(fp).endswith(f":{tid}"))
+            )
+        ]
+        if kept == open_list:
+            return
+        state["open_unrecorded"] = kept
+        save_state(path, state)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("partner_audit open_unrecorded cleanup failed type=%s", type(exc).__name__)
+
+
 def _verify_finding(conn: sqlite3.Connection) -> Finding | None:
     result = verify_ledger(conn)
     if result.get("ok") is True:
