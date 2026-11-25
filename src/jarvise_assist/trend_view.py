@@ -105,17 +105,19 @@ def explain_risk_rejections(
     Pre-margin admitted = candidates not in ``rejected`` (by identity). Uses the
     same slot/budget arithmetic ``admit_signals`` would have after those admits.
     """
+    from jarvise_assist.sizing import sized_real_risk_usdt
+
     rejected_ids = {id(c) for c in rejected}
     admitted = [c for c in candidates if id(c) not in rejected_ids]
     used = sum((e.risk_usdt for e in existing), Decimal("0")) + sum(
-        (c.sized.loss_at_stop for c in admitted), Decimal("0")
+        (sized_real_risk_usdt(c.sized) for c in admitted), Decimal("0")
     )
     slots = len(existing) + len(admitted)
     budget = balance * (max_risk_pct / Decimal("100")) if balance > 0 else Decimal("0")
     used_pct = _pct_of_balance(used, balance)
     out: dict[str, RiskExplain] = {}
     for cand in rejected:
-        loss = cand.sized.loss_at_stop
+        loss = sized_real_risk_usdt(cand.sized)
         this_pct = _pct_of_balance(loss, balance)
         if slots + 1 > max_ideas:
             kind: RiskKind = "slot_cap"

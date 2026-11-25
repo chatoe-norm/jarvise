@@ -198,6 +198,18 @@ def post_entry_extremes(
     return best_low, best_high
 
 
+def loss_side_risk(*, side: str, entry: Decimal, stop: Decimal) -> Decimal:
+    """Cash distance from entry to stop on the loss side; <= 0 means R is unknown.
+
+    Long: entry − stop. Short: stop − entry. When the stop sits on the profit
+    side of entry (e.g. after a same-side add past a kept initial_stop), callers
+    must not invent R, 2R, progress, trail, or break-even advice.
+    """
+    if side == "long":
+        return entry - stop
+    return stop - entry
+
+
 def current_trail_advice(
     *,
     side: str,
@@ -215,6 +227,8 @@ def current_trail_advice(
     Uses the frozen initial stop as the R anchor and as ``stop_price`` for
     ``trail_stop_with_source`` (never the live mark as an extreme).
     """
+    if loss_side_risk(side=side, entry=entry, stop=initial_stop) <= 0:
+        return None
     best_low, best_high = post_entry_extremes(
         candles_1h,
         symbol=symbol,

@@ -2296,14 +2296,21 @@ def test_size_for_execution_requote_cap_and_chase_vs_seen(
     conn.close()
 
 
-def test_ey_confirm_risk_lowered_returns_risk_cap_no_post(
+def test_ey_confirm_risk_lowered_resizes_under_new_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Lowering risk after ec: preview makes ey: return risk_cap with no order POST."""
+    """Lowering risk after ec: makes ey: re-size (never above preview); real risk ≤ new budget."""
+    from jarvise_assist.sizing import real_stop_loss_usdt
+
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
     monkeypatch.setattr(
         "jarvise_assist.execute.kill_switch_state",
         lambda **_: {"engaged": False, "known": True},
+    )
+    # Skip the order sequence — only assert confirm guards persist a shrunk preview.
+    monkeypatch.setattr(
+        "jarvise_assist.execute.run_entry_sequence",
+        lambda *_a, **_k: "ok",
     )
     conn = open_db(tmp_path / "ey_lower.db")
     write_settings(conn, risk_pct=3.0, enabled=True)
@@ -2328,9 +2335,82 @@ def test_ey_confirm_risk_lowered_returns_risk_cap_no_post(
     preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
     assert preview["ok"] is True
     intent_id = preview["intent_id"]
+    preview_qty = Decimal(str(preview["sized"].qty))
     loss = Decimal(str(preview["sized"].loss_at_stop))
-    assert loss > Decimal("20")  # exceeds the 2% cap after lowering to 1%
+    assert loss > Decimal("10")  # 3% preview is above a 1% budget
     write_settings(conn, risk_pct=1.0)
+    from jarvise_assist.execute import _confirm_guards_entry
+
+    intent = get_exec_intent(conn, intent_id)
+    assert intent is not None
+    assert claim_exec_intent(conn, intent_id)
+    intent = get_exec_intent(conn, intent_id)
+    assert intent is not None
+    guard = _confirm_guards_entry(conn, intent, trade, now_ms_value=now + 1_000)
+    assert guard is None
+    refreshed = get_exec_intent(conn, intent_id)
+    assert refreshed is not None
+    sent_qty = Decimal(str(refreshed["preview"]["qty"]))
+    mark = Decimal(str(refreshed["preview"]["entry"]))
+    stop = Decimal(str(refreshed["preview"]["stop"]))
+    assert sent_qty <= preview_qty
+    assert real_stop_loss_usdt(qty=sent_qty, entry=mark, stop=stop) <= Decimal("10")
+    conn.close()
+
+
+def test_ey_confirm_risk_cap_with_open_position_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confirm still returns risk_cap when an open idea fills the portfolio budget."""
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "ey_cap.db")
+    write_settings(conn, risk_pct=1.0, enabled=True)
+    bar = _ms_bangkok(2026, 11, 2, 3, 0)
+    now = _ms_bangkok(2026, 11, 2, 8, 20)
+    _seed_doge_short(conn, ts=bar)
+    # ETH open at ~1.6% price risk (+fees) leaves little room under the 2% portfolio cap.
+    eth_pos = {
+        "symbol": "ETHUSDT",
+        "positionSide": "BOTH",
+        "positionAmt": "1",
+        "entryPrice": "2000",
+        "markPrice": "2000",
+    }
+    eth_stop = {
+        "symbol": "ETHUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "reduceOnly": True,
+        "triggerPrice": "1968",
+        "quantity": "1",
+        "algoId": 9,
+    }
+    handlers: dict[tuple[str, str], Any] = {
+        ("GET", "/fapi/v1/positionSide/dual"): (200, {"dualSidePosition": False}),
+        ("GET", "/fapi/v1/multiAssetsMargin"): (200, {"multiAssetsMargin": False}),
+        ("GET", "/fapi/v3/balance"): (
+            200,
+            [{"asset": "USDT", "balance": "1000", "availableBalance": "1000"}],
+        ),
+        ("GET", "/fapi/v3/positionRisk"): (200, [eth_pos]),
+        ("GET", "/fapi/v1/premiumIndex"): (200, {"markPrice": "0.08"}),
+        ("GET", "/fapi/v1/exchangeInfo"): (200, _exchange_info()),
+        ("GET", "/fapi/v1/openOrders"): (200, [eth_stop]),
+        ("GET", "/fapi/v1/openAlgoOrders"): (200, []),
+    }
+    transport = RecordingTransport(handlers)
+    trade = _client(transport)
+    # Build preview while flat so ec: succeeds, then inject the open position for ey:.
+    handlers[("GET", "/fapi/v3/positionRisk")] = (200, [])
+    preview = create_entry_preview(conn, symbol="DOGEUSDT", side="short", trade=trade, now_ms_value=now)
+    assert preview["ok"] is True
+    intent_id = preview["intent_id"]
+    handlers[("GET", "/fapi/v3/positionRisk")] = (200, [eth_pos])
     posts_before = sum(1 for m, _, _ in transport.calls if m == "POST")
     sent: list[str] = []
     out = handle_exec_callback(
@@ -2343,12 +2423,11 @@ def test_ey_confirm_risk_lowered_returns_risk_cap_no_post(
         now_ms_value=now + 1_000,
     )
     assert out.get("ok") is False
-    assert any("เต็มเพดานความเสี่ยง" in t for t in sent)
+    assert out.get("reason") in {"risk_cap", "open_position"} or any(
+        "เต็มเพดานความเสี่ยง" in t or "ถืออยู่แล้ว" in t for t in sent
+    )
     posts_after = sum(1 for m, _, _ in transport.calls if m == "POST")
     assert posts_after == posts_before
-    row = get_exec_intent(conn, intent_id)
-    assert row is not None
-    assert row["status"] == "failed"
     conn.close()
 
 

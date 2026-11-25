@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -65,6 +66,7 @@ from jarvise_assist.messages import (
 from jarvise_assist.pause import is_paused
 from jarvise_assist.quick_tags import MSG_QUICK_OPEN, quick_symbols
 from jarvise_assist.sizing import (
+    MAX_LEVERAGE,
     ExistingIdea,
     SignalCandidate,
     SizedSignal,
@@ -77,6 +79,7 @@ from jarvise_assist.sizing import (
     floor_to_step,
     passes_signal_floor,
     portfolio_risk_cap_pct,
+    real_stop_loss_usdt,
     round_level_to_tick,
     size_signal,
 )
@@ -101,6 +104,7 @@ from jarvise_assist.store import (
     set_exec_intent_message_id,
     set_exec_intent_ref,
     symbol_has_in_flight_exec,
+    update_exec_intent_preview,
 )
 from jarvise_assist.trail_advice import current_trail_advice
 from jarvise_exchange.binance_spot import (
@@ -1862,7 +1866,8 @@ def _confirm_guards_entry(
     preview = intent["preview"]
     entry = Decimal(str(preview["entry"]))
     stop = Decimal(str(preview["stop"]))
-    qty = Decimal(str(preview["qty"]))
+    preview_qty = Decimal(str(preview["qty"]))
+    preview_target = Decimal(str(preview["target"]))
     symbol = str(intent["symbol"])
     side = str(intent["side"])
     analysis = load_latest_analysis(conn, symbol, ASSIST_TIMEFRAME)
@@ -1886,34 +1891,60 @@ def _confirm_guards_entry(
             return "chase"
     balance, available = trade.usdt_wallet_and_available()
     filters = trade.symbol_filters(symbol)
+    risk_pct = Decimal(str(ensure_settings(conn)["risk_pct"]))
+    # Re-size from the live mark; never send more than the preview qty the owner saw.
+    resized = size_signal(
+        symbol=symbol,
+        side=side,
+        entry=mark,
+        stop=stop,
+        balance=balance,
+        risk_pct=risk_pct,
+        step_size=filters.step_size,
+        analysis_id=preview.get("analysis_id"),
+    )
+    if resized is None:
+        return "below_min_notional"
+    qty = min(resized.qty, preview_qty)
+    if qty <= 0:
+        return "below_min_notional"
     if below_min_notional(
-        qty=qty, notional=qty * entry, min_qty=filters.min_qty, min_notional=filters.min_notional
+        qty=qty,
+        notional=qty * mark,
+        min_qty=filters.min_qty,
+        min_notional=filters.min_notional,
     ):
         return "below_min_notional"
-    risk_pct = Decimal(str(ensure_settings(conn)["risk_pct"]))
+    r_confirm = abs(mark - stop)
+    loss_at_stop = qty * r_confirm
+    notional = qty * mark
+    uncapped = int(math.ceil(float(notional / balance))) if balance > 0 else int(preview["leverage"])
+    sized = dc_replace(
+        resized,
+        entry=mark,
+        stop=stop,
+        target=preview_target,
+        qty=qty,
+        notional=notional,
+        loss_at_stop=loss_at_stop,
+        r_distance=r_confirm,
+        leverage=min(uncapped, MAX_LEVERAGE) if uncapped > 0 else 1,
+        leverage_capped=uncapped > MAX_LEVERAGE,
+        uncapped_leverage=max(1, uncapped),
+        step_size=filters.step_size,
+        balance_usdt=balance,
+        budget_usdt=balance * (risk_pct / Decimal("100")) if balance > 0 else resized.budget_usdt,
+    )
+    # Defensive: real risk must stay within the planned budget after the min() cap.
+    budget = balance * (risk_pct / Decimal("100")) if balance > 0 else Decimal("0")
+    if budget > 0 and real_stop_loss_usdt(qty=qty, entry=mark, stop=stop) > budget:
+        return "below_min_notional"
     existing = _existing_ideas_from_trade(
         conn,
         trade,
         balance=balance,
         risk_pct=risk_pct,
         now_ms_value=now_ms_value,
-    )
-    sized = SizedSignal(
-        symbol=symbol,
-        side=side,
-        entry=entry,
-        stop=stop,
-        target=Decimal(str(preview["target"])),
-        qty=qty,
-        notional=qty * entry,
-        leverage=int(preview["leverage"]),
-        loss_at_stop=Decimal(str(preview.get("loss_at_stop") or qty * abs(entry - stop))),
-        risk_pct=risk_pct,
-        r_distance=Decimal(str(preview.get("r_distance") or abs(entry - stop))),
-        leverage_capped=False,
-        uncapped_leverage=int(preview["leverage"]),
-        analysis_id=preview.get("analysis_id"),
-        step_size=filters.step_size,
     )
     cand = SignalCandidate(sized=sized, confidence=1.0, symbol_rank=0)
     admitted, rejected = admit_signals(
@@ -1927,6 +1958,26 @@ def _confirm_guards_entry(
     admitted, dropped = assign_shared_leverage(admitted, available_balance=available)
     if dropped:
         return "margin_cap"
+    final = admitted[0].sized
+    # Persist resized confirm fields before run_entry_sequence reads preview["qty"].
+    # Keep card entry for signal-drift analytics; confirm_entry is the live mark used to size.
+    updated_preview = {
+        **preview,
+        "qty": str(final.qty),
+        "confirm_entry": str(final.entry),
+        "stop": str(stop),
+        "target": str(preview_target),
+        "notional": str(final.notional),
+        "leverage": int(final.leverage),
+        "loss_at_stop": str(final.loss_at_stop),
+        "r_distance": str(final.r_distance),
+    }
+    try:
+        update_exec_intent_preview(conn, str(intent["id"]), updated_preview)
+        intent["preview"] = updated_preview
+    except Exception as exc:  # noqa: BLE001 — without persist, orders must not proceed
+        logger.warning("update_exec_intent_preview failed type=%s", type(exc).__name__)
+        return "below_min_notional"
     # Persist the mark already used for chase. Never changes the return or timing.
     try:
         set_exec_intent_ref(

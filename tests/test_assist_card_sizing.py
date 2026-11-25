@@ -1,4 +1,4 @@
-"""Card sizing metadata. Qty, leverage, and loss_at_stop stay on the old formula."""
+"""Card sizing metadata. Qty includes round-trip fees; loss_at_stop stays price risk."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ from jarvise_assist.sizing import (
     _shrink_for_max_leverage,
     cap_requote_qty,
     floor_to_step,
+    real_stop_loss_usdt,
+    round_trip_fee_rate,
     size_signal,
 )
 from jarvise_assist.store import insert_signal, mark_signal_sent
@@ -41,15 +43,18 @@ def _doge_short() -> SizedSignal:
     return sized
 
 
-def test_doge_fixture_qty_leverage_and_loss_unchanged() -> None:
+def test_doge_fixture_qty_leverage_and_loss_fee_aware() -> None:
     sized = _doge_short()
-    assert sized.qty == Decimal("5714")
-    assert sized.notional == Decimal("457.12")
+    assert sized.qty == Decimal("5561")
+    assert sized.notional == Decimal("444.88")
     assert sized.leverage == 1
-    assert sized.loss_at_stop == Decimal("19.999")
+    assert sized.loss_at_stop == Decimal("19.4635")
     assert sized.balance_usdt == Decimal("1000")
     assert sized.budget_usdt == Decimal("20")
     assert sized.reduce_reasons == ("step",)
+    assert real_stop_loss_usdt(qty=sized.qty, entry=Decimal("0.0800"), stop=Decimal("0.0835")) <= Decimal(
+        "20"
+    )
 
 
 def test_step_reason_when_floor_lowers_qty() -> None:
@@ -63,7 +68,8 @@ def test_step_reason_when_floor_lowers_qty() -> None:
         step_size=Decimal("0.3"),
     )
     assert sized is not None
-    raw = Decimal("10") / Decimal("10")
+    fee_rt = round_trip_fee_rate()
+    raw = Decimal("10") / (Decimal("10") + fee_rt * Decimal("100"))
     assert sized.qty == floor_to_step(raw, Decimal("0.3"))
     assert sized.qty == Decimal("0.9")
     assert sized.loss_at_stop == Decimal("9")
@@ -71,13 +77,14 @@ def test_step_reason_when_floor_lowers_qty() -> None:
 
 
 def test_leverage_cap_reason_when_max_leverage_lowers_qty() -> None:
+    # risk 2% so fee-aware raw still exceeds 5x and leverage_cap fires.
     sized = size_signal(
         symbol="BTCUSDT",
         side="long",
         entry=Decimal("100"),
         stop=Decimal("99.9"),
         balance=Decimal("1000"),
-        risk_pct=Decimal("1"),
+        risk_pct=Decimal("2"),
         step_size=Decimal("1"),
     )
     assert sized is not None
@@ -86,7 +93,8 @@ def test_leverage_cap_reason_when_max_leverage_lowers_qty() -> None:
     assert sized.leverage == 5
     assert sized.loss_at_stop == Decimal("5")
     assert sized.leverage_capped is True
-    assert sized.reduce_reasons == ("leverage_cap",)
+    assert sized.reduce_reasons == ("step", "leverage_cap")
+    assert real_stop_loss_usdt(qty=sized.qty, entry=Decimal("100"), stop=Decimal("99.9")) <= Decimal("20")
 
 
 def test_margin_cap_reason_only_when_shrink_lowers_qty() -> None:
@@ -100,7 +108,7 @@ def test_margin_cap_reason_only_when_shrink_lowers_qty() -> None:
         step_size=Decimal("1"),
     )
     assert sized is not None
-    assert sized.qty == Decimal("10")
+    assert sized.qty == Decimal("9")
     same = _shrink_for_max_leverage(sized, available_balance=Decimal("1000"), uncapped=2)
     assert same is not None
     assert same.qty == sized.qty
@@ -111,7 +119,7 @@ def test_margin_cap_reason_only_when_shrink_lowers_qty() -> None:
     assert shrunk.notional == Decimal("50")
     assert shrunk.leverage == 5
     assert shrunk.loss_at_stop == Decimal("5")
-    assert shrunk.reduce_reasons == ("margin_cap",)
+    assert shrunk.reduce_reasons == ("step", "margin_cap")
 
 
 def test_requote_cap_stores_anchor_id_time_and_first_loss() -> None:
@@ -125,7 +133,7 @@ def test_requote_cap_stores_anchor_id_time_and_first_loss() -> None:
         step_size=Decimal("1"),
     )
     assert fresh is not None
-    assert fresh.qty == Decimal("100")
+    assert fresh.qty == Decimal("98")
     sent_at = int(datetime(2026, 11, 6, 11, 55, tzinfo=BANGKOK).timestamp() * 1000)
     capped, reason = cap_requote_qty(
         fresh,
@@ -148,9 +156,9 @@ def test_requote_cap_stores_anchor_id_time_and_first_loss() -> None:
 def test_normal_card_shows_budget_and_hides_tiny_step() -> None:
     sized = _doge_short()
     text = format_signal_message(sized, expires_at_ms=EXPIRES, balance=Decimal("1000"))
-    assert "ขนาด: 5714 DOGE ≈ 457.12 USDT" in text
+    assert "ขนาด: 5561 DOGE ≈ 444.88 USDT" in text
     assert "ฐาน: Futures 1000 USDT × 2% = งบ 20 USDT" in text
-    assert "ถ้าชน stop เสีย: 20 USDT (2%)" in text
+    assert "ถ้าชน stop เสีย: 19.46 USDT (1.95%)" in text
     assert "ลดขนาดเพราะ" not in text
     assert text.index("ขนาด:") < text.index("ฐาน:") < text.index("ถ้าชน stop เสีย:")
 
@@ -162,13 +170,14 @@ def test_reduction_lines_only_below_95pct_and_leverage_line_once() -> None:
         entry=Decimal("100"),
         stop=Decimal("99.9"),
         balance=Decimal("1000"),
-        risk_pct=Decimal("1"),
+        risk_pct=Decimal("2"),
         step_size=Decimal("1"),
     )
     assert tight is not None
     lev = format_signal_message(tight, expires_at_ms=EXPIRES, balance=Decimal("1000"))
-    assert "ฐาน: Futures 1000 USDT × 1% = งบ 10 USDT" in lev
-    assert lev.count("ขนาดเต็มต้องใช้ 10x — ลดเป็น 5x แล้ว") == 1
+    assert "ฐาน: Futures 1000 USDT × 2% = งบ 20 USDT" in lev
+    assert lev.count("ขนาดเต็มต้องใช้") == 1
+    assert "ลดเป็น 5x แล้ว" in lev
     assert "ลดขนาดเพราะ" not in lev
 
     stepped = size_signal(
@@ -254,7 +263,7 @@ def test_preview_json_carries_sizing_keys() -> None:
     assert preview["balance_usdt"] == "1000"
     assert preview["risk_pct"] == "1"
     assert preview["budget_usdt"] == "10.00"
-    assert preview["reduce_reasons"] == ["requote_cap"]
+    assert preview["reduce_reasons"] == ["step", "requote_cap"]
     assert preview["requote_anchor_id"] == "as_anchor"
     assert preview["requote_anchor_sent_at_ms"] == sent_at
     assert preview["requote_first_loss"] == "2"
@@ -273,9 +282,9 @@ def test_signal_row_stores_sizing_on_insert_and_requote(tmp_path: Path) -> None:
         """,
         (sid,),
     ).fetchone()
-    assert row["qty"] == 5714
+    assert row["qty"] == 5561
     assert row["leverage"] == 1
-    assert row["loss_at_stop"] == 19.999
+    assert abs(row["loss_at_stop"] - 19.4635) < 1e-9
     assert row["balance_usdt"] == 1000
     assert row["risk_pct"] == 2
     assert row["budget_usdt"] == 20
@@ -308,7 +317,7 @@ def test_signal_row_stores_sizing_on_insert_and_requote(tmp_path: Path) -> None:
     ).fetchone()
     assert updated["qty"] == 20
     assert updated["loss_at_stop"] == 2
-    assert json.loads(updated["reduce_reasons"]) == ["requote_cap"]
+    assert json.loads(updated["reduce_reasons"]) == ["step", "requote_cap"]
     assert updated["requote_anchor_id"] == sid
     conn.close()
 

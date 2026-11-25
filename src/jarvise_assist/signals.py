@@ -46,6 +46,7 @@ from jarvise_assist.sizing import (
     passes_signal_floor,
     portfolio_risk_cap_pct,
     position_risk_usdt,
+    real_stop_loss_usdt,
     round_level_to_tick,
     size_signal,
 )
@@ -312,11 +313,18 @@ def build_existing_ideas(
             key = (str(row["symbol"]).upper(), str(row["side"]).lower())
             if key in open_keys:
                 continue
+            entry = Decimal(str(row["entry"]))
+            stop = Decimal(str(row["stop"]))
+            qty = Decimal(str(row["qty"]))
+            if entry > 0 and qty > 0 and abs(entry - stop) > 0:
+                risk = real_stop_loss_usdt(qty=qty, entry=entry, stop=stop)
+            else:
+                risk = Decimal(str(row["loss_at_stop"]))
             ideas.append(
                 ExistingIdea(
                     symbol=key[0],
                     side=key[1],
-                    risk_usdt=Decimal(str(row["loss_at_stop"])),
+                    risk_usdt=risk,
                 )
             )
             open_keys.add(key)

@@ -64,46 +64,46 @@ NOW = _ms_bangkok(2026, 11, 23, 15, 0)
 SRC = Path(__file__).resolve().parents[1] / "src" / "jarvise_assist"
 
 G2 = (
-    "❌ stop ห่าง 0.15% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
-    "ค่าธรรมเนียมไป-กลับ ≈ 0.80R · "
+    "❌ stop ห่าง 0.07% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
+    "ค่าธรรมเนียมไป-กลับ ≈ 1.71R · "
     "👉 ขยาย stop ≥ 0.20% (≥ 59448.8) หรือลดความเสี่ยงในเมนู ⚡ Quick"
 )
 G2L = (
-    "❌ stop ห่าง 0.15% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
-    "ค่าธรรมเนียมไป-กลับ ≈ 0.80R · "
+    "❌ stop ห่าง 0.07% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
+    "ค่าธรรมเนียมไป-กลับ ≈ 1.71R · "
     "👉 ขยาย stop ≥ 0.20% (≤ 59211.4) หรือลดความเสี่ยงในเมนู ⚡ Quick"
 )
 G2B_TIGHT = (
-    "❌ stop ห่าง 0.19% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
-    "ค่าธรรมเนียมไป-กลับ ≈ 0.63R · "
+    "❌ stop ห่าง 0.07% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
+    "ค่าธรรมเนียมไป-กลับ ≈ 1.71R · "
     "👉 ขยาย stop ≥ 0.20% (≥ 59448.8) หรือลดความเสี่ยงในเมนู ⚡ Quick"
 )
 G2C = (
-    "❌ stop ห่าง 0.19% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
-    "ค่าธรรมเนียมไป-กลับ ≈ 0.60R · "
+    "❌ stop ห่าง 0.07% แคบกว่าขั้นต่ำ ≈ 0.20% (risk 1% ÷ 5x) · "
+    "ค่าธรรมเนียมไป-กลับ ≈ 1.71R · "
     "👉 ขยาย stop ≥ 0.20% (≥ 59448.8) หรือลดความเสี่ยงในเมนู ⚡ Quick"
 )
 G2D = (
-    "❌ stop ห่าง 0.15% แคบกว่าขั้นต่ำ ≈ 0.16% (risk 0.76% ÷ 5x) · "
-    "ค่าธรรมเนียมไป-กลับ ≈ 0.80R · "
+    "❌ stop ห่าง 0.03% แคบกว่าขั้นต่ำ ≈ 0.16% (risk 0.76% ÷ 5x) · "
+    "ค่าธรรมเนียมไป-กลับ ≈ 4.00R · "
     "👉 ขยาย stop ≥ 0.16% (≥ 59425.1) หรือลดความเสี่ยงในเมนู ⚡ Quick"
 )
 G3 = (
-    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 0.7 + ไม้นี้ 1.19 = 1.89 · "
+    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 0.7 + ไม้นี้ 0.89 = 1.59 · "
     "เหลือ 0.72 USDT (0.50%) · "
     "👉 ตั้งความเสี่ยง 0.5% ในเมนู ⚡ Quick (ไม้นี้จะเสี่ยง 0.59 USDT) หรือปิดไม้/รอทะเบียนหมดอายุ"
 )
 G3B = (
-    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 0.83 + ไม้นี้ 1.19 = 2.01 · "
+    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 0.83 + ไม้นี้ 0.89 = 1.72 · "
     "เหลือ 0.59 USDT (0.41%) · "
     "👉 ตั้งความเสี่ยง 0.5% ในเมนู ⚡ Quick (ไม้นี้จะเสี่ยง 0.59 USDT) หรือปิดไม้/รอทะเบียนหมดอายุ"
 )
 G3C = (
-    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 0.7 + ไม้นี้ 1.19 = 1.89 · "
+    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 0.7 + ไม้นี้ 0.89 = 1.59 · "
     "เหลือ 0.72 USDT (0.50%) · 👉 ปิดไม้หรือรอทะเบียนหมดอายุ"
 )
 G4 = (
-    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 1.22 + ไม้นี้ 1.19 = 2.41 · "
+    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 1.22 + ไม้นี้ 0.89 = 2.11 · "
     "เหลือ 0.2 USDT (0.14%) · 👉 ปิดไม้หรือรอทะเบียนหมดอายุ"
 )
 G4_WIDE = (
@@ -111,16 +111,16 @@ G4_WIDE = (
     "เหลือ 0.72 USDT (0.50%) · 👉 ปิดไม้หรือรอทะเบียนหมดอายุ"
 )
 G4B = (
-    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 1.5 + ไม้นี้ 1.19 = 2.69 · "
+    "❌ เกินเพดาน Quick รวม 1% = 1.42 USDT · เปิดอยู่ 1.5 + ไม้นี้ 0.89 = 2.39 · "
     "เหลือ 0 USDT (0.00%) · 👉 ปิดไม้หรือรอทะเบียนหมดอายุ"
 )
 G5 = (
-    "❌ margin ไม่พอ — ขนาดตาม risk 0.006 BTC ≈ 372.6 USDT "
-    "ต้องใช้ ≈ 74.52 USDT ที่ 5x มี 43.32 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
+    "❌ margin ไม่พอ — ขนาดตาม risk 0.004 BTC ≈ 248.4 USDT "
+    "ต้องใช้ ≈ 49.68 USDT ที่ 5x มี 43.32 USDT · 👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดที่ margin พอ"
 )
 G6 = (
-    "❌ ไม้เล็กกว่าขั้นต่ำ — ขนาดตาม risk 0.001 BTC ≈ 59.33 USDT "
-    "ต่ำกว่าขั้นต่ำ 0.002 BTC / 100 USDT · "
+    "❌ ไม้เล็กกว่าขั้นต่ำ — ขนาดตาม risk 0.003 BTC ≈ 177.99 USDT "
+    "ต่ำกว่าขั้นต่ำ 0.007 BTC / 400 USDT · "
     "👉 พิมพ์ q ใหม่ บอทจะเสนอขนาดขั้นต่ำถ้าความเสี่ยงไม่เกินเพดาน"
 )
 G7 = (
@@ -292,13 +292,13 @@ def test_g1_bug3_short_and_cap15(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 def test_g2_family_leverage_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _forbid_trade_client(monkeypatch)
     conn = _conn(tmp_path, "g2.db")
-    out, sent = _typed(conn, "q BTC short 0.15%", _fake())
+    out, sent = _typed(conn, "q BTC short 0.07%", _fake())
     assert out["reason"] == "leverage_cap"
     assert sent[0]["text"] == G2
     assert sent[0]["reply_markup"] is None
     assert _cards(conn) == 0
 
-    out_l, sent_l = _typed(conn, "q BTC long 0.15%", _fake())
+    out_l, sent_l = _typed(conn, "q BTC long 0.07%", _fake())
     assert out_l["reason"] == "leverage_cap"
     assert sent_l[0]["text"] == G2L
 
@@ -307,7 +307,7 @@ def test_g2_family_leverage_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         _fake(),
         symbol="BTCUSDT",
         side="short",
-        stop_pct=Decimal("0.21"),
+        stop_pct=Decimal("0.08"),
         now_ms=NOW,
         allow_offer=True,
         enforce_stop_far=True,
@@ -321,7 +321,7 @@ def test_g2_family_leverage_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         _fake(),
         symbol="BTCUSDT",
         side="short",
-        stop_pct=Decimal("0.19"),
+        stop_pct=Decimal("0.07"),
         now_ms=NOW,
         allow_offer=True,
     )
@@ -333,7 +333,7 @@ def test_g2_family_leverage_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         _fake(),
         symbol="BTCUSDT",
         side="short",
-        stop=Decimal("59448.4"),
+        stop=Decimal("59371.7"),
         now_ms=NOW,
         allow_offer=True,
         enforce_stop_far=True,
@@ -347,7 +347,7 @@ def test_g2_family_leverage_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         _fake(),
         symbol="BTCUSDT",
         side="short",
-        stop_pct=Decimal("0.15"),
+        stop_pct=Decimal("0.03"),
         now_ms=NOW,
         allow_offer=True,
     )
@@ -464,10 +464,14 @@ def test_g5_g6_g7_legacy_and_wallet_zero(tmp_path: Path, monkeypatch: pytest.Mon
     assert legacy["reason"] == "margin_cap"
     assert legacy["text"] == G5
 
-    write_quick_settings(conn, risk_pct=0.25)
+    # Fee-aware 0.25% floors to 0 (size_failed); use 1% + higher mins for below_min.
+    write_quick_settings(conn, risk_pct=1.0)
     below = build_quick_card(
         conn,
-        _fake(min_notional={"BTCUSDT": Decimal("100")}),
+        _fake(
+            min_notional={"BTCUSDT": Decimal("400")},
+            min_qty={"BTCUSDT": Decimal("0.002")},
+        ),
         symbol="BTCUSDT",
         side="short",
         stop_pct=Decimal("0.5"),

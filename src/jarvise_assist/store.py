@@ -1330,6 +1330,15 @@ def set_exec_intent_ref(
     conn.commit()
 
 
+def update_exec_intent_preview(conn: Any, intent_id: str, preview: dict[str, Any]) -> None:
+    """Replace preview_json on an existing intent (same column; no schema change)."""
+    conn.execute(
+        "UPDATE assist_exec_intent SET preview_json=? WHERE id=?",
+        (json.dumps(preview, separators=(",", ":"), default=str), intent_id),
+    )
+    conn.commit()
+
+
 def claim_exec_intent(conn: Any, intent_id: str) -> bool:
     """Atomic preview → confirmed. True only for the caller that won the race.
 

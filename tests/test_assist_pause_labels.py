@@ -230,7 +230,7 @@ def test_run_assist_signals_block_reason_per_pause_reason(tmp_path: Path) -> Non
             write_settings(conn, paused_until_ms=until)
         else:
             write_settings(conn, paused_until_ms=until, pause_reason=reason)
-        fake = FakeFutures(marks={"BTCUSDT": Decimal("100")})
+        fake = FakeFutures(marks={"BTCUSDT": Decimal("100")}, steps={"BTCUSDT": Decimal("0.001")})
         _seed_analysis(
             conn, symbol="BTCUSDT", action="long", confidence=0.7, invalidation=90.0, ts=now - 60_000
         )

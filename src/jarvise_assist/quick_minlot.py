@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, ROUND_UP, Decimal
 
-from jarvise_assist.sizing import floor_to_step
+from jarvise_assist.sizing import floor_to_step, round_trip_fee_rate
 
 
 @dataclass(frozen=True)
@@ -185,7 +185,7 @@ def size_offer(
     if q_min <= 0:
         return _bad_input()
 
-    fee_rt = Decimal("2") * fee_bps_per_side / Decimal("10000")
+    fee_rt = round_trip_fee_rate(fee_bps_per_side)
     dist = abs(mark - stop)
     q_1pct = floor_to_step(
         wallet_balance * max_real_risk_pct / Decimal("100") / (dist + fee_rt * mark),
