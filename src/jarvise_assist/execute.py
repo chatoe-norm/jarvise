@@ -7,7 +7,7 @@ import logging
 import os
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -3258,9 +3258,18 @@ def _cancel_exit_stops_and_tp(
     )
 
 
+def _tick_size_or_none(trade: BinanceTradeClient, symbol: str) -> Decimal | None:
+    """Tick for leftover price formatting; None on filters failure (close still done)."""
+    try:
+        tick = trade.symbol_filters(symbol).tick_size
+    except Exception:  # noqa: BLE001 — listing must not fail the close
+        return None
+    return tick if tick is not None and tick > 0 else None
+
+
 def _append_exit_retained_leftovers(
     base: str,
-    leftover_orders: list[dict[str, Any]],
+    leftover_orders: Sequence[dict[str, Any]],
     *,
     symbol: str,
     tick: Decimal | None = None,
@@ -3319,7 +3328,12 @@ def _finish_flat_exit(
         )
         return _exec_result(text, status="unknown")
     # List-only leftovers (missing create time) stay open; status stays done.
-    text = _append_exit_retained_leftovers(text, list(cancel.leftover_orders), symbol=symbol)
+    text = _append_exit_retained_leftovers(
+        text,
+        cancel.leftover_orders,
+        symbol=symbol,
+        tick=_tick_size_or_none(trade, symbol) if cancel.leftover_orders else None,
+    )
     return _exec_result(text, status="done")
 
 
@@ -5505,8 +5519,9 @@ def _recover_exit_intent(
         elif cancel.ok:
             text = _append_exit_retained_leftovers(
                 f"✅ ปิด {symbol}",
-                list(cancel.leftover_orders),
+                cancel.leftover_orders,
                 symbol=symbol,
+                tick=_tick_size_or_none(trade, symbol) if cancel.leftover_orders else None,
             )
             _recovery_notify(
                 send,
@@ -5559,7 +5574,12 @@ def _recover_exit_intent(
             status = "unknown"
         else:
             # List-only leftovers stay open; status stays done.
-            text = _append_exit_retained_leftovers(text, list(cancel.leftover_orders), symbol=symbol)
+            text = _append_exit_retained_leftovers(
+                text,
+                cancel.leftover_orders,
+                symbol=symbol,
+                tick=_tick_size_or_none(trade, symbol) if cancel.leftover_orders else None,
+            )
         _recovery_notify(
             send,
             conn,
@@ -5705,8 +5725,9 @@ def _recover_reduce_intent(
         elif cancel.ok:
             text = _append_exit_retained_leftovers(
                 f"✅ ปิด {symbol}",
-                list(cancel.leftover_orders),
+                cancel.leftover_orders,
                 symbol=symbol,
+                tick=_tick_size_or_none(trade, symbol) if cancel.leftover_orders else None,
             )
             _recovery_notify(
                 send,
@@ -5757,9 +5778,20 @@ def _recover_reduce_intent(
             )
             status = "unknown"
         else:
-            text = _append_menu_close_owner_orders(
-                text, trade, symbol=symbol, position_side="BOTH", trade_side=side
-            )
+            # List-only leftovers stay open; status stays done. Prefer cancel.leftover_orders
+            # (flag-on) so a later all_open_orders raise cannot drop the listing; fall back
+            # to the menu helper when empty (flag-off first-flat still lists open owner orders).
+            if cancel.leftover_orders:
+                text = _append_exit_retained_leftovers(
+                    text,
+                    cancel.leftover_orders,
+                    symbol=symbol,
+                    tick=_tick_size_or_none(trade, symbol),
+                )
+            else:
+                text = _append_menu_close_owner_orders(
+                    text, trade, symbol=symbol, position_side="BOTH", trade_side=side
+                )
         _recovery_notify(
             send,
             conn,
