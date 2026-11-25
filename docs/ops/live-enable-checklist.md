@@ -122,6 +122,7 @@ Refreshed 2026-11-05 from the repo only; confirm on the VPS before acting (`dock
 - `JARVISE_LIVE_TRADING` remains **false** (spot live path off).
 - `BINANCE_TRADE_*` on the VPS is the **assist futures** key, composed into **jobs only** (see §1 note). The spot live path has no key wired into web.
 - Assist futures execute is gated by `JARVISE_ASSIST_EXECUTE` (`off` / `testnet` / `live`). Its current value is shown on the dashboard Exchange page.
+- Menu 50% partial close (B2) is gated by `JARVISE_ASSIST_REDUCE` (`on` / anything else = off; default off) and still requires `JARVISE_ASSIST_EXECUTE=live`. Roll back B2 with REDUCE off — do **not** flip EXECUTE off while a reduce intent may be in-flight (that skips all exec recovery).
 
 History:
 

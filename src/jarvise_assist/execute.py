@@ -42,12 +42,15 @@ from jarvise_assist.futures import (
     order_stop_price,
     order_type,
     protective_stop_coverage,
+    protective_stop_covered_qty,
 )
 from jarvise_assist.keyboard import (
     entry_confirm_keyboard,
     menu_close_refresh_keyboard,
     menu_exit_confirm_keyboard,
+    menu_exit_reduce_confirm_keyboard,
     move_stop_keyboard,
+    partial_be_keyboard,
     progress_keyboard,
 )
 from jarvise_assist.messages import (
@@ -71,6 +74,7 @@ from jarvise_assist.sizing import (
     below_min_notional,
     cap_requote_qty,
     chase_exceeded,
+    floor_to_step,
     passes_signal_floor,
     portfolio_risk_cap_pct,
     round_level_to_tick,
@@ -148,6 +152,16 @@ OWNER_CLOSING_HEADER = "stop/TP ที่คุณตั้งเอง (บอ�
 MSG_MENU_EXIT_EXPIRED = "หมดเวลา — กด 🔄 อัปเดต หรือเปิด 📋 ไม้ที่ถืออยู่ใหม่"
 MSG_MENU_LIVE_ONLY = "ปุ่มปิดไม้ใช้ได้เฉพาะโหมดเงินจริง — ยังไม่ได้ส่งคำสั่ง ปิดในแอป Binance"
 MSG_MENU_POSITION_CHANGED = "ไม้เปลี่ยนไป — ไม่ปิด"
+MSG_REDUCE_FLAG_OFF = "ปุ่มปิดครึ่งปิดอยู่ — ยังไม่ได้ส่งคำสั่ง"
+MSG_PARTIAL_BE_FLAG_OFF = "ปุ่มเลื่อน stop ปิดครึ่งปิดอยู่ — ยังไม่ได้ส่งคำสั่ง"
+MSG_REDUCE_DUST = "ปิดครึ่งไม่ได้ — ส่วนที่เหลือจะต่ำกว่าขั้นต่ำ · ยังไม่ได้ส่งคำสั่ง"
+MSG_STOP_COVERAGE_READ_FAIL = "อ่าน stop ไม่ได้ — ตรวจในแอป"
+MSG_PARTIAL_BE_BUFFER = "🛡 ยังเลื่อนไป BE ไม่ได้ — ราคายังไม่ห่างพอ"
+MSG_PARTIAL_BE_NOT_TIGHTER = "🛡 ยังเลื่อนไป BE ไม่ได้ — stop ตอนนี้กระชับกว่า BE แล้ว"
+MSG_PARTIAL_BE_NO_STOP = "🛡 ยังเลื่อนไป BE ไม่ได้ — ไม่มี stop ที่ลงทะเบียน"
+MSG_PARTIAL_BE_TICK = "🛡 ยังเลื่อนไป BE ไม่ได้ — tick นี้วาง BE ฝั่งกำไรไม่ได้"
+MSG_PARTIAL_BE_ORDERS_READ_FAIL = "🛡 ยังเลื่อนไป BE ไม่ได้ — อ่าน stop ไม่ได้"
+MSG_REDUCE_FILTERS_READ_FAIL = "✂️ ปิดครึ่งไม่ได้ — อ่านขั้นต่ำของ Binance ไม่ได้"
 MSG_STOP_CLOSED = "วาง stop ไม่ได้ — ปิดไม้แล้วเพื่อความปลอดภัย"
 MSG_TP_KEEP = "เข้าแล้วและมี stop — วาง TP ไม่ได้ ตั้งเองได้"
 MSG_HANDLER_ERROR = "ทำคำสั่งไม่สำเร็จ — ลองใหม่หรือปิดเอง"
@@ -238,6 +252,11 @@ def assist_execute_mode() -> str:
     if raw in {"testnet", "live"}:
         return raw
     return "off"
+
+
+def assist_reduce_enabled() -> bool:
+    """JARVISE_ASSIST_REDUCE=on (strip/lower). Still requires EXECUTE=live at the call site."""
+    return (os.environ.get("JARVISE_ASSIST_REDUCE") or "off").strip().lower() == "on"
 
 
 def execution_buttons_enabled(conn: Any) -> bool:
@@ -832,12 +851,248 @@ def _msg_menu_in_flight(symbol: str) -> str:
 
 
 def _preorder_fail_text(prefix: str) -> str:
-    """Copy before any order is sent. ey: keeps the entry line. ms:/xx: never say retry."""
+    """Copy before any order is sent. ey: keeps the entry line. ms:/xx:/xr: never say retry."""
     if prefix == "ms:":
         return MSG_PREORDER_MOVE
-    if prefix == "xx:":
+    if prefix in {"xx:", "xr:"}:
         return MSG_PREORDER_EXIT
     return MSG_BINANCE_NOT_SENT
+
+
+def half_close_legs(
+    qty: Decimal,
+    *,
+    step: Decimal,
+    min_qty: Decimal,
+    min_notional: Decimal,
+    mark: Decimal,
+) -> tuple[Decimal, Decimal, str | None]:
+    """Return (close, leave, refuse_reason). refuse_reason is None when both legs are legal."""
+    if step <= 0 or qty <= 0:
+        return Decimal("0"), Decimal("0"), "ขั้นต่ำ"
+    close = floor_to_step(qty * Decimal("0.5"), step)
+    leave = qty - close
+    if close <= 0:
+        return close, leave, "ปิด"
+    if below_min_notional(qty=close, notional=close * mark, min_qty=min_qty, min_notional=min_notional):
+        return close, leave, "ปิด"
+    if below_min_notional(qty=leave, notional=leave * mark, min_qty=min_qty, min_notional=min_notional):
+        return close, leave, "เหลือ"
+    return close, leave, None
+
+
+def _half_refuse_note(
+    *,
+    close: Decimal,
+    leave: Decimal,
+    failing: str,
+    min_qty: Decimal,
+    min_notional: Decimal,
+) -> str:
+    floors: list[str] = []
+    if min_qty > 0:
+        floors.append(f"ขั้นต่ำ qty {fmt_qty(min_qty)}")
+    if min_notional > 0:
+        floors.append(f"ขั้นต่ำ {min_notional} USDT")
+    floor_s = " · ".join(floors) if floors else "ขั้นต่ำของ Binance"
+    leg = "ขาปิด" if failing == "ปิด" else "ส่วนที่เหลือ"
+    return f"✂️ ปิดครึ่งไม่ได้ — {leg}ต่ำกว่า{floor_s} (ปิด {fmt_qty(close)} · เหลือ {fmt_qty(leave)})"
+
+
+def _reduce_coverage_line(
+    trade: BinanceTradeClient,
+    *,
+    symbol: str,
+    side: str,
+    position_side: str,
+    remaining: Decimal,
+) -> str:
+    from jarvise_assist.menu import _NO_STOP_LINE, _partial_stop_line
+
+    try:
+        orders = trade.all_open_orders(symbol=symbol)
+        step = trade.symbol_filters(symbol).step_size
+        coverage = protective_stop_coverage(
+            orders,
+            symbol=symbol,
+            position_side=position_side,
+            trade_side=side,
+            position_qty=remaining,
+            step_size=step,
+        )
+    except Exception:  # noqa: BLE001
+        return MSG_STOP_COVERAGE_READ_FAIL
+    if coverage == "full":
+        stop_px = find_protective_stop(orders, symbol=symbol, position_side=position_side, trade_side=side)
+        if stop_px is not None:
+            return f"stop {fmt_price_display(stop_px)} คุมส่วนที่เหลือ"
+        return "stop คุมส่วนที่เหลือ"
+    if coverage == "partial":
+        covered = protective_stop_covered_qty(
+            orders, symbol=symbol, position_side=position_side, trade_side=side
+        )
+        return _partial_stop_line(covered, remaining)
+    return _NO_STOP_LINE
+
+
+def _quick_be_level(*, side: str, entry: Decimal, tick: Decimal) -> Decimal | None:
+    """Profit-side BE (C1). None when post-round guard fails."""
+    if side == "long":
+        raw = entry * Decimal("1.002")
+    else:
+        raw = entry * Decimal("0.998")
+    be = round_level_to_tick(raw, tick, side=side, kind="stop")
+    if side == "long" and be <= entry:
+        return None
+    if side == "short" and be >= entry:
+        return None
+    return be
+
+
+def _cancel_sibling_preview(conn: Any, preview: dict[str, Any] | None) -> None:
+    if not isinstance(preview, dict):
+        return
+    for key in ("reduce_intent_id", "exit_intent_id"):
+        sib = preview.get(key)
+        if sib:
+            cancel_exec_intent(conn, str(sib))
+
+
+def _maybe_offer_after_reduce(
+    conn: Any,
+    trade: BinanceTradeClient,
+    *,
+    intent: dict[str, Any],
+    preview: dict[str, Any],
+    reduce_intent_id: str,
+    result_text: str,
+    now_ms_value: int,
+    send: Callable[..., Any] | None,
+) -> tuple[str, dict[str, Any] | None, Callable[[], None] | None]:
+    """After a successful half close: Quick BE keyboard, or main trail advice card.
+
+    Returns (text, markup, deferred). Markup is set only for Quick BE. Main trail
+    advice is deferred so the caller can send the reduce result first, then run
+    `_send_fresh_move_stop_advice` as its own card.
+    """
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    is_quick = preview.get("cohort") == "quick" or symbol in quick_symbols(conn)
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return result_text, None, None
+    if not positions or positions[0].side != side:
+        return result_text, None, None
+    pos = positions[0]
+    try:
+        filters = trade.symbol_filters(symbol)
+        mark = trade.mark_price(symbol)
+    except Exception:  # noqa: BLE001
+        return result_text, None, None
+    tick = filters.tick_size if filters.tick_size > 0 else Decimal("0.01")
+
+    if is_quick:
+        be = _quick_be_level(side=side, entry=pos.entry_price, tick=tick)
+        if be is None:
+            return f"{result_text}\n{MSG_PARTIAL_BE_TICK}", None, None
+        if not _move_stop_buffer_ok(side=side, mark=mark, new_stop=be, tick=tick):
+            return f"{result_text}\n{MSG_PARTIAL_BE_BUFFER}", None, None
+        try:
+            orders = trade.all_open_orders(symbol=symbol)
+        except Exception:  # noqa: BLE001
+            return f"{result_text}\n{MSG_PARTIAL_BE_ORDERS_READ_FAIL}", None, None
+        current = find_protective_stop(
+            orders, symbol=symbol, position_side=pos.position_side, trade_side=side
+        )
+        from jarvise_assist.menu import quick_planned_stop
+
+        planned = quick_planned_stop(conn, symbol=symbol, side=side)
+        if current is None and planned is None:
+            return f"{result_text}\n{MSG_PARTIAL_BE_NO_STOP}", None, None
+        compare = current if current is not None else Decimal(str(planned))
+        if side == "long" and be <= compare:
+            return f"{result_text}\n{MSG_PARTIAL_BE_NOT_TIGHTER}", None, None
+        if side == "short" and be >= compare:
+            return f"{result_text}\n{MSG_PARTIAL_BE_NOT_TIGHTER}", None, None
+        be_s = _fmt_price_tick(be, tick)
+        advice = f"{result_text}\n🛡 เลื่อน stop ส่วนที่เหลือ → {be_s}"
+        expires = int(now_ms_value) + MOVE_STOP_TTL_MS
+        move_id = insert_exec_intent(
+            conn,
+            kind="move_stop",
+            symbol=symbol,
+            side=side,
+            preview={
+                "stop": str(be),
+                "qty": str(pos.qty),
+                "entry": str(pos.entry_price),
+                "tick": str(tick),
+                "via": "partial_be",
+                "source": "partial_be",
+                "reduce_intent_id": reduce_intent_id,
+                "cohort": "quick",
+                "advice_text": advice,
+            },
+            created_at_ms=int(now_ms_value),
+            expires_at_ms=expires,
+        )
+        return advice, partial_be_keyboard(move_id, be_stop=be_s), None
+
+    # Main (universe + watch): existing trail advice only.
+    if symbol.upper() not in ASSIST_SYMBOLS:
+        return result_text, None, None
+    watch = get_watch_position(conn, symbol, pos.position_side)
+    if watch is None or watch.get("initial_stop") is None:
+        return result_text, None, None
+    initial_stop = Decimal(str(watch["initial_stop"]))
+    entry_time = int(watch.get("entry_time_ms") or now_ms_value)
+    candles_1h = load_candles_in_range(conn, symbol, "1h", since_ms=entry_time, until_ms=int(now_ms_value))
+    advice_pair = current_trail_advice(
+        side=side,
+        entry=pos.entry_price,
+        initial_stop=initial_stop,
+        candles_1h=candles_1h,
+        entry_time_ms=entry_time,
+        now_ms=int(now_ms_value),
+        tick=tick,
+        symbol=symbol,
+    )
+    if advice_pair is None:
+        return result_text, None, None
+    new_stop, source = advice_pair
+    try:
+        orders = trade.all_open_orders(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        orders = []
+    protective = find_protective_stop(orders, symbol=symbol, position_side=pos.position_side, trade_side=side)
+    compare = protective if protective is not None else initial_stop
+    if side == "long" and new_stop <= compare:
+        return result_text, None, None
+    if side == "short" and new_stop >= compare:
+        return result_text, None, None
+    if not _move_stop_buffer_ok(side=side, mark=mark, new_stop=new_stop, tick=tick):
+        return result_text, None, None
+    entry_ms = int(watch["entry_time_ms"]) if watch.get("entry_time_ms") else None
+
+    def _deferred_main_advice() -> None:
+        _send_fresh_move_stop_advice(
+            conn,
+            symbol=symbol,
+            side=side,
+            pos=pos,
+            new_stop=new_stop,
+            source=source,
+            initial_stop=initial_stop,
+            protective=protective,
+            mark=mark,
+            tick=tick,
+            now_ms_value=int(now_ms_value),
+            send=send,
+            entry_time_ms=entry_ms,
+        )
+
+    return result_text, None, _deferred_main_advice
 
 
 def _fill_from_position(
@@ -2563,6 +2818,8 @@ def run_move_stop_sequence(
     symbol = str(intent["symbol"])
     side = str(intent["side"])
     button_stop = Decimal(str(preview["stop"]))
+    via = str(preview.get("via") or "") if isinstance(preview, dict) else ""
+    partial_be = via == "partial_be"
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     positions = trade.position_risk(symbol=symbol)
     if not positions:
@@ -2574,47 +2831,61 @@ def run_move_stop_sequence(
     tick = filters.tick_size if filters.tick_size > 0 else Decimal("0.01")
     button_stop = round_level_to_tick(button_stop, tick, side=side, kind="stop")
 
-    watch = get_watch_position(conn, symbol, pos.position_side)
-    if watch is None or watch.get("initial_stop") is None:
-        return MSG_MOVE_STOP_NO_ADVICE
-    initial_stop = Decimal(str(watch["initial_stop"]))
-    entry_time = int(watch.get("entry_time_ms") or ts)
-    candles_1h = load_candles_in_range(conn, symbol, "1h", since_ms=entry_time, until_ms=ts)
-    advice = current_trail_advice(
-        side=side,
-        entry=pos.entry_price,
-        initial_stop=initial_stop,
-        candles_1h=candles_1h,
-        entry_time_ms=entry_time,
-        now_ms=ts,
-        tick=tick,
-        symbol=symbol,
-    )
-    if advice is None:
-        return MSG_MOVE_STOP_NO_ADVICE
-    fresh_stop, source = advice
-    if abs(fresh_stop - button_stop) > tick:
-        orders = trade.all_open_orders(symbol=symbol)
-        protective = find_protective_stop(
-            orders, symbol=symbol, position_side=pos.position_side, trade_side=side
-        )
-        mark = trade.mark_price(symbol)
-        _send_fresh_move_stop_advice(
-            conn,
-            symbol=symbol,
+    if partial_be:
+        # Quick BE: skip watch / advice re-derivation; snapshot qty+entry.
+        try:
+            preview_qty = Decimal(str(preview["qty"]))
+            preview_entry = Decimal(str(preview["entry"]))
+        except Exception:  # noqa: BLE001
+            return MSG_MENU_POSITION_CHANGED
+        if preview_qty != pos.qty or preview_entry != pos.entry_price:
+            return MSG_MENU_POSITION_CHANGED
+        from jarvise_assist.menu import quick_planned_stop
+
+        planned = quick_planned_stop(conn, symbol=symbol, side=side)
+        initial_stop = Decimal(str(planned)) if planned is not None else button_stop
+    else:
+        watch = get_watch_position(conn, symbol, pos.position_side)
+        if watch is None or watch.get("initial_stop") is None:
+            return MSG_MOVE_STOP_NO_ADVICE
+        initial_stop = Decimal(str(watch["initial_stop"]))
+        entry_time = int(watch.get("entry_time_ms") or ts)
+        candles_1h = load_candles_in_range(conn, symbol, "1h", since_ms=entry_time, until_ms=ts)
+        advice = current_trail_advice(
             side=side,
-            pos=pos,
-            new_stop=fresh_stop,
-            source=source,
+            entry=pos.entry_price,
             initial_stop=initial_stop,
-            protective=protective,
-            mark=mark,
+            candles_1h=candles_1h,
+            entry_time_ms=entry_time,
+            now_ms=ts,
             tick=tick,
-            now_ms_value=ts,
-            send=send,
-            entry_time_ms=int(watch["entry_time_ms"]) if watch.get("entry_time_ms") else None,
+            symbol=symbol,
         )
-        return f"stop แนะนำเปลี่ยนเป็น {_fmt_price_tick(fresh_stop, tick)}"
+        if advice is None:
+            return MSG_MOVE_STOP_NO_ADVICE
+        fresh_stop, source = advice
+        if abs(fresh_stop - button_stop) > tick:
+            orders = trade.all_open_orders(symbol=symbol)
+            protective = find_protective_stop(
+                orders, symbol=symbol, position_side=pos.position_side, trade_side=side
+            )
+            mark = trade.mark_price(symbol)
+            _send_fresh_move_stop_advice(
+                conn,
+                symbol=symbol,
+                side=side,
+                pos=pos,
+                new_stop=fresh_stop,
+                source=source,
+                initial_stop=initial_stop,
+                protective=protective,
+                mark=mark,
+                tick=tick,
+                now_ms_value=ts,
+                send=send,
+                entry_time_ms=int(watch["entry_time_ms"]) if watch.get("entry_time_ms") else None,
+            )
+            return f"stop แนะนำเปลี่ยนเป็น {_fmt_price_tick(fresh_stop, tick)}"
 
     new_stop = button_stop
     mark = trade.mark_price(symbol)
@@ -3029,6 +3300,191 @@ def run_exit_sequence(
     )
 
 
+def run_reduce_sequence(
+    conn: Any,
+    intent_id: str,
+    *,
+    trade: BinanceTradeClient,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Market reduce-only for half the snapshot qty. Never cancels/resizes SL/TP on success."""
+    intent = get_exec_intent(conn, intent_id)
+    if intent is None:
+        return _exec_result("ไม่พบคำสั่ง", status="failed")
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    raw_preview = intent.get("preview")
+    preview: dict[str, Any] = raw_preview if isinstance(raw_preview, dict) else {}
+    try:
+        preview_qty = Decimal(str(preview["qty"]))
+        preview_entry = Decimal(str(preview["entry"]))
+        close_qty = Decimal(str(preview["close_qty"]))
+    except Exception:  # noqa: BLE001
+        return _exec_result(MSG_EXIT_POSITION_CHANGED, status="failed")
+
+    positions = trade.position_risk(symbol=symbol)
+    if not positions:
+        return _exec_result(MSG_ALREADY_CLOSED, status="done")
+    pos = positions[0]
+    if pos.side != side:
+        return _exec_result(_reason_th("wrong_side"), status="failed")
+    if preview_qty != pos.qty or preview_entry != pos.entry_price:
+        return _exec_result(MSG_EXIT_POSITION_CHANGED, status="failed")
+
+    filters = trade.symbol_filters(symbol)
+    mark = trade.mark_price(symbol)
+    close, leave, refuse = half_close_legs(
+        pos.qty,
+        step=filters.step_size,
+        min_qty=filters.min_qty,
+        min_notional=filters.min_notional,
+        mark=mark,
+    )
+    if refuse is not None or close != close_qty:
+        return _exec_result(MSG_REDUCE_DUST, status="failed")
+
+    cid = client_order_id(intent_id, "rd")
+    fill: dict[str, Any] | None = None
+    try:
+        fill = trade.market_order(
+            symbol=symbol,
+            side=_closing_side(side),
+            qty=close,
+            reduce_only=True,
+            client_id=cid,
+        )
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="reduce_market",
+            endpoint="/fapi/v1/order",
+            client_order_id=cid,
+            http_status=200,
+            order_or_algo_id=str(fill.get("orderId") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        code = exc.binance_code if isinstance(exc, TradeClientError) else None
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="reduce_market",
+            endpoint="/fapi/v1/order",
+            client_order_id=cid,
+            http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+            binance_code=code,
+        )
+        if _is_clear_rejection(exc):
+            return _exec_result(f"ปิดครึ่งไม่สำเร็จ: {exc}", status="failed")
+
+    queried = _query_fill_after_unknown(
+        trade,
+        symbol=symbol,
+        client_id=cid,
+        conn=conn,
+        intent_id=intent_id,
+        step="reduce_query",
+        sleep=sleep,
+    )
+    if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+        fill = queried.order
+    elif fill is None and queried.kind == QueryResultKind.UNREADABLE:
+        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+
+    try:
+        still = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("position read failed after reduce")
+        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+
+    avg = _positive_fill_price(fill)
+    exec_qty = executed_qty(fill) if fill is not None else Decimal("0")
+    step = filters.step_size if filters.step_size > 0 else Decimal("0")
+
+    if not still:
+        # Unexpectedly flat — jv cleanup + owner leftover list via finish path.
+        pnl: Decimal | None = None
+        pnl_known = False
+        if fill is not None and exec_qty > 0:
+            try:
+                order_id = fill.get("orderId")
+                if order_id not in (None, ""):
+                    pnl = trade.realized_pnl_for_order(symbol=symbol, order_id=order_id)
+                    pnl_known = True
+            except Exception:  # noqa: BLE001
+                pnl = None
+                pnl_known = False
+        return _finish_flat_exit(
+            trade,
+            conn=conn,
+            intent_id=intent_id,
+            symbol=symbol,
+            side=side,
+            position_side=pos.position_side,
+            avg=avg if fill is not None and exec_qty > 0 else None,
+            pnl=pnl if pnl_known else None,
+            include_pnl=fill is not None and exec_qty > 0,
+        )
+
+    remaining = still[0].qty
+    expected_leave = preview_qty - exec_qty
+    leave_ok = abs(remaining - expected_leave) <= step if step > 0 else remaining == expected_leave
+
+    if exec_qty <= 0 and queried.kind == QueryResultKind.NOT_FOUND:
+        if fill is None:
+            return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+        # 200 with executedQty 0 but position already shrank → keep locked for recovery.
+        if remaining < preview_qty:
+            return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+        return _exec_result("ปิดครึ่งไม่สำเร็จ", status="failed")
+    if exec_qty <= 0:
+        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+
+    # Found fill in a final-ish state with odd remaining → terminal done + ⚠️ (not unknown).
+    if queried.kind == QueryResultKind.FOUND and fill is not None and not leave_ok:
+        try:
+            cov = _reduce_coverage_line(
+                trade,
+                symbol=symbol,
+                side=side,
+                position_side=still[0].position_side,
+                remaining=remaining,
+            )
+            stop_bit = "ยืนยันแล้ว" if "คุมส่วนที่เหลือ" in cov and "⚠️" not in cov else "ยังไม่ยืนยัน"
+        except Exception:  # noqa: BLE001
+            stop_bit = "ยังไม่ยืนยัน"
+        return _exec_result(
+            (
+                f"⚠️ ปิดบางส่วน {symbol} × {fmt_qty(exec_qty)} · เหลือ {fmt_qty(remaining)}"
+                f" (ไม่ตรงที่ตั้งใจ) · stop {stop_bit}"
+            ),
+            status="done",
+        )
+
+    if not leave_ok and queried.kind != QueryResultKind.FOUND:
+        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+
+    pnl_s = " · PnL ไม่ทราบ"
+    try:
+        order_id = fill.get("orderId") if fill is not None else None
+        if order_id not in (None, ""):
+            pnl_v = trade.realized_pnl_for_order(symbol=symbol, order_id=order_id)
+            pnl_s = f" · PnL {pnl_v.quantize(Decimal('0.01'))} USDT"
+    except Exception:  # noqa: BLE001
+        pnl_s = " · PnL ไม่ทราบ"
+    avg_s = fmt_price_display(avg) if avg is not None and avg > 0 else "?"
+    coverage = _reduce_coverage_line(
+        trade,
+        symbol=symbol,
+        side=side,
+        position_side=still[0].position_side,
+        remaining=remaining,
+    )
+    return _exec_result(
+        (f"✅ ปิดครึ่ง {symbol} × {fmt_qty(exec_qty)} @ {avg_s}{pnl_s}\nเหลือ {fmt_qty(remaining)} · {coverage}"),
+        status="done",
+    )
+
+
 def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> tuple[list[str], bool]:
     """Cancel leftover jv- reduce-only algo orders. Never touches non-jv ids.
 
@@ -3275,7 +3731,7 @@ def handle_exec_callback(
     now_ms_value: int | None = None,
     message: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Route xc:/ec:/ey:/en:/mn:/ms:/xx: callbacks. Caller already enforced owner chat."""
+    """Route xc:/ec:/ey:/en:/mn:/ms:/xx:/xr: callbacks. Caller already enforced owner chat."""
     ts = int(now_ms_value if now_ms_value is not None else now_ms())
     msg = message or {}
     mid = msg.get("message_id")
@@ -3321,8 +3777,10 @@ def handle_exec_callback(
             return {"ok": False, "reason": "wrong_side"}
         pos = matched[0]
         tick: Decimal | None = None
+        filters = None
         try:
-            tick = reader.symbol_filters(symbol).tick_size
+            filters = reader.symbol_filters(symbol)
+            tick = filters.tick_size
         except Exception:  # noqa: BLE001
             tick = None
         from jarvise_assist.menu import (
@@ -3349,6 +3807,33 @@ def handle_exec_callback(
             tick=tick,
             quick_stop_line=quick_stop_line,
         )
+        half_note: str | None = None
+        half_close: Decimal | None = None
+        half_leave: Decimal | None = None
+        if assist_reduce_enabled():
+            if filters is None:
+                half_note = MSG_REDUCE_FILTERS_READ_FAIL
+                confirm_text = f"{confirm_text}\n{half_note}"
+            else:
+                close_q, leave_q, refuse = half_close_legs(
+                    pos.qty,
+                    step=filters.step_size,
+                    min_qty=filters.min_qty,
+                    min_notional=filters.min_notional,
+                    mark=pos.mark_price,
+                )
+                if refuse is None:
+                    half_close, half_leave = close_q, leave_q
+                    confirm_text = f"{confirm_text}\n✂️ ปิดครึ่ง: ปิด {fmt_qty(close_q)} · เหลือ {fmt_qty(leave_q)}"
+                else:
+                    half_note = _half_refuse_note(
+                        close=close_q,
+                        leave=leave_q,
+                        failing=refuse,
+                        min_qty=filters.min_qty,
+                        min_notional=filters.min_notional,
+                    )
+                    confirm_text = f"{confirm_text}\n{half_note}"
         preview: dict[str, Any] = {
             "qty": str(pos.qty),
             "entry": str(pos.entry_price),
@@ -3372,10 +3857,48 @@ def handle_exec_callback(
             created_at_ms=ts,
             expires_at_ms=ts + PREVIEW_TTL_MS,
         )
+        markup = menu_exit_confirm_keyboard(intent_id)
+        if half_close is not None and half_leave is not None:
+            reduce_preview: dict[str, Any] = {
+                "qty": str(pos.qty),
+                "entry": str(pos.entry_price),
+                "close_qty": str(half_close),
+                "leave_qty": str(half_leave),
+                "fraction": "0.5",
+                "source": "menu",
+                "position_side": pos.position_side,
+                "confirm_text": confirm_text,
+                "exit_intent_id": intent_id,
+            }
+            if is_quick:
+                reduce_preview["cohort"] = "quick"
+            reduce_id = insert_exec_intent(
+                conn,
+                kind="reduce",
+                symbol=symbol,
+                side=side,
+                preview=reduce_preview,
+                created_at_ms=ts,
+                expires_at_ms=ts + PREVIEW_TTL_MS,
+            )
+            preview["reduce_intent_id"] = reduce_id
+            conn.execute(
+                "UPDATE assist_exec_intent SET preview_json=? WHERE id=?",
+                (json.dumps(preview, separators=(",", ":"), default=str), intent_id),
+            )
+            conn.commit()
+            markup = menu_exit_reduce_confirm_keyboard(
+                intent_id,
+                reduce_id,
+                full_qty=fmt_qty(pos.qty),
+                leave_qty=fmt_qty(half_leave),
+            )
         answer()
-        new_mid = send(confirm_text, reply_markup=menu_exit_confirm_keyboard(intent_id))
+        new_mid = send(confirm_text, reply_markup=markup)
         if new_mid is not None:
             set_exec_intent_message_id(conn, intent_id, int(new_mid))
+            if half_close is not None and isinstance(preview.get("reduce_intent_id"), str):
+                set_exec_intent_message_id(conn, str(preview["reduce_intent_id"]), int(new_mid))
         return {"ok": True, "preview": intent_id}
 
     if data.startswith(("ec:", "ey:")):
@@ -3384,10 +3907,31 @@ def handle_exec_callback(
             send(MSG_OFF)
             return {"ok": False, "reason": "off"}
     elif data.startswith("ms:"):
-        if not protective_buttons_enabled(conn):
+        early_ms = get_exec_intent(conn, data[3:])
+        early_ms_prev = (early_ms or {}).get("preview") or {}
+        partial_be_gate = isinstance(early_ms_prev, dict) and early_ms_prev.get("via") == "partial_be"
+        if partial_be_gate:
+            if assist_execute_mode() != "live":
+                answer(MSG_MENU_LIVE_ONLY)
+                send(MSG_MENU_LIVE_ONLY)
+                return {"ok": False, "reason": "off"}
+            if not assist_reduce_enabled():
+                answer(MSG_PARTIAL_BE_FLAG_OFF)
+                send(MSG_PARTIAL_BE_FLAG_OFF)
+                return {"ok": False, "reason": "reduce_off"}
+        elif not protective_buttons_enabled(conn):
             answer("ปิดอยู่")
             send(MSG_OFF)
             return {"ok": False, "reason": "off"}
+    elif data.startswith("xr:"):
+        if assist_execute_mode() != "live":
+            answer(MSG_MENU_LIVE_ONLY)
+            send(MSG_MENU_LIVE_ONLY)
+            return {"ok": False, "reason": "off"}
+        if not assist_reduce_enabled():
+            answer(MSG_REDUCE_FLAG_OFF)
+            send(MSG_REDUCE_FLAG_OFF)
+            return {"ok": False, "reason": "reduce_off"}
     elif data.startswith("xx:"):
         early_intent = get_exec_intent(conn, data[3:])
         early_preview = (early_intent or {}).get("preview") or {}
@@ -3464,6 +4008,7 @@ def handle_exec_callback(
             preview = intent.get("preview") or {}
             if isinstance(preview, dict):
                 advice_body = preview.get("confirm_text") or preview.get("advice_text")
+                _cancel_sibling_preview(conn, preview)
         edit_body = str(advice_body) if advice_body else MSG_CANCELLED
         if mid is not None:
             edit(int(mid), edit_body, reply_markup={"inline_keyboard": []})
@@ -3511,7 +4056,7 @@ def handle_exec_callback(
             send(edit_body)
         return {"ok": True, "declined": intent_id}
 
-    if data.startswith("ey:") or data.startswith("ms:") or data.startswith("xx:"):
+    if data.startswith("ey:") or data.startswith("ms:") or data.startswith("xx:") or data.startswith("xr:"):
         prefix = data[:3]
         intent_id = data[3:]
         intent = get_exec_intent(conn, intent_id)
@@ -3544,7 +4089,11 @@ def handle_exec_callback(
         menu_exit = (
             prefix == "xx:" and isinstance(preview_gate, dict) and preview_gate.get("source") == "menu"
         )
-        if menu_exit and intent["expires_at_ms"] < ts:
+        menu_reduce = prefix == "xr:" and isinstance(preview_gate, dict)
+        partial_be_ms = (
+            prefix == "ms:" and isinstance(preview_gate, dict) and preview_gate.get("via") == "partial_be"
+        )
+        if (menu_exit or menu_reduce) and intent["expires_at_ms"] < ts:
             wrote = finish_exec_intent(
                 conn,
                 intent_id,
@@ -3555,14 +4104,22 @@ def handle_exec_callback(
             answer()
             if not wrote:
                 return {"ok": False, "reason": "lost_write"}
-            confirm_body = preview_gate.get("confirm_text")
+            if menu_reduce or menu_exit:
+                _cancel_sibling_preview(conn, preview_gate if isinstance(preview_gate, dict) else None)
+            confirm_body = preview_gate.get("confirm_text") if isinstance(preview_gate, dict) else None
             edit_body = str(confirm_body) if confirm_body else MSG_MENU_EXIT_EXPIRED
             refresh = menu_close_refresh_keyboard(str(intent["symbol"]), str(intent["side"]))
             if mid is not None:
                 edit(int(mid), edit_body, reply_markup=refresh)
             send(MSG_MENU_EXIT_EXPIRED)
             return {"ok": False, "reason": "expired"}
-        if menu_exit and symbol_has_in_flight_exec(conn, str(intent["symbol"]), exclude_id=intent_id):
+        if (menu_exit or menu_reduce) and symbol_has_in_flight_exec(
+            conn, str(intent["symbol"]), exclude_id=intent_id
+        ):
+            answer()
+            send(_msg_menu_in_flight(str(intent["symbol"])))
+            return {"ok": False, "reason": "in_flight"}
+        if partial_be_ms and symbol_has_in_flight_exec(conn, str(intent["symbol"]), exclude_id=intent_id):
             answer()
             send(_msg_menu_in_flight(str(intent["symbol"])))
             return {"ok": False, "reason": "in_flight"}
@@ -3620,6 +4177,8 @@ def handle_exec_callback(
                 return {"ok": True, "replay": True}
             send("กำลังทำอยู่")
             return {"ok": False, "reason": "race"}
+        if menu_exit or menu_reduce:
+            _cancel_sibling_preview(conn, preview_gate if isinstance(preview_gate, dict) else None)
 
         answer()
         try:
@@ -3705,6 +4264,27 @@ def handle_exec_callback(
                             trade_side=str(intent["side"]),
                             tick=tick_menu,
                         )
+                if prefix == "xr:":
+                    result_text = _menu_exit_result_text(result_text)
+                    if status == "done" and result_text.startswith("✅ ปิด ") and "ปิดครึ่ง" not in result_text:
+                        tick_menu = None
+                        try:
+                            tick_menu = client.symbol_filters(str(intent["symbol"])).tick_size
+                        except Exception:  # noqa: BLE001
+                            tick_menu = None
+                        pos_side = (
+                            str(preview_gate.get("position_side"))
+                            if isinstance(preview_gate, dict) and preview_gate.get("position_side")
+                            else "BOTH"
+                        )
+                        result_text = _append_menu_close_owner_orders(
+                            result_text,
+                            client,
+                            symbol=str(intent["symbol"]),
+                            position_side=pos_side,
+                            trade_side=str(intent["side"]),
+                            tick=tick_menu,
+                        )
                 wrote = finish_exec_intent(
                     conn,
                     intent_id,
@@ -3715,7 +4295,11 @@ def handle_exec_callback(
                 if not wrote:
                     return {"ok": False, "reason": "lost_write", "status": status}
                 if prefix == "ms:":
-                    position_gone = result_text in {MSG_ALREADY_CLOSED, _reason_th("wrong_side")}
+                    position_gone = result_text in {
+                        MSG_ALREADY_CLOSED,
+                        _reason_th("wrong_side"),
+                        MSG_MENU_POSITION_CHANGED,
+                    }
                     _strip_ms_buttons(position_gone=position_gone)
                     if markup is not None:
                         send(result_text, reply_markup=markup)
@@ -3738,6 +4322,48 @@ def handle_exec_callback(
                             str(intent["side"]),
                         )
                     send(result_text, reply_markup=out_markup)
+                elif prefix == "xr:":
+                    if mid is not None:
+                        confirm_body = (
+                            preview_gate.get("confirm_text") if isinstance(preview_gate, dict) else None
+                        )
+                        edit(
+                            int(mid),
+                            str(confirm_body) if confirm_body else result_text,
+                            reply_markup={"inline_keyboard": []},
+                        )
+                    out_markup = None
+                    deferred_advice: Callable[[], None] | None = None
+                    if result_text in {MSG_MENU_POSITION_CHANGED, MSG_REDUCE_DUST}:
+                        out_markup = menu_close_refresh_keyboard(
+                            str(intent["symbol"]),
+                            str(intent["side"]),
+                        )
+                    elif status == "done" and "ปิดครึ่ง" in result_text:
+                        try:
+                            result_text, out_markup, deferred_advice = _maybe_offer_after_reduce(
+                                conn,
+                                client,
+                                intent=intent,
+                                preview=preview_gate if isinstance(preview_gate, dict) else {},
+                                reduce_intent_id=intent_id,
+                                result_text=result_text,
+                                now_ms_value=ts,
+                                send=send,
+                            )
+                        except Exception:  # noqa: BLE001 — intent already done; keep success text
+                            logger.exception("post-reduce offer failed intent=%s", intent_id)
+                            out_markup = None
+                            deferred_advice = None
+                    send(result_text, reply_markup=out_markup)
+                    if deferred_advice is not None:
+                        try:
+                            deferred_advice()
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "post-reduce deferred advice failed intent=%s",
+                                intent_id,
+                            )
                 elif mid is not None and markup is None and prefix == "ey:":
                     edit(int(mid), result, reply_markup={"inline_keyboard": []})
                     # Telegram does not notify on edits — send a new message for non-success.
@@ -3810,6 +4436,10 @@ def handle_exec_callback(
                     )
                     return _finish_send(result)
 
+                if prefix == "xr:":
+                    result = run_reduce_sequence(conn, intent_id, trade=client)
+                    return _finish_send(result)
+
                 result = run_exit_sequence(conn, intent_id, trade=client)
                 return _finish_send(result)
             except Exception:  # noqa: BLE001
@@ -3819,7 +4449,8 @@ def handle_exec_callback(
                     """
                     SELECT 1 FROM assist_exec_log
                     WHERE intent_id=? AND step IN (
-                        'market', 'stop', 'exit_market', 'move_stop_place', 'tp'
+                        'market', 'stop', 'exit_market', 'reduce_market', 'reduce_query',
+                        'move_stop_place', 'tp'
                     )
                     LIMIT 1
                     """,
@@ -4610,6 +5241,211 @@ def _recover_exit_intent(
     return
 
 
+def _recover_reduce_intent(
+    conn: Any,
+    trade: BinanceTradeClient,
+    intent: dict[str, Any],
+    *,
+    now_ms_value: int,
+    send: Callable[..., Any] | None,
+    sleep: Callable[[float], None],
+) -> None:
+    """Read-only recovery for kind=reduce. Never sends a second rd market."""
+    intent_id = str(intent["id"])
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    cid = client_order_id(intent_id, "rd")
+    queried = _query_fill_after_unknown(
+        trade,
+        symbol=symbol,
+        client_id=cid,
+        conn=conn,
+        intent_id=intent_id,
+        step="recover_reduce_query",
+        sleep=sleep,
+    )
+    try:
+        positions = trade.position_risk(symbol=symbol)
+    except Exception:  # noqa: BLE001
+        return
+    if _has_log_step(conn, intent_id, "exit_cancel_pending"):
+        if positions:
+            if not _has_log_step(conn, intent_id, "exit_cancel_gave_up"):
+                ids = _open_jv_client_ids(trade, symbol)
+                text = f"⚠️ มี stop/TP ของบอทค้างอยู่บน {symbol} — ลบในแอปก่อน"
+                if ids:
+                    text = f"{text} {', '.join(ids)}"
+                _log_write(conn, intent_id=intent_id, step="exit_cancel_gave_up", endpoint="local")
+                _recovery_notify(
+                    send,
+                    conn,
+                    intent_id,
+                    status="failed",
+                    text=text,
+                    expect_status="recovering",
+                )
+            return
+        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+            trade,
+            conn=conn,
+            intent_id=intent_id,
+            symbol=symbol,
+            side=side,
+            position_side="BOTH",
+        )
+        if cancel_ok:
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="done",
+                text=f"✅ ปิด {symbol}",
+                expect_status="recovering",
+            )
+        else:
+            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="unknown",
+                text=f"✅ ปิด {symbol}\n{warning}",
+                expect_status="recovering",
+            )
+        return
+    if not positions:
+        fill = queried.order if queried.kind == QueryResultKind.FOUND else None
+        avg = _positive_fill_price(fill)
+        cancel_ok, failed_ids = _cancel_exit_stops_and_tp(
+            trade,
+            conn=conn,
+            intent_id=intent_id,
+            symbol=symbol,
+            side=side,
+            position_side="BOTH",
+        )
+        if avg is not None and avg > 0:
+            text = f"✅ ปิด {symbol} @ {fmt_price_display(avg)}"
+        else:
+            text = f"✅ ปิด {symbol}"
+        status = "done"
+        if not cancel_ok:
+            warning = msg_cancel_old_failed(failed_ids) if failed_ids else MSG_CANCEL_OLD_FAILED
+            text = f"{text}\n{warning}"
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="exit_cancel_pending",
+                endpoint="/fapi/v1/algoOrder",
+            )
+            status = "unknown"
+        else:
+            text = _append_menu_close_owner_orders(
+                text, trade, symbol=symbol, position_side="BOTH", trade_side=side
+            )
+        _recovery_notify(
+            send,
+            conn,
+            intent_id,
+            status=status,
+            text=text,
+            expect_status="recovering",
+        )
+        return
+    if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+        if classify_order_body(queried.order) == OrderOutcome.NOT_FILLED:
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="failed",
+                text="ปิดครึ่งไม่สำเร็จ — ยังไม่ได้ปิด",
+                expect_status="recovering",
+            )
+            return
+        exec_qty = executed_qty(queried.order)
+        if exec_qty > 0:
+            pos = positions[0]
+            preview_raw = intent.get("preview")
+            preview_d: dict[str, Any] = preview_raw if isinstance(preview_raw, dict) else {}
+            try:
+                preview_qty = Decimal(str(preview_d["qty"]))
+            except Exception:  # noqa: BLE001
+                preview_qty = Decimal("0")
+            try:
+                step = trade.symbol_filters(symbol).step_size
+            except Exception:  # noqa: BLE001
+                step = Decimal("0")
+            expected_leave = preview_qty - exec_qty
+            leave_ok = abs(pos.qty - expected_leave) <= step if step > 0 else pos.qty == expected_leave
+            odd = pos.side != side or not leave_ok
+            if odd:
+                try:
+                    cov = _reduce_coverage_line(
+                        trade,
+                        symbol=symbol,
+                        side=side,
+                        position_side=pos.position_side,
+                        remaining=pos.qty,
+                    )
+                    stop_bit = "ยืนยันแล้ว" if "คุมส่วนที่เหลือ" in cov and "⚠️" not in cov else "ยังไม่ยืนยัน"
+                except Exception:  # noqa: BLE001
+                    stop_bit = "ยังไม่ยืนยัน"
+                text = (
+                    f"⚠️ ปิดบางส่วน {symbol} × {fmt_qty(exec_qty)} · เหลือ {fmt_qty(pos.qty)}"
+                    f" (ไม่ตรงที่ตั้งใจ) · stop {stop_bit}"
+                )
+            else:
+                avg = _positive_fill_price(queried.order)
+                avg_s = fmt_price_display(avg) if avg is not None and avg > 0 else "?"
+                coverage = _reduce_coverage_line(
+                    trade,
+                    symbol=symbol,
+                    side=side,
+                    position_side=pos.position_side,
+                    remaining=pos.qty,
+                )
+                text = (
+                    f"✅ ปิดครึ่ง {symbol} × {fmt_qty(exec_qty)} @ {avg_s} · PnL ไม่ทราบ\n"
+                    f"เหลือ {fmt_qty(pos.qty)} · {coverage}"
+                )
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="done",
+                text=text,
+                expect_status="recovering",
+            )
+            return
+    if queried.kind == QueryResultKind.NOT_FOUND:
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step="recover_not_found",
+            endpoint="/fapi/v1/order",
+            client_order_id=cid,
+            binance_code=-2013,
+        )
+        n, first = _count_recover_not_found(conn, intent_id)
+        if (
+            n >= RECOVER_NOT_FOUND_PASSES
+            and first is not None
+            and (now_ms_value - first >= RECOVER_NOT_FOUND_SPAN_MS)
+        ):
+            _recovery_notify(
+                send,
+                conn,
+                intent_id,
+                status="failed",
+                text="ปิดครึ่งไม่สำเร็จ — position และ stop ยังเปิดอยู่",
+                expect_status="recovering",
+            )
+        return
+    # UNREADABLE — stay recovering
+    return
+
+
 class _LeaseLost(Exception):
     """This pass no longer owns the latest recover_claim."""
 
@@ -4663,6 +5499,9 @@ def _aged_read_snapshot(
     elif kind == "move_stop":
         cid = client_order_id(intent_id, "ms")
         query_algo = True
+    elif kind == "reduce":
+        cid = client_order_id(intent_id, "rd")
+        query_algo = False
     else:
         cid = client_order_id(intent_id, "mkt")
         query_algo = False
@@ -4818,6 +5657,20 @@ def run_exec_recovery(
                 _recover_move_stop_intent(conn, leased, intent, now_ms_value=now_ms_value, send=send)
             elif kind == "exit":
                 _recover_exit_intent(conn, leased, intent, now_ms_value=now_ms_value, send=send, sleep=sleep)
+            elif kind == "reduce":
+                _recover_reduce_intent(
+                    conn, leased, intent, now_ms_value=now_ms_value, send=send, sleep=sleep
+                )
+            else:
+                logger.error("recover: no handler for kind=%s intent_id=%s", kind, intent_id)
+                _recovery_notify(
+                    send,
+                    conn,
+                    intent_id,
+                    status="failed",
+                    text=f"ไม่รองรับการกู้คืน kind={kind}",
+                    expect_status="recovering",
+                )
         except _LeaseLost:
             logger.warning("recover lease lost intent_id=%s", intent_id)
             continue
