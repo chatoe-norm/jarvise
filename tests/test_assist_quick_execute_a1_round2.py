@@ -924,6 +924,8 @@ def test_b_real_trades_excludes_quick_order_id_only(tmp_path: Path, monkeypatch:
 
     class _Client:
         def all_orders(self, symbol: str, **_k: Any) -> list[dict[str, Any]]:
+            if symbol != "BTCUSDT":
+                return []
             return [
                 {
                     "symbol": symbol,
@@ -937,6 +939,8 @@ def test_b_real_trades_excludes_quick_order_id_only(tmp_path: Path, monkeypatch:
             ]
 
         def user_trades(self, symbol: str, **_k: Any) -> list[dict[str, Any]]:
+            if symbol != "BTCUSDT":
+                return []
             return [
                 {
                     "id": 1,

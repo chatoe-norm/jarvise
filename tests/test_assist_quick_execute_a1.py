@@ -49,6 +49,7 @@ class _Pos:
         self.side = side
         self.qty = Decimal(qty)
         self.entry = Decimal(entry)
+        self.entry_price = Decimal(entry)
         self.position_side = "BOTH"
         self.mark = Decimal(entry)
 
