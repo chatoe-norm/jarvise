@@ -49,6 +49,7 @@ from jarvise_assist.quick_regime import Trend, quick_side_risk, quick_trend_4h
 from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.store import (
     clear_awaiting_quick_input,
+    ensure_settings,
     list_explore_symbols,
     set_awaiting_quick_input,
     write_settings,
@@ -766,11 +767,13 @@ def _edit_callback_message(
     markup: dict[str, Any] | None,
     send: SendFn,
     edit: EditFn,
+    fallback_send: bool = True,
 ) -> None:
     mid = message.get("message_id")
     chat_id = (message.get("chat") or {}).get("id")
     if mid is None or chat_id is None:
-        send(text, reply_markup=markup)
+        if fallback_send:
+            send(text, reply_markup=markup)
         return
     try:
         if edit(
@@ -782,7 +785,14 @@ def _edit_callback_message(
             return
     except Exception:  # noqa: BLE001
         pass
-    send(text, reply_markup=markup)
+    if fallback_send:
+        send(text, reply_markup=markup)
+
+
+def _clear_symbol_await_only(conn: Any) -> None:
+    """Clear typed-symbol await; leave cfg:<key> settings prompts alone."""
+    if ensure_settings(conn).get("awaiting_quick_input") == "symbol":
+        clear_awaiting_quick_input(conn)
 
 
 def _clear_other_awaitings(conn: Any) -> None:
@@ -829,18 +839,20 @@ def handle_quick_trade_callback(
         return {"ok": True, "busy": True}
 
     if op == "mx":
+        # Close drops the keyboard in place; never re-send the whole Quick menu.
         _edit_callback_message(
             message=message,
             text=str(message.get("text") or "⚡ Quick"),
             markup={"inline_keyboard": []},
             send=send,
             edit=edit,
+            fallback_send=False,
         )
         answer(None)
         return {"ok": True, "closed": True}
 
     if op == "cx":
-        clear_awaiting_quick_input(conn)
+        _clear_symbol_await_only(conn)
         _edit_callback_message(
             message=message,
             text="ยกเลิกแล้ว",
@@ -852,7 +864,7 @@ def handle_quick_trade_callback(
         return {"ok": True, "cancelled": True}
 
     if op == "bk":
-        clear_awaiting_quick_input(conn)
+        _clear_symbol_await_only(conn)
         text, kb = render_quick_menu(conn, now_ms=now_ms)
         # Coin grid only (no status prose re-send): keep full menu text for context.
         _edit_callback_message(message=message, text=text, markup=kb, send=send, edit=edit)
@@ -879,7 +891,7 @@ def handle_quick_trade_callback(
         if sym in quick_symbols(conn):
             answer(quick_symbol_busy_toast(sym))
             return {"ok": True, "busy": True}
-        clear_awaiting_quick_input(conn)
+        _clear_symbol_await_only(conn)
         text, markup = render_side_picker(conn, sym, now_ms=now_ms, futures=futures)
         _edit_callback_message(message=message, text=text, markup=markup, send=send, edit=edit)
         answer(None)

@@ -304,7 +304,9 @@ def process_update(
         lookup = None
         fut_for_await: Any = futures
         if pending == "symbol":
-            lookup = explore_lookup or _explore_lookup(futures)
+            # Quick typed-symbol: let lookup errors propagate so validate_quick_symbol
+            # can return lookup_error (not "coin not found"). Explore keep swallowing.
+            lookup = explore_lookup or _quick_symbol_lookup(futures)
             if fut_for_await is None:
                 fut_for_await = build_futures_client()
         awaiting_out = handle_awaiting_quick_input(
@@ -356,6 +358,19 @@ def _explore_lookup(futures: Any) -> Callable[[str], dict[str, Any] | None]:
         except Exception:  # noqa: BLE001 — a bad lookup is a Thai rejection, not a listener crash
             logger.warning("assist explore exchangeInfo lookup failed for %s", symbol)
             return None
+        return row if isinstance(row, dict) else None
+
+    return lookup
+
+
+def _quick_symbol_lookup(futures: Any) -> Callable[[str], dict[str, Any] | None]:
+    """Lookup for typed Quick symbols. Exceptions propagate to validate_quick_symbol."""
+    client = futures if futures is not None else build_futures_client()
+
+    def lookup(symbol: str) -> dict[str, Any] | None:
+        if client is None:
+            return public_exchange_symbol(symbol)
+        row = client.exchange_symbol(symbol)
         return row if isinstance(row, dict) else None
 
     return lookup
