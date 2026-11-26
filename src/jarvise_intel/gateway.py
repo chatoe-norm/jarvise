@@ -1,0 +1,216 @@
+"""Authenticated Hermes /v1/runs client for the ingest adapter."""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+TERMINAL_OK = frozenset({"completed"})
+TERMINAL_FAIL = frozenset(
+    {
+        "failed",
+        "cancelled",
+        "interrupted",
+        "unknown",
+        "incomplete",
+        "error",
+    }
+)
+DEFAULT_POLL_S = 2.0
+
+
+@dataclass(frozen=True)
+class GatewayConfig:
+    base_url: str
+    api_key: str
+    provider: str
+    model: str
+    deadline_s: float = 600.0
+    poll_s: float = DEFAULT_POLL_S
+
+
+@dataclass(frozen=True)
+class RunResult:
+    run_id: str
+    status: str
+    output: str
+    usage: dict[str, Any]
+    runtime: dict[str, Any]
+    raw: dict[str, Any]
+
+
+class GatewayError(Exception):
+    def __init__(self, category: str, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.category = category
+        self.status_code = status_code
+
+
+HttpOpener = Callable[[urllib.request.Request, float], Any]
+
+
+def _default_open(request: urllib.request.Request, timeout: float) -> Any:
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _auth_headers(api_key: str, *, idempotency_key: str | None = None) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return headers
+
+
+def create_run(
+    cfg: GatewayConfig,
+    *,
+    instructions: str,
+    input_text: str,
+    idempotency_key: str,
+    open_url: HttpOpener | None = None,
+) -> str:
+    opener = open_url or _default_open
+    body = {
+        "input": input_text,
+        "instructions": instructions,
+        "provider": cfg.provider,
+        "model": cfg.model,
+    }
+    request = urllib.request.Request(
+        f"{cfg.base_url.rstrip('/')}/v1/runs",
+        data=json.dumps(body).encode("utf-8"),
+        headers=_auth_headers(cfg.api_key, idempotency_key=idempotency_key),
+        method="POST",
+    )
+    try:
+        with opener(request, min(30.0, cfg.deadline_s)) as resp:
+            status = getattr(resp, "status", 200)
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise GatewayError("auth_error", f"HTTP {exc.code}", status_code=exc.code) from exc
+        raise GatewayError("provider_error", f"HTTP {exc.code}", status_code=exc.code) from exc
+    except urllib.error.URLError as exc:
+        raise GatewayError("provider_error", type(exc).__name__) from exc
+    if status >= 400:
+        raise GatewayError("provider_error", f"HTTP {status}", status_code=status)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GatewayError("malformed_response", "create_run_json") from exc
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise GatewayError("malformed_response", "missing_run_id")
+    return run_id
+
+
+def get_run(
+    cfg: GatewayConfig,
+    run_id: str,
+    *,
+    open_url: HttpOpener | None = None,
+    timeout: float = 30.0,
+) -> RunResult:
+    opener = open_url or _default_open
+    request = urllib.request.Request(
+        f"{cfg.base_url.rstrip('/')}/v1/runs/{run_id}",
+        headers=_auth_headers(cfg.api_key),
+        method="GET",
+    )
+    try:
+        with opener(request, timeout) as resp:
+            status_code = getattr(resp, "status", 200)
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise GatewayError("auth_error", f"HTTP {exc.code}", status_code=exc.code) from exc
+        raise GatewayError("provider_error", f"HTTP {exc.code}", status_code=exc.code) from exc
+    except urllib.error.URLError as exc:
+        raise GatewayError("provider_error", type(exc).__name__) from exc
+    if status_code >= 400:
+        raise GatewayError("provider_error", f"HTTP {status_code}", status_code=status_code)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GatewayError("malformed_response", "get_run_json") from exc
+    if not isinstance(payload, dict):
+        raise GatewayError("malformed_response", "get_run_not_object")
+    status = str(payload.get("status") or "").strip().lower()
+    output = payload.get("output")
+    if output is None:
+        output_text = ""
+    elif isinstance(output, str):
+        output_text = output
+    else:
+        output_text = json.dumps(output)
+    usage_raw = payload.get("usage")
+    runtime_raw = payload.get("runtime")
+    usage: dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
+    runtime: dict[str, Any] = runtime_raw if isinstance(runtime_raw, dict) else {}
+    return RunResult(
+        run_id=str(payload.get("run_id") or run_id),
+        status=status,
+        output=output_text,
+        usage=usage,
+        runtime=runtime,
+        raw=payload,
+    )
+
+
+def wait_for_run(
+    cfg: GatewayConfig,
+    run_id: str,
+    *,
+    open_url: HttpOpener | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> RunResult:
+    deadline = monotonic() + cfg.deadline_s
+    last: RunResult | None = None
+    while monotonic() < deadline:
+        last = get_run(cfg, run_id, open_url=open_url, timeout=min(30.0, max(1.0, deadline - monotonic())))
+        if last.status in TERMINAL_OK:
+            error_code = str(last.raw.get("hermes.error_code") or last.raw.get("error_code") or "")
+            finish = str(last.raw.get("finish_reason") or "")
+            if error_code == "iteration_budget_exhausted" or finish == "length":
+                raise GatewayError("incomplete_run", "iteration_budget_exhausted")
+            provider = str(last.runtime.get("provider") or "").strip()
+            model = str(last.runtime.get("model") or "").strip()
+            if provider and provider != cfg.provider:
+                raise GatewayError("provider_mismatch", provider)
+            if model and cfg.model and model != cfg.model:
+                # Allow provider-qualified model names that end with the pin.
+                if not model.endswith(cfg.model) and model != cfg.model:
+                    raise GatewayError("model_mismatch", model)
+            return last
+        if last.status in TERMINAL_FAIL:
+            raise GatewayError("incomplete_run", last.status)
+        sleep(cfg.poll_s)
+    raise GatewayError("timeout", "deadline_exceeded")
+
+
+def run_research(
+    cfg: GatewayConfig,
+    *,
+    instructions: str,
+    input_text: str,
+    idempotency_key: str,
+    open_url: HttpOpener | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> RunResult:
+    run_id = create_run(
+        cfg,
+        instructions=instructions,
+        input_text=input_text,
+        idempotency_key=idempotency_key,
+        open_url=open_url,
+    )
+    return wait_for_run(cfg, run_id, open_url=open_url, sleep=sleep)

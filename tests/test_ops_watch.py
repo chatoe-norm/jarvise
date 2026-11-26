@@ -24,6 +24,7 @@ PAYLOAD_KEYS = (
     "digest_newest",
     "digest_age_h",
     "digest_stale",
+    "digest_producer",
     "openrouter_remaining",
     "openrouter_low",
     "openrouter_error",
@@ -79,6 +80,7 @@ def test_fresh_digest_sends_no_alert(tmp_path: Path, monkeypatch: Any) -> None:
     assert code == 0
     assert body["digest_stale"] is False
     assert body["digest_newest"] == "2026-11-10-00.md"
+    assert body["digest_producer"] == "openclaw"
     assert body["digest_alert"] is None
     assert sent == []
     for key in PAYLOAD_KEYS:
@@ -132,6 +134,17 @@ def test_empty_digest_dir_is_stale(tmp_path: Path, monkeypatch: Any) -> None:
     assert format_digest_stale_message(hours=None, filename=None).startswith(
         "⚠️ OpenClaw ไม่ได้เขียนข่าวมา (ไม่มีไฟล์)"
     )
+
+
+def test_digest_producer_env(monkeypatch: Any) -> None:
+    from jarvise.ops_watch import digest_producer
+
+    monkeypatch.delenv("JARVISE_DIGEST_PRODUCER", raising=False)
+    assert digest_producer() == "openclaw"
+    monkeypatch.setenv("JARVISE_DIGEST_PRODUCER", "hermes")
+    assert digest_producer() == "hermes"
+    monkeypatch.setenv("JARVISE_DIGEST_PRODUCER", "pilot")
+    assert digest_producer() == "unknown"
 
 
 def test_openrouter_low_then_recovery(tmp_path: Path, monkeypatch: Any) -> None:
@@ -217,6 +230,15 @@ def test_openrouter_network_error_does_not_break_health(
     monkeypatch.setattr("jarvise.ops_watch.httpx.get", _boom)
     monkeypatch.setattr("jarvise.jobs.notify_openrouter_credit", lambda **_k: True)
     monkeypatch.setattr("jarvise.jobs.notify_digest_freshness", lambda **_k: False)
+    monkeypatch.setattr(
+        "jarvise.jobs.disk_free",
+        lambda _path: {
+            "disk_free_bytes": 50 * 1024**3,
+            "disk_total_bytes": 100 * 1024**3,
+            "disk_free_pct": 50.0,
+            "disk_low": False,
+        },
+    )
     with caplog.at_level(logging.WARNING):
         code, body = run_ingest_health()
     assert code == 0

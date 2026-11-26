@@ -1,0 +1,89 @@
+{
+  "id": "jrvsHermesIngest0719",
+  "name": "Jarvise Hermes news ingest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7,19 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-hermes-ingest",
+      "name": "07:00 and 19:00 ICT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "notes": "Container timezone is Asia/Bangkok. Stage A template only — keep inactive until Stage C cutover. OpenClaw jrvsNewsIngest0719 stays the producer until then."
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\nconst parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false }).formatToParts(now);\nconst get = (t) => parts.find((p) => p.type === t)?.value;\nconst hour = Number(get('hour'));\nconst slotHour = hour < 13 ? '07' : '19';\nconst slot = `${get('year')}-${get('month')}-${get('day')}T${slotHour}`;\nreturn [{ json: { slot } }];"
+      },
+      "id": "code-hermes-slot",
+      "name": "Build Bangkok slot",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "notes": "Fixed slot field only. No prompt, tools, paths, or commands."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://hermes-ingest:8092/ingest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer __JARVISE_HERMES_INGEST_TOKEN__"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ slot: $json.slot }) }}",
+        "options": {
+          "timeout": 660000
+        }
+      },
+      "id": "http-hermes-ingest",
+      "name": "POST Hermes ingest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 0],
+      "notes": "Authenticated fixed POST /ingest. Render __JARVISE_HERMES_INGEST_TOKEN__ with infra/docker/render-n8n-hermes-ingest.sh. Do not import while OpenClaw is the producer."
+    }
+  ],
+  "connections": {
+    "07:00 and 19:00 ICT": {
+      "main": [[{ "node": "Build Bangkok slot", "type": "main", "index": 0 }]]
+    },
+    "Build Bangkok slot": {
+      "main": [[{ "node": "POST Hermes ingest", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Bangkok"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "jarvise": {
+      "paper_only": true,
+      "no_order_placement": true,
+      "stage": "A-dormant",
+      "import": "infra/docker/render-n8n-hermes-ingest.sh then n8n import:workflow. Keep inactive until Stage C. Do not import live-reconcile."
+    }
+  },
+  "pinData": {},
+  "active": false
+}

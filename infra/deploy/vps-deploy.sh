@@ -35,13 +35,26 @@ COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
 # are made readable by it and nobody else. Co-tenant stacks under /opt/t4trip* are untouched.
 "${COMPOSE[@]}" stop jobs web >/dev/null 2>&1 || true
 mkdir -p data/analytics data/openclaw data/nlm data/.cache secrets
+mkdir -p data/hermes/gateway data/hermes/adapter data/hermes/pilot-digests
 chown -R "$uid:$gid" data
+# Hermes gateway runs as UID 10000 inside nousresearch/hermes-agent. Scope only
+# data/hermes/gateway so a normal redeploy keeps both Jarvise and Hermes writable.
+# Do not chown co-tenant stacks or archived OpenClaw trees for this step.
+hermes_uid="$(env_get HERMES_UID)"; hermes_uid="${hermes_uid:-10000}"
+hermes_gid="$(env_get HERMES_GID)"; hermes_gid="${hermes_gid:-10000}"
+if [[ ! -f data/hermes/gateway/config.yaml ]]; then
+  cp config/hermes/config.yaml.template data/hermes/gateway/config.yaml
+fi
+chown -R "$hermes_uid:$hermes_gid" data/hermes/gateway
+# Adapter + pilot digests stay on JARVISE_UID (canonical cutover later uses the same UID).
+chown -R "$uid:$gid" data/hermes/adapter data/hermes/pilot-digests
 if [[ -n "$(ls -A secrets 2>/dev/null)" ]]; then
   chown -R "$uid:$gid" secrets
   find secrets -type d -exec chmod 0500 {} +
   find secrets -type f -exec chmod 0400 {} +
 fi
 
+# Default up omits the hermes profile so OpenClaw remains the production digest producer.
 "${COMPOSE[@]}" up -d
 
 echo "image digests (for rollback via docker tag / compose image pin):"

@@ -1,0 +1,31 @@
+Implement Stage A of the Jarvise OpenClaw-to-Hermes migration plan. Use Grok for implementation and retain the separate Claude review gate. Open a PR; STOP before merge or any production change.
+
+READ FIRST
+D:\Projects\jarvise\AGENTS.md
+D:\Projects\jarvise\CLAUDE.md
+D:\Projects\jarvise\.cursor\rules\model-tiers.mdc
+D:\Projects\jarvise\.cursor\rules\fdpy-wdpy.mdc
+D:\Projects\jarvise\docs\superpowers\plans\2026-11-26-openclaw-to-hermes-migration.md (all sections, especially 3-5 and 7).
+Then inspect the exact integration files listed in plan section 6 on current origin/main.
+
+CONTEXT
+The owner confirmed Nous Research Hermes Agent. Production was inspected read-only on 2026-11-26. Jarvise OpenClaw is healthy on Hostinger 76.13.218.48, /opt/jarvise, pinned to 2026.9.8. n8n owns the 07:00/19:00 Bangkok ingest schedule. jobs consumes /digests read-only. A separate LearningYard Hermes already owns 127.0.0.1:8642; do not reuse or modify it. The local branch is substantially behind main and has owner changes in AGENTS.md, CLAUDE.md, and .claude/. Preserve them. This plan and prompt are new uncommitted handoff artifacts, not shipped changes.
+
+TASK
+1. Refresh origin/main and create an isolated worktree/feature branch from it. Copy the plan/handoff into that worktree if needed; do not include unrelated local edits. Use gh as chatoe-norm and SSH push host github.com-chatoe-norm.
+2. Follow plan section 4 Stage A: verify candidate Hermes v0.23.4 image/digest and official mcp-serve plugin pin. Add dormant opt-in services, isolated state/networks, an authenticated deterministic ingest adapter, bounded public-web research tools, output/idempotency/provenance checks, and a runbook. Keep OpenClaw the production default. Do not run a production pilot.
+3. Preserve canonical digest files/mtimes, parser format, RAG/tactics compatibility, schedules, and frozen research. Resolve the shadow-study continuity gate before any later cutover. Update deployment UID handling and honest backend/status metadata where needed.
+4. Provide an opt-in Windows Cursor MCP wrapper/example using SSH stdio and hermes mcp-serve --tools-only as non-root. Verify tools/list and prevent access to messaging, approvals, shell, orders, internal URLs, and secrets. MCP is research tooling, not generic agent delegation. Do not overwrite current Cursor MCP configuration.
+5. Add focused security/integration tests and implement the exact rollback/activation runbook in the plan. No production .env reads/edits, secret imports, workflow imports, container stops/replacement, image pulls on the VPS, or unmerged production-ledger execution.
+
+CHECKS
+Run .venv\Scripts\ruff.exe check src tests scripts; .venv\Scripts\ruff.exe format --check src tests scripts; .venv\Scripts\python.exe -m mypy src; .venv\Scripts\python.exe -m pytest. Use the worktree environment. Run isolated adapter/gateway/MCP/Compose tests from plan section 5. If web changes, run npm run lint, npm test, and npm run build in web. Expect green repository and image/security CI; report unrun checks honestly.
+
+SHIP
+Open a Stage A PR only, then STOP. No fdpy, merge, production deployment, pilot, or canonical producer switch. Stage B is Claude review/fixes on the same branch; Stage C requires owner instruction after approval. Use the owner-required commit trailer. Do not ship unrelated PRs or commit owner memory/config edits.
+
+HARD RULES
+Keep live autotrade off; leave existing owner-confirmed assist behavior and its settings alone. VPS .env and secret files remain owner-edited; report only set/EMPTY and basename paths. No Binance/Telegram/Redis/jobs/web/ledger access for Hermes. Preserve floors 0.55/0.70, analyzer formula, 1.5x ATR stop, flat_exit, same_side_hold, profit lock, universe, EV latch, and quiet/weekly mode. No H3-frozen file changes, ledger migrations, LearningYard changes, or Docker volume cleanup.
+
+REPORT
+Return PR URL, branch/base SHA, resolved image/plugin pins, capability matrix, changed files, tests/CI results, cost/resource bounds, rollback proof, and unresolved cutover/owner setup gates. Say explicitly that production OpenClaw is still active and no deployment occurred.

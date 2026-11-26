@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+# Deterministic Hermes digest adapter. No worker/web lockfiles, no trading imports.
+
+FROM python:3.14.0-slim-bookworm
+
+ARG JARVISE_UID=1000
+ARG JARVISE_GID=1000
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    HOME=/home/jarvise
+
+RUN groupadd -g "${JARVISE_GID}" jarvise \
+    && useradd -m -u "${JARVISE_UID}" -g jarvise -s /usr/sbin/nologin jarvise
+
+COPY src/jarvise_intel /app/src/jarvise_intel
+
+USER jarvise
+EXPOSE 8092
+CMD ["python", "-m", "jarvise_intel", "ingest"]

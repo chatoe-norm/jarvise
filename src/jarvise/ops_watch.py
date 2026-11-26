@@ -6,6 +6,7 @@ Thresholds are constants. The OpenRouter key is never logged, stored, or returne
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -29,11 +30,22 @@ _STATE_LOW = 1.0
 _STATE_ERROR = 2.0
 
 
+def digest_producer() -> str:
+    """Active digest backend label. Dormant Hermes must not claim production."""
+    raw = (os.environ.get("JARVISE_DIGEST_PRODUCER") or "").strip().lower()
+    if not raw:
+        return "openclaw"
+    if raw in {"openclaw", "hermes"}:
+        return raw
+    return "unknown"
+
+
 def digest_status(directory: Path, *, now_s: float | None = None) -> dict[str, Any]:
     """Newest ``*.md`` in ``directory`` by mtime. Missing dir or files is stale."""
     now = time.time() if now_s is None else now_s
     newest: str | None = None
     age_h: float | None = None
+    producer = digest_producer()
     try:
         if directory.is_dir():
             files = [path for path in directory.iterdir() if path.is_file() and path.suffix == ".md"]
@@ -43,12 +55,18 @@ def digest_status(directory: Path, *, now_s: float | None = None) -> dict[str, A
                 age_h = (now - latest.stat().st_mtime) / 3600.0
     except OSError as exc:
         logger.warning("digest dir unread type=%s", type(exc).__name__)
-        return {"digest_newest": None, "digest_age_h": None, "digest_stale": True}
+        return {
+            "digest_newest": None,
+            "digest_age_h": None,
+            "digest_stale": True,
+            "digest_producer": producer,
+        }
     stale = newest is None or age_h is None or age_h > DIGEST_STALE_AFTER_H
     return {
         "digest_newest": newest,
         "digest_age_h": None if age_h is None else round(age_h, 2),
         "digest_stale": stale,
+        "digest_producer": producer,
     }
 
 

@@ -53,7 +53,8 @@ services:
     image: n8nio/n8n:2.40.0
     restart: unless-stopped
     # jarvise_net reaches jobs; openclaw_net reaches the OpenClaw hook only.
-    networks: [jarvise_net, openclaw_net]
+    # hermes_ingress reaches hermes-ingest only when the hermes profile is enabled.
+    networks: [jarvise_net, openclaw_net, hermes_ingress]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 768m
     cpus: 1.0
@@ -381,10 +382,158 @@ services:
     depends_on:
       - prometheus
 
+  # Opt-in Hermes research stack (Stage A). Default compose up leaves these off.
+  # Image pin: nousresearch/hermes-agent:v0.23.4 linux/amd64
+  # Manifest-list sha256:ef0650d523ee1b5ab32c779acabc446d9936869a9932591553688a62bcf0c42f
+  # amd64 manifest sha256:3bc37fd8546e90fc41fe0d29511b4052840c281617cbcec6093bfe03d86a4ad9
+  # Source revision 8fc0374447313e276f6b9a2764bfc750190c966a; runtime user hermes UID 10000.
+  # Do not publish host 8642 (LearningYard already owns 127.0.0.1:8642).
+  hermes-egress:
+    profiles: [hermes]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.hermes-egress
+      args:
+        JARVISE_UID: ${JARVISE_UID:-1000}
+        JARVISE_GID: ${JARVISE_GID:-1000}
+    image: jarvise-hermes-egress:local
+    restart: unless-stopped
+    networks: [hermes_net]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - HERMES_EGRESS_HOST=0.0.0.0
+      - HERMES_EGRESS_PORT=8899
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1',8899),2); s.close()",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  hermes:
+    profiles: [hermes]
+    # Pin amd64 digest; tag v0.23.4 is documentation only — never use latest/stable/main.
+    image: nousresearch/hermes-agent@sha256:3bc37fd8546e90fc41fe0d29511b4052840c281617cbcec6093bfe03d86a4ad9
+    restart: unless-stopped
+    networks: [hermes_net]
+    # Keep default entrypoint (s6). Do not override; gateway drops to UID 10000.
+    # no-new-privileges left off: s6 must drop root → hermes for supervised services.
+    mem_limit: 3072m
+    cpus: 1.5
+    pids_limit: 256
+    stop_grace_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${JARVISE_HERMES_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - HERMES_PROVIDER=${HERMES_PROVIDER:-}
+      - HERMES_MODEL=${HERMES_MODEL:-}
+      - HTTPS_PROXY=http://hermes-egress:8899
+      - ALL_PROXY=http://hermes-egress:8899
+      - NO_PROXY=
+      - HTTP_PROXY=
+    volumes:
+      - ./data/hermes/gateway:/opt/data
+    depends_on:
+      hermes-egress:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=5)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  hermes-ingest:
+    profiles: [hermes]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.hermes-ingest
+      args:
+        JARVISE_UID: ${JARVISE_UID:-1000}
+        JARVISE_GID: ${JARVISE_GID:-1000}
+    image: jarvise-hermes-ingest:local
+    restart: unless-stopped
+    networks: [hermes_net, hermes_ingress]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 256m
+    cpus: 0.25
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - JARVISE_HERMES_INGEST_TOKEN=${JARVISE_HERMES_INGEST_TOKEN:-}
+      - JARVISE_HERMES_API_KEY=${JARVISE_HERMES_API_KEY:-}
+      - JARVISE_HERMES_GATEWAY_URL=http://hermes:8642
+      - HERMES_PROVIDER=${HERMES_PROVIDER:-}
+      - HERMES_MODEL=${HERMES_MODEL:-}
+      - JARVISE_HERMES_DIGEST_DIR=/data/hermes/pilot-digests
+      - JARVISE_HERMES_STATE_DIR=/data/hermes/adapter
+      - JARVISE_HERMES_PROMPT_PATH=/config/hermes/ingest-prompt.md
+      - JARVISE_HERMES_SMOKE=${JARVISE_HERMES_SMOKE:-0}
+      - HERMES_INGEST_HOST=0.0.0.0
+      - HERMES_INGEST_PORT=8092
+    volumes:
+      - ./data/hermes/adapter:/data/hermes/adapter
+      - ./data/hermes/pilot-digests:/data/hermes/pilot-digests
+      - ./config/hermes:/config/hermes:ro
+    depends_on:
+      hermes:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/healthz')",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
 networks:
   jarvise_net:
     driver: bridge
   openclaw_net:
+    driver: bridge
+  hermes_net:
+    driver: bridge
+  hermes_ingress:
     driver: bridge
 
 volumes:
