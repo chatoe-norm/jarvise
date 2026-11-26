@@ -34,6 +34,7 @@ from jarvise_assist.store import (
     insert_explore_symbol,
     list_explore_symbols,
     set_awaiting_quick_input,
+    write_settings,
 )
 from jarvise_ingest.db import open_db, upsert_analysis_output
 
@@ -120,6 +121,20 @@ def test_quick_trend_core_fresh_long_short_flat_stale(conn: Any) -> None:
 
 def test_quick_trend_non_universe_unknown(conn: Any) -> None:
     assert quick_trend_4h(conn, "PEPEUSDT", now_ms=NOW) == "unknown"
+
+
+def test_quick_trend_explore_fresh_long_via_injected_conn(conn: Any, tmp_path: Any) -> None:
+    """Explore-coin trend reads the injected explore DB, not the main ledger."""
+    insert_explore_symbol(conn, "LINKUSDT", NOW)
+    explore = open_db(tmp_path / "explore-trend.db")
+    try:
+        _seed_analysis(explore, "LINKUSDT", action="long", now_ms=NOW)
+        assert quick_trend_4h(conn, "LINKUSDT", now_ms=NOW, explore_conn=explore) == "up"
+        fake = _happy_fake()
+        text, _ = render_side_picker(conn, "LINKUSDT", now_ms=NOW, futures=fake, explore_conn=explore)
+        assert "4h: ขาขึ้น" in text
+    finally:
+        explore.close()
 
 
 def test_quick_side_risk_uses_live_eff(conn: Any) -> None:
@@ -405,6 +420,74 @@ def test_qk_sd_five_part_stale_future_bad_busy(conn: Any, monkeypatch: pytest.Mo
     assert "ETH" in (answers4[-1] or "")
 
 
+def test_qk_sd_six_part_junk_no_state_change(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """qk:sd with >5 parts must reject without cancelling drafts or clearing awaits."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    _forbid_trade_client(monkeypatch)
+    fake = _happy_fake()
+    issued = NOW // 1000
+
+    # Seed a draft that must survive, plus a cfg await.
+    _, _, draft_out, _ = _run_qk(conn, "qk:sd:l", fake, now_ms=NOW)
+    draft_id = draft_out["card_id"]
+    set_awaiting_quick_input(conn, "cfg:quick_risk_pct", until_ms=NOW + 300_000)
+
+    _, answers, out, _ = _run_qk(conn, f"qk:sd:l:BTCUSDT:{issued}:junk", fake, now_ms=NOW)
+    assert out.get("ok") is False
+    assert answers[-1] == MSG_BAD_BUTTON
+    assert ensure_settings(conn)["awaiting_quick_input"] == "cfg:quick_risk_pct"
+    row = conn.execute("SELECT status FROM assist_quick_card WHERE id=?", (draft_id,)).fetchone()
+    assert row["status"] == "pick_symbol"
+    n = conn.execute("SELECT COUNT(*) AS n FROM assist_quick_card WHERE status='pick_stop'").fetchone()["n"]
+    assert int(n) == 0
+
+
+def test_qk_sd_five_part_clears_other_awaits(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Valid 5-part qk:sd clears explore / risk / symbol awaits (mutually exclusive seeds)."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    _forbid_trade_client(monkeypatch)
+    fake = _happy_fake()
+    issued = NOW // 1000
+
+    write_settings(conn, awaiting_explore=True)
+    _, _, out1, _ = _run_qk(conn, f"qk:sd:l:BTCUSDT:{issued}", fake, now_ms=NOW)
+    assert out1.get("step") == "pick_stop"
+    assert ensure_settings(conn)["awaiting_explore"] is False
+
+    write_settings(conn, awaiting_risk="confirm", pending_risk_pct=1.0)
+    _, _, out2, _ = _run_qk(conn, f"qk:sd:s:ETHUSDT:{issued}", fake, now_ms=NOW)
+    assert out2.get("step") == "pick_stop"
+    assert ensure_settings(conn)["awaiting_risk"] is None
+
+    set_awaiting_quick_input(conn, "symbol", until_ms=NOW + 300_000)
+    _, _, out3, _ = _run_qk(conn, f"qk:sd:l:SOLUSDT:{issued}", fake, now_ms=NOW)
+    assert out3.get("step") == "pick_stop"
+    assert ensure_settings(conn)["awaiting_quick_input"] is None
+
+
+def test_side_picker_has_back_and_cancel_row(conn: Any) -> None:
+    fake = _happy_fake()
+    _, markup = render_side_picker(conn, "BTCUSDT", now_ms=NOW, futures=fake)
+    flat = [(b["text"], b["callback_data"]) for row in markup["inline_keyboard"] for b in row]
+    assert ("↩️ เลือกเหรียญใหม่", "qk:bk") in flat
+    assert ("✖️ ยกเลิก", "qk:cx") in flat
+
+
+def test_qk_sd_five_part_stop_step_uses_configured_presets(
+    conn: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    _forbid_trade_client(monkeypatch)
+    fake = _happy_fake()
+    set_quick_config(conn, "quick_stop_presets", "0.2,0.4", source="t", now_ms=NOW)
+    issued = NOW // 1000
+    _, _, out, edits = _run_qk(conn, f"qk:sd:l:BTCUSDT:{issued}", fake, now_ms=NOW)
+    assert out.get("step") == "pick_stop"
+    assert edits
+    texts = [b["text"] for b in edits[-1]["reply_markup"]["inline_keyboard"][0]]
+    assert texts == ["0.2%", "0.4%"]
+
+
 # --- parity -----------------------------------------------------------------
 
 
@@ -552,6 +635,17 @@ def test_validate_quick_symbol_paths() -> None:
         raise RuntimeError("net")
 
     assert validate_quick_symbol("WIF", lookup=boom).outcome == "lookup_error"
+
+    def first_none_fallback_raises(sym: str) -> dict[str, Any] | None:
+        if sym == "PEPEUSDT":
+            return None
+        if sym == "1000PEPEUSDT":
+            raise RuntimeError("net-fallback")
+        return None
+
+    fallback_err = validate_quick_symbol("PEPE", lookup=first_none_fallback_raises)
+    assert fallback_err.outcome == "lookup_error"
+    assert fallback_err.message == "อ่าน Binance ไม่ได้ — ลองพิมพ์ใหม่"
 
 
 def test_awaiting_symbol_flow(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
