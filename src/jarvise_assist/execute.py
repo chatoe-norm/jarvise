@@ -281,6 +281,13 @@ def assist_cancel_owner_enabled() -> bool:
     return (os.environ.get("JARVISE_ASSIST_CANCEL_OWNER") or "off").strip().lower() == "on"
 
 
+def quick_execute_enabled() -> bool:
+    """JARVISE_QUICK_EXECUTE=on and EXECUTE in {testnet, live}. Independent of main enabled (D5)."""
+    from jarvise_assist.quick_execute import quick_execute_enabled as _qe
+
+    return _qe()
+
+
 def execution_buttons_enabled(conn: Any) -> bool:
     if assist_execute_mode() == "off":
         return False
@@ -895,17 +902,27 @@ def half_close_legs(
     min_qty: Decimal,
     min_notional: Decimal,
     mark: Decimal,
+    close_pct: Decimal = Decimal("50"),
 ) -> tuple[Decimal, Decimal, str | None]:
-    """Return (close, leave, refuse_reason). refuse_reason is None when both legs are legal."""
+    """Return (close, leave, refuse_reason). refuse_reason is None when both legs are legal.
+
+    ``close_pct`` defaults to 50 (byte-identical to the pre-A1 0.5 share). A 100%
+    close leaves qty 0 and skips the leave min-notional check.
+    """
     if step <= 0 or qty <= 0:
         return Decimal("0"), Decimal("0"), "ขั้นต่ำ"
-    close = floor_to_step(qty * Decimal("0.5"), step)
+    if close_pct <= 0:
+        return Decimal("0"), qty, "ปิด"
+    share = min(Decimal("100"), close_pct) / Decimal("100")
+    close = floor_to_step(qty * share, step)
     leave = qty - close
     if close <= 0:
         return close, leave, "ปิด"
     if below_min_notional(qty=close, notional=close * mark, min_qty=min_qty, min_notional=min_notional):
         return close, leave, "ปิด"
-    if below_min_notional(qty=leave, notional=leave * mark, min_qty=min_qty, min_notional=min_notional):
+    if leave > 0 and below_min_notional(
+        qty=leave, notional=leave * mark, min_qty=min_qty, min_notional=min_notional
+    ):
         return close, leave, "เหลือ"
     return close, leave, None
 
@@ -1446,6 +1463,20 @@ _REASON_TH: dict[str, str] = {
     "not_tighter": "ระดับใหม่ไม่กระชับกว่าเดิม",
     "no_position": "ไม่มีไม้นี้แล้ว",
     "wrong_side": "ด้านไม่ตรงกับไม้ที่เปิด",
+    "night": "ช่วงคืนของบอท — เข้าไม้ไม่ได้",
+    "cutoff_block": "ช่วงตัดรอบ — เข้าไม้ไม่ได้",
+    "universe": "เหรียญนี้อยู่นอกจักรวาลบอทเข้าไม้",
+    "non_jv_order": "มีออเดอร์ที่ไม่ใช่ jv- บนสัญลักษณ์นี้",
+    "quick_open": MSG_QUICK_OPEN,
+    "open_watch": "มีไม้หลักเฝ้าอยู่บนสัญลักษณ์นี้",
+    "in_flight": "มีคำสั่งของบอทค้างบนสัญลักษณ์นี้",
+    "same_side_cap": "เต็มเพดานจำนวนไม้ quick ฝั่งเดียวกัน",
+    "stop_buffer": "stop ใกล้ราคาเกินไป",
+    "stop_wrong_side": "stop อยู่ผิดฝั่ง",
+    "fee_r": "ค่าธรรมเนียมเทียบระยะ stop สูงเกินไป",
+    "quick_cap": "เต็มเพดานความเสี่ยง quick",
+    "portfolio_cap": "เต็มเพดานความเสี่ยงรวม",
+    "cfg_changed": "ค่าตั้งเปลี่ยน — กด 🔄 อัปเดตราคา",
 }
 
 
@@ -1992,6 +2023,240 @@ def _confirm_guards_entry(
     return None
 
 
+def _confirm_guards_quick_entry(
+    conn: Any,
+    intent: dict[str, Any],
+    trade: BinanceTradeClient,
+    *,
+    now_ms_value: int,
+) -> str | None:
+    """Fresh post-claim guards for origin=quick. Returns a reason code or None."""
+    from jarvise_assist.quick_config import effective_quick_values, get_quick_config
+    from jarvise_assist.quick_execute import (
+        MSG_CFG_CHANGED,
+        any_non_jv_open_order,
+        cfg_became_stricter,
+        check_quick_and_portfolio_caps,
+        in_entry_block_for_bot,
+        in_quick_bot_night,
+        pause_blocks_bot,
+        quick_chase_exceeded,
+        quick_execute_enabled,
+        quick_stop_buffer_ok,
+        same_side_blocks,
+        symbol_busy_for_bot,
+        symbol_in_quick_exec_universe,
+    )
+
+    # Design: 29.9 s valid / 30 s expired (inclusive at the TTL boundary).
+    if int(intent["expires_at_ms"]) <= int(now_ms_value):
+        return "expired"
+    if not quick_execute_enabled() or assist_execute_mode() == "off":
+        return "disabled"
+    if _kill_blocks():
+        return "kill_switch"
+    if pause_blocks_bot(conn, now_ms=now_ms_value):
+        return "paused"
+    cfg_view = get_quick_config(conn)
+    values = cfg_view.values
+    if in_quick_bot_night(
+        now_ms_value,
+        start=str(values["quick_night_start"]),
+        end=str(values["quick_night_end"]),
+    ):
+        return "night"
+    if in_entry_block_for_bot(now_ms_value):
+        return "cutoff_block"
+
+    preview_raw = intent.get("preview")
+    preview: dict[str, Any] = preview_raw if isinstance(preview_raw, dict) else {}
+    symbol = str(intent["symbol"])
+    side = str(intent["side"])
+    cfg_raw = preview.get("cfg")
+    frozen_cfg: dict[str, Any] = cfg_raw if isinstance(cfg_raw, dict) else {}
+    if frozen_cfg and cfg_became_stricter(frozen_cfg, values):
+        return "cfg_changed"
+
+    universe = str(values.get("quick_exec_universe") or "core_explore")
+    if not symbol_in_quick_exec_universe(conn, symbol, universe=universe):
+        return "universe"
+
+    busy = symbol_busy_for_bot(conn, symbol)
+    # Registration does not exist yet — busy for open Quick/watch/in-flight only.
+    if busy in {"open_watch", "in_flight"}:
+        return busy
+    if busy == "quick_open":
+        # Allow if the only open item is ourselves after a prior partial path; else refuse.
+        return "quick_open"
+    if same_side_blocks(conn, side):
+        return "same_side_cap"
+
+    positions = trade.position_risk()
+    if any(str(p.symbol).upper() == symbol.upper() for p in positions):
+        return "open_position"
+    try:
+        orders = list(trade.all_open_orders())
+    except AttributeError:
+        orders = [*trade.open_orders(), *trade.open_algo_orders()]
+    if any_non_jv_open_order(orders, symbol):
+        return "non_jv_order"
+
+    entry = Decimal(str(preview["entry"]))
+    stop = Decimal(str(preview["stop"]))
+    preview_qty = Decimal(str(preview["qty"]))
+    risk_pct = Decimal(str(preview.get("risk_pct_used") or frozen_cfg.get("risk_used") or "0.5"))
+    fee_bps = Decimal(str(frozen_cfg.get("quick_fee_bps_per_side") or values["quick_fee_bps_per_side"]))
+    chase_r = Decimal(str(frozen_cfg.get("quick_chase_r") or values["quick_chase_r"]))
+    buf_pct = Decimal(str(frozen_cfg.get("quick_stop_buffer_pct") or values["quick_stop_buffer_pct"]))
+    buf_ticks = int(frozen_cfg.get("quick_stop_buffer_ticks") or values["quick_stop_buffer_ticks"])
+    max_fee_r = Decimal(str(frozen_cfg.get("quick_max_fee_r") or values["quick_max_fee_r"]))
+    lev_cap = int(effective_quick_values(cfg_view)["lev_used"])
+    if frozen_cfg.get("lev_used") is not None:
+        lev_cap = min(lev_cap, int(frozen_cfg["lev_used"]))
+
+    mark = trade.mark_price(symbol)
+    if quick_chase_exceeded(side=side, entry=entry, stop=stop, mark=mark, chase_r=chase_r):
+        return "chase"
+
+    filters = trade.symbol_filters(symbol)
+    if not quick_stop_buffer_ok(
+        side=side,
+        mark=mark,
+        stop=stop,
+        tick=filters.tick_size,
+        buffer_pct=buf_pct,
+        buffer_ticks=buf_ticks,
+    ):
+        return "stop_buffer"
+    r_dist = abs(mark - stop)
+    if r_dist <= 0:
+        return "stop_wrong_side"
+    if side == "long" and stop >= mark:
+        return "stop_wrong_side"
+    if side == "short" and stop <= mark:
+        return "stop_wrong_side"
+    from jarvise_assist.sizing import round_trip_fee_rate
+
+    fee_r = (round_trip_fee_rate(fee_bps) * mark) / r_dist
+    if fee_r > max_fee_r:
+        return "fee_r"
+
+    balance, available = trade.usdt_wallet_and_available()
+    resized = size_signal(
+        symbol=symbol,
+        side=side,
+        entry=mark,
+        stop=stop,
+        balance=balance,
+        risk_pct=risk_pct,
+        step_size=filters.step_size,
+        fee_bps_per_side=fee_bps,
+    )
+    if resized is None:
+        return "below_min_notional"
+    qty = min(resized.qty, preview_qty)
+    if qty <= 0:
+        return "below_min_notional"
+    if below_min_notional(
+        qty=qty,
+        notional=qty * mark,
+        min_qty=filters.min_qty,
+        min_notional=filters.min_notional,
+    ):
+        return "below_min_notional"
+
+    loss_at_stop = qty * abs(mark - stop)
+    budget = balance * (risk_pct / Decimal("100")) if balance > 0 else Decimal("0")
+    if budget > 0 and real_stop_loss_usdt(qty=qty, entry=mark, stop=stop, fee_bps_per_side=fee_bps) > budget:
+        return "below_min_notional"
+
+    cap_pct = Decimal(str(frozen_cfg.get("quick_risk_cap_pct") or values["quick_risk_cap_pct"]))
+    # Cap check must not count a registration that does not exist yet.
+    cap_hit = check_quick_and_portfolio_caps(
+        conn,
+        balance=balance,
+        new_risk=loss_at_stop,
+        positions=positions,
+        orders=orders,
+        now_ms=now_ms_value,
+        cap_pct=cap_pct,
+    )
+    if cap_hit:
+        return cap_hit
+
+    notional = qty * mark
+    uncapped = int(math.ceil(float(notional / balance))) if balance > 0 else int(preview.get("leverage") or 1)
+    leverage = min(uncapped, lev_cap) if uncapped > 0 else 1
+    sized = dc_replace(
+        resized,
+        entry=mark,
+        stop=stop,
+        target=Decimal(str(preview.get("t1") or preview.get("target") or mark)),
+        qty=qty,
+        notional=notional,
+        loss_at_stop=loss_at_stop,
+        r_distance=abs(mark - stop),
+        leverage=leverage,
+        leverage_capped=uncapped > lev_cap,
+        uncapped_leverage=max(1, uncapped),
+        step_size=filters.step_size,
+        balance_usdt=balance,
+        budget_usdt=budget if budget > 0 else resized.budget_usdt,
+    )
+    cand = SignalCandidate(sized=sized, confidence=1.0, symbol_rank=0)
+    admitted, dropped = assign_shared_leverage([cand], available_balance=available, max_leverage=leverage)
+    if dropped or not admitted:
+        return "margin_cap"
+    final = admitted[0].sized
+
+    t1 = Decimal(str(preview.get("t1") or preview.get("target") or "0"))
+    tp1_pct = Decimal(str(frozen_cfg.get("quick_tp1_close_pct") or values["quick_tp1_close_pct"]))
+    close_q, _leave_q, refuse = half_close_legs(
+        final.qty,
+        step=filters.step_size,
+        min_qty=filters.min_qty,
+        min_notional=filters.min_notional,
+        mark=t1 if t1 > 0 else mark,
+        close_pct=tp1_pct,
+    )
+    tp_half = close_q if refuse is None and tp1_pct > 0 else None
+
+    updated_preview = {
+        **preview,
+        "qty": str(final.qty),
+        "confirm_entry": str(final.entry),
+        "stop": str(stop),
+        "t1": str(t1),
+        "target": str(t1),
+        "tp_half_qty": str(tp_half) if tp_half is not None else None,
+        "tp_refuse": refuse,
+        "notional": str(final.notional),
+        "leverage": int(final.leverage),
+        "loss_at_stop": str(final.loss_at_stop),
+        "r_distance": str(final.r_distance),
+        "risk_pct_used": str(risk_pct),
+    }
+    try:
+        update_exec_intent_preview(conn, str(intent["id"]), updated_preview)
+        intent["preview"] = updated_preview
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("quick update_exec_intent_preview failed type=%s", type(exc).__name__)
+        return "below_min_notional"
+    try:
+        set_exec_intent_ref(
+            conn,
+            str(intent["id"]),
+            ref_price=str(mark),
+            ref_source="confirm_mark",
+            ref_at_ms=int(now_ms_value),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("quick set_exec_intent_ref failed type=%s", type(exc).__name__)
+    # Silence unused import warning path for MSG_CFG_CHANGED (mapped in _reason_th).
+    _ = MSG_CFG_CHANGED
+    return None
+
+
 def _placement_log_client_ids(conn: Any, intent_id: str) -> set[str]:
     """Client ids that have a stop or recover_slr placement row."""
     rows = conn.execute(
@@ -2390,16 +2655,22 @@ def run_entry_sequence(
     *,
     trade: BinanceTradeClient,
     sleep: Callable[[float], None] = time.sleep,
+    origin: str | None = None,
 ) -> str:
     intent = get_exec_intent(conn, intent_id)
     if intent is None:
         return _exec_result("ไม่พบคำสั่ง", status="failed")
     preview = intent["preview"]
+    if not isinstance(preview, dict):
+        preview = {}
+    preview_origin = str(preview.get("origin") or "") or None
+    origin = origin or preview_origin
+    is_quick = origin == "quick"
     symbol = str(intent["symbol"])
     side = str(intent["side"])
     qty = Decimal(str(preview["qty"]))
     stop = Decimal(str(preview["stop"]))
-    target = Decimal(str(preview["target"]))
+    target = Decimal(str(preview.get("target") or preview.get("t1") or "0"))
     leverage = int(preview["leverage"])
     filters = trade.symbol_filters(symbol)
     stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
@@ -2619,42 +2890,105 @@ def run_entry_sequence(
         )
 
     tp_note = ""
-    tcid = client_order_id(intent_id, "tp")
-    try:
-        algo_tp = trade.place_algo_stop(
-            symbol=symbol,
-            side=close_side,
-            qty=exec_qty,
-            trigger=target,
-            order_type="TAKE_PROFIT_MARKET",
-            client_id=tcid,
-        )
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step="tp",
-            endpoint="/fapi/v1/algoOrder",
-            client_order_id=tcid,
-            http_status=200,
-            order_or_algo_id=str(algo_tp.get("algoId") or ""),
-        )
-    except Exception as exc:  # noqa: BLE001
-        code = exc.binance_code if isinstance(exc, TradeClientError) else None
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step="tp",
-            endpoint="/fapi/v1/algoOrder",
-            client_order_id=tcid,
-            http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
-            binance_code=code,
-        )
-        if not _is_clear_rejection(exc):
-            found_tp = _safe_find_algo(trade, symbol=symbol, client_id=tcid)
-            if found_tp is None:
-                tp_note = f"\n{MSG_TP_KEEP}"
+    tp_qty_used: Decimal | None = None
+    if is_quick:
+        # (a) TP1 share only — never a full-qty TP by default. SL stays on full qty.
+        qcfg_raw = preview.get("cfg")
+        qcfg: dict[str, Any] = qcfg_raw if isinstance(qcfg_raw, dict) else {}
+        tp1_pct = Decimal(str(qcfg.get("quick_tp1_close_pct") or "50"))
+        t1 = Decimal(str(preview.get("t1") or target))
+        # Prefer avg for TP1 distance when known; else preview entry.
+        base_px = avg if (avg is not None and avg > 0) else Decimal(str(preview.get("entry") or stop))
+        r_dist = abs(base_px - stop)
+        tp1_r = Decimal(str(qcfg.get("quick_tp1_r") or "1"))
+        if side == "long":
+            t1 = base_px + tp1_r * r_dist
         else:
-            tp_note = f"\n{MSG_TP_KEEP}"
+            t1 = base_px - tp1_r * r_dist
+        t1 = round_level_to_tick(t1, filters.tick_size, side=side, kind="target")
+        close_q, _leave, refuse = half_close_legs(
+            exec_qty,
+            step=filters.step_size,
+            min_qty=filters.min_qty,
+            min_notional=filters.min_notional,
+            mark=t1,
+            close_pct=tp1_pct,
+        )
+        if refuse is None and tp1_pct > 0 and close_q > 0:
+            tp_qty_used = close_q
+            tcid = client_order_id(intent_id, "tp")
+            try:
+                algo_tp = trade.place_algo_stop(
+                    symbol=symbol,
+                    side=close_side,
+                    qty=close_q,
+                    trigger=t1,
+                    order_type="TAKE_PROFIT_MARKET",
+                    client_id=tcid,
+                )
+                _log_write(
+                    conn,
+                    intent_id=intent_id,
+                    step="tp",
+                    endpoint="/fapi/v1/algoOrder",
+                    client_order_id=tcid,
+                    http_status=200,
+                    order_or_algo_id=str(algo_tp.get("algoId") or ""),
+                )
+            except Exception as exc:  # noqa: BLE001
+                code = exc.binance_code if isinstance(exc, TradeClientError) else None
+                _log_write(
+                    conn,
+                    intent_id=intent_id,
+                    step="tp",
+                    endpoint="/fapi/v1/algoOrder",
+                    client_order_id=tcid,
+                    http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+                    binance_code=code,
+                )
+                tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
+                # Intent outcome is not "failed" — SL protects.
+        else:
+            tp_note = "\nไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"
+            t1 = target
+        target = t1
+    else:
+        tcid = client_order_id(intent_id, "tp")
+        try:
+            algo_tp = trade.place_algo_stop(
+                symbol=symbol,
+                side=close_side,
+                qty=exec_qty,
+                trigger=target,
+                order_type="TAKE_PROFIT_MARKET",
+                client_id=tcid,
+            )
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="tp",
+                endpoint="/fapi/v1/algoOrder",
+                client_order_id=tcid,
+                http_status=200,
+                order_or_algo_id=str(algo_tp.get("algoId") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            code = exc.binance_code if isinstance(exc, TradeClientError) else None
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="tp",
+                endpoint="/fapi/v1/algoOrder",
+                client_order_id=tcid,
+                http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+                binance_code=code,
+            )
+            if not _is_clear_rejection(exc):
+                found_tp = _safe_find_algo(trade, symbol=symbol, client_id=tcid)
+                if found_tp is None:
+                    tp_note = f"\n{MSG_TP_KEEP}"
+            else:
+                tp_note = f"\n{MSG_TP_KEEP}"
 
     # RESULT can return avgPrice "0.000000". Recover after stop/TP so a slow query
     # cannot leave the position unprotected.
@@ -2685,7 +3019,8 @@ def run_entry_sequence(
 
     # Live-only: link watch / mark signal taken. Testnet must not touch live watch.
     # Never write entry=0 when fill price is still unknown.
-    if assist_execute_mode() == "live":
+    # (b) Quick origin: skip mark_signal_taken and assist_watch_position INSERT.
+    if assist_execute_mode() == "live" and not is_quick:
         signal_id = preview.get("signal_id")
         if signal_id:
             try:
@@ -2737,6 +3072,32 @@ def run_entry_sequence(
     side_l = "LONG" if side == "long" else "SHORT"
     stop_s = _fmt_price_tick(stop, filters.tick_size)
     target_s = _fmt_price_tick(target, filters.tick_size)
+    # (c) Quick-specific Thai success text.
+    if is_quick:
+        lev = int(preview.get("leverage") or leverage)
+        if avg is None or avg <= 0:
+            tp_line = f"TP1 {target_s} × {fmt_qty(tp_qty_used)}" if tp_qty_used is not None else "ไม่มี TP1"
+            return _exec_result(
+                f"✅ Quick เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\n"
+                f"SL {stop_s} · {tp_line} · lev {lev}x{tp_note}",
+                status="done",
+            )
+        loss = abs(avg - stop) * exec_qty
+        avg_s = _fmt_price_tick(avg, filters.tick_size)
+        if tp_qty_used is not None:
+            tp_line = f"TP1 {target_s} × {fmt_qty(tp_qty_used)}"
+        else:
+            tp_line = "ไม่มี TP1"
+        return _exec_result(
+            (
+                f"✅ Quick เข้า {symbol} {side_l}\n"
+                f"fill {avg_s} × {exec_qty}\n"
+                f"SL {stop_s} · {tp_line} · lev {lev}x\n"
+                f"ถ้าชน stop ≈ {loss.quantize(Decimal('0.01'))} USDT"
+                f"{tp_note}"
+            ),
+            status="done",
+        )
     if avg is None or avg <= 0:
         return _exec_result(
             f"✅ เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\n"
@@ -4330,7 +4691,18 @@ def handle_exec_callback(
         return {"ok": True, "preview": intent_id}
 
     if data.startswith(("ec:", "ey:")):
-        if not execution_buttons_enabled(conn):
+        quick_origin = False
+        if data.startswith("ey:"):
+            early_ey = get_exec_intent(conn, data[3:])
+            early_prev = (early_ey or {}).get("preview") or {}
+            quick_origin = isinstance(early_prev, dict) and early_prev.get("origin") == "quick"
+        if quick_origin:
+            # D5: Quick bot ignores main assistant enabled; needs QUICK_EXECUTE + mode.
+            if not quick_execute_enabled() or assist_execute_mode() == "off":
+                answer("ปิดอยู่")
+                send(MSG_OFF)
+                return {"ok": False, "reason": "off"}
+        elif not execution_buttons_enabled(conn):
             answer("ปิดอยู่")
             send(MSG_OFF)
             return {"ok": False, "reason": "off"}
@@ -4820,22 +5192,28 @@ def handle_exec_callback(
 
             try:
                 if prefix == "ey:":
+                    preview_ey_raw = intent.get("preview")
+                    preview_ey: dict[str, Any] = preview_ey_raw if isinstance(preview_ey_raw, dict) else {}
+                    is_quick_ey = preview_ey.get("origin") == "quick"
                     try:
-                        stale = _stale_card_levels(conn, intent, client, now_ms_value=ts)
-                        if stale:
-                            text = _reason_th(stale)
-                            finish_exec_intent(
-                                conn,
-                                intent_id,
-                                status="expired",
-                                result_text=text,
-                                expect_status="confirmed",
-                            )
-                            if mid is not None:
-                                edit(int(mid), text, reply_markup={"inline_keyboard": []})
-                            send(text)
-                            return {"ok": False, "reason": stale}
-                        guard = _confirm_guards_entry(conn, intent, client, now_ms_value=ts)
+                        if not is_quick_ey:
+                            stale = _stale_card_levels(conn, intent, client, now_ms_value=ts)
+                            if stale:
+                                text = _reason_th(stale)
+                                finish_exec_intent(
+                                    conn,
+                                    intent_id,
+                                    status="expired",
+                                    result_text=text,
+                                    expect_status="confirmed",
+                                )
+                                if mid is not None:
+                                    edit(int(mid), text, reply_markup={"inline_keyboard": []})
+                                send(text)
+                                return {"ok": False, "reason": stale}
+                            guard = _confirm_guards_entry(conn, intent, client, now_ms_value=ts)
+                        else:
+                            guard = _confirm_guards_quick_entry(conn, intent, client, now_ms_value=ts)
                     except (httpx.HTTPError, ProviderError) as exc:
                         logger.warning("confirm guards network error %s", type(exc).__name__)
                         text = _preorder_fail_text(prefix)
@@ -4852,7 +5230,7 @@ def handle_exec_callback(
                         return {"ok": False, "reason": "binance_unreachable"}
                     if guard:
                         text = _reason_th(guard)
-                        status = "expired" if guard == "expired" else "failed"
+                        status = "expired" if guard in {"expired", "cfg_changed"} else "failed"
                         finish_exec_intent(
                             conn,
                             intent_id,
@@ -4866,7 +5244,89 @@ def handle_exec_callback(
                         else:
                             send(text)
                         return {"ok": False, "reason": guard}
-                    result = run_entry_sequence(conn, intent_id, trade=client)
+                    if is_quick_ey and assist_execute_mode() == "live":
+                        # One SQLite transaction: registration + card → registered BEFORE exchange.
+                        from jarvise_assist.quick import create_quick_registration
+
+                        try:
+                            if not conn.in_transaction:
+                                conn.execute("BEGIN")
+                            rid, reg_reason = create_quick_registration(
+                                conn,
+                                symbol=str(intent["symbol"]),
+                                side=str(intent["side"]),
+                                planned_entry=float(preview_ey.get("confirm_entry") or preview_ey["entry"]),
+                                planned_stop=float(preview_ey["stop"]),
+                                qty=float(preview_ey["qty"]),
+                                now_ms=ts,
+                                commit=False,
+                                exec_intent_id=intent_id,
+                            )
+                            if rid is None:
+                                conn.rollback()
+                                text = _reason_th(str(reg_reason or "size_failed"))
+                                finish_exec_intent(
+                                    conn,
+                                    intent_id,
+                                    status="failed",
+                                    result_text=text,
+                                    expect_status="confirmed",
+                                )
+                                send(text)
+                                return {"ok": False, "reason": reg_reason}
+                            card_id = preview_ey.get("card_id")
+                            if card_id:
+                                conn.execute(
+                                    """
+                                    UPDATE assist_quick_card
+                                    SET status='registered', registration_id=?, updated_at_ms=?
+                                    WHERE id=? AND status='quoted'
+                                    """,
+                                    (rid, int(ts), str(card_id)),
+                                )
+                            _log_write(
+                                conn,
+                                intent_id=intent_id,
+                                step="quick_registration",
+                                endpoint="local",
+                                http_status=200,
+                                order_or_algo_id=rid,
+                            )
+                            conn.commit()
+                        except Exception:  # noqa: BLE001
+                            logger.exception("quick registration before entry failed")
+                            try:
+                                conn.rollback()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            text = MSG_BINANCE_NOT_SENT
+                            finish_exec_intent(
+                                conn,
+                                intent_id,
+                                status="failed",
+                                result_text=text,
+                                expect_status="confirmed",
+                            )
+                            send(text)
+                            return {"ok": False, "reason": "registration_failed"}
+                    result = run_entry_sequence(
+                        conn,
+                        intent_id,
+                        trade=client,
+                        origin="quick" if is_quick_ey else None,
+                    )
+                    if is_quick_ey:
+                        status_r = (
+                            result.status
+                            if isinstance(result, ExecResult)
+                            else ("done" if str(result).startswith("✅") else "failed")
+                        )
+                        if status_r == "failed":
+                            from jarvise_assist.quick_execute import (
+                                expire_quick_registration_for_intent,
+                            )
+
+                            expire_quick_registration_for_intent(conn, intent_id, now_ms=ts)
                     return _finish_send(result)
 
                 if prefix == "ms:":
@@ -5095,6 +5555,12 @@ def _recovery_notify(
         result_text=text,
         expect_status=expect_status,
     )
+    if wrote and status in {"failed", "expired", "not_found"}:
+        preview = (prev or {}).get("preview") if isinstance((prev or {}).get("preview"), dict) else {}
+        if isinstance(preview, dict) and preview.get("origin") == "quick":
+            from jarvise_assist.quick_execute import expire_quick_registration_for_intent
+
+            expire_quick_registration_for_intent(conn, intent_id, now_ms=now_ms())
     if wrote and send is not None and text != prev_text:
         send(text)
 
