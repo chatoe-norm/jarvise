@@ -498,7 +498,67 @@ def sync_quick_trades(
             if exec_intent_id and not bot_order_id:
                 if int(now_ms) <= created + UNRESOLVED_EXEC_KEEP_MS:
                     continue
-                # Bound elapsed with still-unresolved orderId → expire as no_fill.
+                # Past keep window: read-only resolve of jv-<short>-mkt, then
+                # still-open check. Expire only when resolve fails AND flat.
+                if bot_client_id:
+                    try:
+                        qfn = getattr(client, "query_order_by_client_id", None)
+                        if callable(qfn):
+                            try:
+                                order = qfn(symbol=sym, client_id=bot_client_id)
+                            except TypeError:
+                                order = qfn(bot_client_id)
+                            if isinstance(order, dict):
+                                oid = str(order.get("orderId") or "") or None
+                                if oid:
+                                    bot_order_id = oid
+                                    after = [f for f in fills if str(f.get("orderId") or "") == bot_order_id]
+                                    after.sort(
+                                        key=lambda r: (
+                                            int(r.get("time") or 0),
+                                            int(r.get("id") or 0),
+                                        )
+                                    )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("quick sync mkt order resolve failed intent=%s", exec_intent_id)
+                if after:
+                    pass  # fall through to tagging with resolved orderId
+                else:
+                    still_open = False
+                    try:
+                        pos_fn = getattr(client, "position_risk", None)
+                        if callable(pos_fn):
+                            try:
+                                live = pos_fn(symbol=sym)
+                            except TypeError:
+                                live = pos_fn()
+                            still_open = any(
+                                str(getattr(p, "symbol", "") or "").upper() == sym for p in (live or [])
+                            )
+                        else:
+                            # No position reader → keep (fail closed for attribution).
+                            still_open = True
+                    except Exception:  # noqa: BLE001
+                        still_open = True
+                    if still_open:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE assist_quick_registration
+                        SET status='expired', updated_at_ms=?
+                        WHERE id=?
+                        """,
+                        (int(now_ms), rid),
+                    )
+                    conn.commit()
+                    info["expired"] += 1
+                    _send_reg_expire_notice(
+                        send,
+                        sym=sym,
+                        side=side,
+                        kind="no_fill",
+                    )
+                    continue
             elif int(now_ms) <= expires + REG_EXPIRE_GRACE_MS:
                 continue
             elif exec_intent_id:
@@ -519,23 +579,41 @@ def sync_quick_trades(
                     still_open = True
                 if still_open:
                     continue
-            conn.execute(
-                """
-                UPDATE assist_quick_registration
-                SET status='expired', updated_at_ms=?
-                WHERE id=?
-                """,
-                (int(now_ms), rid),
-            )
-            conn.commit()
-            info["expired"] += 1
-            _send_reg_expire_notice(
-                send,
-                sym=sym,
-                side=side,
-                kind="no_fill",
-            )
-            continue
+                conn.execute(
+                    """
+                    UPDATE assist_quick_registration
+                    SET status='expired', updated_at_ms=?
+                    WHERE id=?
+                    """,
+                    (int(now_ms), rid),
+                )
+                conn.commit()
+                info["expired"] += 1
+                _send_reg_expire_notice(
+                    send,
+                    sym=sym,
+                    side=side,
+                    kind="no_fill",
+                )
+                continue
+            else:
+                conn.execute(
+                    """
+                    UPDATE assist_quick_registration
+                    SET status='expired', updated_at_ms=?
+                    WHERE id=?
+                    """,
+                    (int(now_ms), rid),
+                )
+                conn.commit()
+                info["expired"] += 1
+                _send_reg_expire_notice(
+                    send,
+                    sym=sym,
+                    side=side,
+                    kind="no_fill",
+                )
+                continue
 
         first = after[0]
         first_side = str(first.get("side") or "").upper()

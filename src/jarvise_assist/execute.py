@@ -2711,6 +2711,7 @@ def _emergency_close_reply(
     sleep: Callable[[float], None],
     unresolved_as_unknown: bool = False,
     mkt_client_id: str | None = None,
+    keep_unknown_if_not_final: bool = False,
 ) -> ExecResult:
     closed = _emergency_close_verified(
         trade,
@@ -2731,7 +2732,10 @@ def _emergency_close_reply(
         text = f"{MSG_STOP_CLOSED} ({stop_err or 'stop failed'})"
         if not cancel_ok:
             text = f"{text}\n{_orphan_cancel_warning(symbol)}"
-        return _exec_result(text, status="failed")
+        # Non-terminal Quick entry: keep unknown so recovery watches for late fills.
+        # Main callers leave keep_unknown_if_not_final=False → failed (5608315).
+        status = "unknown" if keep_unknown_if_not_final else "failed"
+        return _exec_result(text, status=status)
     remain_qty = qty
     try:
         still = trade.position_risk(symbol=symbol)
@@ -3003,6 +3007,7 @@ def run_entry_sequence(
             sleep=sleep,
             unresolved_as_unknown=is_quick,
             mkt_client_id=cid if is_quick else None,
+            keep_unknown_if_not_final=is_quick and not order_final,
         )
     if _position_flat_now(trade, symbol=symbol) is True:
         if is_quick and not order_final:
@@ -6011,6 +6016,7 @@ def _recover_entry_intent(
             sleep=sleep,
             unresolved_as_unknown=is_quick_recover,
             mkt_client_id=cid if is_quick_recover else None,
+            keep_unknown_if_not_final=is_quick_recover and not order_final,
         )
         _recovery_notify(
             send,
@@ -6059,6 +6065,7 @@ def _recover_entry_intent(
         sleep=sleep,
         unresolved_as_unknown=is_quick_recover,
         mkt_client_id=cid if is_quick_recover else None,
+        keep_unknown_if_not_final=is_quick_recover and not order_final,
     )
     _recovery_notify(
         send,

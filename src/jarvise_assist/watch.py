@@ -1572,20 +1572,22 @@ def _cleanup_exec_linked_quick_jv(
         if any(str(p.symbol).upper() == qsym for p in live):
             continue
         try:
-            ids, _ok = cancel_jv_orders_for_symbol(trade, qsym, intent_id=str(intent_id))
+            ids, cancel_ok = cancel_jv_orders_for_symbol(trade, qsym, intent_id=str(intent_id))
         except Exception:  # noqa: BLE001
             logger.exception("exec-linked quick jv- cancel failed for %s", qsym)
             continue
-        # Mark done even when zero orders cancelled so retries are bounded.
-        insert_exec_log(
-            conn,
-            intent_id=str(intent_id),
-            step=QUICK_JV_CLEANUP_STEP,
-            endpoint="local",
-            client_order_id=None,
-            http_status=200,
-            created_at_ms=int(now_ms),
-        )
+        # Only mark complete when every cancel was confirmed; failed attempts retry
+        # on a later pass (bounded by RECOVER_MAX_AGE_MS). Zero ids + ok still marks.
+        if cancel_ok:
+            insert_exec_log(
+                conn,
+                intent_id=str(intent_id),
+                step=QUICK_JV_CLEANUP_STEP,
+                endpoint="local",
+                client_order_id=None,
+                http_status=200,
+                created_at_ms=int(now_ms),
+            )
         for algo_id in ids:
             cancelled.append({"symbol": qsym, "algo_id": str(algo_id)})
     return cancelled
