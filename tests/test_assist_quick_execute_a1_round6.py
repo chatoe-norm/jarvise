@@ -309,11 +309,14 @@ def test_r6_sync_past_keep_open_position_kept(tmp_path: Path, monkeypatch: pytes
     assert rid is not None, reason
 
     class _OpenClient:
-        def position_risk(self, symbol: str | None = None) -> list[Any]:
+        def position_risk(self, *, symbol: str | None = None) -> list[Any]:
             return [_Pos("BTCUSDT", "long", "0.05", "100")]
 
-        def query_order_by_client_id(self, *, symbol: str, client_id: str) -> dict[str, Any]:
-            raise TradeClientError("Order does not exist.", http_status=400, binance_code=-2013)
+        def all_orders(self, symbol: str, **_kw: Any) -> list[dict[str, Any]]:
+            return []
+
+        def user_trades(self, symbol: str, **_kw: Any) -> list[dict[str, Any]]:
+            return []
 
     monkeypatch.setattr(qmod, "fetch_all_user_trades", lambda *_a, **_k: [])
     monkeypatch.setattr(qmod, "fetch_income_range", lambda *_a, **_k: [])
@@ -396,21 +399,27 @@ def test_r6_sync_past_keep_resolve_tags_fills(tmp_path: Path, monkeypatch: pytes
 
     class _ResolveClient:
         def __init__(self) -> None:
-            self.resolve_calls = 0
+            self.all_orders_calls = 0
 
-        def position_risk(self, symbol: str | None = None) -> list[Any]:
+        def position_risk(self, *, symbol: str | None = None) -> list[Any]:
             return []
 
-        def query_order_by_client_id(self, *, symbol: str, client_id: str) -> dict[str, Any]:
-            self.resolve_calls += 1
-            assert client_id == mkt_cid
-            return {
-                "orderId": 777001,
-                "status": "FILLED",
-                "executedQty": "0.05",
-                "avgPrice": "100",
-                "clientOrderId": client_id,
-            }
+        def all_orders(self, symbol: str, **_kw: Any) -> list[dict[str, Any]]:
+            self.all_orders_calls += 1
+            return [
+                {
+                    "orderId": 777001,
+                    "status": "FILLED",
+                    "executedQty": "0.05",
+                    "avgPrice": "100",
+                    "clientOrderId": mkt_cid,
+                    "time": buy_t,
+                    "updateTime": buy_t,
+                }
+            ]
+
+        def user_trades(self, symbol: str, **_kw: Any) -> list[dict[str, Any]]:
+            return []
 
     client = _ResolveClient()
     monkeypatch.setattr(qmod, "fetch_all_user_trades", lambda *_a, **_k: list(fills))
@@ -421,7 +430,7 @@ def test_r6_sync_past_keep_resolve_tags_fills(tmp_path: Path, monkeypatch: pytes
         now_ms=created + UNRESOLVED_EXEC_KEEP_MS + 1,
         send=lambda *_a, **_k: True,
     )
-    assert client.resolve_calls >= 1
+    assert client.all_orders_calls >= 1
     reg = conn.execute("SELECT status, trade_id FROM assist_quick_registration WHERE id=?", (rid,)).fetchone()
     assert reg is not None
     assert reg["status"] == "tagged", reg["status"]
@@ -468,11 +477,14 @@ def test_r6_sync_past_keep_flat_resolve_miss_expires(tmp_path: Path, monkeypatch
     assert rid is not None, reason
 
     class _FlatMissClient:
-        def position_risk(self, symbol: str | None = None) -> list[Any]:
+        def position_risk(self, *, symbol: str | None = None) -> list[Any]:
             return []
 
-        def query_order_by_client_id(self, *, symbol: str, client_id: str) -> dict[str, Any]:
-            raise TradeClientError("Order does not exist.", http_status=400, binance_code=-2013)
+        def all_orders(self, symbol: str, **_kw: Any) -> list[dict[str, Any]]:
+            return []
+
+        def user_trades(self, symbol: str, **_kw: Any) -> list[dict[str, Any]]:
+            return []
 
     monkeypatch.setattr(qmod, "fetch_all_user_trades", lambda *_a, **_k: [])
     monkeypatch.setattr(qmod, "fetch_income_range", lambda *_a, **_k: [])

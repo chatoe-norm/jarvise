@@ -363,7 +363,13 @@ def test_r5_sync_keeps_unresolved_exec_linked_when_flat(
     assert rid is not None, reason
 
     class _FlatClient:
-        def position_risk(self, symbol: str | None = None) -> list[Any]:
+        def position_risk(self, *, symbol: str | None = None) -> list[Any]:
+            return []
+
+        def all_orders(self, symbol: str, **_kw: Any) -> list[dict[str, Any]]:
+            return []
+
+        def user_trades(self, symbol: str, **_kw: Any) -> list[dict[str, Any]]:
             return []
 
     # Fills lack clientOrderId and we have no orderId → after stays empty.
