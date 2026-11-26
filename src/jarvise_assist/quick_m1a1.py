@@ -927,8 +927,8 @@ def handle_quick_trade_callback(
             return {"ok": False}
         side = "long" if side_code == "l" else "short"
 
-        # Extended form: qk:sd:<l|s>:<SYMBOL>:<issued_s>
-        if len(parts) >= 5:
+        # Extended form: qk:sd:<l|s>:<SYMBOL>:<issued_s> (exactly 5 parts)
+        if len(parts) == 5:
             sym = normalize_explore_symbol(parts[3].upper())
             if sym is None:
                 answer(MSG_BAD_BUTTON)

@@ -66,7 +66,11 @@ def validate_quick_symbol(raw: str, *, lookup: LookupFn) -> QuickSymbolResult:
             try:
                 hint_row = lookup(hint)
             except Exception:  # noqa: BLE001
-                hint_row = None
+                return QuickSymbolResult(
+                    outcome="lookup_error",
+                    symbol=symbol,
+                    message="อ่าน Binance ไม่ได้ — ลองพิมพ์ใหม่",
+                )
             if contract_rejection(hint_row) is None:
                 return QuickSymbolResult(
                     outcome="hint_1000",
