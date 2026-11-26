@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
+from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.messages import fmt_price, fmt_qty
 from jarvise_assist.order_lines import format_closing_order_line
@@ -25,9 +26,10 @@ from jarvise_assist.quick_errors import (
     e_setting_reject,
     e_setting_risk_over_cap,
 )
+from jarvise_assist.quick_tags import quick_symbols
 from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
 from jarvise_assist.sizing import portfolio_risk_cap_pct
-from jarvise_assist.store import ensure_settings
+from jarvise_assist.store import ensure_settings, list_explore_symbols
 
 logger = logging.getLogger(__name__)
 _BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
@@ -54,6 +56,55 @@ MSG_QUICK_SETTING_REJECT = e_setting_reject()
 MSG_QUICK_CONFIRM_STALE = e_confirm_stale()
 MSG_QUICK_SETTING_HINT_RISK = "พิมพ์ค่าเอง: q risk 0.6"
 MSG_QUICK_SETTING_HINT_CAP = "พิมพ์ค่าเอง: q cap 1.2"
+MSG_QUICK_SYMBOL_BUSY = "มีไม้ quick ของ {base} เปิดอยู่"
+
+
+def _cb(data: str) -> str:
+    raw = data.encode("utf-8")
+    if len(raw) > 64:
+        raise ValueError(f"callback_data exceeds 64 bytes: {data!r} ({len(raw)})")
+    return data
+
+
+def _symbol_base(sym: str) -> str:
+    s = str(sym).upper()
+    return s[:-4] if s.endswith("USDT") else s
+
+
+def quick_symbol_busy_toast(symbol: str) -> str:
+    return MSG_QUICK_SYMBOL_BUSY.format(base=_symbol_base(symbol))
+
+
+def build_coin_menu_keyboard(conn: Any) -> dict[str, Any]:
+    """Coin-first Quick menu keyboard (core + explore + other/close)."""
+    busy = quick_symbols(conn)
+    rows: list[list[dict[str, str]]] = []
+
+    def _chunk(buttons: list[dict[str, str]], n: int = 3) -> None:
+        for i in range(0, len(buttons), n):
+            rows.append(buttons[i : i + n])
+
+    core_btns: list[dict[str, str]] = []
+    for sym in ASSIST_SYMBOLS:
+        base = _symbol_base(sym)
+        if sym in busy:
+            core_btns.append({"text": f"⏳ {base}", "callback_data": _cb(f"qk:bz:{sym}")})
+        else:
+            core_btns.append({"text": base, "callback_data": _cb(f"qk:cs:{sym}")})
+    _chunk(core_btns)
+
+    explore_btns: list[dict[str, str]] = []
+    for sym in list_explore_symbols(conn):
+        base = _symbol_base(sym)
+        if sym in busy:
+            explore_btns.append({"text": f"⏳ {base}", "callback_data": _cb(f"qk:bz:{sym}")})
+        else:
+            explore_btns.append({"text": f"🧪 {base}", "callback_data": _cb(f"qk:cs:{sym}")})
+    if explore_btns:
+        _chunk(explore_btns)
+
+    rows.append([{"text": "✏️ เหรียญอื่น (พิมพ์รหัส)", "callback_data": _cb("qk:ot")}])
+    return {"inline_keyboard": rows}
 
 
 def get_quick_settings(conn: Any) -> dict[str, Any]:
@@ -1082,15 +1133,14 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
             }
         )
 
+    coin_kb = build_coin_menu_keyboard(conn)
     keyboard = {
         "inline_keyboard": [
-            [
-                {"text": "🟢 LONG", "callback_data": "qk:sd:l"},
-                {"text": "🔴 SHORT", "callback_data": "qk:sd:s"},
-            ],
+            *coin_kb["inline_keyboard"],
             risk_row,
             cap_row,
-            [{"text": "⚙️ ตั้งค่า quick", "callback_data": "qc:h"}],
+            [{"text": "⚙️ ตั้งค่า quick", "callback_data": _cb("qc:h")}],
+            [{"text": "✖️ ปิด", "callback_data": _cb("qk:mx")}],
         ]
     }
     return "\n".join(lines), keyboard

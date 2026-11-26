@@ -12,6 +12,7 @@ from jarvise_assist.quick import (
     MSG_QUICK_CONFIRM_STALE,
     QUICK_CONFIRM_FUTURE_S,
     QUICK_CONFIRM_TTL_S,
+    _cb,
     _fmt_fixed,
     get_quick_settings,
     write_quick_settings,
@@ -53,13 +54,6 @@ _CFG_CMD_RE = re.compile(
     re.I,
 )
 _RESERVED_CARD_WORDS = frozenset({"set", "settings", "setting", "config", "reset", "history", "risk", "cap"})
-
-
-def _cb(data: str) -> str:
-    raw = data.encode("utf-8")
-    if len(raw) > 64:
-        raise ValueError(f"callback_data exceeds 64 bytes: {data!r} ({len(raw)})")
-    return data
 
 
 def _fmt_one(v: Any) -> str:
@@ -210,13 +204,16 @@ def render_settings_home(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]
 
 
 def _phase_suffix(entry: ConfigEntry) -> str:
-    if entry.phase == "now":
+    if entry.phase in {"now", "A0b"}:
         return " · ใช้แล้ว"
-    if entry.phase == "A0b":
-        return " (ใช้ตั้งแต่ A0b)"
     if entry.phase == "A1":
         return " (ใช้ตั้งแต่ A1)"
     return " (A2)"
+
+
+def _parse_example(entry: ConfigEntry) -> str:
+    """Example value that round-trips through ``parse_value`` (not display-with-unit)."""
+    return canonical_string(entry.key, entry.default)
 
 
 def render_group(conn: Any, group: str, *, now_ms: int) -> tuple[str, dict[str, Any]]:
@@ -685,7 +682,7 @@ def handle_quick_config_callback(
             send("ไม่รู้จักคีย์นี้")
             return {"ok": False}
         set_awaiting_quick_input(conn, f"cfg:{entry.key}", until_ms=int(now_ms) + AWAITING_QUICK_TTL_MS)
-        send(f"พิมพ์ค่าสำหรับ {entry.alias} ภายใน 5 นาที (เช่น {_fmt_display(entry, entry.default)})")
+        send(f"พิมพ์ค่าสำหรับ {entry.alias} ภายใน 5 นาที (เช่น {_parse_example(entry)})")
         return {"ok": True, "awaiting": entry.key}
 
     if data.startswith("qc:d:"):
@@ -776,6 +773,8 @@ def handle_awaiting_quick_input(
     *,
     send: SendFn,
     now_ms: int,
+    lookup: Callable[[str], dict[str, Any] | None] | None = None,
+    futures: Any = None,
 ) -> dict[str, Any] | None:
     """Consume typed value while awaiting_quick_input is set. None → fall through."""
     settings = ensure_settings(conn)
@@ -786,10 +785,13 @@ def handle_awaiting_quick_input(
     if until is not None and int(now_ms) > int(until):
         clear_awaiting_quick_input(conn)
         return None
-    if not str(pending).startswith("cfg:"):
+    pending_s = str(pending)
+    if pending_s == "symbol":
+        return _handle_awaiting_symbol(conn, text, send=send, now_ms=now_ms, lookup=lookup, futures=futures)
+    if not pending_s.startswith("cfg:"):
         clear_awaiting_quick_input(conn)
         return None
-    key = str(pending)[4:]
+    key = pending_s[4:]
     clear_awaiting_quick_input(conn)
     return apply_quick_config_change(
         conn,
@@ -800,3 +802,54 @@ def handle_awaiting_quick_input(
         confirmed=False,
         source="text:await",
     )
+
+
+def _refresh_symbol_await(conn: Any, *, now_ms: int) -> None:
+    set_awaiting_quick_input(conn, "symbol", until_ms=int(now_ms) + AWAITING_QUICK_TTL_MS)
+
+
+def _handle_awaiting_symbol(
+    conn: Any,
+    text: str,
+    *,
+    send: SendFn,
+    now_ms: int,
+    lookup: Callable[[str], dict[str, Any] | None] | None,
+    futures: Any,
+) -> dict[str, Any]:
+    from jarvise_assist.quick_m1a1 import render_side_picker
+    from jarvise_assist.quick_symbol import validate_quick_symbol
+
+    if lookup is None:
+        _refresh_symbol_await(conn, now_ms=now_ms)
+        send("อ่าน Binance ไม่ได้ — ลองพิมพ์ใหม่")
+        return {"ok": False, "awaiting": "symbol", "reason": "no_lookup"}
+
+    result = validate_quick_symbol(text, lookup=lookup)
+    if result.outcome == "ok" and result.symbol:
+        clear_awaiting_quick_input(conn)
+        body, markup = render_side_picker(conn, result.symbol, now_ms=now_ms, futures=futures)
+        send(body, reply_markup=markup)
+        return {"ok": True, "step": "pick_side", "symbol": result.symbol}
+
+    if result.outcome == "hint_1000" and result.hint_symbol:
+        _refresh_symbol_await(conn, now_ms=now_ms)
+        hint = result.hint_symbol
+        markup = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": f"หมายถึง {hint} ?",
+                        "callback_data": _cb(f"qk:cs:{hint}"),
+                    }
+                ],
+                [{"text": "✖️ ยกเลิก", "callback_data": _cb("qk:cx")}],
+            ]
+        }
+        send(str(result.message or ""), reply_markup=markup)
+        return {"ok": False, "awaiting": "symbol", "hint": hint}
+
+    _refresh_symbol_await(conn, now_ms=now_ms)
+    cancel_row = {"inline_keyboard": [[{"text": "✖️ ยกเลิก", "callback_data": _cb("qk:cx")}]]}
+    send(str(result.message or "พิมพ์ใหม่"), reply_markup=cancel_row)
+    return {"ok": False, "awaiting": "symbol", "outcome": result.outcome}
