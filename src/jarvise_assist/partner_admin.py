@@ -2041,7 +2041,7 @@ def handle_partner_callback(
 
             preview_path = owner_preview_path_for(conn)
             if preview_path is not None:
-                revoke_owner_preview(preview_path, owner_cancel.group(1))
+                revoke_owner_preview(preview_path, owner_cancel.group(1), now_ms=int(now_ms))
             _answer()
             if mid is not None:
                 edit(int(mid), "ยกเลิกแล้ว", reply_markup={"inline_keyboard": []})
@@ -2071,7 +2071,7 @@ def handle_partner_callback(
 
             def _restore() -> None:
                 if preview_path is not None:
-                    restore_owner_preview(preview_path, preview)
+                    restore_owner_preview(preview_path, preview, now_ms=int(now_ms))
 
             if preview.get("replay") or _owner_already_recorded(conn, side=side, tran_id=tran_id):
                 if _owner_already_recorded(conn, side=side, tran_id=tran_id):

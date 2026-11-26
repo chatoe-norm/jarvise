@@ -15,6 +15,7 @@ import secrets
 import sqlite3
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -117,6 +118,30 @@ def _preview_map(state: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _preview_is_stale(entry: dict[str, Any], *, now_ms: int) -> bool:
+    """True when issued_at is past TTL or too far in the future.
+
+    Covers expired unconsumed tokens and consumed tokens past TTL alike.
+    Still-valid unconsumed (and freshly consumed, within TTL) entries stay.
+    """
+    try:
+        issued = int(entry.get("issued_at_ms") or 0)
+    except (TypeError, ValueError):
+        return True
+    return int(now_ms) - issued > _OWNER_PREVIEW_TTL_MS or issued > int(now_ms) + 60_000
+
+
+def _prune_previews(previews: dict[str, Any], *, now_ms: int) -> None:
+    """Drop expired / future-skewed entries; never drop a still-valid unconsumed token."""
+    stale = [
+        token
+        for token, entry in list(previews.items())
+        if not isinstance(entry, dict) or _preview_is_stale(entry, now_ms=int(now_ms))
+    ]
+    for token in stale:
+        previews.pop(token, None)
+
+
 def issue_owner_preview(
     path: Path,
     *,
@@ -131,6 +156,7 @@ def issue_owner_preview(
     def mutate(state: dict[str, Any]) -> str:
         state["v"] = 1
         previews = _preview_map(state)
+        _prune_previews(previews, now_ms=int(issued_at_ms))
         previews[token] = {
             "side": str(side),
             "tran_id": str(tran_id),
@@ -142,11 +168,13 @@ def issue_owner_preview(
     return locked_json_update(path, mutate)
 
 
-def revoke_owner_preview(path: Path, token: str) -> bool:
+def revoke_owner_preview(path: Path, token: str, *, now_ms: int | None = None) -> bool:
     """Remove a preview token (cancel). True when an entry was removed."""
+    prune_now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
 
     def mutate(state: dict[str, Any]) -> bool:
         previews = _preview_map(state)
+        _prune_previews(previews, now_ms=prune_now)
         return previews.pop(str(token), None) is not None
 
     return locked_json_update(path, mutate)
@@ -167,6 +195,7 @@ def consume_owner_preview(
 
     def mutate(state: dict[str, Any]) -> dict[str, Any] | None:
         previews = _preview_map(state)
+        _prune_previews(previews, now_ms=int(now_ms))
         entry = previews.get(str(token))
         if not isinstance(entry, dict):
             return None
@@ -200,24 +229,22 @@ def consume_owner_preview(
     return locked_json_update(path, mutate)
 
 
-def restore_owner_preview(path: Path, preview: dict[str, Any]) -> None:
-    """Clear the consumed flag so a clean apply refusal can retry the same card."""
+def restore_owner_preview(path: Path, preview: dict[str, Any], *, now_ms: int | None = None) -> None:
+    """Clear the consumed flag so a clean apply refusal can retry the same card.
+
+    If the token was revoked (absent), leave it absent — do not recreate.
+    """
     token = str(preview.get("token") or "")
     if not token or preview.get("replay"):
         return
+    prune_now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
 
     def mutate(state: dict[str, Any]) -> None:
         state["v"] = 1
         previews = _preview_map(state)
+        _prune_previews(previews, now_ms=prune_now)
         entry = previews.get(token)
         if isinstance(entry, dict):
             entry.pop("consumed", None)
-        else:
-            previews[token] = {
-                "side": str(preview["side"]),
-                "tran_id": str(preview["tran_id"]),
-                "amount_micro": int(preview["amount_micro"]),
-                "issued_at_ms": int(preview["issued_at_ms"]),
-            }
 
     locked_json_update(path, mutate)

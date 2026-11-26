@@ -970,25 +970,30 @@ def run_partner_audit_job(
 
         reason = fetched.status if fetched.error is None else f"{fetched.status}/{fetched.error}"
 
-        def mutate_fail(state: dict[str, Any]) -> bool:
-            sent = False
+        def mutate_fail_claim(state: dict[str, Any]) -> bool:
             if state.get("fail_since_ms") is None:
                 state["fail_since_ms"] = int(now_ms)
             anchor = state.get("last_ok_ms")
             if anchor is None:
                 anchor = state.get("fail_since_ms")
-            if (
+            return bool(
                 anchor is not None
                 and int(now_ms) - int(anchor) >= FAIL_ALERT_AFTER_MS
                 and not state.get("fail_alerted")
-            ):
-                mid = send(format_failure_th(reason))
-                if mid is not None:
-                    state["fail_alerted"] = True
-                    sent = True
-            return sent
+            )
 
-        alert_sent = bool(locked_json_update(state_path, mutate_fail, load=load_state, save=save_state))
+        should_fail_alert = bool(
+            locked_json_update(state_path, mutate_fail_claim, load=load_state, save=save_state)
+        )
+        if should_fail_alert:
+            mid = send(format_failure_th(reason))
+            if mid is not None:
+
+                def mutate_fail_finalize(state: dict[str, Any]) -> None:
+                    state["fail_alerted"] = True
+
+                locked_json_update(state_path, mutate_fail_finalize, load=load_state, save=save_state)
+                alert_sent = True
         return {
             "ok": False,
             "status": fetched.status,
@@ -1017,25 +1022,15 @@ def run_partner_audit_job(
     alertable = [f for f in findings if f.alertable]
     from jarvise_assist.partner_json_store import locked_json_update
 
-    def mutate_ok(state: dict[str, Any]) -> tuple[bool, int]:
-        sent = False
+    def mutate_ok_claim(state: dict[str, Any]) -> tuple[list[Finding], int, bool, int]:
         alerted_map: dict[str, int] = dict(state.get("alerted") or {})
         new = [f for f in alertable if f.fingerprint not in alerted_map]
-        still_open = [f for f in alertable if f.fingerprint in alerted_map]
+        still_open_n = len([f for f in alertable if f.fingerprint in alerted_map])
+        need_recovery = bool(state.get("fail_alerted"))
 
-        if new:
-            mid = send(format_alert_th(new, len(still_open)))
-            if mid is not None:
-                for f in new:
-                    alerted_map[f.fingerprint] = int(now_ms)
-                sent = True
-
-        if state.get("fail_alerted"):
-            mid = send(format_recovery_th())
-            if mid is not None:
-                sent = True
+        # Non-send state always advances under the lock (same as pre-split semantics).
+        if need_recovery:
             state["fail_alerted"] = False
-
         state["last_ok_ms"] = int(now_ms)
         state["fail_since_ms"] = None
         state["alerted"] = {fp: ms for fp, ms in alerted_map.items() if int(now_ms) - int(ms) <= PRUNE_MS}
@@ -1046,9 +1041,32 @@ def run_partner_audit_job(
                 if f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded")
             }
         )
-        return sent, len(new)
+        return new, still_open_n, need_recovery, len(new)
 
-    alert_sent, new_n = locked_json_update(state_path, mutate_ok, load=load_state, save=save_state)
+    new_findings, still_open_n, need_recovery, new_n = locked_json_update(
+        state_path, mutate_ok_claim, load=load_state, save=save_state
+    )
+
+    if new_findings:
+        mid = send(format_alert_th(new_findings, still_open_n))
+        if mid is not None:
+            fps = [str(f.fingerprint) for f in new_findings]
+
+            def mutate_alert_finalize(state: dict[str, Any]) -> None:
+                alerted_map: dict[str, int] = dict(state.get("alerted") or {})
+                for fp in fps:
+                    alerted_map[fp] = int(now_ms)
+                state["alerted"] = {
+                    fp: ms for fp, ms in alerted_map.items() if int(now_ms) - int(ms) <= PRUNE_MS
+                }
+
+            locked_json_update(state_path, mutate_alert_finalize, load=load_state, save=save_state)
+            alert_sent = True
+
+    if need_recovery:
+        mid = send(format_recovery_th())
+        if mid is not None:
+            alert_sent = True
 
     return {
         "ok": True,
