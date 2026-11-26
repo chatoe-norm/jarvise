@@ -53,7 +53,7 @@ from jarvise_ingest.db import SCHEMA_VERSION, open_db
 
 
 def test_schema_stays_38() -> None:
-    assert SCHEMA_VERSION == 38
+    assert SCHEMA_VERSION == 39
 
 
 def test_assist_cancel_owner_flag(monkeypatch: pytest.MonkeyPatch) -> None:

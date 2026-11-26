@@ -37,7 +37,7 @@ def _n_events(conn: sqlite3.Connection, *, kind: str | None = None) -> int:
 
 
 def test_migration_creates_tables_fresh_and_from_29(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 38
+    assert SCHEMA_VERSION == 39
     fresh = open_db(tmp_path / "fresh.db")
     assert schema_version(fresh) == SCHEMA_VERSION
     for table in ("partner", "partner_event", "partner_request"):

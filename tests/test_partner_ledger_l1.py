@@ -196,12 +196,12 @@ def _json_out(result: object) -> dict:
 
 
 def test_migration_37_fresh_and_v36_golden(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 38
+    assert SCHEMA_VERSION == 39
     assert MIGRATIONS[36][0] == 37
     assert MIGRATIONS[36][1] == "partner_ledger_owner_flows"
     assert MIGRATIONS[36][3] is False
     fresh = open_db(tmp_path / "fresh.db")
-    assert schema_version(fresh) == 38
+    assert schema_version(fresh) == 39
     cols = {row[1] for row in fresh.execute("PRAGMA table_info(partner_event)")}
     assert {"effective_at_ms", "origin", "payouts_due_micro"} <= cols
     triggers = {
@@ -229,7 +229,7 @@ def test_migration_37_fresh_and_v36_golden(tmp_path: Path) -> None:
         int(row[0]) for row in migrated.execute("SELECT payouts_due_micro FROM partner_event ORDER BY rowid")
     ]
     assert dues == [0, 0]
-    assert schema_version(migrated) == 38
+    assert schema_version(migrated) == 39
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         migrated.execute("UPDATE partner_event SET note = 'x' WHERE id = 'pe_admin_l1'")
     migrated.rollback()
@@ -397,7 +397,7 @@ def test_migration_37_concurrency_rebuilds_once(tmp_path: Path) -> None:
     assert errors == {}
     assert created == {"a": 1, "b": 0}
     check = connect(path)
-    assert schema_version(check) == 38
+    assert schema_version(check) == 39
     assert _partner_event_checksum(check) == before
     check.close()
 

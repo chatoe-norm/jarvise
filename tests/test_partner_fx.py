@@ -199,7 +199,7 @@ def _dump(conn: sqlite3.Connection, table: str) -> list[tuple[Any, ...]]:
 def test_migration_34_is_additive_and_repair_writes_nothing(tmp_path: Path) -> None:
     path = tmp_path / "fx.db"
     conn = open_db(path)
-    assert SCHEMA_VERSION == 38
+    assert SCHEMA_VERSION == 39
     assert schema_version(conn) == SCHEMA_VERSION
     for name in ("partner_payout_fx_draft", "partner_usdt_carry", "partner_payout_fx"):
         conn.execute(f"DROP TABLE {name}")

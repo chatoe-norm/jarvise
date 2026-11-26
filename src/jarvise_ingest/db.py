@@ -794,6 +794,50 @@ def _migrate_assist_quick_p1b(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "assist_quick_registration", "cutoff_notice_day", "TEXT")
 
 
+def _migrate_assist_quick_config(conn: sqlite3.Connection) -> None:
+    """Quick Plan A0: key-value config, audit log, pending input, inert exec_intent_id.
+
+    Additive only. No INSERT/UPDATE of settings rows. Missing keys use code defaults.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_quick_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_quick_config_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            source TEXT NOT NULL,
+            at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_quick_config_log_at
+        ON assist_quick_config_log (at_ms)
+        """
+    )
+    _add_column_if_missing(conn, "assist_quick_registration", "exec_intent_id", "TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assist_quick_reg_exec_intent
+        ON assist_quick_registration (exec_intent_id)
+        WHERE exec_intent_id IS NOT NULL
+        """
+    )
+    _add_column_if_missing(conn, "assist_settings", "awaiting_quick_input", "TEXT")
+    _add_column_if_missing(conn, "assist_settings", "awaiting_quick_until_ms", "INTEGER")
+
+
 def _migrate_assist_income_status(conn: sqlite3.Connection) -> None:
     """Income completeness on closed real trades. Nullable. Does not rewrite existing rows.
 
@@ -2064,6 +2108,7 @@ MIGRATIONS: tuple[tuple[int, str, Any, bool], ...] = (
     (36, "assist_quick_p1a", _migrate_assist_quick_p1a, True),
     (37, "partner_ledger_owner_flows", _migrate_partner_ledger_owner_flows, False),
     (38, "assist_quick_p1b", _migrate_assist_quick_p1b, True),
+    (39, "assist_quick_config", _migrate_assist_quick_config, True),
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
