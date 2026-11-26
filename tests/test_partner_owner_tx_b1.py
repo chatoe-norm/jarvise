@@ -201,8 +201,9 @@ def test_owner_preview_match_none_multi_and_confirm(tmp_path: Path, env_chat: No
     assert out["tran_id"] == "t_one"
     assert "reply_markup" in sent[-1]
     cb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
-    assert cb.startswith("pa:oy:d:t_one:")
-    assert cb.endswith(":100000000")  # 100 USDT micro
+    assert pa._OWNER_CONFIRM_RE.match(cb)
+    assert out.get("token")
+    assert cb == f"pa:oy:{out['token']}"
 
     # confirm
     answers: list[str | None] = []
@@ -505,8 +506,10 @@ def test_owner_confirm_ts_and_amount_integrity(tmp_path: Path, env_chat: None) -
     )
     assert out["ok"] is True
     good_cb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    cancel_cb = sent[-1]["reply_markup"]["inline_keyboard"][0][1]["callback_data"]
+    token = str(out["token"])
 
-    # forged old ts
+    # forged old-style callback (no token) must not book
     old = pa.handle_partner_callback(
         conn,
         "pa:oy:d:ts1:1000000000:100000000",
@@ -519,11 +522,11 @@ def test_owner_confirm_ts_and_amount_integrity(tmp_path: Path, env_chat: None) -
     )
     assert old["reason"] == "stale_confirm"
 
-    # future ts
-    future_s = NOW // 1000 + 120
+    # never-issued token
+    fake = "a" * 32
     fut = pa.handle_partner_callback(
         conn,
-        f"pa:oy:d:ts1:{future_s}:100000000",
+        f"pa:oy:{fake}",
         callback=_owner_cb("x"),
         send=send,
         answer=answer,
@@ -533,11 +536,32 @@ def test_owner_confirm_ts_and_amount_integrity(tmp_path: Path, env_chat: None) -
     )
     assert fut["reason"] == "stale_confirm"
 
-    # amount mismatch
-    bad_amt = good_cb.rsplit(":", 1)[0] + ":999000000"
+    # amount mismatch vs live finding (token stores wrong micro)
+    import json
+
+    from jarvise_assist.partner_json_store import owner_preview_path_for
+
+    path = owner_preview_path_for(conn)
+    assert path is not None
+    path.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "previews": {
+                    token: {
+                        "side": "dep",
+                        "tran_id": "ts1",
+                        "amount_micro": 999_000_000,
+                        "issued_at_ms": NOW,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     mism = pa.handle_partner_callback(
         conn,
-        bad_amt,
+        good_cb,
         callback=_owner_cb("x"),
         send=send,
         answer=answer,
@@ -547,18 +571,43 @@ def test_owner_confirm_ts_and_amount_integrity(tmp_path: Path, env_chat: None) -
     )
     assert mism["reason"] == "amount_mismatch"
 
-    # cancel stays harmless
+    # re-issue a clean preview for cancel
+    sent.clear()
+    out2 = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW + 1,
+    )
+    assert out2["ok"] is True
+    cancel_cb = sent[-1]["reply_markup"]["inline_keyboard"][0][1]["callback_data"]
+    confirm_cb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+
+    # cancel revokes; later confirm is stale
     cancel = pa.handle_partner_callback(
         conn,
-        "pa:on:d:ts1",
+        cancel_cb,
         callback=_owner_cb("x"),
         send=send,
         answer=answer,
         edit=edit,
         futures=client,
-        now_ms=NOW,
+        now_ms=NOW + 2,
     )
     assert cancel["cmd"] == "owner_cancel"
+    after_cancel = pa.handle_partner_callback(
+        conn,
+        confirm_cb,
+        callback=_owner_cb("x"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW + 3,
+    )
+    assert after_cancel["reason"] == "stale_confirm"
     assert (
         conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind = 'owner_deposit'").fetchone()["n"]
         == 0
@@ -901,17 +950,48 @@ def test_owner_booking_v_open_pos_refuses(tmp_path: Path, env_chat: None, monkey
         == 0
     )
 
-    # Confirm path: forge a callback; safety flat then booking open → refuse
+    # Confirm path: issue a real preview while flat, then flip booking V to open.
     reads["n"] = 0
+
+    def _flat_then_open(_futures: Any, *, now_ms: int) -> AccountValue:
+        # Preview uses 2 flat reads; confirm safety is flat; booking V is open.
+        reads["n"] += 1
+        if reads["n"] <= 3:
+            return AccountValue(
+                value=D("500"),
+                wallet=D("500"),
+                unrealized=D("0"),
+                open_positions=0,
+                read_at_ms=int(now_ms),
+            )
+        return AccountValue(
+            value=D("505"),
+            wallet=D("500"),
+            unrealized=D("5"),
+            open_positions=1,
+            read_at_ms=int(now_ms),
+        )
+
+    monkeypatch.setattr(pa, "_read_v", _flat_then_open)
+    preview = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW + 1,
+    )
+    assert preview.get("ok") is True
+    cb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
     conf = pa.handle_partner_callback(
         conn,
-        f"pa:oy:d:vflip:{NOW // 1000}:100000000",
+        cb,
         callback=_owner_cb("x"),
         send=send,
         answer=answer,
         edit=edit,
         futures=client,
-        now_ms=NOW,
+        now_ms=NOW + 2,
     )
     assert conf["reason"] == "unsafe"
     assert (
@@ -977,13 +1057,178 @@ def test_owner_amount_max_preview_and_callback_bytes(tmp_path: Path, env_chat: N
     assert out["reason"] == "amount_too_large"
     assert "ใหญ่เกิน" in sent[-1]
 
-    # Max legal: 32-char tranId + 10-digit ts + 12-digit micro ≤ 64
-    tran = "T" * 32
-    ts = "1700000000"
-    micro = "999999999999"
-    cb = f"pa:oy:d:{tran}:{ts}:{micro}"
+    # Token callback stays well under Telegram's 64-byte limit; legacy shape rejected.
+    token = "a" * 32
+    cb = f"pa:oy:{token}"
     assert len(cb.encode("utf-8")) <= 64
     assert pa._OWNER_CONFIRM_RE.match(cb)
-    # 13-digit micro fails confirm regex
-    assert pa._OWNER_CONFIRM_RE.match(f"pa:oy:d:{tran}:{ts}:1000000000000") is None
+    assert pa._OWNER_CONFIRM_RE.match("pa:oy:d:tran:1700000000:100000000") is None
     conn.close()
+
+
+def test_owner_preview_token_expired_and_restart(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+    """Expired token refuses; unconsumed token on disk still works after 'restart'."""
+    conn = open_db(tmp_path / "tok.db")
+    t_init = NOW - 10 * HOUR
+    _init(conn, wallet="400", now_ms=t_init)
+    t0 = NOW - HOUR
+    client = FakeClient([_xfer(time_ms=t0, amount="100", tran_id="tok1")], wallet="500")
+    monkeypatch.setattr(
+        pa,
+        "_read_v",
+        lambda *_a, **_k: AccountValue(
+            value=D("500"), wallet=D("500"), unrealized=D("0"), open_positions=0, read_at_ms=NOW
+        ),
+    )
+    sent: list[dict[str, Any]] = []
+
+    def send(text: str, **kwargs: Any) -> None:
+        sent.append({"text": text, **kwargs})
+
+    out = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert out["ok"] is True
+    token = str(out["token"])
+    cb = f"pa:oy:{token}"
+
+    # Expired (>900s)
+    stale = pa.handle_partner_callback(
+        conn,
+        cb,
+        callback=_owner_cb(cb),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: True,
+        futures=client,
+        now_ms=NOW + 901_000,
+    )
+    assert stale["reason"] == "stale_confirm"
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind = 'owner_deposit'").fetchone()["n"]
+        == 0
+    )
+
+    # Re-issue; simulate process restart by only using the on-disk preview file.
+    sent.clear()
+    out2 = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message=_owner_msg(),
+        send=send,
+        futures=client,
+        now_ms=NOW + 1,
+    )
+    assert out2["ok"] is True
+    token2 = str(out2["token"])
+    from jarvise_assist.partner_json_store import load_json_object, owner_preview_path_for
+
+    path = owner_preview_path_for(conn)
+    assert path is not None
+    disk = load_json_object(path)
+    assert token2 in (disk.get("previews") or {})
+    conf = pa.handle_partner_callback(
+        conn,
+        f"pa:oy:{token2}",
+        callback=_owner_cb(f"pa:oy:{token2}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: True,
+        futures=client,
+        now_ms=NOW + 2,
+    )
+    assert conf.get("ok") is True
+    assert conf.get("cmd") == "owner_confirm"
+    # Second tap → already_recorded
+    again = pa.handle_partner_callback(
+        conn,
+        f"pa:oy:{token2}",
+        callback=_owner_cb(f"pa:oy:{token2}"),
+        send=send,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: True,
+        futures=client,
+        now_ms=NOW + 3,
+    )
+    assert again["reason"] == "already_recorded"
+    conn.close()
+
+
+def test_audit_state_locked_rmw_serializes(tmp_path: Path, monkeypatch: Any) -> None:
+    """Two overlapping remove updates do not drop each other's changes.
+
+    Monkeypatch flock to a no-op so this pins the threading.Lock (on Linux
+    flock alone does not exclude same-process threads).
+    """
+    import threading
+    import time
+
+    import jarvise_assist.partner_json_store as pjs
+    from jarvise_assist.partner_audit import load_state, remove_open_unrecorded_for_tran, save_state
+    from jarvise_assist.partner_json_store import locked_json_update
+
+    monkeypatch.setattr(pjs.fcntl, "flock", lambda *_a, **_k: None)
+
+    path = tmp_path / "partner_audit_state.json"
+    save_state(
+        path,
+        {
+            "v": 1,
+            "alerted": {},
+            "open_unrecorded": ["bx:TRANSFER:a1", "bx:TRANSFER:b2", "bx:TRANSFER:c3"],
+            "last_ok_ms": NOW,
+            "fail_since_ms": None,
+            "fail_alerted": False,
+        },
+    )
+    order: list[str] = []
+    started = threading.Event()
+    errors: list[BaseException] = []
+
+    def slow_a() -> None:
+        try:
+
+            def mutate(state: dict[str, Any]) -> None:
+                order.append("a-start")
+                started.set()
+                time.sleep(0.05)
+                state["open_unrecorded"] = [
+                    fp for fp in list(state.get("open_unrecorded") or []) if not str(fp).endswith(":a1")
+                ]
+                order.append("a-end")
+
+            locked_json_update(path, mutate, load=load_state, save=save_state)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def fast_b() -> None:
+        try:
+            assert started.wait(timeout=2)
+
+            def mutate(state: dict[str, Any]) -> None:
+                order.append("b")
+                state["open_unrecorded"] = [
+                    fp for fp in list(state.get("open_unrecorded") or []) if not str(fp).endswith(":b2")
+                ]
+
+            locked_json_update(path, mutate, load=load_state, save=save_state)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t1 = threading.Thread(target=slow_a)
+    t2 = threading.Thread(target=fast_b)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not errors
+    assert order == ["a-start", "a-end", "b"]
+    state = load_state(path)
+    assert state["open_unrecorded"] == ["bx:TRANSFER:c3"]
+    remove_open_unrecorded_for_tran(path, "c3")
+    assert load_state(path)["open_unrecorded"] == []

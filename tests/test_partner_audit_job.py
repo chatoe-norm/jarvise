@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,15 @@ from jarvise_assist.partner_audit import (
     audit_report,
     export_events_csv,
     fetch_transfers,
+    load_state,
+    remove_open_unrecorded_for_tran,
     run_partner_audit_job,
+    save_state,
+)
+from jarvise_assist.partner_json_store import (
+    consume_owner_preview,
+    issue_owner_preview,
+    revoke_owner_preview,
 )
 from jarvise_ingest.db import open_db
 
@@ -600,3 +609,307 @@ def test_audit_report_and_csv_read_only(tmp_path: Path) -> None:
 def test_fetch_no_client() -> None:
     r = fetch_transfers(None, NOW - 1000, NOW, now_ms=NOW)
     assert r.status == "no_client"
+
+
+def _blocking_send(gate: threading.Event, entered: threading.Event) -> Any:
+    def send(text: str) -> int:
+        entered.set()
+        assert gate.wait(timeout=5), "send gate was not released"
+        return 1
+
+    return send
+
+
+def _assert_preview_ops_while_send_blocked(
+    *,
+    preview_path: Path,
+    entered: threading.Event,
+    gate: threading.Event,
+    job_thread: threading.Thread,
+    errors: list[BaseException],
+) -> None:
+    assert entered.wait(timeout=2), "audit send never started"
+    preview_done = threading.Event()
+    preview_errors: list[BaseException] = []
+
+    def do_preview_ops() -> None:
+        try:
+            token = issue_owner_preview(
+                preview_path,
+                side="dep",
+                tran_id="live",
+                amount_micro=10_000_000,
+                issued_at_ms=NOW,
+            )
+            taken = consume_owner_preview(preview_path, token, now_ms=NOW + 1)
+            assert taken is not None
+            assert taken["tran_id"] == "live"
+            assert revoke_owner_preview(preview_path, token, now_ms=NOW + 1) is True
+        except BaseException as exc:  # noqa: BLE001
+            preview_errors.append(exc)
+        finally:
+            preview_done.set()
+
+    pt = threading.Thread(target=do_preview_ops)
+    pt.start()
+    try:
+        assert preview_done.wait(timeout=1.5), "preview ops blocked by audit send under lock"
+        pt.join(timeout=2)
+        assert not preview_errors
+        assert job_thread.is_alive(), "audit finished before preview ops (send not held?)"
+    finally:
+        gate.set()
+        job_thread.join(timeout=5)
+        pt.join(timeout=2)
+    assert not job_thread.is_alive()
+    assert not errors
+
+
+def _seed_partner_db(db: Path) -> None:
+    conn = open_db(db)
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)
+    ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), NOW)
+    conn.close()
+
+
+def test_audit_fail_send_does_not_block_preview_ops(tmp_path: Path) -> None:
+    db = tmp_path / "fail_lock.db"
+    _seed_partner_db(db)
+    state = tmp_path / "partner_audit_state.json"
+    save_state(
+        state,
+        {
+            "v": 1,
+            "alerted": {},
+            "open_unrecorded": [],
+            "last_ok_ms": NOW,
+            "fail_since_ms": NOW,
+            "fail_alerted": False,
+        },
+    )
+    preview_path = tmp_path / "partner_owner_preview.json"
+    client = FakeClient()
+    client.fail = True
+    gate = threading.Event()
+    entered = threading.Event()
+    errors: list[BaseException] = []
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        conn = open_db(db)
+        try:
+            result.update(
+                run_partner_audit_job(
+                    conn,
+                    client=client,
+                    now_ms=NOW + FAIL_ALERT_AFTER_MS,
+                    send=_blocking_send(gate, entered),
+                    state_path=state,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=run)
+    t.start()
+    _assert_preview_ops_while_send_blocked(
+        preview_path=preview_path,
+        entered=entered,
+        gate=gate,
+        job_thread=t,
+        errors=errors,
+    )
+    assert result.get("ok") is False
+    assert result.get("alert_sent") is True
+    assert load_state(state)["fail_alerted"] is True
+
+
+def test_audit_new_alert_send_does_not_block_preview_ops(tmp_path: Path) -> None:
+    db = tmp_path / "alert_lock.db"
+    _seed_partner_db(db)
+    state = tmp_path / "partner_audit_state.json"
+    preview_path = tmp_path / "partner_owner_preview.json"
+    t_xfer = NOW + GRACE_BINANCE_MS + 1000
+    client = FakeClient(
+        [
+            Transfer(
+                time_ms=t_xfer,
+                amount=D("50"),
+                asset="USDT",
+                income_type="TRANSFER",
+                tran_id="orphan_lock",
+            )
+        ]
+    )
+    gate = threading.Event()
+    entered = threading.Event()
+    errors: list[BaseException] = []
+    result: dict[str, Any] = {}
+    now = t_xfer + GRACE_BINANCE_MS + 1
+
+    def run() -> None:
+        conn = open_db(db)
+        try:
+            result.update(
+                run_partner_audit_job(
+                    conn,
+                    client=client,
+                    now_ms=now,
+                    send=_blocking_send(gate, entered),
+                    state_path=state,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=run)
+    t.start()
+    _assert_preview_ops_while_send_blocked(
+        preview_path=preview_path,
+        entered=entered,
+        gate=gate,
+        job_thread=t,
+        errors=errors,
+    )
+    assert result.get("ok") is True
+    assert result.get("alert_sent") is True
+    assert "bx:TRANSFER:orphan_lock" in load_state(state)["alerted"]
+
+
+def test_audit_recovery_send_does_not_block_preview_ops(tmp_path: Path) -> None:
+    db = tmp_path / "recovery_lock.db"
+    _seed_partner_db(db)
+    state = tmp_path / "partner_audit_state.json"
+    save_state(
+        state,
+        {
+            "v": 1,
+            "alerted": {},
+            "open_unrecorded": [],
+            "last_ok_ms": None,
+            "fail_since_ms": NOW,
+            "fail_alerted": True,
+        },
+    )
+    preview_path = tmp_path / "partner_owner_preview.json"
+    client = FakeClient()
+    gate = threading.Event()
+    entered = threading.Event()
+    errors: list[BaseException] = []
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        conn = open_db(db)
+        try:
+            result.update(
+                run_partner_audit_job(
+                    conn,
+                    client=client,
+                    now_ms=NOW + DAY_MS,
+                    send=_blocking_send(gate, entered),
+                    state_path=state,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=run)
+    t.start()
+    _assert_preview_ops_while_send_blocked(
+        preview_path=preview_path,
+        entered=entered,
+        gate=gate,
+        job_thread=t,
+        errors=errors,
+    )
+    assert result.get("ok") is True
+    assert result.get("alert_sent") is True
+    assert load_state(state)["fail_alerted"] is False
+
+
+def test_audit_finalize_preserves_concurrent_open_unrecorded_prune(tmp_path: Path) -> None:
+    db = tmp_path / "finalize_prune.db"
+    _seed_partner_db(db)
+    state = tmp_path / "partner_audit_state.json"
+    t_xfer = NOW + GRACE_BINANCE_MS + 1000
+    client = FakeClient(
+        [
+            Transfer(
+                time_ms=t_xfer,
+                amount=D("50"),
+                asset="USDT",
+                income_type="TRANSFER",
+                tran_id="keep_open",
+            ),
+            Transfer(
+                time_ms=t_xfer + 1,
+                amount=D("25"),
+                asset="USDT",
+                income_type="TRANSFER",
+                tran_id="booked_now",
+            ),
+        ]
+    )
+    gate = threading.Event()
+    entered = threading.Event()
+    wrote_open = threading.Event()
+    errors: list[BaseException] = []
+    result: dict[str, Any] = {}
+    now = t_xfer + GRACE_BINANCE_MS + 1
+
+    # Poll until the pre-send locked update has written open_unrecorded.
+    def watch_open() -> None:
+        try:
+            pause = threading.Event()
+            for _ in range(100):
+                if state.exists():
+                    open_list = load_state(state).get("open_unrecorded") or []
+                    if "bx:TRANSFER:booked_now" in open_list and "bx:TRANSFER:keep_open" in open_list:
+                        wrote_open.set()
+                        return
+                pause.wait(0.02)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def run() -> None:
+        conn = open_db(db)
+        try:
+            result.update(
+                run_partner_audit_job(
+                    conn,
+                    client=client,
+                    now_ms=now,
+                    send=_blocking_send(gate, entered),
+                    state_path=state,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    watcher = threading.Thread(target=watch_open)
+    t = threading.Thread(target=run)
+    watcher.start()
+    t.start()
+    assert entered.wait(timeout=2), "audit send never started"
+    assert wrote_open.wait(timeout=2), "open_unrecorded not written before send"
+    remove_open_unrecorded_for_tran(state, "booked_now")
+    assert "bx:TRANSFER:booked_now" not in (load_state(state).get("open_unrecorded") or [])
+    gate.set()
+    t.join(timeout=5)
+    watcher.join(timeout=5)
+    assert not t.is_alive()
+    assert not errors
+    assert result.get("alert_sent") is True
+    final = load_state(state)
+    assert "bx:TRANSFER:booked_now" not in final["open_unrecorded"]
+    assert "bx:TRANSFER:keep_open" in final["open_unrecorded"]
+    assert "bx:TRANSFER:keep_open" in final["alerted"]
+    assert "bx:TRANSFER:booked_now" in final["alerted"]
