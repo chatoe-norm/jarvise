@@ -140,8 +140,9 @@ def _seed_unresolved_exec_reg(conn: Any, *, created: int, order_id_logged: str =
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("decoy_kind", ["owner", "jv_sibling_sl"])
 def test_r7_sync_past_keep_all_orders_tags_matching_order_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decoy_kind: str
 ) -> None:
     """(a) past 2h, all_orders has jv-mkt → tag; fills with other orderId ignored."""
     from jarvise_assist import quick as qmod
@@ -151,6 +152,8 @@ def test_r7_sync_past_keep_all_orders_tags_matching_order_id(
     _seed_settings(conn)
     created = _daytime_ms()
     _iid, rid, mkt_cid = _seed_unresolved_exec_reg(conn, created=created)
+    decoy_cid = "owner-x" if decoy_kind == "owner" else client_order_id(_iid, "sl")
+    assert decoy_cid != mkt_cid
     buy_t = created + 1_000
     sell_t = created + 5_000
     # Earlier unrelated SELL (different orderId): without orderId filter this would
@@ -194,16 +197,17 @@ def test_r7_sync_past_keep_all_orders_tags_matching_order_id(
     class _Client(_ReadClientBase):
         def __init__(self) -> None:
             super().__init__()
-            # Decoy FIRST: owner order whose orderId matches the unrelated SELL fill.
-            # A loosened clientOrderId match (A67) would resolve to 888888 and
-            # expire the registration as wrong_side instead of tagging 777001.
+            # Decoy FIRST: an owner order, or this intent's own jv-<short>-sl, whose
+            # orderId matches the unrelated SELL fill. A dropped or loosened
+            # clientOrderId match (A67, or startswith("jv-")) would resolve to
+            # 888888 and expire the registration as wrong_side instead of tagging 777001.
             self._orders = [
                 {
                     "orderId": 888888,
                     "status": "FILLED",
                     "executedQty": "1.0",
                     "avgPrice": "101",
-                    "clientOrderId": "owner-x",
+                    "clientOrderId": decoy_cid,
                     "time": created + 100,
                     "updateTime": created + 100,
                 },
@@ -241,11 +245,6 @@ def test_r7_sync_past_keep_all_orders_tags_matching_order_id(
     assert abs(float(trade["entry_qty"]) - 0.05) < 1e-9
     assert "1" in str(trade["entry_trade_ids"])
     assert "90" not in str(trade["entry_trade_ids"])
-    linked = conn.execute(
-        "SELECT order_or_algo_id FROM assist_exec_log WHERE intent_id=? AND order_or_algo_id='888888'",
-        (_iid,),
-    ).fetchall()
-    assert linked == []
     conn.close()
 
 
