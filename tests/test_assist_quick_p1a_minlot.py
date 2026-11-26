@@ -1941,8 +1941,7 @@ def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.Mon
     conn = open_db(tmp_path / "cap_sui.db")
     _seed_settings(conn)
     write_quick_settings(conn, risk_pct=1.0, cap_pct=0.5)
-    # available 80: fee-aware 1% qty needs more margin than 80, so the margin→offer
-    # path shrinks to the 0.5% cap (not the deleted risk>cap offer branch).
+    # A0: risk_used = min(1.0, 0.5) = 0.5 → plain risk mode at the cap (no offer shrink).
     c_half = build_quick_card(
         conn,
         _sui_fake(Decimal("80")),
@@ -1953,15 +1952,11 @@ def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.Mon
         allow_offer=True,
     )
     assert c_half["ok"] is True
-    assert c_half["size_mode"] == "fit_margin"
+    assert c_half["size_mode"] == "risk"
     assert c_half["qty"] == Decimal("23.5")
     half_text = c_half["text"]
-    assert "ขนาดที่เสนอ: 23.5 SUI ≈ 235 USDT (ใหญ่สุดที่ risk จริงรวมค่าธรรมเนียม ≤ 0.5%)" in half_text
-    assert "risk จริง: −4.99 USDT = 0.50% ของ Futures 1000 USDT (เป้า 1% · เพดาน 0.5%)" in half_text
-    assert "≤ 1%)" not in half_text
-    assert "เพดาน 1%" not in half_text
+    assert "risk จริง: −4.99 USDT = 0.50% ของ Futures 1000 USDT (เป้า 0.5%)" in half_text
     assert "ลองใหม่" not in half_text
-    assert "ไม้นี้ 0.47% (ไม่รวมค่าธรรมเนียม)" in half_text
 
     write_quick_settings(conn, cap_pct=2.0)
     c_double = build_quick_card(
@@ -1985,12 +1980,11 @@ def test_card_sui_offer_respects_cap_pct(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_card_risk_over_cap_refuses_quick_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Risk > cap with ample margin must refuse (base quick_cap), not offer a shrink."""
+    """A0: risk > cap uses risk_used = min(risk, cap); card sizes at the cap (no refuse)."""
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "risk_over_cap.db")
     _seed_settings(conn)
     write_quick_settings(conn, risk_pct=1.5, cap_pct=1.0)
-    # Mark 2 / stop 1.98: fee-aware 1.5% fits wallet+available 1000; still over cap 1%.
     fake = QuickFake(
         balance=Decimal("1000"),
         available=Decimal("1000"),
@@ -2009,8 +2003,8 @@ def test_card_risk_over_cap_refuses_quick_cap(tmp_path: Path, monkeypatch: pytes
         now_ms=NOW,
         allow_offer=True,
     )
-    assert card["ok"] is False
-    assert card["reason"] == "quick_cap"
+    assert card["ok"] is True
+    assert card["size_mode"] == "risk"
     assert "margin ไม่พอ" not in str(card.get("text") or "")
     conn.close()
 

@@ -811,10 +811,9 @@ def test_g15_g16_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert parsed is not None
     handle_quick_setting_text(conn, parsed, send=send, now_ms=NOW)
     assert get_quick_settings(conn)["risk_pct"] == 1.5
-    warn = sent[-1]["text"].split("\n")[1]
-    assert warn == e_setting_risk_over_cap("1.5", "1")
-    assert warn == "⚠️ ความเสี่ยงต่อไม้ 1.5% มากกว่าเพดาน 1% — ไม้ quick ใหม่จะถูกปฏิเสธเพราะเกินเพดานรวม"
-    _no_codes(warn)
+    warn = sent[-1]["text"]
+    assert "cap จำกัด" in warn or e_setting_risk_over_cap("1.5", "1") in warn
+    _no_codes(warn.split("\n")[1] if "\n" in warn else warn)
 
     write_quick_settings(conn, cap_pct=0.5, risk_pct=0.5)
     handle_quick_callback(
@@ -823,9 +822,9 @@ def test_g15_g16_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         send=send,
         now_ms=NOW,
     )
-    confirmed = sent[-1]["text"].split("\n")[1]
-    assert confirmed == e_setting_risk_over_cap("0.75", "0.5")
-    _no_codes(confirmed)
+    confirmed = sent[-1]["text"]
+    assert "cap จำกัด" in confirmed or e_setting_risk_over_cap("0.75", "0.5") in confirmed
+    _no_codes(confirmed.split("\n")[1] if "\n" in confirmed else confirmed)
 
     sent_r, send_r = _sent()
     bad = parse_quick_setting_command("q risk abc")

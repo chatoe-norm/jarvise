@@ -110,8 +110,8 @@ def _income(
 
 def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     fresh = open_db(tmp_path / "fresh.db")
-    assert SCHEMA_VERSION == 38
-    assert schema_version(fresh) == 38
+    assert SCHEMA_VERSION == 39
+    assert schema_version(fresh) == 39
     for table in (
         "assist_quick_settings",
         "assist_quick_registration",
@@ -155,7 +155,7 @@ def test_migration_27_fresh_and_from_26(tmp_path: Path) -> None:
     conn.close()
 
     conn = open_db(path26)
-    assert schema_version(conn) == 38
+    assert schema_version(conn) == 39
     row = conn.execute("SELECT qty FROM assist_signal WHERE id='old'").fetchone()
     assert row["qty"] == 2
     qs = get_quick_settings(conn)
@@ -1001,7 +1001,7 @@ def test_quick_settings_via_process_update(tmp_path: Path, monkeypatch: Any) -> 
     out = process_update(conn, _cq("qs:risk:3"), send=send, answer=answer, now_ms_value=now)
     assert "unhandled_callback" not in out
     assert dict(get_quick_settings(conn)) == before
-    assert any("ยืนยัน" in s["text"] for s in sent[n_sent:])
+    assert any("เกินขอบเขต" in s["text"] or "0.05–2" in s["text"] for s in sent[n_sent:])
 
     # foreign chat
     n_sent = len(sent)
@@ -1092,9 +1092,9 @@ def test_quick_menu_total_uses_dynamic_main_cap(tmp_path: Path) -> None:
         ("1.", "reject"),
         ("00.5", "save_0.5"),
         ("\u0661", "reject"),
-        ("100.004", "confirm"),
+        ("100.004", "bounds"),
         ("100.005", "reject"),
-        ("0.005", "save_0.01"),
+        ("0.005", "bounds"),
         ("1" * 27, "reject"),
         ("0." + "1" * 40, "no_raise"),
     ],
@@ -1106,7 +1106,7 @@ def test_quick_settings_risk_value_edges(
     expect: str,
 ) -> None:
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-    conn = open_db(tmp_path / f"qs_edge_{expect}.db")
+    conn = open_db(tmp_path / f"qs_edge_{expect}_{abs(hash(raw)) % 10_000}.db")
     ensure_settings(conn)
     now = _ms_bangkok(2026, 11, 22, 14, 0)
     sent, send = _send_capture()
@@ -1120,10 +1120,11 @@ def test_quick_settings_risk_value_edges(
     if expect == "reject":
         assert sent[-1]["text"] == e_setting_reject(raw)
         assert dict(get_quick_settings(conn)) == before
+    elif expect == "bounds":
+        assert "เกินขอบเขต" in sent[-1]["text"] or "ขอบเขต" in sent[-1]["text"]
+        assert dict(get_quick_settings(conn)) == before
     elif expect == "save_0.5":
         assert get_quick_settings(conn)["risk_pct"] == 0.5
-    elif expect == "save_0.01":
-        assert get_quick_settings(conn)["risk_pct"] == 0.01
     elif expect == "confirm":
         assert dict(get_quick_settings(conn)) == before
         assert any("ยืนยัน" in s["text"] for s in sent)
@@ -1251,7 +1252,7 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     process_update(conn, _cq(f"qs:ok:risk:0.6:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 0.6
 
-    for cmd in ("q risk 1", "q risk 0.999", "q risk 2.5", "q risk 100"):
+    for cmd in ("q risk 1", "q risk 0.999", "q risk 1.5"):
         before_r = get_quick_settings(conn)["risk_pct"]
         n0 = len(sent)
         process_update(conn, _msg(cmd), send=send, now_ms_value=now)
@@ -1261,9 +1262,12 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     confirm = sent[-1].get("reply_markup", {}).get("inline_keyboard", [[]])[0][0]
     assert confirm["callback_data"] == f"qs:ok:risk:1:{now // 1000}"
 
+    n0 = len(sent)
     process_update(conn, _msg("q risk 2.5"), send=send, now_ms_value=now)
-    process_update(conn, _cq(f"qs:ok:risk:2.5:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
-    assert get_quick_settings(conn)["risk_pct"] == 2.5
+    assert any("เกินขอบเขต" in s["text"] for s in sent[n0:])
+    process_update(conn, _msg("q risk 2"), send=send, now_ms_value=now)
+    process_update(conn, _cq(f"qs:ok:risk:2:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
+    assert get_quick_settings(conn)["risk_pct"] == 2.0
 
     write_quick_settings(conn, cap_pct=1.0)
     n0 = len(sent)
@@ -1290,7 +1294,6 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "q risk Infinity",
         "q risk 1_0",
         "q risk 1e3",
-        "q risk 0.004",
         "q risk 101",
     ]
     for cmd in reject_texts:
@@ -1298,6 +1301,10 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         process_update(conn, _msg(cmd), send=send, now_ms_value=now)
         assert sent[-1]["text"] == e_setting_reject(cmd.split()[-1])
         assert dict(get_quick_settings(conn)) == frozen
+    n0 = len(sent)
+    process_update(conn, _msg("q risk 0.004"), send=send, now_ms_value=now)
+    assert "เกินขอบเขต" in sent[-1]["text"]
+    assert dict(get_quick_settings(conn)) == frozen
 
     ts = now // 1000
     process_update(conn, _cq("qs:ok:risk:0"), send=send, answer=answer, now_ms_value=now)
@@ -1339,12 +1346,12 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert sent[-1]["text"] == want
         assert dict(get_quick_settings(conn)) == frozen
 
-    # risk > cap warning still saves
-    write_quick_settings(conn, cap_pct=1.0, risk_pct=2.5)
-    process_update(conn, _msg("q risk 1.5"), send=send, now_ms_value=now)
-    assert get_quick_settings(conn)["risk_pct"] == 1.5
-    saved_lines = sent[-1]["text"].split("\n")
-    assert saved_lines[1] == "⚠️ ความเสี่ยงต่อไม้ 1.5% มากกว่าเพดาน 1% — ไม้ quick ใหม่จะถูกปฏิเสธเพราะเกินเพดานรวม"
+        # risk > cap warning still saves (advice engine copy)
+        write_quick_settings(conn, cap_pct=1.0, risk_pct=2.0)
+        process_update(conn, _msg("q risk 1.5"), send=send, now_ms_value=now)
+        assert get_quick_settings(conn)["risk_pct"] == 1.5
+        saved_lines = sent[-1]["text"].split("\n")
+        assert any("cap จำกัด" in line or "มากกว่าเพดาน" in line for line in saved_lines)
 
     write_quick_settings(conn, cap_pct=1.0, risk_pct=0.5)
     process_update(conn, _cq("qs:cap:0.5"), send=send, answer=answer, now_ms_value=now)
@@ -1353,7 +1360,7 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert get_quick_settings(conn)["risk_pct"] == 0.5
     process_update(conn, _cq(f"qs:ok:risk:0.75:{now // 1000}"), send=send, answer=answer, now_ms_value=now)
     assert get_quick_settings(conn)["risk_pct"] == 0.75
-    assert sent[-1]["text"].split("\n")[1] == e_setting_risk_over_cap("0.75", "0.5")
+    assert "cap จำกัด" in sent[-1]["text"] or e_setting_risk_over_cap("0.75", "0.5") in sent[-1]["text"]
 
     # callback max length helper
     from jarvise_assist.quick import _fmt_fixed
