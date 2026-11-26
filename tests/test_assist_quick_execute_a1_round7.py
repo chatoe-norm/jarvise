@@ -194,7 +194,19 @@ def test_r7_sync_past_keep_all_orders_tags_matching_order_id(
     class _Client(_ReadClientBase):
         def __init__(self) -> None:
             super().__init__()
+            # Decoy FIRST: owner order whose orderId matches the unrelated SELL fill.
+            # A loosened clientOrderId match (A67) would resolve to 888888 and
+            # expire the registration as wrong_side instead of tagging 777001.
             self._orders = [
+                {
+                    "orderId": 888888,
+                    "status": "FILLED",
+                    "executedQty": "1.0",
+                    "avgPrice": "101",
+                    "clientOrderId": "owner-x",
+                    "time": created + 100,
+                    "updateTime": created + 100,
+                },
                 {
                     "orderId": 777001,
                     "status": "FILLED",
@@ -203,7 +215,7 @@ def test_r7_sync_past_keep_all_orders_tags_matching_order_id(
                     "clientOrderId": mkt_cid,
                     "time": buy_t,
                     "updateTime": buy_t,
-                }
+                },
             ]
 
     client = _Client()
@@ -229,6 +241,11 @@ def test_r7_sync_past_keep_all_orders_tags_matching_order_id(
     assert abs(float(trade["entry_qty"]) - 0.05) < 1e-9
     assert "1" in str(trade["entry_trade_ids"])
     assert "90" not in str(trade["entry_trade_ids"])
+    linked = conn.execute(
+        "SELECT order_or_algo_id FROM assist_exec_log WHERE intent_id=? AND order_or_algo_id='888888'",
+        (_iid,),
+    ).fetchall()
+    assert linked == []
     conn.close()
 
 
