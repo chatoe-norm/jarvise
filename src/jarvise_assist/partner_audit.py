@@ -874,21 +874,23 @@ def remove_open_unrecorded_for_tran(path: Path, tran_id: str) -> None:
     if not tid:
         return
     try:
-        state = load_state(path)
-        open_list = list(state.get("open_unrecorded") or [])
-        if not open_list:
-            return
-        kept = [
-            fp
-            for fp in open_list
-            if not (
-                str(fp) == f"bx:TRANSFER:{tid}" or (str(fp).startswith("bx:") and str(fp).endswith(f":{tid}"))
-            )
-        ]
-        if kept == open_list:
-            return
-        state["open_unrecorded"] = kept
-        save_state(path, state)
+        from jarvise_assist.partner_json_store import locked_json_update
+
+        def mutate(state: dict[str, Any]) -> None:
+            open_list = list(state.get("open_unrecorded") or [])
+            if not open_list:
+                return
+            kept = [
+                fp
+                for fp in open_list
+                if not (
+                    str(fp) == f"bx:TRANSFER:{tid}"
+                    or (str(fp).startswith("bx:") and str(fp).endswith(f":{tid}"))
+                )
+            ]
+            state["open_unrecorded"] = kept
+
+        locked_json_update(path, mutate, load=load_state, save=save_state)
     except Exception as exc:  # noqa: BLE001
         logger.warning("partner_audit open_unrecorded cleanup failed type=%s", type(exc).__name__)
 
@@ -958,29 +960,35 @@ def run_partner_audit_job(
 
     report_start = max(start, int(now_ms) - JOB_DAYS * DAY_MS)
     pad_from = max(start, report_start - PAD_MS)
-    state = load_state(state_path)
     alert_sent = False
 
     items = ledger_cash(conn, pad_from, int(now_ms))
     fetch_from = _fetch_from_ms(items, pad_from=pad_from, report_start=report_start, ledger_start=start)
     fetched = fetch_transfers(client, fetch_from, int(now_ms), now_ms=int(now_ms))
     if fetched.status != "ok":
-        if state.get("fail_since_ms") is None:
-            state["fail_since_ms"] = int(now_ms)
-        anchor = state.get("last_ok_ms")
-        if anchor is None:
-            anchor = state.get("fail_since_ms")
+        from jarvise_assist.partner_json_store import locked_json_update
+
         reason = fetched.status if fetched.error is None else f"{fetched.status}/{fetched.error}"
-        if (
-            anchor is not None
-            and int(now_ms) - int(anchor) >= FAIL_ALERT_AFTER_MS
-            and not state.get("fail_alerted")
-        ):
-            mid = send(format_failure_th(reason))
-            if mid is not None:
-                state["fail_alerted"] = True
-                alert_sent = True
-        save_state(state_path, state)
+
+        def mutate_fail(state: dict[str, Any]) -> bool:
+            sent = False
+            if state.get("fail_since_ms") is None:
+                state["fail_since_ms"] = int(now_ms)
+            anchor = state.get("last_ok_ms")
+            if anchor is None:
+                anchor = state.get("fail_since_ms")
+            if (
+                anchor is not None
+                and int(now_ms) - int(anchor) >= FAIL_ALERT_AFTER_MS
+                and not state.get("fail_alerted")
+            ):
+                mid = send(format_failure_th(reason))
+                if mid is not None:
+                    state["fail_alerted"] = True
+                    sent = True
+            return sent
+
+        alert_sent = bool(locked_json_update(state_path, mutate_fail, load=load_state, save=save_state))
         return {
             "ok": False,
             "status": fetched.status,
@@ -1007,39 +1015,45 @@ def run_partner_audit_job(
         findings.append(vf)
 
     alertable = [f for f in findings if f.alertable]
-    alerted_map: dict[str, int] = dict(state.get("alerted") or {})
-    new = [f for f in alertable if f.fingerprint not in alerted_map]
-    still_open = [f for f in alertable if f.fingerprint in alerted_map]
+    from jarvise_assist.partner_json_store import locked_json_update
 
-    if new:
-        mid = send(format_alert_th(new, len(still_open)))
-        if mid is not None:
-            for f in new:
-                alerted_map[f.fingerprint] = int(now_ms)
-            alert_sent = True
+    def mutate_ok(state: dict[str, Any]) -> tuple[bool, int]:
+        sent = False
+        alerted_map: dict[str, int] = dict(state.get("alerted") or {})
+        new = [f for f in alertable if f.fingerprint not in alerted_map]
+        still_open = [f for f in alertable if f.fingerprint in alerted_map]
 
-    if state.get("fail_alerted"):
-        mid = send(format_recovery_th())
-        if mid is not None:
-            alert_sent = True
-        state["fail_alerted"] = False
+        if new:
+            mid = send(format_alert_th(new, len(still_open)))
+            if mid is not None:
+                for f in new:
+                    alerted_map[f.fingerprint] = int(now_ms)
+                sent = True
 
-    state["last_ok_ms"] = int(now_ms)
-    state["fail_since_ms"] = None
-    state["alerted"] = {fp: ms for fp, ms in alerted_map.items() if int(now_ms) - int(ms) <= PRUNE_MS}
-    state["open_unrecorded"] = sorted(
-        {
-            str(f.fingerprint)
-            for f in findings
-            if f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded")
-        }
-    )
-    save_state(state_path, state)
+        if state.get("fail_alerted"):
+            mid = send(format_recovery_th())
+            if mid is not None:
+                sent = True
+            state["fail_alerted"] = False
+
+        state["last_ok_ms"] = int(now_ms)
+        state["fail_since_ms"] = None
+        state["alerted"] = {fp: ms for fp, ms in alerted_map.items() if int(now_ms) - int(ms) <= PRUNE_MS}
+        state["open_unrecorded"] = sorted(
+            {
+                str(f.fingerprint)
+                for f in findings
+                if f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded")
+            }
+        )
+        return sent, len(new)
+
+    alert_sent, new_n = locked_json_update(state_path, mutate_ok, load=load_state, save=save_state)
 
     return {
         "ok": True,
         "status": "ok",
-        "new": len(new),
+        "new": new_n,
         "open": len(alertable),
         "pending": result.pending_n,
         "matched": result.matched_n,

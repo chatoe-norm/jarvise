@@ -2357,7 +2357,16 @@ def test_b1_owner_confirm_refuse_invalidates_portal_clear(
         open_positions=0,
         read_at_ms=NOW,
     )
-    finding = Finding(
+    match = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:mine",
+        time_ms=NOW - 1000,
+        amount=D("100"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+    other = Finding(
         code="transfer_in_unrecorded",
         fingerprint="bx:TRANSFER:other",
         time_ms=NOW - 1000,
@@ -2368,28 +2377,49 @@ def test_b1_owner_confirm_refuse_invalidates_portal_clear(
     )
     _warm_portal_clear(conn, row, monkeypatch=monkeypatch, av=av)
 
-    def _wrong_tran(*_a: Any, **_k: Any) -> GuardResult:
-        return GuardResult(
-            status="ok",
-            checked_at_ms=NOW + 1,
-            findings=[finding],
-            warn=True,
-        )
+    mode = {"v": "match"}
 
-    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _wrong_tran)
-    ts_s = int(NOW + 1) // 1000
-    cb = f"pa:oy:d:missing:{ts_s}:100000000"
-    answers: list[str | None] = []
+    def _guard(*_a: Any, **_k: Any) -> GuardResult:
+        findings = [match] if mode["v"] == "match" else [other]
+        return GuardResult(status="ok", checked_at_ms=NOW + 1, findings=findings, warn=True)
 
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _guard)
+    monkeypatch.setattr(
+        pa,
+        "_read_v",
+        lambda *_a, **_k: AccountValue(
+            value=D("1061.5"),
+            wallet=D("1061.5"),
+            unrealized=D("0"),
+            open_positions=0,
+            read_at_ms=NOW + 1,
+        ),
+    )
+    monkeypatch.setattr(pa, "_owner_safety_refuse", lambda *_a, **_k: None)
+    sent: list[dict[str, Any]] = []
+    preview = pa.handle_partner_text(
+        conn,
+        "p owner dep 100",
+        message={"chat": {"id": ADMIN, "type": "private"}, "from": {"id": ADMIN}},
+        send=lambda text, **kw: sent.append({"text": text, **kw}),
+        futures=FakeClient(),
+        now_ms=NOW + 1,
+    )
+    assert preview.get("ok") is True
+    cb = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+
+    # Warm clear again; confirm then sees a different tran → no_match + invalidate.
+    _warm_portal_clear(conn, row, monkeypatch=monkeypatch, av=av)
+    mode["v"] = "other"
     out = pa.handle_partner_callback(
         conn,
         cb,
         callback=_owner_cb(cb),
         send=lambda *_a, **_k: None,
-        answer=lambda _id, text=None: answers.append(text),
+        answer=lambda *_a, **_k: None,
         edit=lambda *_a, **_k: True,
         futures=FakeClient(),
-        now_ms=NOW + 1,
+        now_ms=NOW + 2,
     )
     assert out["reason"] == "no_match"
     assert pu._display_cache is None or pu._display_cache[1] != "clear"
@@ -2399,8 +2429,8 @@ def test_b1_owner_confirm_refuse_invalidates_portal_clear(
         row,
         monkeypatch=monkeypatch,
         av=av,
-        now_ms=NOW + 2,
-        guard_impl=_wrong_tran,
+        now_ms=NOW + 3,
+        guard_impl=_guard,
     )
     assert n >= 1
     conn.close()

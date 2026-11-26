@@ -39,12 +39,11 @@ _AMOUNT_RE = re.compile(r"^(?:[0-9]{1,9}(?:\.[0-9]{1,6})?|[0-9]{1,3}(?:,[0-9]{3}
 _CMD_RE = re.compile(r"^\s*p(\s|$)", re.IGNORECASE)
 _REQ_ID_RE = re.compile(r"^pr_[0-9a-f]{16}$")
 _GUARD_FORCE_RE = re.compile(r"^(pr_[0-9a-f]{16}):([0-9]{10})$")
-# Short side codes keep confirm callback_data ≤ 64 bytes with amount micro.
-_OWNER_CONFIRM_RE = re.compile(r"^pa:oy:(d|w):([A-Za-z0-9_.-]{1,32}):([0-9]{10}):([0-9]{1,12})$")
-_OWNER_CANCEL_RE = re.compile(r"^pa:on:(d|w):([A-Za-z0-9_.-]{1,32})$")
+# Confirm binds to a single-use preview token (fits Telegram's 64-byte limit).
+_OWNER_CONFIRM_RE = re.compile(r"^pa:oy:([0-9a-f]{32})$")
+_OWNER_CANCEL_RE = re.compile(r"^pa:on:([0-9a-f]{32})$")
 _TRAN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
-_OWNER_SIDE = {"d": "dep", "w": "wd"}
-_OWNER_SIDE_CB = {"dep": "d", "wd": "w"}
+_OWNER_STALE_MSG = "การ์ดหมดอายุแล้ว — พิมพ์คำสั่งใหม่"
 _GUARD_OVERRIDE_S = 900
 _GUARD_FUTURE_S = 60
 _GUARD_MARKER = "\n\n⚠️ ตรวจยอดโอน"
@@ -821,16 +820,12 @@ def _owner_event_id(tran_id: str) -> str:
     return f"pe_owner_tran{tran_id}"
 
 
-def _owner_buttons(side: str, tran_id: str, ts_s: int, amount_micro: int) -> dict[str, Any]:
-    cb_side = _OWNER_SIDE_CB[side]
+def _owner_buttons(token: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {
-                    "text": "✅ ยืนยัน",
-                    "callback_data": f"pa:oy:{cb_side}:{tran_id}:{ts_s}:{int(amount_micro)}",
-                },
-                {"text": "❌ ยกเลิก", "callback_data": f"pa:on:{cb_side}:{tran_id}"},
+                {"text": "✅ ยืนยัน", "callback_data": f"pa:oy:{token}"},
+                {"text": "❌ ยกเลิก", "callback_data": f"pa:on:{token}"},
             ]
         ]
     }
@@ -853,15 +848,6 @@ def _owner_already_recorded(conn: sqlite3.Connection, *, side: str, tran_id: str
         (kind,),
     ).fetchall()
     return any(ps._note_has_exact_tran_id(str(row["note"]), tran_id) for row in rows)
-
-
-def _owner_confirm_ts_ok(ts_s: int, *, now_ms: int) -> bool:
-    now_s = int(now_ms) // 1000
-    if int(ts_s) > now_s + _GUARD_FUTURE_S:
-        return False
-    if now_s - int(ts_s) > _GUARD_OVERRIDE_S:
-        return False
-    return True
 
 
 def _owner_match_amount(wanted: Decimal, found: Decimal) -> bool:
@@ -1082,11 +1068,21 @@ def _handle_owner_tx(
         f"V ตอนนี้ {fmt_usdt(av.value)} · NAV ก่อน {fmt_nav(nav_pre)}\n"
         f"{units_line} · ทุนหลัง {fmt_usdt(cost_after)}"
     )
-    send(
-        text,
-        reply_markup=_owner_buttons(side, tid, int(now_ms) // 1000, ps.usdt_to_micro(amount_q)),
+    from jarvise_assist.partner_json_store import issue_owner_preview, owner_preview_path_for
+
+    preview_path = owner_preview_path_for(conn)
+    if preview_path is None:
+        send(_FAIL_MSG)
+        return {"ok": False, "reason": "no_db"}
+    token = issue_owner_preview(
+        preview_path,
+        side=side,
+        tran_id=tid,
+        amount_micro=ps.usdt_to_micro(amount_q),
+        issued_at_ms=int(now_ms),
     )
-    return {"ok": True, "cmd": "owner", "tran_id": tid, "side": side}
+    send(text, reply_markup=_owner_buttons(token))
+    return {"ok": True, "cmd": "owner", "tran_id": tid, "side": side, "token": token}
 
 
 def _handle_overview(conn: sqlite3.Connection, *, send: Any, futures: Any, now_ms: int) -> dict[str, Any]:
@@ -2032,30 +2028,59 @@ def handle_partner_callback(
             return {"ok": False, "refused": "not_private"}
 
         mid = msg.get("message_id")
+        # Reject legacy pa:oy:d:tran:ts:micro / pa:on:d:tran shapes (no booking).
+        if data.startswith("pa:oy:") and _OWNER_CONFIRM_RE.match(data) is None:
+            _answer(_OWNER_STALE_MSG)
+            return {"ok": False, "reason": "stale_confirm"}
+        if data.startswith("pa:on:") and _OWNER_CANCEL_RE.match(data) is None:
+            _answer(_OWNER_STALE_MSG)
+            return {"ok": False, "reason": "stale_confirm"}
         owner_cancel = _OWNER_CANCEL_RE.match(data)
         if owner_cancel is not None:
+            from jarvise_assist.partner_json_store import owner_preview_path_for, revoke_owner_preview
+
+            preview_path = owner_preview_path_for(conn)
+            if preview_path is not None:
+                revoke_owner_preview(preview_path, owner_cancel.group(1))
             _answer()
             if mid is not None:
                 edit(int(mid), "ยกเลิกแล้ว", reply_markup={"inline_keyboard": []})
             return {"ok": True, "cmd": "owner_cancel"}
         owner_confirm = _OWNER_CONFIRM_RE.match(data)
         if owner_confirm is not None:
-            side_code, tran_id, owner_ts_s, amount_micro_s = (
-                owner_confirm.group(1),
-                owner_confirm.group(2),
-                int(owner_confirm.group(3)),
-                owner_confirm.group(4),
+            from jarvise_assist.partner_json_store import (
+                consume_owner_preview,
+                owner_preview_path_for,
+                restore_owner_preview,
             )
-            side = _OWNER_SIDE[side_code]
-            preview_micro = int(amount_micro_s)
-            if not _owner_confirm_ts_ok(owner_ts_s, now_ms=now_ms):
-                _answer("การ์ดหมดอายุแล้ว — พิมพ์คำสั่งใหม่")
+
+            preview_path = owner_preview_path_for(conn)
+            token = owner_confirm.group(1)
+            preview = (
+                consume_owner_preview(preview_path, token, now_ms=int(now_ms))
+                if preview_path is not None
+                else None
+            )
+            if preview is None:
+                # Missing/expired, or forged old-style pa:oy:d:tran:ts:micro (no match).
+                _answer(_OWNER_STALE_MSG)
                 return {"ok": False, "reason": "stale_confirm"}
-            if _owner_already_recorded(conn, side=side, tran_id=tran_id):
-                _answer("บันทึกแล้ว")
-                if mid is not None:
-                    edit(int(mid), "บันทึกแล้ว", reply_markup={"inline_keyboard": []})
-                return {"ok": True, "cmd": "owner_confirm", "reason": "already_recorded"}
+            side = str(preview["side"])
+            tran_id = str(preview["tran_id"])
+            preview_micro = int(preview["amount_micro"])
+
+            def _restore() -> None:
+                if preview_path is not None:
+                    restore_owner_preview(preview_path, preview)
+
+            if preview.get("replay") or _owner_already_recorded(conn, side=side, tran_id=tran_id):
+                if _owner_already_recorded(conn, side=side, tran_id=tran_id):
+                    _answer("บันทึกแล้ว")
+                    if mid is not None:
+                        edit(int(mid), "บันทึกแล้ว", reply_markup={"inline_keyboard": []})
+                    return {"ok": True, "cmd": "owner_confirm", "reason": "already_recorded"}
+                _answer(_OWNER_STALE_MSG)
+                return {"ok": False, "reason": "stale_confirm"}
             from jarvise_assist.partner_audit import guard_check
 
             client = _resolve_client(futures)
@@ -2063,9 +2088,11 @@ def handle_partner_callback(
                 guard = guard_check(conn, client, now_ms=int(now_ms))
             except Exception:
                 _admin_guard_seen()
+                _restore()
                 raise
             _admin_guard_seen()
             if guard.status != "ok":
+                _restore()
                 _answer("อ่านรายการโอนไม่ได้ตอนนี้")
                 return {"ok": False, "reason": guard.status}
             code = "transfer_in_unrecorded" if side == "dep" else "transfer_out_unrecorded"
@@ -2078,10 +2105,12 @@ def handle_partner_callback(
                     finding = f
                     break
             if finding is None:
+                _restore()
                 _answer("ไม่พบเงินโอนที่ยังไม่บันทึก")
                 return {"ok": False, "reason": "no_match"}
             amount = Decimal(finding.amount)
             if ps.usdt_to_micro(amount) != preview_micro:
+                _restore()
                 _answer("จำนวนไม่ตรงกับที่ตรวจแล้ว — พิมพ์คำสั่งใหม่")
                 return {"ok": False, "reason": "amount_mismatch"}
             refuse = _owner_safety_refuse(
@@ -2092,13 +2121,16 @@ def handle_partner_callback(
                 now_ms=now_ms,
             )
             if refuse is not None:
+                _restore()
                 _answer(refuse)
                 return {"ok": False, "reason": "unsafe"}
             av = _read_v(client, now_ms=now_ms)
             if isinstance(av, AccountValueError):
+                _restore()
                 _answer(thai_reason(av.reason, detail=av.detail))
                 return {"ok": False, "reason": av.reason}
             if int(av.open_positions) > 0:
+                _restore()
                 _answer(_OWNER_OPEN_POS_MSG)
                 return {"ok": False, "reason": "unsafe"}
             note = _owner_note(tran_id)
@@ -2124,11 +2156,13 @@ def handle_partner_callback(
                     event_id=eid,
                 )
             if result.get("reason") == "already_recorded":
+                # Do not restore — booking already exists for this tranId.
                 _answer("บันทึกแล้ว")
                 if mid is not None:
                     edit(int(mid), "บันทึกแล้ว", reply_markup={"inline_keyboard": []})
                 return {"ok": True, "cmd": "owner_confirm", "reason": "already_recorded"}
             if not result.get("ok"):
+                _restore()
                 reason = str(result.get("reason") or "")
                 _answer(thai_reason(reason))
                 return {"ok": False, "reason": reason}
