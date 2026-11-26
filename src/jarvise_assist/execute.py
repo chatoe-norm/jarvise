@@ -2710,6 +2710,7 @@ def _emergency_close_reply(
     stop_err: str | None,
     sleep: Callable[[float], None],
     unresolved_as_unknown: bool = False,
+    mkt_client_id: str | None = None,
 ) -> ExecResult:
     closed = _emergency_close_verified(
         trade,
@@ -2721,6 +2722,11 @@ def _emergency_close_reply(
         sleep=sleep,
     )
     if closed:
+        # Quick: resolve market orderId after confirmed flat so sync can tag fills.
+        if mkt_client_id:
+            _ensure_mkt_order_id_logged(
+                trade, conn, intent_id=intent_id, symbol=symbol, client_id=mkt_client_id
+            )
         cancel_ok = _orphan_cancel_after_close(trade, conn=conn, intent_id=intent_id, symbol=symbol)
         text = f"{MSG_STOP_CLOSED} ({stop_err or 'stop failed'})"
         if not cancel_ok:
@@ -2971,6 +2977,9 @@ def run_entry_sequence(
         attempt_sl1_on_unknown=True,
     )
     if vr == StopVerifyResult.CLOSED_BY_STOP:
+        # Quick: done only with terminal market-order evidence (partial may still grow).
+        if is_quick and not order_final:
+            return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
         return _exec_result(MSG_ALREADY_CLOSED, status="done")
     if vr == StopVerifyResult.UNVERIFIABLE:
         return _exec_result(
@@ -2979,6 +2988,8 @@ def run_entry_sequence(
         )
     if vr != StopVerifyResult.VERIFIED:
         if _position_flat_now(trade, symbol=symbol) is True:
+            if is_quick and not order_final:
+                return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
             return _exec_result(MSG_ALREADY_CLOSED, status="done")
         return _emergency_close_reply(
             trade,
@@ -2991,8 +3002,11 @@ def run_entry_sequence(
             stop_err=stop_err,
             sleep=sleep,
             unresolved_as_unknown=is_quick,
+            mkt_client_id=cid if is_quick else None,
         )
     if _position_flat_now(trade, symbol=symbol) is True:
+        if is_quick and not order_final:
+            return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
         return _exec_result(MSG_ALREADY_CLOSED, status="done")
     if keep_tag is not None:
         _cancel_dup_stops_after_verified(
@@ -5784,6 +5798,12 @@ def _recover_entry_intent(
             )
             return
         if outcome == OrderOutcome.FILLED and flat:
+            # classify treats executedQty>0 as FILLED (incl. PARTIALLY_FILLED).
+            # Quick: finish done only with terminal market-order evidence.
+            is_quick_flat = str(preview.get("origin") or "") == "quick"
+            if is_quick_flat and not _order_is_final(queried.order):
+                _keep_recovering_unknown(conn, intent_id)
+                return
             _recovery_notify(
                 send,
                 conn,
@@ -5857,6 +5877,9 @@ def _recover_entry_intent(
         position_qty=qty,
     )
     if vr == StopVerifyResult.CLOSED_BY_STOP:
+        if is_quick_recover and not order_final:
+            _keep_recovering_unknown(conn, intent_id)
+            return
         _recovery_notify(
             send,
             conn,
@@ -5987,6 +6010,7 @@ def _recover_entry_intent(
             stop_err=str(exc),
             sleep=sleep,
             unresolved_as_unknown=is_quick_recover,
+            mkt_client_id=cid if is_quick_recover else None,
         )
         _recovery_notify(
             send,
@@ -6034,6 +6058,7 @@ def _recover_entry_intent(
         stop_err="slr not verified",
         sleep=sleep,
         unresolved_as_unknown=is_quick_recover,
+        mkt_client_id=cid if is_quick_recover else None,
     )
     _recovery_notify(
         send,

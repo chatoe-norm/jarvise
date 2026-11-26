@@ -38,6 +38,10 @@ SendFn = Callable[..., Any]
 
 REG_TTL_MS = 10 * 60_000
 REG_EXPIRE_GRACE_MS = 2 * 60_000
+# Same bound as execute.RECOVER_MAX_AGE_MS (2h). Unresolved exec-linked
+# registrations stay open for fill reconciliation even when the position is
+# already flat (emergency-close fills often lack clientOrderId).
+UNRESOLVED_EXEC_KEEP_MS = 2 * 60 * 60_000
 QUICK_SAMPLE_TARGET = 25
 
 QUICK_USAGE = "พิมพ์: q BTC long 67000 (stop เป็นราคา) หรือ q BTC short 0.4% (stop ห่างจากราคา %)"
@@ -488,42 +492,49 @@ def sync_quick_trades(
             after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
 
         if not after:
-            if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
-                # Exec-linked + unresolved: keep open while the symbol still has a
-                # position (position-fallback may lack orderId until recovery resolves it).
-                if exec_intent_id:
-                    still_open = False
-                    try:
-                        pos_fn = getattr(client, "position_risk", None)
-                        if callable(pos_fn):
-                            try:
-                                live = pos_fn(symbol=sym)
-                            except TypeError:
-                                live = pos_fn()
-                            still_open = any(
-                                str(getattr(p, "symbol", "") or "").upper() == sym for p in (live or [])
-                            )
-                    except Exception:  # noqa: BLE001
-                        # Unreadable position → do not expire (fail closed for attribution).
-                        still_open = True
-                    if still_open:
-                        continue
-                conn.execute(
-                    """
-                    UPDATE assist_quick_registration
-                    SET status='expired', updated_at_ms=?
-                    WHERE id=?
-                    """,
-                    (int(now_ms), rid),
-                )
-                conn.commit()
-                info["expired"] += 1
-                _send_reg_expire_notice(
-                    send,
-                    sym=sym,
-                    side=side,
-                    kind="no_fill",
-                )
+            # Exec-linked with no bot orderId yet: keep for reconciliation up to
+            # UNRESOLVED_EXEC_KEEP_MS from created_at. Flat is not no-fill evidence
+            # (emergency-close fills often lack clientOrderId until resolve).
+            if exec_intent_id and not bot_order_id:
+                if int(now_ms) <= created + UNRESOLVED_EXEC_KEEP_MS:
+                    continue
+                # Bound elapsed with still-unresolved orderId → expire as no_fill.
+            elif int(now_ms) <= expires + REG_EXPIRE_GRACE_MS:
+                continue
+            elif exec_intent_id:
+                # Have orderId but no matching fills yet, past grace: keep while open.
+                still_open = False
+                try:
+                    pos_fn = getattr(client, "position_risk", None)
+                    if callable(pos_fn):
+                        try:
+                            live = pos_fn(symbol=sym)
+                        except TypeError:
+                            live = pos_fn()
+                        still_open = any(
+                            str(getattr(p, "symbol", "") or "").upper() == sym for p in (live or [])
+                        )
+                except Exception:  # noqa: BLE001
+                    # Unreadable position → do not expire (fail closed for attribution).
+                    still_open = True
+                if still_open:
+                    continue
+            conn.execute(
+                """
+                UPDATE assist_quick_registration
+                SET status='expired', updated_at_ms=?
+                WHERE id=?
+                """,
+                (int(now_ms), rid),
+            )
+            conn.commit()
+            info["expired"] += 1
+            _send_reg_expire_notice(
+                send,
+                sym=sym,
+                side=side,
+                kind="no_fill",
+            )
             continue
 
         first = after[0]
