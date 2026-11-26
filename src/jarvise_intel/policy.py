@@ -1,9 +1,10 @@
-"""Public-HTTPS-only allow policy for Hermes tool egress."""
+"""Public-HTTPS-only allow policy for Hermes tool egress and digest sources."""
 
 from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import socket
 from collections.abc import Callable
 from pathlib import Path
@@ -18,6 +19,8 @@ BLOCKED_HOST_IPS = frozenset(
 
 Resolver = Callable[[str], list[str]]
 DEFAULT_SOURCE_POLICY = Path("config/hermes/source-policy.json")
+# Printable ASCII only — the exact string that will be rendered into Markdown.
+SOURCE_URL_RE = re.compile(r"^[\x21-\x7e]+$")
 
 
 def _default_resolve(hostname: str) -> list[str]:
@@ -32,8 +35,20 @@ def _default_resolve(hostname: str) -> list[str]:
     return addrs
 
 
+def _unwrap_ip(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Normalize IPv4-mapped / transition forms before the global check."""
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
 def is_blocked_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    addr = _unwrap_ip(addr)
     if addr in BLOCKED_HOST_IPS:
+        return True
+    if not addr.is_global:
         return True
     if addr.is_loopback or addr.is_private or addr.is_link_local:
         return True
@@ -45,6 +60,12 @@ def is_blocked_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     # Unique-local IPv6
     if isinstance(addr, ipaddress.IPv6Address) and addr in ipaddress.ip_network("fc00::/7"):
         return True
+    # 6to4 / NAT64 transition ranges (still deny even if presented as global).
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr in ipaddress.ip_network("2002::/16"):
+            return True
+        if addr in ipaddress.ip_network("64:ff9b::/96"):
+            return True
     # Cloud metadata
     if addr == ipaddress.ip_address("169.254.169.254"):
         return True
@@ -58,7 +79,7 @@ def validate_host_addrs(
 ) -> tuple[list[str], str]:
     """Resolve once (or accept a literal) and return allowed IP strings.
 
-    If any answer is blocked, the whole name is denied.
+    If any answer is blocked, the whole name is denied. Used by the CONNECT proxy only.
     """
     host = (host or "").strip()
     if not host or "/" in host or "@" in host:
@@ -92,30 +113,40 @@ def validate_host_addrs(
     return allowed, "ok"
 
 
+def _https_syntax(url: str, *, require_port_443: bool = True) -> tuple[bool, str, str]:
+    """Scheme/userinfo/port/host syntax only. Returns (ok, reason, host)."""
+    raw = (url or "").strip()
+    if not raw:
+        return False, "empty_url", ""
+    if not SOURCE_URL_RE.fullmatch(raw):
+        return False, "url_not_printable", ""
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() != "https":
+        return False, "scheme_not_https", ""
+    if parsed.username is not None or parsed.password is not None:
+        return False, "userinfo_forbidden", ""
+    host = parsed.hostname
+    if not host:
+        return False, "missing_host", ""
+    port = parsed.port
+    if require_port_443 and port is not None and port != 443:
+        return False, "port_not_443", ""
+    return True, "ok", host.lower().strip("[]")
+
+
 def allow_https_url(
     url: str,
     *,
     resolve: Resolver | None = None,
     require_port_443: bool = True,
 ) -> tuple[bool, str]:
-    """Return (ok, reason). Deny HTTP, userinfo, non-443, and private/metadata targets."""
-    raw = (url or "").strip()
-    if not raw:
-        return False, "empty_url"
-    parsed = urlparse(raw)
-    if parsed.scheme.lower() != "https":
-        return False, "scheme_not_https"
-    if parsed.username is not None or parsed.password is not None:
-        return False, "userinfo_forbidden"
-    host = parsed.hostname
-    if not host:
-        return False, "missing_host"
-    port = parsed.port
-    if require_port_443 and port is not None and port != 443:
-        return False, "port_not_443"
-    addrs, reason = validate_host_addrs(host, resolve=resolve)
-    if not addrs:
+    """Proxy-facing HTTPS check: syntax plus DNS/IP validation."""
+    ok, reason, host = _https_syntax(url, require_port_443=require_port_443)
+    if not ok:
         return False, reason
+    addrs, dns_reason = validate_host_addrs(host, resolve=resolve)
+    if not addrs:
+        return False, dns_reason
     return True, "ok"
 
 
@@ -141,7 +172,7 @@ def allow_redirect_url(
     *,
     resolve: Resolver | None = None,
 ) -> tuple[bool, str]:
-    """Re-check each redirect hop with the same public-HTTPS rules."""
+    """Re-check each redirect hop with the same public-HTTPS rules (proxy path)."""
     return allow_https_url(url, resolve=resolve, require_port_443=True)
 
 
@@ -166,13 +197,15 @@ def allow_source_url(
     resolve: Resolver | None = None,
     policy_path: Path | None = None,
 ) -> tuple[bool, str]:
-    """HTTPS + public DNS + explicit primary-source allowlist."""
-    ok, reason = allow_https_url(url, resolve=resolve)
+    """Adapter source check: syntax + allowlist only. Never resolves DNS.
+
+    ``resolve`` is accepted for call-site compatibility and ignored — the adapter
+    does not fetch URLs; CONNECT-time DNS stays on the egress proxy.
+    """
+    del resolve  # hermetic: adapter never looks up hosts
+    ok, reason, host = _https_syntax(url, require_port_443=True)
     if not ok:
         return False, reason
-    host = (urlparse(url).hostname or "").lower().strip("[]")
-    if not host:
-        return False, "missing_host"
     try:
         ipaddress.ip_address(host)
         return False, "ip_literal_host"
@@ -184,11 +217,7 @@ def allow_source_url(
     for suffix in rules["deny_suffixes"]:
         if host == suffix or host.endswith("." + suffix):
             return False, "denied_suffix"
-    allowed = False
     for suffix in rules["allow_suffixes"]:
         if host == suffix or host.endswith("." + suffix):
-            allowed = True
-            break
-    if not allowed:
-        return False, "unknown_source"
-    return True, "ok"
+            return True, "ok"
+    return False, "unknown_source"

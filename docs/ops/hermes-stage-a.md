@@ -13,10 +13,13 @@ Status: **implementation only**. Production OpenClaw remains the digest producer
 | Runtime user | `hermes` UID/GID `10000` |
 | Entrypoint | `/opt/jarvise/hermes-entrypoint.sh` → image `/opt/hermes/docker/entrypoint-dispatch.sh` (s6; do not drop dispatch) |
 | Gateway command | `gateway run` (empty image `Cmd` would fall through to chat) |
-| Plugin | Vendored `config/hermes/plugins/mcp-serve/` = official-plugins commit `80025332933bf84fb3c7b68f369d9fe59a771e98` (`mcp-serve` 1.0.1). Init copies into `/opt/data/plugins` when `PIN` differs; no install from floating `main`. |
+| Plugin | Vendored `config/hermes/plugins/mcp-serve/` = official-plugins commit `80025332933bf84fb3c7b68f369d9fe59a771e98` (`mcp-serve` 1.0.1). Init restores from the read-only vendor when the **tree hash** differs; probes run as uid `hermes`; no install from floating `main`. |
 | MCP mode | `hermes mcp-serve --tools-only` (no conversation bridge, no `messages_send`, no `permissions_*`) |
+| HTTP `/v1/runs` toolsets | `web` only (`skills` removed — `skill_manage` is a persistent write path). MCP may still list `skill_view` / `skills_list`. |
 
-`HERMES_PROVIDER` and `HERMES_MODEL` have no silent default. Empty values make `/ingest` return `503 provider_unconfigured`. `fallback_providers: []` in the template. Do not use `openrouter/openrouter/auto`.
+`HERMES_PROVIDER` and `HERMES_MODEL` have no silent default. Empty values make `/ingest` return `503 provider_unconfigured`. `fallback_providers: []` in the template. Do not use `openrouter/openrouter/auto`. Hermes reuses the shared `OPENROUTER_API_KEY` with jobs (same provider budget).
+
+**Config seeding:** a missing `data/hermes/gateway/config.yaml` is copied from `config/hermes/config.yaml.template`. An existing file is only stripped of the managed `skills` list entry under `platform_toolsets`; model/provider/credential keys are never overwritten. Unparseable YAML with a leftover skills entry refuses start.
 
 ## Network shape (R1)
 
@@ -31,21 +34,23 @@ Status: **implementation only**. Production OpenClaw remains the digest producer
 
 ## Publication and slots (R5/R6)
 
-- Create-if-absent: cross-process file lock, temp + `os.link` (or `O_EXCL`), never overwrite an incumbent `*.md`. Matching hash replays; differing bytes → `filename_conflict`.
-- Smoke slots use distinct `smoke-YYYY-MM-DD-HH.md` names and require `JARVISE_HERMES_SMOKE=1`.
-- Normal slots are admitted only for the **current** Asia/Bangkok window (`07` from 07:00–19:00, `19` from 19:00–next 07:00). Historical/future labels (e.g. `2000-01-01T07`, `2099-01-01T19`) return `400`.
-- One adapter-wide in-flight lock: a second distinct slot gets `429` and does not call Hermes. Hermes `Idempotency-Key` retention (~24h) is **not** the publication lock.
+- Create-if-absent: cross-process file lock, fully written + fsynced temp (`0644`), then `os.link`. Linux fails closed if hard links are unavailable (no partial final `*.md`). Matching hash replays; differing bytes → `filename_conflict`.
+- Provenance sidecar (slot, filename, sha256, length) is written before the link. A crash after link and before the slot record is recovered by adopting the file when the sidecar matches — without another Hermes call. Empty/truncated/untrusted files fail closed.
+- Smoke slots use distinct `smoke-YYYY-MM-DD-HH.md` names, require `JARVISE_HERMES_SMOKE=1`, and are refused unless the digest directory path contains `pilot-digests`.
+- Normal slots are admitted only for the **current** Asia/Bangkok window (`07` from 07:00–19:00, `19` from 19:00–next 07:00). Historical/future labels return `400`.
+- One adapter-wide **cross-process** in-flight lock: a second distinct slot gets `429`. Idempotency keys are `{slot}-a{n}` with `n` capped at 2; a new key is minted only after a confirmed terminal failure. On deadline the adapter calls `POST /v1/runs/{id}/stop`; still-running/unknown blocks a replacement run. Hermes `Idempotency-Key` retention (~24h) is not the publication lock.
 
 ## Digest schema and sources (R7)
 
 - `no_news` must be a real boolean (`"false"` is invalid).
-- Titles/comments/URLs are typed strings with length caps; `day` must parse `%Y-%m-%d` and lie within 14 days before the slot day.
-- `config/hermes/source-policy.json`: deny shorteners and IP-literal hosts; allow only listed publisher suffixes (includes `federalreserve.gov`, `nvidia.com`). Other hosts → `unknown_source` (not published).
-- Rendered Markdown must still match `parse_digest_text`.
+- Titles/comments/URLs reject control characters and line separators; URLs must be printable ASCII `[\x21-\x7e]+` and pass the allowlist on the exact rendered string. Titles may not contain `**`. Comments may not start with `http(s)://` or the research footer.
+- Adapter source validation is **syntax + allowlist only** (no DNS). DNS/IP checks stay on the CONNECT proxy. Experiment (2026-11-27): `getaddrinfo` from an adapter container on an `internal: true` network failed with `gaierror` for `federalreserve.gov`.
+- `config/hermes/source-policy.json` denies shorteners and IP-literal hosts. The allowlist includes watchlist publishers **and** secondary outlets (`reuters.com`, `cnbc.com`, …) plus `google.com` (includes user-content subdomains) by owner policy. Other hosts → `unknown_source` and the **whole slot** is rejected (dropping unknown items is a later owner decision, not Stage A default).
+- After render, `parse_digest_text` must recover the same item count, title, and URL.
 
 ## Runtime identity (R8)
 
-Completed runs without `runtime.provider` and `runtime.model` fail closed (`provider_mismatch` / `model_mismatch`). Exact normalized match only (no `str.endswith`). Differing `runtime.requested` is substitution and rejected. Fixture: `tests/fixtures/hermes_v0.23.4_run.json`.
+Completed runs without `runtime.provider` and `runtime.model` fail closed (`provider_mismatch` / `model_mismatch`). Exact normalized match only (no `str.endswith`). Differing `runtime.requested` is substitution and rejected. Fixture `tests/fixtures/hermes_v0.23.4_run.json` is **source-derived** (not a captured live response); `route_source` is accepted as an ignored extra.
 
 ## Capability matrix
 

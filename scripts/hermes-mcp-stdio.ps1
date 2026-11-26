@@ -10,7 +10,7 @@ $composeDir = if ($env:JARVISE_HERMES_COMPOSE_DIR) { $env:JARVISE_HERMES_COMPOSE
 
 $remote = @(
     "cd $composeDir",
-    "&& docker compose -f docker-compose.yml -f docker-compose.prod.yml",
+    "&& docker compose --profile hermes -f docker-compose.yml -f docker-compose.prod.yml",
     "exec -T --user hermes hermes hermes mcp-serve --tools-only"
 ) -join " "
 

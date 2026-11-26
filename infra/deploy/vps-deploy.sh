@@ -36,12 +36,19 @@ COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
 "${COMPOSE[@]}" stop jobs web >/dev/null 2>&1 || true
 mkdir -p data/analytics data/openclaw data/nlm data/.cache secrets
 mkdir -p data/hermes/gateway data/hermes/adapter data/hermes/pilot-digests
-chown -R "$uid:$gid" data
-# Hermes gateway runs as UID 10000 inside nousresearch/hermes-agent. Scope only
-# data/hermes/gateway so a normal redeploy keeps both Jarvise and Hermes writable.
-# Do not chown co-tenant stacks or archived OpenClaw trees for this step.
+# Exclude data/hermes/gateway from the recursive Jarvise chown so a running Hermes
+# state directory is not briefly owned by JARVISE_UID mid-redeploy (P3-5).
+# Do not stop jobs/web/trading services for this research-only path.
 hermes_uid="$(env_get HERMES_UID)"; hermes_uid="${hermes_uid:-10000}"
 hermes_gid="$(env_get HERMES_GID)"; hermes_gid="${hermes_gid:-10000}"
+if command -v find >/dev/null 2>&1; then
+  find data -mindepth 1 -maxdepth 1 ! -name hermes -exec chown -R "$uid:$gid" {} +
+  mkdir -p data/hermes
+  find data/hermes -mindepth 1 -maxdepth 1 ! -name gateway -exec chown -R "$uid:$gid" {} +
+else
+  chown -R "$uid:$gid" data/analytics data/openclaw data/nlm data/.cache 2>/dev/null || true
+  chown -R "$uid:$gid" data/hermes/adapter data/hermes/pilot-digests
+fi
 if [[ ! -f data/hermes/gateway/config.yaml ]]; then
   cp config/hermes/config.yaml.template data/hermes/gateway/config.yaml
 fi

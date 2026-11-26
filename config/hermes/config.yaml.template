@@ -43,13 +43,12 @@ agent:
     - browser
 
 platform_toolsets:
-  # Research-only: web + skills. No terminal/file/shell/messaging/approvals.
+  # Research-only: web. Skills toolset dropped — skill_manage is a persistent write path.
+  # MCP --tools-only may still expose skill_view / skills_list for Cursor; /v1/runs does not.
   api_server:
     - web
-    - skills
   cli:
     - web
-    - skills
 
 platforms:
   api_server:

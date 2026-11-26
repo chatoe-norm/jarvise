@@ -119,6 +119,7 @@ def test_mcp_wrapper_is_tools_only_non_root() -> None:
     text = MCP.read_text(encoding="utf-8")
     assert "--user hermes" in text
     assert "mcp-serve --tools-only" in text
+    assert "--profile hermes" in text
     assert "ssh -T" in text
     assert "18789" not in text
     assert "8642" not in text
@@ -137,11 +138,23 @@ def test_vendored_mcp_serve_pin_and_init() -> None:
     assert "mcp-serve" in init
     assert "git clone" not in init.lower()
     assert "plugins enable mcp-serve" in init
-    assert "PIN" in init
+    assert "treehash" in init or "tree_hash" in init
+    assert "skills" in init  # strip path
     tmpl = CONFIG_TMPL.read_text(encoding="utf-8")
     assert "fallback_providers: []" in tmpl
     assert "mcp-serve" in tmpl
     assert 'default: ""' in tmpl
+    assert "- skills" not in tmpl
+    assert "- web" in tmpl
+    jobs = _service_block(COMPOSE.read_text(encoding="utf-8"), "jobs")
+    assert "JARVISE_DIGEST_PRODUCER" in jobs
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    assert "! -name gateway" in deploy or "exclude" in deploy.lower()
+    render = (ROOT / "infra" / "docker" / "render-n8n-hermes-ingest.sh").read_text(encoding="utf-8")
+    assert "publish:workflow" not in render
+    assert "json.dumps" in render
+    env_ex = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "HERMES_IMAGE=" not in env_ex
 
 
 def test_ci_builds_hermes_images() -> None:

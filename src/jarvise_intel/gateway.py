@@ -165,6 +165,48 @@ def get_run(
     )
 
 
+def stop_run(
+    cfg: GatewayConfig,
+    run_id: str,
+    *,
+    open_url: HttpOpener | None = None,
+    timeout: float = 30.0,
+) -> RunResult | None:
+    """Request stop via POST /v1/runs/{id}/stop. Returns parsed body when available."""
+    opener = open_url or _default_open
+    request = urllib.request.Request(
+        f"{cfg.base_url.rstrip('/')}/v1/runs/{run_id}/stop",
+        data=b"{}",
+        headers=_auth_headers(cfg.api_key),
+        method="POST",
+    )
+    try:
+        with opener(request, timeout) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise GatewayError("auth_error", f"HTTP {exc.code}", status_code=exc.code) from exc
+        # Stop is best-effort; caller will GET to verify.
+        return None
+    except urllib.error.URLError:
+        return None
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status = str(payload.get("status") or "").strip().lower()
+    return RunResult(
+        run_id=str(payload.get("run_id") or run_id),
+        status=status or "unknown",
+        output="",
+        usage={},
+        runtime={},
+        raw=payload,
+    )
+
+
 def normalize_runtime_identity(provider: str, model: str) -> tuple[str, str]:
     """Exact normalized identity: provider + model, or provider/model form of the pin."""
     prov = (provider or "").strip().lower()
@@ -213,15 +255,25 @@ def wait_for_run(
         last = get_run(cfg, run_id, open_url=open_url, timeout=min(30.0, max(1.0, deadline - monotonic())))
         if last.status in TERMINAL_OK:
             error_code = str(last.raw.get("hermes.error_code") or last.raw.get("error_code") or "")
-            finish = str(last.raw.get("finish_reason") or "")
-            if error_code == "iteration_budget_exhausted" or finish == "length":
+            if error_code == "iteration_budget_exhausted":
                 raise GatewayError("incomplete_run", "iteration_budget_exhausted")
             assert_runtime_identity(cfg, last.runtime)
             return last
         if last.status in TERMINAL_FAIL:
             raise GatewayError("incomplete_run", last.status)
         sleep(cfg.poll_s)
-    raise GatewayError("timeout", "deadline_exceeded")
+    # Deadline: request stop, then verify resulting state.
+    stop_run(cfg, run_id, open_url=open_url, timeout=min(15.0, cfg.deadline_s))
+    try:
+        final = get_run(cfg, run_id, open_url=open_url, timeout=min(15.0, cfg.deadline_s))
+    except GatewayError:
+        raise GatewayError("unknown_run", "stop_unverified") from None
+    if final.status in TERMINAL_OK:
+        assert_runtime_identity(cfg, final.runtime)
+        return final
+    if final.status in TERMINAL_FAIL:
+        raise GatewayError("incomplete_run", final.status)
+    raise GatewayError("unknown_run", final.status or "deadline_exceeded")
 
 
 def run_research(
@@ -232,6 +284,7 @@ def run_research(
     idempotency_key: str,
     open_url: HttpOpener | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    on_created: Callable[[str], None] | None = None,
 ) -> RunResult:
     run_id = create_run(
         cfg,
@@ -240,4 +293,6 @@ def run_research(
         idempotency_key=idempotency_key,
         open_url=open_url,
     )
+    if on_created is not None:
+        on_created(run_id)
     return wait_for_run(cfg, run_id, open_url=open_url, sleep=sleep)

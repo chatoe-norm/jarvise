@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from jarvise_intel.policy import Resolver, allow_source_url
+from jarvise_intel.policy import SOURCE_URL_RE, allow_source_url
 
 BANGKOK = timezone(timedelta(hours=7))
 ALLOWED_HOURS = frozenset({7, 19})
@@ -29,8 +29,9 @@ ITEM_DAY_MAX_AGE = timedelta(days=14)
 SLOT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2})$")
 SMOKE_SLOT_RE = re.compile(r"^smoke-(\d{4}-\d{2}-\d{2})T(\d{2})$")
 FOOTER = "Not a trade signal. Research context only."
-
-_INFLIGHT = threading.Lock()
+PILOT_DIGEST_MARKER = "pilot-digests"
+MAX_ATTEMPTS = 2
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 
 @dataclass(frozen=True)
@@ -56,8 +57,11 @@ class Slot:
         return base
 
     @property
-    def idempotency_key(self) -> str:
+    def idempotency_base(self) -> str:
         return f"jarvise-hermes-ingest-{self.label}"
+
+    def idempotency_key(self, attempt: int) -> str:
+        return f"{self.idempotency_base}-a{attempt}"
 
     @property
     def slot_day(self) -> date:
@@ -116,14 +120,29 @@ def assert_current_slot(slot: Slot, *, now: datetime | None = None, smoke_allowe
         raise ValueError("slot_not_current")
 
 
+def assert_smoke_confined(slot: Slot, digest_dir: Path) -> None:
+    """Refuse smoke when the digest directory is not the pilot tree."""
+    if not slot.smoke:
+        return
+    resolved = digest_dir.resolve()
+    if PILOT_DIGEST_MARKER not in resolved.as_posix():
+        raise ValueError("smoke_not_pilot_dir")
+
+
+def _reject_controls(value: str, field: str) -> None:
+    if CONTROL_RE.search(value):
+        raise ValueError(f"control_char:{field}")
+
+
 def validate_items(
     payload: Any,
     *,
-    resolve: Resolver | None = None,
+    resolve: Any = None,
     slot: Slot | None = None,
     policy_path: Path | None = None,
 ) -> tuple[list[DigestItem], bool]:
-    """Parse gateway JSON into items. Returns (items, no_news)."""
+    """Parse gateway JSON into items. Returns (items, no_news). No DNS."""
+    del resolve  # adapter path is hermetic; keep kw for call-site compatibility
     if not isinstance(payload, dict):
         raise ValueError("payload_not_object")
     if "no_news" not in payload:
@@ -157,6 +176,7 @@ def validate_items(
             raise ValueError("item_fields_type")
         if not isinstance(url_raw, str) or not isinstance(comment_raw, str):
             raise ValueError("item_fields_type")
+        # Validate the exact strings that will be rendered (no strip of interior controls).
         title = title_raw.strip()
         day = day_raw.strip()
         url = url_raw.strip()
@@ -165,8 +185,17 @@ def validate_items(
             raise ValueError("item_fields_missing")
         if len(title) > MAX_TITLE or len(comment) > MAX_COMMENT or len(url) > MAX_URL:
             raise ValueError("item_fields_too_long")
-        if "\n" in title or "\n" in comment:
-            raise ValueError("multiline_forbidden")
+        for field, value in (("title", title), ("day", day), ("url", url), ("comment", comment)):
+            _reject_controls(value, field)
+        if "**" in title:
+            raise ValueError("title_delimiter")
+        lower_comment = comment.lower()
+        if lower_comment.startswith("http://") or lower_comment.startswith("https://"):
+            raise ValueError("comment_looks_like_url")
+        if lower_comment.startswith("not a trade signal"):
+            raise ValueError("comment_footer_forbidden")
+        if not SOURCE_URL_RE.fullmatch(url):
+            raise ValueError("url_not_printable")
         try:
             item_day = datetime.strptime(day, "%Y-%m-%d").date()
         except ValueError as exc:
@@ -175,7 +204,7 @@ def validate_items(
             raise ValueError("day_in_future")
         if ref_day - item_day > ITEM_DAY_MAX_AGE:
             raise ValueError("day_too_old")
-        ok, reason = allow_source_url(url, resolve=resolve, policy_path=policy_path)
+        ok, reason = allow_source_url(url, policy_path=policy_path)
         if not ok:
             raise ValueError(f"url_denied:{reason}")
         items.append(DigestItem(title=title, day=day, url=url, comment=comment))
@@ -198,6 +227,24 @@ def render_markdown(items: list[DigestItem], *, no_news: bool = False) -> str:
     lines.append(FOOTER)
     lines.append("")
     return "\n".join(lines)
+
+
+def assert_round_trip(items: list[DigestItem], markdown: str) -> None:
+    """Require parse_digest_text to recover the validated title/day/URL set."""
+    from jarvise_context.news_sources import parse_digest_text
+
+    parsed = parse_digest_text(markdown)
+    if len(parsed) != len(items):
+        raise ValueError("round_trip_count")
+    for expected, got in zip(items, parsed, strict=True):
+        if got.get("title") != expected.title:
+            raise ValueError("round_trip_title")
+        if got.get("url") != expected.url:
+            raise ValueError("round_trip_url")
+        day_got = str(got.get("day") or got.get("date") or "")
+        if day_got and day_got != expected.day:
+            # parse_digest_text may omit day; when present it must match.
+            raise ValueError("round_trip_day")
 
 
 @contextmanager
@@ -244,6 +291,15 @@ def _filename_lock_path(state_dir: Path, filename: str) -> Path:
     return state_dir / "locks" / f"{safe}.lock"
 
 
+def _provenance_path(state_dir: Path, slot: Slot) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", slot.label)
+    return state_dir / "provenance" / f"{safe}.json"
+
+
+def _inflight_lock_path(state_dir: Path) -> Path:
+    return state_dir / "locks" / "inflight.lock"
+
+
 def load_slot_record(state_dir: Path, slot: Slot) -> dict[str, Any] | None:
     path = _record_path(state_dir, slot)
     if not path.is_file():
@@ -265,6 +321,10 @@ def write_slot_record(state_dir: Path, slot: Slot, record: dict[str, Any]) -> No
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         _fsync_dir(path.parent)
     finally:
         if os.path.exists(tmp_name):
@@ -272,6 +332,53 @@ def write_slot_record(state_dir: Path, slot: Slot, record: dict[str, Any]) -> No
                 os.unlink(tmp_name)
             except OSError:
                 pass
+
+
+def _write_json_atomic(path: Path, data: dict[str, Any], *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
+        _fsync_dir(path.parent)
+    finally:
+        if os.path.exists(tmp_name):
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
+
+def write_provenance(state_dir: Path, slot: Slot, *, sha256: str, byte_length: int) -> None:
+    path = _provenance_path(state_dir, slot)
+    _write_json_atomic(
+        path,
+        {
+            "slot": slot.label,
+            "filename": slot.filename,
+            "sha256": sha256,
+            "byte_length": byte_length,
+        },
+        mode=0o600,
+    )
+
+
+def load_provenance(state_dir: Path, slot: Slot) -> dict[str, Any] | None:
+    path = _provenance_path(state_dir, slot)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -288,31 +395,85 @@ def _fsync_dir(directory: Path) -> None:
 
 
 def _link_create_if_absent(tmp: Path, target: Path) -> None:
-    """Create target from tmp without overwriting an existing file."""
+    """Create target from tmp without overwriting. Fail closed when hard links are unavailable."""
     try:
         os.link(tmp, target)
+        return
     except FileExistsError:
         raise
     except OSError:
-        # Windows may lack link privileges; fall back to exclusive create.
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        if hasattr(os, "O_BINARY"):
-            flags |= os.O_BINARY
-        try:
-            fd = os.open(str(target), flags, 0o644)
-        except FileExistsError:
+        if sys.platform != "win32":
+            # Never expose a partial final *.md on Linux (O_EXCL-then-write is unsafe).
             raise
+    # Windows-only fallback: write to a unique sibling then os.replace is still replace-capable,
+    # so use O_EXCL on a staging name under the digest dir, then link/rename only if target absent.
+    staging = target.with_name(f".{target.name}.{uuid.uuid4().hex}.stg")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(str(staging), flags, 0o644)
+    try:
+        with open(tmp, "rb") as src, os.fdopen(fd, "wb") as dst:
+            dst.write(src.read())
+            dst.flush()
+            os.fsync(dst.fileno())
+        if target.exists():
+            raise FileExistsError("filename_conflict")
+        os.replace(staging, target)
+    except Exception:
         try:
-            with open(tmp, "rb") as src, os.fdopen(fd, "wb") as dst:
-                dst.write(src.read())
-                dst.flush()
-                os.fsync(dst.fileno())
-        except Exception:
-            try:
-                os.unlink(target)
-            except OSError:
-                pass
-            raise
+            if staging.exists():
+                staging.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def adopt_existing_digest(
+    *,
+    digest_dir: Path,
+    state_dir: Path,
+    slot: Slot,
+) -> dict[str, Any] | None:
+    """If a complete trusted file exists without a completed record, adopt it (no Hermes call)."""
+    target = digest_dir / slot.filename
+    if not target.is_file():
+        return None
+    data = target.read_bytes()
+    if not data:
+        raise ValueError("recovery_empty_file")
+    prior_hash = hashlib.sha256(data).hexdigest()
+    prov = load_provenance(state_dir, slot)
+    if prov is None:
+        raise ValueError("recovery_missing_provenance")
+    if str(prov.get("slot") or "") != slot.label:
+        raise ValueError("recovery_slot_mismatch")
+    if str(prov.get("filename") or "") != slot.filename:
+        raise ValueError("recovery_filename_mismatch")
+    if str(prov.get("sha256") or "") != prior_hash:
+        raise ValueError("recovery_hash_mismatch")
+    if int(prov.get("byte_length") or -1) != len(data):
+        raise ValueError("recovery_length_mismatch")
+    text = data.decode("utf-8")
+    if FOOTER not in text:
+        raise ValueError("recovery_footer_missing")
+    from jarvise_context.news_sources import parse_digest_text
+
+    if "No confirmed watchlist coverage" not in text:
+        parsed = parse_digest_text(text)
+        if not parsed:
+            raise ValueError("recovery_unparseable")
+    record = {
+        "status": "completed",
+        "slot": slot.label,
+        "filename": slot.filename,
+        "output_hash": prior_hash,
+        "published_at": datetime.fromtimestamp(target.stat().st_mtime, tz=UTC).isoformat(),
+        "replay": True,
+        "recovered": True,
+    }
+    write_slot_record(state_dir, slot, record)
+    return record
 
 
 def publish_digest(
@@ -358,6 +519,8 @@ def publish_digest(
             write_slot_record(state_dir, slot, record)
             return record
 
+        write_provenance(state_dir, slot, sha256=new_hash, byte_length=len(data))
+
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{uuid.uuid4().hex}.",
             suffix=".tmp",
@@ -369,6 +532,10 @@ def publish_digest(
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+            try:
+                os.chmod(tmp, 0o644)
+            except OSError:
+                pass
             try:
                 _link_create_if_absent(tmp, target)
             except FileExistsError as exc:
@@ -407,14 +574,72 @@ def publish_digest(
                 pass
 
 
-def try_acquire_inflight() -> bool:
-    return _INFLIGHT.acquire(blocking=False)
+_INFLIGHT_HANDLE: Any = None
+_INFLIGHT_THREAD = threading.Lock()
+_INFLIGHT_MODE: str | None = None
+
+
+def try_acquire_inflight(state_dir: Path | None = None) -> bool:
+    """Cross-process single-in-flight lock when state_dir is set; else process-local."""
+    global _INFLIGHT_HANDLE, _INFLIGHT_MODE
+    if state_dir is None:
+        if _INFLIGHT_THREAD.acquire(blocking=False):
+            _INFLIGHT_MODE = "thread"
+            return True
+        return False
+    lock_path = _inflight_lock_path(state_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _INFLIGHT_HANDLE = handle
+        _INFLIGHT_MODE = "file"
+        return True
+    except OSError:
+        handle.close()
+        return False
 
 
 def release_inflight() -> None:
+    global _INFLIGHT_HANDLE, _INFLIGHT_MODE
+    mode = _INFLIGHT_MODE
+    _INFLIGHT_MODE = None
+    if mode == "thread":
+        try:
+            _INFLIGHT_THREAD.release()
+        except RuntimeError:
+            pass
+        return
+    handle = _INFLIGHT_HANDLE
+    _INFLIGHT_HANDLE = None
+    if handle is None:
+        return
     try:
-        _INFLIGHT.release()
-    except RuntimeError:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        handle.close()
+    except OSError:
         pass
 
 

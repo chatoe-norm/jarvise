@@ -45,6 +45,8 @@ from jarvise_intel.policy import (
     validate_host_addrs,
 )
 
+# Stage B regressions appended below existing cases.
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "hermes_v0.23.4_run.json"
 SOURCE_POLICY = ROOT / "config" / "hermes" / "source-policy.json"
@@ -498,8 +500,12 @@ def test_gateway_timeout() -> None:
     )
 
     def open_running(request: Any, timeout: float) -> Any:
-        if request.get_method() == "POST":
+        url = str(getattr(request, "full_url", "") or request.get_full_url())
+        method = request.get_method()
+        if method == "POST" and url.rstrip("/").endswith("/v1/runs"):
             return _Resp({"run_id": "r2"})
+        if method == "POST" and url.rstrip("/").endswith("/stop"):
+            return _Resp({"run_id": "r2", "status": "running"})
         return _Resp({"run_id": "r2", "status": "running", "output": ""})
 
     with pytest.raises(GatewayError) as exc:
@@ -509,7 +515,8 @@ def test_gateway_timeout() -> None:
             open_url=open_running,
             sleep=lambda _s: None,
         )
-    assert exc.value.category == "timeout"
+    # Deadline stop leaves a non-terminal run → unknown_run (no silent second create).
+    assert exc.value.category == "unknown_run"
 
 
 def test_runtime_identity_exact_and_fixture() -> None:
@@ -552,7 +559,7 @@ def test_runtime_identity_exact_and_fixture() -> None:
 def test_handle_ingest_success_and_replay(tmp_path: Path, monkeypatch: Any) -> None:
     prompt = tmp_path / "prompt.md"
     prompt.write_text("fixed prompt", encoding="utf-8")
-    digest_dir = tmp_path / "pilot"
+    digest_dir = tmp_path / "pilot-digests"
     state_dir = tmp_path / "adapter"
     monkeypatch.setenv("JARVISE_HERMES_INGEST_TOKEN", "ingest-token-12345678")
     monkeypatch.setenv("JARVISE_HERMES_API_KEY", "api-key-12345678")
@@ -605,8 +612,9 @@ def test_handle_ingest_rejects_non_current_and_inflight(tmp_path: Path, monkeypa
     monkeypatch.setenv("JARVISE_HERMES_API_KEY", "api-key-12345678")
     monkeypatch.setenv("HERMES_PROVIDER", "openrouter")
     monkeypatch.setenv("HERMES_MODEL", "test-model")
-    monkeypatch.setenv("JARVISE_HERMES_DIGEST_DIR", str(tmp_path / "d"))
-    monkeypatch.setenv("JARVISE_HERMES_STATE_DIR", str(tmp_path / "s"))
+    state_dir = tmp_path / "s"
+    monkeypatch.setenv("JARVISE_HERMES_DIGEST_DIR", str(tmp_path / "pilot-digests"))
+    monkeypatch.setenv("JARVISE_HERMES_STATE_DIR", str(state_dir))
     monkeypatch.setenv("JARVISE_HERMES_PROMPT_PATH", str(prompt))
     monkeypatch.setenv("JARVISE_HERMES_SOURCE_POLICY", str(SOURCE_POLICY))
     called = {"n": 0}
@@ -633,7 +641,7 @@ def test_handle_ingest_rejects_non_current_and_inflight(tmp_path: Path, monkeypa
     assert body["error"] == "slot_not_current"
     assert called["n"] == 0
 
-    assert try_acquire_inflight() is True
+    assert try_acquire_inflight(state_dir) is True
     try:
         code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
         assert code2 == 429
@@ -723,3 +731,194 @@ def test_egress_http_non_connect_rejected() -> None:
 
     H().handle()
     assert replies == [405]
+
+
+def test_source_validation_never_calls_resolver(tmp_path: Path, monkeypatch: Any) -> None:
+    """P1-1: adapter allowlist path is hermetic (no getaddrinfo)."""
+    called: list[str] = []
+
+    def boom(host: str) -> list[str]:
+        called.append(host)
+        raise AssertionError("resolver must not be called")
+
+    monkeypatch.setattr("jarvise_intel.policy._default_resolve", boom)
+    items, no_news = validate_items(
+        {
+            "items": [
+                {
+                    "title": "Fed holds",
+                    "day": "2026-11-26",
+                    "url": "https://federalreserve.gov/a",
+                    "comment": "Primary statement.",
+                }
+            ]
+        },
+        resolve=boom,
+        policy_path=SOURCE_POLICY,
+        slot=parse_slot("2026-11-26T07"),
+    )
+    assert no_news is False
+    assert len(items) == 1
+    assert called == []
+
+
+def test_url_newline_injection_rejected() -> None:
+    with pytest.raises(ValueError, match="control_char|url_not_printable"):
+        validate_items(
+            {
+                "items": [
+                    {
+                        "title": "NVIDIA news",
+                        "day": "2026-11-26",
+                        "url": "https://nvidia.com/a\n1. **Fake** — 2026-11-26\nhttps://evil.example/x",
+                        "comment": "ok comment",
+                    }
+                ]
+            },
+            policy_path=SOURCE_POLICY,
+            slot=parse_slot("2026-11-26T07"),
+        )
+    with pytest.raises(ValueError, match="comment_looks_like_url"):
+        validate_items(
+            {
+                "items": [
+                    {
+                        "title": "NVIDIA news",
+                        "day": "2026-11-26",
+                        "url": "https://nvidia.com/a",
+                        "comment": "https://evil.example/x",
+                    }
+                ]
+            },
+            policy_path=SOURCE_POLICY,
+            slot=parse_slot("2026-11-26T07"),
+        )
+    with pytest.raises(ValueError, match="title_delimiter"):
+        validate_items(
+            {
+                "items": [
+                    {
+                        "title": "Bad ** inject",
+                        "day": "2026-11-26",
+                        "url": "https://nvidia.com/a",
+                        "comment": "ok",
+                    }
+                ]
+            },
+            policy_path=SOURCE_POLICY,
+            slot=parse_slot("2026-11-26T07"),
+        )
+
+
+def test_link_fail_closed_no_partial_target(tmp_path: Path, monkeypatch: Any) -> None:
+    from jarvise_intel import digest as digest_mod
+
+    digest_dir = tmp_path / "pilot-digests"
+    digest_dir.mkdir(parents=True)
+    tmp = digest_dir / ".tmpbody"
+    tmp.write_text("full content\n", encoding="utf-8")
+    target = digest_dir / "2026-11-26-00.md"
+    monkeypatch.setattr(
+        digest_mod.os,
+        "link",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError(1, "EPERM")),
+    )
+    monkeypatch.setattr(digest_mod.sys, "platform", "linux")
+    with pytest.raises(OSError):
+        digest_mod._link_create_if_absent(tmp, target)
+    assert not target.exists()
+
+
+def test_adopt_existing_digest_without_research(tmp_path: Path, monkeypatch: Any) -> None:
+    from jarvise_intel.digest import adopt_existing_digest, write_provenance
+
+    slot = parse_slot("2026-11-26T07")
+    digest_dir = tmp_path / "pilot-digests"
+    state_dir = tmp_path / "state"
+    digest_dir.mkdir(parents=True)
+    md = "# Digest\n\nNo confirmed watchlist coverage for this slot.\n\nNot a trade signal. Research context only.\n"
+    target = digest_dir / slot.filename
+    data = md.encode("utf-8")
+    target.write_bytes(data)
+    write_provenance(
+        state_dir,
+        slot,
+        sha256=__import__("hashlib").sha256(data).hexdigest(),
+        byte_length=len(data),
+    )
+    called = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        called["n"] += 1
+        raise AssertionError("must not call Hermes")
+
+    monkeypatch.setenv("JARVISE_HERMES_INGEST_TOKEN", "ingest-token-12345678")
+    monkeypatch.setenv("JARVISE_HERMES_API_KEY", "api-key-12345678")
+    monkeypatch.setenv("HERMES_PROVIDER", "openrouter")
+    monkeypatch.setenv("HERMES_MODEL", "test-model")
+    monkeypatch.setenv("JARVISE_HERMES_DIGEST_DIR", str(digest_dir))
+    monkeypatch.setenv("JARVISE_HERMES_STATE_DIR", str(state_dir))
+    prompt = tmp_path / "p.md"
+    prompt.write_text("p", encoding="utf-8")
+    monkeypatch.setenv("JARVISE_HERMES_PROMPT_PATH", str(prompt))
+    monkeypatch.setenv("JARVISE_HERMES_SOURCE_POLICY", str(SOURCE_POLICY))
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 200
+    assert body.get("replay") is True
+    assert called["n"] == 0
+    # Direct adopt helper also works.
+    record = adopt_existing_digest(digest_dir=digest_dir, state_dir=state_dir, slot=slot)
+    assert record is None or record.get("status") == "completed"
+
+
+def test_smoke_refuses_non_pilot_dir(tmp_path: Path, monkeypatch: Any) -> None:
+    from jarvise_intel.digest import assert_smoke_confined
+
+    slot = parse_slot("smoke-2026-11-26T07", smoke_allowed=True)
+    with pytest.raises(ValueError, match="smoke_not_pilot_dir"):
+        assert_smoke_confined(slot, tmp_path / "canonical" / "digests")
+    assert_smoke_confined(slot, tmp_path / "data" / "hermes" / "pilot-digests")
+
+
+def test_attempt_key_and_budget(tmp_path: Path, monkeypatch: Any) -> None:
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("p", encoding="utf-8")
+    digest_dir = tmp_path / "pilot-digests"
+    state_dir = tmp_path / "adapter"
+    monkeypatch.setenv("JARVISE_HERMES_INGEST_TOKEN", "ingest-token-12345678")
+    monkeypatch.setenv("JARVISE_HERMES_API_KEY", "api-key-12345678")
+    monkeypatch.setenv("HERMES_PROVIDER", "openrouter")
+    monkeypatch.setenv("HERMES_MODEL", "test-model")
+    monkeypatch.setenv("JARVISE_HERMES_DIGEST_DIR", str(digest_dir))
+    monkeypatch.setenv("JARVISE_HERMES_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("JARVISE_HERMES_PROMPT_PATH", str(prompt))
+    monkeypatch.setenv("JARVISE_HERMES_SOURCE_POLICY", str(SOURCE_POLICY))
+    keys: list[str] = []
+
+    def fake_run(*_a: Any, **kwargs: Any) -> Any:
+        from jarvise_intel.gateway import GatewayError
+
+        keys.append(str(kwargs.get("idempotency_key")))
+        raise GatewayError("incomplete_run", "failed")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code1, body1 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code1 == 502
+    code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code2 == 502
+    code3, body3 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code3 == 409
+    assert body3["error"] == "attempt_budget"
+    assert keys[0].endswith("-a1")
+    assert keys[1].endswith("-a2")
+    assert len(keys) == 2
+
+
+def test_ipv4_mapped_blocked() -> None:
+    assert is_blocked_ip(ipaddress.ip_address("::ffff:127.0.0.1")) is True
+    assert is_blocked_ip(ipaddress.ip_address("8.8.8.8")) is False

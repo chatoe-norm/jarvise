@@ -12,6 +12,10 @@ from urllib.parse import urlsplit
 from jarvise_intel.policy import Resolver, allow_connect_target
 
 _BUFFER = 65536
+# Longer than the adapter research deadline (600s) so silent upstream TLS does not cut mid-run.
+_TUNNEL_IDLE_S = 900.0
+_HEADER_READ_TIMEOUT_S = 30.0
+_MAX_HEADER_LINES = 64
 
 
 def connect_validated(
@@ -54,6 +58,11 @@ class _ProxyHandler(socketserver.StreamRequestHandler):
     last_connect_addr: str | None = None
 
     def handle(self) -> None:
+        if self.connection is not None:
+            try:
+                self.connection.settimeout(_HEADER_READ_TIMEOUT_S)
+            except OSError:
+                pass
         try:
             first = self.rfile.readline(65536)
         except OSError:
@@ -81,11 +90,17 @@ class _ProxyHandler(socketserver.StreamRequestHandler):
                 self.on_deny(target, reason)
             self._reply(403, b"Forbidden")
             return
-        # Drain headers
-        while True:
-            hdr = self.rfile.readline(65536)
+        # Drain headers with a hard line cap (resource exhaustion).
+        for _ in range(_MAX_HEADER_LINES):
+            try:
+                hdr = self.rfile.readline(65536)
+            except OSError:
+                return
             if not hdr or hdr in (b"\r\n", b"\n"):
                 break
+        else:
+            self._reply(400, b"Bad Request")
+            return
         try:
             upstream = connect_validated(addrs, port, timeout=30)
             type(self).last_connect_addr = upstream.getpeername()[0]
@@ -95,6 +110,10 @@ class _ProxyHandler(socketserver.StreamRequestHandler):
         try:
             self.wfile.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             self.wfile.flush()
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
             self._tunnel(self.connection, upstream)
         finally:
             upstream.close()
@@ -133,7 +152,7 @@ class _ProxyHandler(socketserver.StreamRequestHandler):
     def _tunnel(self, client: socket.socket, upstream: socket.socket) -> None:
         sockets = [client, upstream]
         while True:
-            readable, _, errored = select.select(sockets, [], sockets, 60)
+            readable, _, errored = select.select(sockets, [], sockets, _TUNNEL_IDLE_S)
             if errored or not readable:
                 return
             for sock in readable:

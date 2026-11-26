@@ -15,7 +15,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from jarvise_intel.digest import (
+    MAX_ATTEMPTS,
+    adopt_existing_digest,
     assert_current_slot,
+    assert_round_trip,
+    assert_smoke_confined,
     extract_json_object,
     load_slot_record,
     parse_slot,
@@ -24,8 +28,16 @@ from jarvise_intel.digest import (
     render_markdown,
     try_acquire_inflight,
     validate_items,
+    write_slot_record,
 )
-from jarvise_intel.gateway import GatewayConfig, GatewayError, run_research
+from jarvise_intel.gateway import (
+    TERMINAL_FAIL,
+    TERMINAL_OK,
+    GatewayConfig,
+    GatewayError,
+    get_run,
+    run_research,
+)
 
 logger = logging.getLogger("jarvise_intel")
 
@@ -76,6 +88,29 @@ def _check_bearer(header: str | None, expected: str) -> bool:
     return hmac.compare_digest(parts[1].encode("utf-8"), expected.encode("utf-8"))
 
 
+def _next_attempt(existing: dict[str, Any] | None) -> tuple[int, str | None]:
+    """Return (attempt_number, block_reason). attempt is 1..MAX_ATTEMPTS."""
+    if existing is None:
+        return 1, None
+    status = str(existing.get("status") or "")
+    if status == "completed":
+        return 0, "completed"
+    if status == "unknown":
+        return 0, "unknown_run"
+    if status == "running":
+        return 0, "running"
+    attempt = int(existing.get("attempt") or 0)
+    if status in TERMINAL_FAIL or status == "incomplete_run" or status == "failed_terminal":
+        if attempt >= MAX_ATTEMPTS:
+            return 0, "attempt_budget"
+        return attempt + 1, None
+    if attempt <= 0:
+        return 1, None
+    if attempt >= MAX_ATTEMPTS and status not in TERMINAL_OK:
+        return 0, "attempt_budget"
+    return attempt, None
+
+
 def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     if not cfg.provider_ready():
         return 503, {"ok": False, "error": "provider_unconfigured"}
@@ -89,6 +124,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
     try:
         slot = parse_slot(slot_raw, smoke_allowed=cfg.smoke)
         assert_current_slot(slot, now=cfg.now, smoke_allowed=cfg.smoke)
+        assert_smoke_confined(slot, cfg.digest_dir)
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
 
@@ -96,14 +132,107 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
     if existing and existing.get("status") == "completed":
         return 200, {"ok": True, "replay": True, "result": existing}
 
-    if not try_acquire_inflight():
+    if not try_acquire_inflight(cfg.state_dir):
         return 429, {"ok": False, "error": "inflight_busy"}
 
     try:
-        # Re-check completed under the admission lock (another worker may have finished).
         existing = load_slot_record(cfg.state_dir, slot)
         if existing and existing.get("status") == "completed":
             return 200, {"ok": True, "replay": True, "result": existing}
+
+        # P2-5: adopt a complete file published before the slot record was written.
+        try:
+            adopted = adopt_existing_digest(digest_dir=cfg.digest_dir, state_dir=cfg.state_dir, slot=slot)
+        except ValueError as exc:
+            return 409, {"ok": False, "error": str(exc)}
+        if adopted is not None:
+            return 200, {"ok": True, "replay": True, "result": adopted}
+
+        # Resume an in-flight run after restart (no second create while unknown/running).
+        if existing and existing.get("status") in {"running", "unknown"}:
+            run_id = str(existing.get("run_id") or "").strip()
+            if not run_id:
+                return 409, {"ok": False, "error": "unknown_run"}
+            gateway = GatewayConfig(
+                base_url=cfg.gateway_url,
+                api_key=cfg.api_key,
+                provider=cfg.provider,
+                model=cfg.model,
+                deadline_s=cfg.deadline_s,
+            )
+            try:
+                current = get_run(gateway, run_id)
+            except GatewayError as exc:
+                write_slot_record(
+                    cfg.state_dir,
+                    slot,
+                    {
+                        **existing,
+                        "status": "unknown",
+                        "error": exc.category,
+                    },
+                )
+                return 409, {"ok": False, "error": "unknown_run"}
+            if current.status in TERMINAL_OK:
+                # Fall through to validation/publish using recovered output.
+                result_output = current.output
+                result_runtime = current.runtime
+                result_usage = current.usage
+                result_run_id = current.run_id
+            elif current.status in TERMINAL_FAIL:
+                attempt = int(existing.get("attempt") or 1)
+                write_slot_record(
+                    cfg.state_dir,
+                    slot,
+                    {
+                        "status": "failed_terminal",
+                        "attempt": attempt,
+                        "run_id": run_id,
+                        "idempotency_key": existing.get("idempotency_key"),
+                    },
+                )
+                existing = load_slot_record(cfg.state_dir, slot)
+            else:
+                write_slot_record(
+                    cfg.state_dir,
+                    slot,
+                    {**existing, "status": "unknown", "run_id": run_id},
+                )
+                return 409, {"ok": False, "error": "unknown_run"}
+            if current.status in TERMINAL_OK:
+                try:
+                    payload = extract_json_object(result_output)
+                    items, no_news = validate_items(payload, slot=slot, policy_path=cfg.source_policy_path)
+                    markdown = render_markdown(items, no_news=no_news)
+                    if items:
+                        assert_round_trip(items, markdown)
+                    meta = {
+                        "provider": str(result_runtime.get("provider") or cfg.provider),
+                        "model": str(result_runtime.get("model") or cfg.model),
+                        "runtime": result_runtime,
+                        "usage": result_usage,
+                        "source_urls": [item.url for item in items],
+                        "run_id": result_run_id,
+                        "no_news": no_news,
+                        "item_count": len(items),
+                        "attempt": int(existing.get("attempt") or 1) if existing else 1,
+                    }
+                    record = publish_digest(
+                        digest_dir=cfg.digest_dir,
+                        state_dir=cfg.state_dir,
+                        slot=slot,
+                        markdown=markdown,
+                        meta=meta,
+                    )
+                    return 200, {"ok": True, "replay": bool(record.get("replay")), "result": record}
+                except (ValueError, FileExistsError, GatewayError) as exc:
+                    return 502, {"ok": False, "error": str(getattr(exc, "category", exc))}
+
+        attempt, block = _next_attempt(existing)
+        if block == "completed":
+            return 200, {"ok": True, "replay": True, "result": existing}
+        if block:
+            return 409, {"ok": False, "error": block}
 
         try:
             instructions = _load_prompt(cfg.prompt_path)
@@ -117,16 +246,31 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             model=cfg.model,
             deadline_s=cfg.deadline_s,
         )
+        idem = slot.idempotency_key(attempt)
         input_text = (
             f"Produce the news digest JSON for slot {slot.label} "
             f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
         )
+
+        def _persist_created(run_id: str) -> None:
+            write_slot_record(
+                cfg.state_dir,
+                slot,
+                {
+                    "status": "running",
+                    "attempt": attempt,
+                    "run_id": run_id,
+                    "idempotency_key": idem,
+                },
+            )
+
         try:
             result = run_research(
                 gateway,
                 instructions=instructions,
                 input_text=input_text,
-                idempotency_key=slot.idempotency_key,
+                idempotency_key=idem,
+                on_created=_persist_created,
             )
             payload = extract_json_object(result.output)
             items, no_news = validate_items(
@@ -135,6 +279,8 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 policy_path=cfg.source_policy_path,
             )
             markdown = render_markdown(items, no_news=no_news)
+            if items:
+                assert_round_trip(items, markdown)
             meta = {
                 "provider": str(result.runtime.get("provider") or cfg.provider),
                 "model": str(result.runtime.get("model") or cfg.model),
@@ -144,6 +290,8 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 "run_id": result.run_id,
                 "no_news": no_news,
                 "item_count": len(items),
+                "attempt": attempt,
+                "idempotency_key": idem,
             }
             record = publish_digest(
                 digest_dir=cfg.digest_dir,
@@ -155,16 +303,53 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             return 200, {"ok": True, "replay": bool(record.get("replay")), "result": record}
         except GatewayError as exc:
             logger.warning("ingest gateway failure category=%s", exc.category)
+            prior = load_slot_record(cfg.state_dir, slot) or {}
+            run_id = str(prior.get("run_id") or "")
+            if exc.category == "unknown_run":
+                write_slot_record(
+                    cfg.state_dir,
+                    slot,
+                    {
+                        "status": "unknown",
+                        "attempt": attempt,
+                        "run_id": run_id,
+                        "idempotency_key": idem,
+                        "error": exc.category,
+                    },
+                )
+                return 409, {"ok": False, "error": "unknown_run"}
+            if exc.category in {"incomplete_run", "timeout"} or exc.category == "provider_error":
+                write_slot_record(
+                    cfg.state_dir,
+                    slot,
+                    {
+                        "status": "failed_terminal",
+                        "attempt": attempt,
+                        "run_id": run_id,
+                        "idempotency_key": idem,
+                        "error": exc.category,
+                    },
+                )
             code = 401 if exc.category == "auth_error" and exc.status_code == 401 else 502
             if exc.category == "auth_error" and exc.status_code == 403:
                 code = 403
-            if exc.category == "timeout":
-                code = 504
+            if exc.category in {"timeout", "unknown_run"}:
+                code = 504 if exc.category == "timeout" else 409
             return code, {"ok": False, "error": exc.category}
         except FileExistsError:
             return 409, {"ok": False, "error": "filename_conflict"}
         except ValueError as exc:
             logger.warning("ingest validation failure type=%s", type(exc).__name__)
+            write_slot_record(
+                cfg.state_dir,
+                slot,
+                {
+                    "status": "failed_terminal",
+                    "attempt": attempt,
+                    "idempotency_key": idem,
+                    "error": str(exc),
+                },
+            )
             return 502, {"ok": False, "error": str(exc)}
         except Exception:  # noqa: BLE001 — fail closed; never leak secrets
             logger.warning("ingest failure type=internal_error")
