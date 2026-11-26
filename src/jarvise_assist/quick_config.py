@@ -25,6 +25,8 @@ AWAITING_QUICK_TTL_MS = 300_000
 CONFIRM_CANCEL_KEY = "_confirm_cancel_ms"
 
 _NUM_RE = re.compile(r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")
+# Lenient read path only: optional leading sign, then clamp. Write stays on _NUM_RE.
+_NUM_SIGNED_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")
 _HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _HHMM_COMPACT_RE = re.compile(r"^([01]\d|2[0-3])([0-5]\d)$")
 
@@ -507,6 +509,8 @@ def parse_value(
             return None, f"❌ เวลาใช้ไม่ได้ — {_bounds_th(entry)}"
         return hh, None
 
+    num_re = _NUM_RE if check_bounds else _NUM_SIGNED_RE
+
     if entry.type == "list_pct":
         parts = [p.strip() for p in s.replace("_", ",").split(",") if p.strip()]
         if not 1 <= len(parts) <= 4:
@@ -514,7 +518,7 @@ def parse_value(
         vals: list[Decimal] = []
         for p in parts:
             tok = p[:-1].strip() if p.endswith("%") else p
-            if not _NUM_RE.fullmatch(tok):
+            if not num_re.fullmatch(tok):
                 return None, f'❌ ค่า "{p}" ใช้ไม่ได้ — {_bounds_th(entry)}'
             try:
                 d = Decimal(tok).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -534,10 +538,10 @@ def parse_value(
     for suf in ("%", "R", "r", "s", "S", "x", "X", "bps", "BPS"):
         if tok.lower().endswith(suf.lower()) and len(tok) > len(suf):
             cand = tok[: -len(suf)].strip()
-            if _NUM_RE.fullmatch(cand):
+            if num_re.fullmatch(cand):
                 tok = cand
                 break
-    if not _NUM_RE.fullmatch(tok):
+    if not num_re.fullmatch(tok):
         return None, f'❌ ค่า "{_truncate(s)}" ใช้ไม่ได้ — ขอบเขต {_bounds_th(entry)}'
 
     try:

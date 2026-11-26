@@ -466,7 +466,9 @@ def _send_confirm(
     after = dict(before)
     after[entry.key] = new
     advice = quick_config_advice(before, after, main_risk_pct=_main_risk(conn))
+    # Legacy qs:ok keeps second granularity; new qc:ok cards use ms (13 digits).
     ts_s = int(now_ms) // 1000
+    ts_ms = int(now_ms)
     enc = _encode_val(entry, new)
     if entry.alias == "risk" and source.startswith("qs"):
         fmt = _fmt_fixed(float(Decimal(str(new))))
@@ -512,7 +514,7 @@ def _send_confirm(
             [
                 {
                     "text": "✅ ยืนยัน",
-                    "callback_data": _cb(f"qc:ok:{entry.alias}:{enc}:{ts_s}"),
+                    "callback_data": _cb(f"qc:ok:{entry.alias}:{enc}:{ts_ms}"),
                 },
                 {"text": "↩️ ไม่เปลี่ยน", "callback_data": _cb("qc:no")},
             ]
@@ -530,15 +532,20 @@ def _confirm_stale(
     now_ms: int,
     any_change: bool = False,
 ) -> str | None:
-    """TTL / future / cancel-epoch / post-card changes. ``entry=None`` → reset-all."""
-    now_s = int(now_ms) // 1000
-    if now_s - confirm_ts > QUICK_CONFIRM_TTL_S:
+    """TTL / future / cancel-epoch / post-card changes in ms. ``entry=None`` → reset-all.
+
+    ``confirm_ts`` is the card issuance time in milliseconds (13-digit qc:ok).
+    """
+    card_ms = int(confirm_ts)
+    now = int(now_ms)
+    if now - card_ms > QUICK_CONFIRM_TTL_S * 1000:
         return e_confirm_stale_ttl()
-    if confirm_ts > now_s + QUICK_CONFIRM_FUTURE_S:
+    if card_ms > now + QUICK_CONFIRM_FUTURE_S * 1000:
         return MSG_QUICK_CONFIRM_STALE
 
     cancel_ms = get_confirm_cancel_ms(conn)
-    if cancel_ms is not None and confirm_ts <= int(cancel_ms) // 1000:
+    # Stale only when cancel is strictly after issuance (fresh card after cancel applies).
+    if cancel_ms is not None and int(cancel_ms) > card_ms:
         return MSG_QUICK_CONFIRM_STALE
 
     check_settings = any_change or (
@@ -546,7 +553,7 @@ def _confirm_stale(
     )
     if check_settings:
         updated_at_ms = get_quick_settings(conn).get("updated_at_ms")
-        if updated_at_ms is not None and int(updated_at_ms) // 1000 > confirm_ts:
+        if updated_at_ms is not None and int(updated_at_ms) > card_ms:
             return MSG_QUICK_CONFIRM_STALE
 
     if any_change or entry is None:
@@ -558,7 +565,7 @@ def _confirm_stale(
         ).fetchone()
     if row is not None:
         m = row["m"] if hasattr(row, "keys") else row[0]
-        if m is not None and int(m) // 1000 > confirm_ts:
+        if m is not None and int(m) > card_ms:
             return MSG_QUICK_CONFIRM_STALE
     return None
 
@@ -584,13 +591,13 @@ def handle_reset(
             send("ทุกค่าเป็นค่าเริ่มต้นอยู่แล้ว")
             return {"ok": True}
         if any(needs_confirm(k, o, n) for k, o, n in changes) and not confirmed:
-            ts_s = int(now_ms) // 1000
+            ts_ms = int(now_ms)
             send(
                 "ยืนยันรีเซ็ตค่าทั้งหมดเป็นค่าเริ่มต้น?\nกดยืนยันภายใน 60 วิ",
                 reply_markup={
                     "inline_keyboard": [
                         [
-                            {"text": "✅ ยืนยัน", "callback_data": _cb(f"qc:ok:all:1:{ts_s}")},
+                            {"text": "✅ ยืนยัน", "callback_data": _cb(f"qc:ok:all:1:{ts_ms}")},
                             {"text": "↩️ ไม่เปลี่ยน", "callback_data": _cb("qc:no")},
                         ]
                     ]
@@ -697,9 +704,9 @@ def handle_quick_config_callback(
             source="qc:default",
         )
 
-    m_ok = re.match(r"^qc:ok:([^:]+):([^:]+):([0-9]{10})$", data or "")
+    m_ok = re.match(r"^qc:ok:([^:]+):([^:]+):([0-9]{13})$", data or "")
     if m_ok:
-        alias, enc, ts_s = m_ok.group(1), m_ok.group(2), int(m_ok.group(3))
+        alias, enc, card_ms = m_ok.group(1), m_ok.group(2), int(m_ok.group(3))
         if alias == "all":
             return handle_reset(
                 conn,
@@ -707,7 +714,7 @@ def handle_quick_config_callback(
                 send=send,
                 now_ms=now_ms,
                 confirmed=True,
-                confirm_ts=ts_s,
+                confirm_ts=card_ms,
             )
         entry = resolve_entry(alias)
         if entry is None:
@@ -725,9 +732,10 @@ def handle_quick_config_callback(
             now_ms=now_ms,
             confirmed=True,
             source="qc:ok",
-            confirm_ts=ts_s,
+            confirm_ts=card_ms,
         )
 
+    # 10-digit (or any other) qc:ok → stale; only exact 13-digit ms cards apply.
     if data.startswith("qc:ok:"):
         send(MSG_QUICK_CONFIRM_STALE)
         return {"ok": False, "rejected": True, "reason": "stale"}

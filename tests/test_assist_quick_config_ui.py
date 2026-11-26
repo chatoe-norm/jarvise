@@ -379,7 +379,7 @@ def test_reset_all_confirm_respects_ttl_and_stale(tmp_path: Path, monkeypatch: p
         now_ms_value=NOW,
     )
     assert any("ยืนยันรีเซ็ต" in s["text"] for s in sent)
-    ts = NOW // 1000
+    ts = NOW  # ms card
     # +59s applies
     process_update(
         conn,
@@ -397,7 +397,7 @@ def test_reset_all_confirm_respects_ttl_and_stale(tmp_path: Path, monkeypatch: p
         send=send,
         now_ms_value=NOW + 100_000,
     )
-    ts2 = (NOW + 100_000) // 1000
+    ts2 = NOW + 100_000
     process_update(
         conn,
         _cq(f"qc:ok:all:1:{ts2}"),
@@ -414,10 +414,10 @@ def test_reset_all_confirm_respects_ttl_and_stale(tmp_path: Path, monkeypatch: p
         send=send,
         now_ms_value=NOW + 200_000,
     )
-    ts3 = (NOW + 200_000) // 1000
+    ts3 = NOW + 200_000
     process_update(
         conn,
-        _cq(f"qc:ok:all:1:{ts3 + 30}"),
+        _cq(f"qc:ok:all:1:{ts3 + 30_000}"),  # 30s in the future → stale
         send=send,
         answer=answer,
         now_ms_value=NOW + 200_000,
@@ -430,7 +430,7 @@ def test_reset_all_confirm_respects_ttl_and_stale(tmp_path: Path, monkeypatch: p
         send=send,
         now_ms_value=NOW + 300_000,
     )
-    ts4 = (NOW + 300_000) // 1000
+    ts4 = NOW + 300_000
     write_quick_settings(conn, risk_pct=0.25, updated_at_ms=NOW + 300_000 + 5_000)
     process_update(
         conn,
@@ -457,7 +457,7 @@ def test_qc_no_invalidates_kv_confirm(tmp_path: Path, monkeypatch: pytest.Monkey
         now_ms_value=NOW,
     )
     assert any("ยืนยัน" in s["text"] for s in sent)
-    ts = NOW // 1000
+    ts = NOW  # ms card
     hist_before = len(quick_config_history(conn))
     process_update(
         conn,
@@ -505,7 +505,7 @@ def test_universe_enum_encode_and_confirm(tmp_path: Path, monkeypatch: pytest.Mo
         now_ms_value=NOW + 1_000,
     )
     assert any("ยืนยัน" in s["text"] for s in sent[-2:])
-    ts = (NOW + 2_000) // 1000
+    ts = NOW + 2_000  # ms card
     process_update(
         conn,
         _cq(f"qc:ok:universe:any:{ts}"),
@@ -558,7 +558,7 @@ def test_registry_key_render_and_qc_v_no_exception(
         now_ms_value=NOW,
     )
     if any("ยืนยัน" in s["text"] for s in sent) and needs_confirm(entry.key, entry.default, target):
-        ts = NOW // 1000
+        ts = NOW  # ms card
         ok_data = f"qc:ok:{entry.alias}:{enc}:{ts}"
         assert len(ok_data.encode()) <= 64
         process_update(
@@ -586,7 +586,7 @@ def test_qc_ok_per_key_ttl_future_stale_via_process_update(
         send=send,
         now_ms_value=NOW,
     )
-    ts = NOW // 1000
+    ts = NOW  # ms card
     process_update(
         conn,
         _cq(f"qc:ok:counter:0.5:{ts}"),
@@ -603,10 +603,10 @@ def test_qc_ok_per_key_ttl_future_stale_via_process_update(
         send=send,
         now_ms_value=NOW + 100_000,
     )
-    ts2 = (NOW + 100_000) // 1000
+    ts2 = NOW + 100_000
     process_update(
         conn,
-        _cq(f"qc:ok:counter:0.5:{ts2 + 30}"),
+        _cq(f"qc:ok:counter:0.5:{ts2 + 30_000}"),  # 30s future → stale
         send=send,
         answer=answer,
         now_ms_value=NOW + 100_000,
@@ -619,7 +619,7 @@ def test_qc_ok_per_key_ttl_future_stale_via_process_update(
         send=send,
         now_ms_value=NOW + 200_000,
     )
-    ts3 = (NOW + 200_000) // 1000
+    ts3 = NOW + 200_000
     set_quick_config(
         conn,
         "quick_counter_risk_pct",
@@ -688,7 +688,7 @@ def test_reset_all_night_pair_via_process_update(tmp_path: Path, monkeypatch: py
     )
     # If confirm shown (other keys), confirm; else already applied
     if any("ยืนยันรีเซ็ต" in s["text"] for s in sent):
-        ts = NOW // 1000
+        ts = NOW  # ms card
         process_update(
             conn,
             _cq(f"qc:ok:all:1:{ts}"),
@@ -701,3 +701,144 @@ def test_reset_all_night_pair_via_process_update(tmp_path: Path, monkeypatch: py
     assert view.values["quick_night_end"] == "07:30"
     assert not any("Traceback" in s["text"] for s in sent)
     conn.close()
+
+
+def test_qc_ok_ms_staleness_same_second_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Card at T+100ms stale after change at T+800ms (per-key + reset-all); 10-digit → stale."""
+    from jarvise_assist.quick import MSG_QUICK_CONFIRM_STALE
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "ms_stale.db")
+    ensure_settings(conn)
+    sent, send = _send_capture()
+    answers, answer = _answers()
+
+    # Per-key: card at base+100, change at base+800 → stale
+    base = NOW
+    card_ms = base + 100
+    process_update(
+        conn,
+        {"message": {"chat": {"id": 42}, "text": "q set counter 0.5"}},
+        send=send,
+        now_ms_value=card_ms,
+    )
+    set_quick_config(
+        conn,
+        "quick_counter_risk_pct",
+        "0.1",
+        source="t",
+        now_ms=base + 800,
+    )
+    process_update(
+        conn,
+        _cq(f"qc:ok:counter:0.5:{card_ms}"),
+        send=send,
+        answer=answer,
+        now_ms_value=base + 1_500,
+    )
+    assert get_quick_config(conn).values["quick_counter_risk_pct"] == Decimal("0.1")
+    assert any(MSG_QUICK_CONFIRM_STALE in s["text"] or "หมดอายุ" in s["text"] for s in sent[-3:])
+
+    # Reset-all: card at base2+100, settings change at base2+800 → stale
+    base2 = NOW + 1_000_000
+    write_quick_settings(conn, risk_pct=0.25, cap_pct=1.0, updated_at_ms=base2)
+    process_update(
+        conn,
+        {"message": {"chat": {"id": 42}, "text": "q reset all"}},
+        send=send,
+        now_ms_value=base2 + 100,
+    )
+    write_quick_settings(conn, risk_pct=0.25, cap_pct=1.0, updated_at_ms=base2 + 800)
+    process_update(
+        conn,
+        _cq(f"qc:ok:all:1:{base2 + 100}"),
+        send=send,
+        answer=answer,
+        now_ms_value=base2 + 1_500,
+    )
+    assert get_quick_settings(conn)["risk_pct"] == 0.25
+
+    # 10-digit qc:ok is always stale
+    n = len(sent)
+    process_update(
+        conn,
+        _cq(f"qc:ok:counter:0.5:{base // 1000}"),
+        send=send,
+        answer=answer,
+        now_ms_value=base + 2_000,
+    )
+    assert any(s["text"] == MSG_QUICK_CONFIRM_STALE for s in sent[n:])
+    conn.close()
+
+
+def test_qc_ok_fresh_after_cancel_same_second(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Card +200ms after cancel in same second applies; card before cancel is stale."""
+    from jarvise_assist.quick_config import mark_confirm_cancelled
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "ms_cancel.db")
+    ensure_settings(conn)
+    sent, send = _send_capture()
+    answers, answer = _answers()
+
+    # Same second: cancel at +100, fresh card at +200 → applies
+    t0 = NOW
+    # Align to a second boundary so cancel and card share the same wall second.
+    t0 = (t0 // 1000) * 1000
+    mark_confirm_cancelled(conn, now_ms=t0 + 100)
+    process_update(
+        conn,
+        {"message": {"chat": {"id": 42}, "text": "q set counter 0.5"}},
+        send=send,
+        now_ms_value=t0 + 200,
+    )
+    process_update(
+        conn,
+        _cq(f"qc:ok:counter:0.5:{t0 + 200}"),
+        send=send,
+        answer=answer,
+        now_ms_value=t0 + 500,
+    )
+    assert get_quick_config(conn).values["quick_counter_risk_pct"] == Decimal("0.5")
+
+    # Card before cancel → stale
+    set_quick_config(conn, "quick_counter_risk_pct", "0.25", source="t", now_ms=t0 + 10_000)
+    card_before = t0 + 20_000
+    process_update(
+        conn,
+        {"message": {"chat": {"id": 42}, "text": "q set counter 0.5"}},
+        send=send,
+        now_ms_value=card_before,
+    )
+    mark_confirm_cancelled(conn, now_ms=card_before + 50)
+    process_update(
+        conn,
+        _cq(f"qc:ok:counter:0.5:{card_before}"),
+        send=send,
+        answer=answer,
+        now_ms_value=card_before + 100,
+    )
+    assert get_quick_config(conn).values["quick_counter_risk_pct"] == Decimal("0.25")
+    conn.close()
+
+
+def test_qc_ok_callback_data_le_64_incl_max_presets() -> None:
+    """Every registry qc:ok (incl. longest 4-value list_pct) stays ≤ 64 bytes with 13-digit ts."""
+    from decimal import Decimal as D
+
+    from jarvise_assist.quick_config_ui import _encode_val
+
+    ts = "1732622400123"  # 13 digits
+    assert len(ts) == 13
+    for entry in QUICK_CONFIG:
+        if entry.type == "list_pct":
+            vals = (D("0.05"), D("6.65"), D("13.25"), D("19.9"))
+            enc = _encode_val(entry, vals)
+        elif entry.hard_max is not None:
+            enc = _encode_val(entry, entry.hard_max)
+        else:
+            enc = _encode_val(entry, entry.default)
+        data = f"qc:ok:{entry.alias}:{enc}:{ts}"
+        assert len(data.encode()) <= 64, (entry.alias, data, len(data.encode()))
+    all_data = f"qc:ok:all:1:{ts}"
+    assert len(all_data.encode()) <= 64

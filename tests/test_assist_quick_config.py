@@ -195,6 +195,41 @@ def test_kv_clamp_on_read_not_default(tmp_path: Path) -> None:
     assert "quick_chase_r" in vj.defaulted_keys
 
 
+def test_lenient_read_accepts_signed_then_clamps(tmp_path: Path) -> None:
+    """Read path: signed numeric KV clamps; junk/non-finite → default; write stays strict."""
+    conn = open_db(tmp_path / "signed.db")
+    for key, raw in (
+        ("quick_max_leverage", "-1"),
+        ("quick_stop_buffer_pct", "-0.5"),
+        ("quick_chase_r", "+9"),
+    ):
+        conn.execute(
+            "INSERT INTO assist_quick_config (key, value, updated_at_ms) VALUES (?, ?, 1)",
+            (key, raw),
+        )
+    conn.commit()
+    before = conn.total_changes
+    view = get_quick_config(conn)
+    assert conn.total_changes == before  # no DB writes on read
+    assert view.values["quick_max_leverage"] == 1
+    assert "quick_max_leverage" in view.clamped_keys
+    assert view.values["quick_stop_buffer_pct"] == Decimal("0.02")  # hard_min
+    assert "quick_stop_buffer_pct" in view.clamped_keys
+    assert view.values["quick_chase_r"] == Decimal("1.0")  # hard_max (from +9)
+    assert "quick_chase_r" in view.clamped_keys
+
+    for junk in ("nan", "inf", "1e3", ""):
+        v, err = parse_value("quick_max_leverage", junk, check_bounds=False)
+        assert v is None and err is not None
+
+    # Write path rejects signed input
+    v, err = parse_value("quick_max_leverage", "-1", check_bounds=True)
+    assert v is None and err is not None
+    with pytest.raises(ValueError):
+        set_quick_config(conn, "quick_max_leverage", "-1", source="t", now_ms=2)
+    conn.close()
+
+
 def test_get_quick_config_empty_row_no_insert(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "empty.db")
     conn.execute("DELETE FROM assist_quick_settings")
