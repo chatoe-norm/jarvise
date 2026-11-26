@@ -23,6 +23,19 @@ D = Decimal
 NOW = 1_700_000_000_000
 
 
+@pytest.fixture(autouse=True)
+def _clear_unrecorded_for_legacy(monkeypatch: Any) -> None:
+    """B2 unrecorded lock is covered in test_partner_unrecorded_b2.py."""
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.guard_unrecorded_status",
+        lambda *_a, **_k: "clear",
+    )
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.resolve_unrecorded_status",
+        lambda *_a, **_k: "clear",
+    )
+
+
 def _setup(conn: Any) -> tuple[str, str]:
     a = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)
     b = ps.create_partner(conn, name="B", is_admin=False, now_ms=NOW + 1)

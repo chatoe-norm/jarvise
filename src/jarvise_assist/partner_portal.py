@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 _CACHE_TTL_MS = 30_000
 _KYC_TOKEN_RE = re.compile(r"^pp:kyc:(ok|re):([0-9a-f]{8})$")
+_UNRECORDED_CARD = "กำลังตรวจยอด"
+_UNRECORDED_LOCK = Block(
+    code="unrecorded_transfer",
+    toast="มีเงินโอนที่ยังไม่บันทึก — รอแอดมิน",
+    label="🔒 กำลังตรวจยอด",
+)
 _KYC_LOCKED = "บันทึกข้อมูลรับเงินแล้ว แก้ไขเองไม่ได้ — ติดต่อแอดมิน"
 _KYC_SAVED = "บันทึกแล้ว แก้ไขเองไม่ได้"
 _KYC_BEFORE_DEPOSIT = "กรอกข้อมูลรับเงินก่อนฝากครั้งแรก\nส่งข้อความที่ขึ้นต้นด้วย ข้อมูลรับเงิน\nอย่าโอนเงินก่อน"
@@ -55,13 +61,24 @@ _KIND_CODE = {"cv": "convert", "wd": "withdraw_profit", "cl": "close"}
 _BAD_DEP_TEXT = f"จำนวนไม่ถูกต้อง (ขั้นต่ำ {ps.MIN_DEPOSIT_USDT} USDT)"
 
 # Portal-only V cache: (AccountValue, read_at_ms, due_total, total_units) or None
+# Unrecorded display cache lives in partner_unrecorded (shared with admin).
 _value_cache: tuple[AccountValue, int, Decimal, Decimal] | None = None
 
 
 def reset_value_cache() -> None:
-    """Test hook: clear the portal AccountValue cache."""
+    """Test hook: clear the portal AccountValue and unrecorded-guard caches."""
+    from jarvise_assist import partner_unrecorded as pu
+
     global _value_cache
     _value_cache = None
+    pu.reset_display_cache()
+
+
+def reset_guard_cache() -> None:
+    """Test hook: clear the shared unrecorded-transfer display cache."""
+    from jarvise_assist import partner_unrecorded as pu
+
+    pu.reset_display_cache()
 
 
 def _bangkok_stamp(now_ms: int) -> str:
@@ -142,8 +159,73 @@ def _read_v_cached(
     return av
 
 
+def _unrecorded_status_for_card(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> str:
+    """Tri-state for card display. Uses a 10-min ledger-keyed cache; never caches unknown."""
+    from jarvise_assist import partner_unrecorded as pu
+
+    try:
+        cached = pu.cached_display_status(conn, int(now_ms))
+    except Exception:
+        # Key lookup raised — drop any prior clear so display stays fail-closed.
+        pu.invalidate_display_cache()
+        raise
+    if cached is not None:
+        return cached
+    client = _resolve_client(futures)
+    try:
+        status = pu.resolve_unrecorded_status(conn, client, now_ms=int(now_ms))
+        key = pu.ledger_cache_key(conn)
+    except Exception:
+        # Fresh check / key raised — drop any prior clear so display stays fail-closed.
+        pu.invalidate_display_cache()
+        raise
+    # Pure resolve does not store; portal is the only path that may store.
+    pu.store_display_status(key, status, int(now_ms))
+    return status
+
+
+def _money_request_blocked(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> bool:
+    """Fresh guard (no cache) before create_request. Fail closed unless clear.
+
+    Syncs the shared display cache with the fresh result: clear refreshes the
+    entry; unrecorded stores the lock; unknown or a raised check clears the
+    cache so a prior cached clear cannot keep card/Profile/preview unlocked.
+
+    Cache is cleared *before* the fresh guard and key lookup so a mid-check
+    failure (or a raising ``guard_unrecorded_status`` stub) cannot leave a
+    prior cached clear intact.
+    """
+    from jarvise_assist import partner_unrecorded as pu
+
+    # Drop any prior clear before fallible work.
+    pu.invalidate_display_cache()
+    client = _resolve_client(futures)
+    try:
+        status = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
+        key = pu.ledger_cache_key(conn)
+    except Exception:
+        pu.invalidate_display_cache()
+        raise
+    if status == "clear":
+        pu.store_display_status(key, status, int(now_ms))
+        return False
+    if status == "unrecorded":
+        pu.store_display_status(key, status, int(now_ms))
+        return True
+    # unknown — never store as clear
+    pu.invalidate_display_cache()
+    return True
+
+
+def _money_callback(code: str, lock: Block | None) -> str:
+    """Unrecorded lock → ``pp:lk`` (toast only). Other locks keep ``pp:rq:*`` for their toast."""
+    if lock is not None and lock.code == "unrecorded_transfer":
+        return "pp:lk"
+    return f"pp:rq:{code}"
+
+
 def _card_buttons(locks: dict[str, Block] | None = None, *, kyc_saved: bool = False) -> dict[str, Any]:
-    """Active-card keyboard. Locked buttons change only ``text``; callbacks stay ``pp:rq:*``."""
+    """Active-card keyboard. Unrecorded locks use ``pp:lk`` so taps cannot open fee previews."""
     locks = locks or {}
     cv = locks.get("cv")
     wd = locks.get("wd")
@@ -159,13 +241,19 @@ def _card_buttons(locks: dict[str, Block] | None = None, *, kyc_saved: bool = Fa
                 {"text": "💰 แจ้งฝาก", "callback_data": "pp:dep"},
             ],
             [
-                {"text": cv.label if cv is not None else "🔁 ทบกำไร", "callback_data": "pp:rq:cv"},
-                {"text": wd.label if wd is not None else "💸 ถอนกำไร", "callback_data": "pp:rq:wd"},
+                {
+                    "text": cv.label if cv is not None else "🔁 ทบกำไร",
+                    "callback_data": _money_callback("cv", cv),
+                },
+                {
+                    "text": wd.label if wd is not None else "💸 ถอนกำไร",
+                    "callback_data": _money_callback("wd", wd),
+                },
             ],
             [
                 {
                     "text": cl.label if cl is not None else "🚪 ปิดพอร์ต",
-                    "callback_data": "pp:rq:cl",
+                    "callback_data": _money_callback("cl", cl),
                 }
             ],
             [{"text": "📊 ไม้ที่เปิดอยู่", "callback_data": "pp:pos"}],
@@ -267,6 +355,7 @@ def _build_card(
     av: AccountValue | AccountValueError,
     *,
     now_ms: int,
+    futures: Any = None,
 ) -> tuple[str, dict[str, Any] | None]:
     name = str(row["name"])
     stamp = _bangkok_stamp(now_ms)
@@ -275,6 +364,13 @@ def _build_card(
     pid = str(row["id"])
     joined = partner_rules.joined_at_ms(conn, pid)
     kyc_saved = pk.kyc_state(conn, pid) == "saved"
+    unrecorded = True
+    try:
+        status = _unrecorded_status_for_card(conn, futures, now_ms=now_ms)
+        unrecorded = status != "clear"
+    except Exception:  # noqa: BLE001
+        logger.warning("portal unrecorded check failed")
+        unrecorded = True
 
     def _with_kyc(lines: list[str], *, closed: bool = False) -> list[str]:
         lines.append(pk.card_kyc_line(conn, pid))
@@ -341,7 +437,19 @@ def _build_card(
     if isinstance(av, AccountValue):
         nav = _nav_for_rules(conn, av)
     locks = _locks_for_row(conn, row, nav=nav, now_ms=now_ms)
+    if unrecorded:
+        locks = {
+            "cv": _UNRECORDED_LOCK,
+            "wd": _UNRECORDED_LOCK,
+            "cl": _UNRECORDED_LOCK,
+        }
     markup = _card_buttons(locks, kyc_saved=kyc_saved)
+
+    if unrecorded:
+        lines = _header()
+        lines.extend([_UNRECORDED_CARD, f"ทุน {fmt_usdt(cost)} USDT"])
+        _pending_and_due(lines)
+        return "\n".join(_with_kyc(lines)), markup
 
     if isinstance(av, AccountValueError):
         lines = _header()
@@ -398,7 +506,7 @@ def _send_card(
     now_ms: int,
 ) -> dict[str, Any]:
     av = _read_v_cached(conn, futures, now_ms=now_ms)
-    text, markup = _build_card(conn, row, av, now_ms=now_ms)
+    text, markup = _build_card(conn, row, av, now_ms=now_ms, futures=futures)
     send_to_partner(send, row, text, reply_markup=markup)
     return {"ok": True, "cmd": "card"}
 
@@ -712,6 +820,20 @@ def _preview_request(
     now_ms: int,
 ) -> dict[str, Any]:
     kind = _KIND_CODE[code]
+    # Non-money rules first (kyc / closed / pending) — same order as submit.
+    early = partner_rules.block(conn, row, kind, nav=None, now_ms=now_ms)
+    if early is not None:
+        answer(early.toast)
+        return {"ok": False, "reason": early.code}
+    try:
+        status = _unrecorded_status_for_card(conn, futures, now_ms=now_ms)
+        if status != "clear":
+            answer(_UNRECORDED_LOCK.toast)
+            return {"ok": False, "reason": "unrecorded_transfer"}
+    except Exception:  # noqa: BLE001
+        logger.warning("portal preview unrecorded check failed")
+        answer(_UNRECORDED_LOCK.toast)
+        return {"ok": False, "reason": "unrecorded_transfer"}
     av = _read_v_cached(conn, futures, now_ms=now_ms)
     nav: Decimal | None = None
     if isinstance(av, AccountValue):
@@ -804,6 +926,15 @@ def _submit_request(
     if early is not None:
         answer(early.toast)
         return {"ok": False, "reason": early.code}
+    if kind in ("convert", "withdraw_profit", "close"):
+        try:
+            if _money_request_blocked(conn, futures, now_ms=now_ms):
+                answer(_UNRECORDED_LOCK.toast)
+                return {"ok": False, "reason": "unrecorded_transfer"}
+        except Exception:  # noqa: BLE001
+            logger.warning("portal unrecorded gate failed")
+            answer(_UNRECORDED_LOCK.toast)
+            return {"ok": False, "reason": "unrecorded_transfer"}
 
     av = _read_v_cached(conn, futures, now_ms=now_ms)
     if kind in ("convert", "withdraw_profit"):
@@ -900,7 +1031,7 @@ def handle_portal_callback(
     if data == "pp:v":
         _answer()
         av = _read_v_cached(conn, futures, now_ms=now_ms)
-        text, markup = _build_card(conn, row, av, now_ms=now_ms)
+        text, markup = _build_card(conn, row, av, now_ms=now_ms, futures=futures)
         return _edit_or_unchanged(
             msg=msg,
             text=text,
@@ -932,7 +1063,7 @@ def handle_portal_callback(
     if data == "pp:x":
         _answer()
         av = _read_v_cached(conn, futures, now_ms=now_ms)
-        text, markup = _build_card(conn, row, av, now_ms=now_ms)
+        text, markup = _build_card(conn, row, av, now_ms=now_ms, futures=futures)
         if mid is not None:
             try:
                 if edit(int(mid), text, reply_markup=markup, chat_id=partner_chat):
@@ -941,6 +1072,10 @@ def handle_portal_callback(
                 pass
         send_to_partner(send, row, text, reply_markup=markup)
         return {"ok": True, "cmd": "cancel_preview"}
+
+    if data == "pp:lk":
+        _answer(_UNRECORDED_LOCK.toast)
+        return {"ok": False, "reason": "unrecorded_transfer"}
 
     if data.startswith("pp:rq:"):
         code = data[len("pp:rq:") :]
@@ -1016,11 +1151,25 @@ def handle_portal_callback(
     if data == "pp:pf":
         _answer()
         account_value = None
+        valuation_pending = False
         if str(row["status"]) == "active":
-            av = _read_v_cached(conn, futures, now_ms=now_ms)
-            account_value = av.value if isinstance(av, AccountValue) else None
+            try:
+                status = _unrecorded_status_for_card(conn, futures, now_ms=now_ms)
+                valuation_pending = status != "clear"
+            except Exception:  # noqa: BLE001
+                logger.warning("portal profile unrecorded check failed")
+                valuation_pending = True
+            if not valuation_pending:
+                av = _read_v_cached(conn, futures, now_ms=now_ms)
+                account_value = av.value if isinstance(av, AccountValue) else None
         text = profile.render_profile(
-            profile.profile_data(conn, str(row["id"]), now_ms, account_value=account_value)
+            profile.profile_data(
+                conn,
+                str(row["id"]),
+                now_ms,
+                account_value=account_value,
+                valuation_pending=valuation_pending,
+            )
         )
         markup = {"inline_keyboard": [[{"text": "⬅️ กลับ", "callback_data": "pp:v"}]]}
         return _edit_or_unchanged(

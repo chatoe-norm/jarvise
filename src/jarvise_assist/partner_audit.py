@@ -805,6 +805,7 @@ def _empty_state() -> dict[str, Any]:
     return {
         "v": 1,
         "alerted": {},
+        "open_unrecorded": [],
         "last_ok_ms": None,
         "fail_since_ms": None,
         "fail_alerted": False,
@@ -833,6 +834,10 @@ def load_state(path: Path) -> dict[str, Any]:
         except (TypeError, ValueError):
             continue
     out["alerted"] = clean_alerted
+    raw_open = data.get("open_unrecorded")
+    if isinstance(raw_open, list):
+        out["open_unrecorded"] = [str(x) for x in raw_open if str(x)]
+    # Old state files without open_unrecorded stay as [].
     lok = data.get("last_ok_ms")
     out["last_ok_ms"] = int(lok) if isinstance(lok, (int, float)) else None
     fs = data.get("fail_since_ms")
@@ -858,6 +863,34 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def remove_open_unrecorded_for_tran(path: Path, tran_id: str) -> None:
+    """Best-effort drop booked ``bx:*:{tranId}`` fingerprints from the state file.
+
+    Never raises — booking must not fail when the audit-state write fails.
+    """
+    tid = str(tran_id or "").strip()
+    if not tid:
+        return
+    try:
+        state = load_state(path)
+        open_list = list(state.get("open_unrecorded") or [])
+        if not open_list:
+            return
+        kept = [
+            fp
+            for fp in open_list
+            if not (
+                str(fp) == f"bx:TRANSFER:{tid}" or (str(fp).startswith("bx:") and str(fp).endswith(f":{tid}"))
+            )
+        ]
+        if kept == open_list:
+            return
+        state["open_unrecorded"] = kept
+        save_state(path, state)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("partner_audit open_unrecorded cleanup failed type=%s", type(exc).__name__)
 
 
 def _verify_finding(conn: sqlite3.Connection) -> Finding | None:
@@ -994,6 +1027,13 @@ def run_partner_audit_job(
     state["last_ok_ms"] = int(now_ms)
     state["fail_since_ms"] = None
     state["alerted"] = {fp: ms for fp, ms in alerted_map.items() if int(now_ms) - int(ms) <= PRUNE_MS}
+    state["open_unrecorded"] = sorted(
+        {
+            str(f.fingerprint)
+            for f in findings
+            if f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded")
+        }
+    )
     save_state(state_path, state)
 
     return {

@@ -37,11 +37,13 @@ def profile_data(
     now_ms: int,
     *,
     account_value: Decimal | None = None,
+    valuation_pending: bool = False,
 ) -> dict[str, Any]:
     """Pure data for one partner. ``account_value`` is the live wallet the card uses.
 
     A closed partner does not use that wallet. A missing or refused value is reported
-    as unreadable instead of inventing a net figure.
+    as unreadable instead of inventing a net figure. ``valuation_pending`` hides
+    net/profit while the portal unrecorded gate is not clear (cost and dues stay).
     """
     row = ps.get_partner(conn, partner_id)
     if row is None:
@@ -71,6 +73,7 @@ def profile_data(
         "close_cash": None,
         "empty": False,
         "value_unreadable": False,
+        "valuation_pending": False,
         "cost": None,
         "net": None,
         "pnl": None,
@@ -84,6 +87,9 @@ def profile_data(
     cost = ps.usdt_from_micro(int(row["cost_micro"]))
     units = ps.units_from_e8(int(row["units_e8"]))
     data["cost"] = cost
+    if valuation_pending:
+        data["valuation_pending"] = True
+        return data
     if account_value is None:
         data["value_unreadable"] = True
         return data
@@ -117,6 +123,9 @@ def render_profile(data: dict[str, Any]) -> str:
     if status == "closed":
         if data.get("close_cash") is not None:
             lines.append(f"ยอดปิด {fmt_usdt(Decimal(data['close_cash']))} USDT")
+    elif data.get("valuation_pending"):
+        lines.append("กำลังตรวจยอด")
+        lines.append(f"ทุน {fmt_usdt(Decimal(data['cost']))} USDT")
     elif data.get("empty"):
         lines.append("ยังไม่มีเงินในพอร์ต")
     elif data.get("value_unreadable"):

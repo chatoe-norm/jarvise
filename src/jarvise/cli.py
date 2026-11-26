@@ -856,6 +856,100 @@ def assist_partner_record_owner_redeem_20261119(
     _echo(payload, 0 if payload.get("ok") else 1)
 
 
+@assist_app.command("partner-record-owner-deposit-20261123")
+def assist_partner_record_owner_deposit_20261123(
+    db: Annotated[Path, typer.Option("--db", help="SQLite file. Required; no default and no env fallback.")],
+    effective_at_ms: Annotated[
+        int | None,
+        typer.Option("--effective-at-ms", help="Effective time (ms). Default 2026-11-23 18:59:15 ICT."),
+    ] = None,
+    do_apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Write the historical owner_deposit. Default is dry-run."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the preview or result as JSON.")] = False,
+) -> None:
+    """Record the 2026-11-23 588.525 USDT owner top-up. Dry-run unless ``--apply``."""
+    import sqlite3
+
+    from jarvise_assist.partner_history_20261123 import (
+        EFF_DEFAULT_MS,
+        HistoricalRecordError,
+        apply_historical,
+        effective_in_window,
+        preview_historical,
+    )
+    from jarvise_ingest.db import SCHEMA_VERSION, open_db
+    from jarvise_ingest.universe_cli import connect_readonly
+
+    when = EFF_DEFAULT_MS if effective_at_ms is None else int(effective_at_ms)
+    if not effective_in_window(when):
+        payload = {
+            "ok": False,
+            "reason": "effective_at_ms_out_of_window",
+            "mode": "apply" if do_apply else "dry-run",
+            "effective_at_ms": when,
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False))
+        else:
+            typer.echo("effective_at_ms out of window", err=True)
+        raise typer.Exit(code=2)
+    if not db.is_file():
+        typer.echo("analytics db missing", err=True)
+        raise typer.Exit(code=2)
+
+    def _echo(payload: dict[str, Any], code: int) -> None:
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False))
+        elif payload.get("ok"):
+            typer.echo(str(payload.get("reason") or "ok"))
+        else:
+            typer.echo(str(payload.get("reason") or "refused"), err=True)
+        raise typer.Exit(code=code)
+
+    probe = connect_readonly(db)
+    probe.row_factory = sqlite3.Row
+    try:
+        user_version = int(probe.execute("PRAGMA user_version").fetchone()[0] or 0)
+    finally:
+        probe.close()
+    if user_version != SCHEMA_VERSION:
+        typer.echo(
+            f"schema mismatch: user_version={user_version} expected={SCHEMA_VERSION}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    if not do_apply:
+        conn = connect_readonly(db)
+        conn.row_factory = sqlite3.Row
+        try:
+            payload = preview_historical(conn, when)
+        finally:
+            conn.close()
+        if payload.get("reason") == "conflict":
+            _echo(payload, 3)
+        _echo(payload, 0 if payload.get("ok") else 1)
+
+    try:
+        conn = open_db(db)
+        try:
+            try:
+                payload = apply_historical(conn, when)
+            except HistoricalRecordError as exc:
+                payload = exc.payload
+            except sqlite3.Error:
+                payload = {"ok": False, "reason": "db_error", "mode": "apply"}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        payload = {"ok": False, "reason": "db_error", "mode": "apply"}
+    if payload.get("reason") == "conflict":
+        _echo(payload, 3)
+    _echo(payload, 0 if payload.get("ok") else 1)
+
+
 report_app = typer.Typer(help="Read-only owner reports. No orders.")
 app.add_typer(report_app, name="report")
 

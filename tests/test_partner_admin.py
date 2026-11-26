@@ -60,6 +60,10 @@ class FakeValueClient:
             }
         ]
 
+    def income_rows(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        """Empty transfers so overview guard resolves clear (no unrecorded)."""
+        return []
+
 
 def _patch_read(monkeypatch: Any, client: FakeValueClient) -> None:
     """Route read_account_value through a fixed AccountValue or error (bypass bracket)."""
@@ -934,6 +938,9 @@ def test_overview_real_reader_no_usdt_row(tmp_path: Path, monkeypatch: Any, env_
             return [{"asset": "BNB", "balance": "1"}]
 
         def position_rows(self) -> list[dict[str, Any]]:
+            return []
+
+        def income_rows(self, **_kwargs: Any) -> list[dict[str, Any]]:
             return []
 
     sent, send = _send_capture()

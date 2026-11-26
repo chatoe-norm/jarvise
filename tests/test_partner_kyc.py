@@ -689,6 +689,7 @@ def test_portal_gates_callbacks_and_legacy_card_still_deposits(
     joined_ms = NOW - 40 * 86_400_000
     assert ps.apply_deposit(conn, bob, D("1000"), D("2100"), joined_ms)["ok"] is True
     monkeypatch.setattr(ps, "deposit_kyc_required", real)
+    monkeypatch.setattr(portal, "_unrecorded_status_for_card", lambda *_a, **_k: "clear")
     edited: list[str] = []
 
     def edit(

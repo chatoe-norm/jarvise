@@ -11,6 +11,8 @@ cash does not inflate everyone else's mark.
 from __future__ import annotations
 
 import hashlib
+import logging
+import re
 import secrets
 import sqlite3
 import unicodedata
@@ -39,6 +41,8 @@ from jarvise_assist.partner_ledger import (
     value_of,
 )
 from jarvise_ingest.db import transaction
+
+logger = logging.getLogger(__name__)
 
 MICRO_SCALE = Decimal("1000000")
 UNIT_SCALE = Decimal("100000000")
@@ -1472,6 +1476,50 @@ def _owner_admin_row(conn: sqlite3.Connection) -> tuple[sqlite3.Row | None, dict
     return admin, None
 
 
+_TRAN_ID_NOTE_RE = re.compile(r"(?<![A-Za-z0-9_.-])tranId ([A-Za-z0-9_.-]{1,32})(?![A-Za-z0-9_.-])")
+
+
+def _note_tran_id(note: str | None) -> str | None:
+    if not note:
+        return None
+    m = _TRAN_ID_NOTE_RE.search(str(note))
+    return m.group(1) if m else None
+
+
+def _note_has_exact_tran_id(note: str | None, tran_id: str) -> bool:
+    """True when note carries ``tranId {tran_id}`` as an exact token (100 ≠ 1001)."""
+    found = _note_tran_id(note)
+    return found is not None and found == tran_id
+
+
+def _owner_tx_already_in_ledger(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str | None,
+    kind: str,  # noqa: ARG001 — kept for call-site clarity (owner_deposit/redeem)
+    note: str | None,
+) -> bool:
+    if event_id is not None:
+        row = conn.execute("SELECT 1 AS n FROM partner_event WHERE id = ?", (event_id,)).fetchone()
+        if row is not None:
+            return True
+    tran_id = _note_tran_id(note)
+    if not tran_id:
+        return False
+    rows = conn.execute(
+        """
+        SELECT id, note FROM partner_event
+        WHERE kind IN ('owner_deposit', 'owner_redeem') AND note IS NOT NULL
+        """
+    ).fetchall()
+    for row in rows:
+        if event_id is not None and str(row["id"]) == event_id:
+            return True
+        if _note_has_exact_tran_id(str(row["note"]), tran_id):
+            return True
+    return False
+
+
 def _apply_owner_tx(
     conn: sqlite3.Connection,
     *,
@@ -1479,6 +1527,9 @@ def _apply_owner_tx(
     amount: Decimal,
     account_value: Decimal,
     now_ms: int,
+    effective_at_ms: int | None = None,
+    note: str | None = None,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     """Book one owner_redeem or owner_deposit on the admin. No transfer guard."""
     refused = _owner_amount_refusal(amount)
@@ -1496,6 +1547,11 @@ def _apply_owner_tx(
     verified = verify_ledger(conn)
     if not verified["ok"]:
         return {"ok": False, "reason": "ledger_unverified"}
+    eid = event_id if event_id is not None else _new_event_id()
+    if _owner_tx_already_in_ledger(
+        conn, event_id=eid if event_id is not None else None, kind=kind, note=note
+    ):
+        return {"ok": True, "reason": "already_recorded", "event_ids": [eid], "kind": kind}
     amount_q = _q_usdt(Decimal(amount))
     v_raw = _q_usdt(account)
     due = payouts_due_total(conn)
@@ -1531,7 +1587,7 @@ def _apply_owner_tx(
         burned = Decimal("0")
         minted = plan_d.units_issued
     admin_id = str(admin["id"])
-    eid = _new_event_id()
+    eff_ms = int(now_ms) if effective_at_ms is None else int(effective_at_ms)
     _update_partner(conn, admin_id, units=units_after, cost=cost_after, now_ms=now_ms)
     _insert_event(
         conn,
@@ -1549,8 +1605,9 @@ def _apply_owner_tx(
         cost_after=cost_after,
         now_ms=now_ms,
         payouts_due=due,
-        effective_at_ms=int(now_ms),
+        effective_at_ms=eff_ms,
         origin="manual",
+        note=note,
         actor="admin",
     )
     verified_after = verify_ledger(conn)
@@ -1577,12 +1634,32 @@ def _apply_owner_tx(
     }
 
 
+def _owner_integrity_outcome(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    note: str | None,
+    event_id: str | None,
+) -> dict[str, Any]:
+    """After IntegrityError + rollback: already_recorded only when the intended row exists."""
+    if _owner_tx_already_in_ledger(conn, event_id=event_id, kind=kind, note=note):
+        out: dict[str, Any] = {"ok": True, "reason": "already_recorded", "kind": kind}
+        if event_id is not None:
+            out["event_ids"] = [event_id]
+        return out
+    logger.warning("owner tx integrity_error type=%s", "IntegrityError")
+    return {"ok": False, "reason": "integrity_error", "kind": kind}
+
+
 def apply_owner_redeem(
     conn: sqlite3.Connection,
     *,
     amount: Decimal,
     account_value: Decimal,
     now_ms: int,
+    effective_at_ms: int | None = None,
+    note: str | None = None,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     """Owner withdrawal already out of the wallet. ``account_value`` is the reading after."""
     try:
@@ -1593,9 +1670,14 @@ def apply_owner_redeem(
                 amount=amount,
                 account_value=account_value,
                 now_ms=now_ms,
+                effective_at_ms=effective_at_ms,
+                note=note,
+                event_id=event_id,
             )
     except _OwnerWriteRefused as exc:
         return exc.payload
+    except sqlite3.IntegrityError:
+        return _owner_integrity_outcome(conn, kind="owner_redeem", note=note, event_id=event_id)
 
 
 def apply_owner_deposit(
@@ -1604,6 +1686,9 @@ def apply_owner_deposit(
     amount: Decimal,
     account_value: Decimal,
     now_ms: int,
+    effective_at_ms: int | None = None,
+    note: str | None = None,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     """Owner deposit already in the wallet. ``account_value`` is the reading after."""
     try:
@@ -1614,9 +1699,14 @@ def apply_owner_deposit(
                 amount=amount,
                 account_value=account_value,
                 now_ms=now_ms,
+                effective_at_ms=effective_at_ms,
+                note=note,
+                event_id=event_id,
             )
     except _OwnerWriteRefused as exc:
         return exc.payload
+    except sqlite3.IntegrityError:
+        return _owner_integrity_outcome(conn, kind="owner_deposit", note=note, event_id=event_id)
 
 
 def verify_ledger(conn: sqlite3.Connection) -> dict[str, Any]:

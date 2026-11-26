@@ -39,9 +39,24 @@ _AMOUNT_RE = re.compile(r"^(?:[0-9]{1,9}(?:\.[0-9]{1,6})?|[0-9]{1,3}(?:,[0-9]{3}
 _CMD_RE = re.compile(r"^\s*p(\s|$)", re.IGNORECASE)
 _REQ_ID_RE = re.compile(r"^pr_[0-9a-f]{16}$")
 _GUARD_FORCE_RE = re.compile(r"^(pr_[0-9a-f]{16}):([0-9]{10})$")
+# Short side codes keep confirm callback_data ≤ 64 bytes with amount micro.
+_OWNER_CONFIRM_RE = re.compile(r"^pa:oy:(d|w):([A-Za-z0-9_.-]{1,32}):([0-9]{10}):([0-9]{1,12})$")
+_OWNER_CANCEL_RE = re.compile(r"^pa:on:(d|w):([A-Za-z0-9_.-]{1,32})$")
+_TRAN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+_OWNER_SIDE = {"d": "dep", "w": "wd"}
+_OWNER_SIDE_CB = {"dep": "d", "wd": "w"}
 _GUARD_OVERRIDE_S = 900
 _GUARD_FUTURE_S = 60
 _GUARD_MARKER = "\n\n⚠️ ตรวจยอดโอน"
+_OWNER_TX_MAX_AGE_MS = 6 * 60 * 60 * 1000
+_OWNER_TX_MAX_INCOME = Decimal("1")
+_OWNER_HIST_HINT = "ใช้เครื่องมือบันทึกย้อนหลัง (historical one-off) แทน"
+_OWNER_MULTI_MSG = f"มีเงินโอนอื่นที่ยังไม่บันทึก — {_OWNER_HIST_HINT}"
+_OWNER_OPEN_POS_MSG = f"มีโพซิชันเปิดอยู่ — uPnL อาจเพี้ยน · {_OWNER_HIST_HINT}"
+_OWNER_V_FAIL_MSG = f"อ่านยอดพอร์ตไม่ได้ — {_OWNER_HIST_HINT}"
+_OWNER_AMOUNT_MAX_MSG = "จำนวนใหญ่เกินที่ปุ่มยืนยันรองรับ — แบ่งรายการหรือใช้เครื่องมือย้อนหลัง"
+_OWNER_MAX_MICRO = 999_999_999_999
+_UNRECORDED_MSG = "มีเงินโอนเข้า/ออกที่ยังไม่บันทึก — บันทึกด้วย p owner ก่อน"
 
 _CENT = Decimal("0.01")
 _NAV_Q = Decimal("0.000001")
@@ -71,8 +86,9 @@ HELP_TEXT = (
     "p kyc — สถานะข้อมูลรับเงิน\n"
     "p kyc <ชื่อ> — ดูข้อมูลรับเงินเต็ม\n"
     "p kyc <ชื่อ> set <เหตุผล> — แก้ข้อมูลรับเงิน (บรรทัดถัดไปเป็นฟอร์ม)\n"
-    "เงินเข้าหรือออกของเจ้าของบันทึกเป็น owner_deposit / owner_redeem "
-    "(จัดประเภทใน L2) — ห้ามบันทึกเงินก้อนนั้นด้วยคำสั่งฝากหรือถอนของแอดมิน"
+    "p owner dep <จำนวน> [tranId] — บันทึก owner_deposit (จับคู่โอนเข้า Binance)\n"
+    "p owner wd <จำนวน> [tranId] — บันทึก owner_redeem (จับคู่โอนออก Binance)\n"
+    "ห้ามบันทึกเงินเข้า/ออกของเจ้าของด้วยคำสั่งฝากหรือถอนของแอดมิน"
 )
 
 _GATE_MSG = "คำสั่งพอร์ตร่วมใช้ได้เฉพาะแชทส่วนตัวกับบอท"
@@ -94,7 +110,10 @@ _STORE_TH: dict[str, str] = {
     "bad_args": "อาร์กิวเมนต์ไม่ครบ",
     "no_admin": "ยังไม่มีแอดมิน",
     "deposit_pending": "มีรายการฝากค้างอยู่",
+    "ledger_unverified": "สมุดไม่ตรงกับประวัติ — ยังไม่บันทึก",
+    "integrity_error": "บันทึกไม่สำเร็จ — สมุดไม่เปลี่ยน",
     "first_deposit_must_equal_value": "ฝากครั้งแรกต้องเท่ากับยอดพอร์ต",
+    "amount_too_large": _OWNER_AMOUNT_MAX_MSG,
     "admin_has_partners": "ปิดแอดมินไม่ได้ ขณะที่ยังมีพาร์ทเนอร์ถือหน่วย",
     "no_profit": "ยังไม่มีกำไร",
     "below_min": "กำไรน้อยเกินไป",
@@ -300,6 +319,21 @@ def parse_partner_command(text: str) -> dict[str, Any] | None:
         return {"cmd": "closed"}
     if head == "due" and len(parts) == 2:
         return {"cmd": "due"}
+    if head == "owner":
+        if len(parts) not in (4, 5):
+            return {"error": "usage"}
+        side = parts[2].lower()
+        if side not in ("dep", "wd"):
+            return {"error": "usage"}
+        amount = parse_amount(parts[3], allow_zero=False)
+        if amount is None:
+            return {"error": "usage"}
+        tran_id: str | None = None
+        if len(parts) == 5:
+            if not _TRAN_ID_RE.match(parts[4]):
+                return {"error": "usage"}
+            tran_id = parts[4]
+        return {"cmd": "owner", "side": side, "amount": amount, "tran_id": tran_id}
     return {"error": "usage"}
 
 
@@ -407,6 +441,13 @@ def _paid_button(request_id: str) -> dict[str, Any]:
     return {"inline_keyboard": [[{"text": "📤 USDT ออกจากพอร์ตแล้ว", "callback_data": f"pa:pd:{request_id}"}]]}
 
 
+def _admin_guard_seen() -> None:
+    """Admin guard evaluations never store the display cache — only invalidate."""
+    from jarvise_assist import partner_unrecorded as pu
+
+    pu.invalidate_display_cache()
+
+
 def _transfer_guard(
     conn: sqlite3.Connection,
     client: Any,
@@ -414,7 +455,11 @@ def _transfer_guard(
     now_ms: int,
     req: sqlite3.Row | dict[str, Any],
 ) -> tuple[GuardResult, str]:
-    """Run confirm-time transfer guard. Lazy-imports partner_audit (never at module load)."""
+    """Run confirm-time transfer guard. Lazy-imports partner_audit (never at module load).
+
+    Always invalidates the portal display cache (never stores): deposit-context
+    results are hypothetical and must not unlock a cached clear/unrecorded.
+    """
     from jarvise_assist.partner_audit import GuardResult as _GuardResult
     from jarvise_assist.partner_audit import format_guard_th, guard_check, load_state
 
@@ -435,6 +480,7 @@ def _transfer_guard(
             deposit_amount=deposit_amount,
             deposit_partner=deposit_partner,
         )
+        _admin_guard_seen()
         last_ok_ms: int | None = None
         if result.status != "ok":
             row = conn.execute("PRAGMA database_list").fetchone()
@@ -448,6 +494,7 @@ def _transfer_guard(
         return result, format_guard_th(result, last_ok_ms=last_ok_ms)
     except Exception as exc:  # noqa: BLE001
         logger.warning("partner transfer guard error type=%s", type(exc).__name__)
+        _admin_guard_seen()
         err = _GuardResult(
             status="error",
             checked_at_ms=int(now_ms),
@@ -487,6 +534,38 @@ def _guard_ok_suffix(result: GuardResult) -> str:
     if info_n:
         line += f" (มีหมายเหตุ {info_n} — ดู partner-audit)"
     return line
+
+
+def _blocks_on_unrecorded(result: GuardResult) -> bool:
+    """cv/wd/close confirm: require status ok; never force on unknown/fetch failure."""
+    if result.status != "ok":
+        return True
+    return any(f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded") for f in result.findings)
+
+
+def _open_unrecorded_overview(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> tuple[str, int]:
+    """Return (status, count). Live clear overrides a stale state-file list.
+
+    Invalidates the portal display cache on every evaluation (never stores),
+    including a raising guard stub.
+    """
+    from jarvise_assist import partner_unrecorded as pu
+
+    client = _resolve_client(futures)
+    try:
+        live = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
+    except Exception:
+        _admin_guard_seen()
+        raise
+    _admin_guard_seen()
+    hint = pu.open_unrecorded_hint(conn)
+    if live == "clear":
+        return "clear", 0
+    if live == "unrecorded":
+        return "unrecorded", max(len(hint), 1)
+    if hint:
+        return "unrecorded", len(hint)
+    return "unknown", 0
 
 
 def _settled_view(conn: sqlite3.Connection, rid: str) -> tuple[str, dict[str, Any]]:
@@ -596,7 +675,13 @@ def _fee_if_closed(view: dict[str, Any]) -> Decimal:
     return Decimal(view.get("fee") or 0)
 
 
-def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueError, *, now_ms: int) -> str:
+def _overview_text(
+    conn: sqlite3.Connection,
+    av: AccountValue | AccountValueError,
+    *,
+    now_ms: int,
+    futures: Any = None,
+) -> str:
     lines: list[str] = [f"พอร์ตร่วม · {_bangkok_stamp(now_ms)}"]
     if not _has_events(conn):
         lines.append("ยังไม่ได้ตั้งต้น")
@@ -607,7 +692,8 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
         lines.append("พิมพ์ p init")
         return "\n".join(lines)
 
-    v_ok = isinstance(av, AccountValue)
+    status, unrecorded_n = _open_unrecorded_overview(conn, futures, now_ms=now_ms)
+    show_partner_valuation = status == "clear" and isinstance(av, AccountValue)
     if isinstance(av, AccountValueError):
         lines.append(thai_reason(av.reason, detail=av.detail))
     else:
@@ -626,6 +712,11 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
             lines.append(thai_reason(n.reason))
         else:
             lines.append(f"NAV {fmt_nav(n)} · หน่วยรวม {fmt_units(u_total)}")
+
+    if status == "unrecorded" and unrecorded_n > 0:
+        lines.append(f"⚠️ มีเงินโอนที่ยังไม่บันทึก {unrecorded_n} รายการ — ตัวเลข partner ยังไม่ถูกต้อง")
+    elif status == "unknown":
+        lines.append("⚠️ กำลังตรวจยอดโอน — ตัวเลข partner อาจยังไม่ถูกต้อง")
 
     waiting = fx.awaiting_thb(conn)
     if waiting:
@@ -651,7 +742,7 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
         if joined is not None:
             name_line += f" · เข้าร่วม {partner_rules.fmt_date(joined)}"
         block = [name_line, f"  หน่วย {fmt_units(units)} · ส่วนแบ่ง {share} · ทุน {fmt_usdt(cost)}"]
-        if v_ok:
+        if show_partner_valuation:
             view = ps.view_partner(conn, pid, account_for_view)
             if view.get("ok"):
                 fee = _fee_if_closed(view)
@@ -672,7 +763,7 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
 
     if len(partners) > _MAX_PARTNERS_SHOWN:
         lines.append(f"แสดง {_MAX_PARTNERS_SHOWN} จาก {len(partners)}")
-    if v_ok:
+    if show_partner_valuation:
         lines.append(f"ปิดแล้ว {closed_n} · ค่าธรรมเนียมถ้าปิดทั้งหมด {fmt_usdt(total_fee)}")
     else:
         lines.append(f"ปิดแล้ว {closed_n}")
@@ -695,9 +786,281 @@ def _overview_text(conn: sqlite3.Connection, av: AccountValue | AccountValueErro
     return "\n".join(lines)
 
 
+def _owner_event_id(tran_id: str) -> str:
+    return f"pe_owner_tran{tran_id}"
+
+
+def _owner_buttons(side: str, tran_id: str, ts_s: int, amount_micro: int) -> dict[str, Any]:
+    cb_side = _OWNER_SIDE_CB[side]
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ ยืนยัน",
+                    "callback_data": f"pa:oy:{cb_side}:{tran_id}:{ts_s}:{int(amount_micro)}",
+                },
+                {"text": "❌ ยกเลิก", "callback_data": f"pa:on:{cb_side}:{tran_id}"},
+            ]
+        ]
+    }
+
+
+def _owner_note(tran_id: str) -> str:
+    return f"owner tx via p owner; Binance TRANSFER tranId {tran_id}"
+
+
+def _owner_already_recorded(conn: sqlite3.Connection, *, side: str, tran_id: str) -> bool:
+    eid = _owner_event_id(tran_id)
+    if conn.execute("SELECT 1 AS n FROM partner_event WHERE id = ?", (eid,)).fetchone() is not None:
+        return True
+    kind = "owner_deposit" if side == "dep" else "owner_redeem"
+    rows = conn.execute(
+        """
+        SELECT note FROM partner_event
+        WHERE kind = ? AND note IS NOT NULL
+        """,
+        (kind,),
+    ).fetchall()
+    return any(ps._note_has_exact_tran_id(str(row["note"]), tran_id) for row in rows)
+
+
+def _owner_confirm_ts_ok(ts_s: int, *, now_ms: int) -> bool:
+    now_s = int(now_ms) // 1000
+    if int(ts_s) > now_s + _GUARD_FUTURE_S:
+        return False
+    if now_s - int(ts_s) > _GUARD_OVERRIDE_S:
+        return False
+    return True
+
+
+def _owner_match_amount(wanted: Decimal, found: Decimal) -> bool:
+    from jarvise_assist.partner_audit import EXACT_TOL, _near_tol
+
+    diff = abs(Decimal(wanted) - Decimal(found))
+    if diff <= EXACT_TOL:
+        return True
+    return diff <= _near_tol(Decimal(wanted))
+
+
+def _owner_unrecorded_matches(
+    findings: list[Any],
+    *,
+    side: str,
+    amount: Decimal,
+    tran_id: str | None,
+) -> list[Any]:
+    code = "transfer_in_unrecorded" if side == "dep" else "transfer_out_unrecorded"
+    out: list[Any] = []
+    for f in findings:
+        if str(f.code) != code:
+            continue
+        fp = str(f.fingerprint or "")
+        tid = fp.rsplit(":", 1)[-1] if fp else ""
+        if tran_id is not None and tid != tran_id:
+            continue
+        if not _owner_match_amount(amount, Decimal(f.amount)):
+            continue
+        out.append(f)
+    return out
+
+
+def _owner_other_unrecorded(findings: list[Any], selected: Any) -> bool:
+    """True when another in/out unrecorded finding exists besides the selected one."""
+    sel_fp = str(getattr(selected, "fingerprint", "") or "")
+    for f in findings:
+        if str(f.code) not in ("transfer_in_unrecorded", "transfer_out_unrecorded"):
+            continue
+        if sel_fp and str(f.fingerprint or "") == sel_fp:
+            continue
+        return True
+    return False
+
+
+def _owner_safety_refuse(
+    conn: sqlite3.Connection,
+    client: Any,
+    *,
+    finding: Any,
+    findings: list[Any],
+    now_ms: int,
+) -> str | None:
+    """Return a Thai refuse message, or None when live booking is safe."""
+    from jarvise_assist.real_trades import IncomeIncompleteError, fetch_all_income
+
+    if _owner_other_unrecorded(findings, finding):
+        return _OWNER_MULTI_MSG
+    av = _read_v(client, now_ms=now_ms)
+    if not isinstance(av, AccountValue):
+        return _OWNER_V_FAIL_MSG
+    if int(av.open_positions) > 0:
+        return _OWNER_OPEN_POS_MSG
+    t_ms = int(finding.time_ms)
+    if int(now_ms) - t_ms > _OWNER_TX_MAX_AGE_MS:
+        return f"เงินโอนเก่าเกิน 6 ชม. — {_OWNER_HIST_HINT}"
+    late_ev = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM partner_event
+        WHERE created_at_ms > ?
+           OR COALESCE(effective_at_ms, created_at_ms) > ?
+        """,
+        (t_ms, t_ms),
+    ).fetchone()
+    if int(late_ev["n"]) != 0:
+        return f"มีรายการ partner หลังเงินโอนแล้ว — {_OWNER_HIST_HINT}"
+    late_req = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM partner_request
+        WHERE status = 'confirmed'
+          AND (
+            created_at_ms > ?
+            OR (decided_at_ms IS NOT NULL AND decided_at_ms > ?)
+            OR (paid_at_ms IS NOT NULL AND paid_at_ms > ?)
+          )
+        """,
+        (t_ms, t_ms, t_ms),
+    ).fetchone()
+    if int(late_req["n"]) != 0:
+        return f"มีคำขอที่ยืนยันหลังเงินโอนแล้ว — {_OWNER_HIST_HINT}"
+    try:
+        rows = fetch_all_income(client, start_ms=t_ms + 1, end_ms=int(now_ms))
+    except IncomeIncompleteError:
+        return f"อ่านรายได้หลังเงินโอนไม่ครบ — {_OWNER_HIST_HINT}"
+    except Exception:  # noqa: BLE001
+        return f"อ่านรายได้หลังเงินโอนไม่สำเร็จ — {_OWNER_HIST_HINT}"
+    income_sum = Decimal("0")
+    for row in rows:
+        itype = str(row.get("incomeType") or "")
+        if itype == "TRANSFER" or itype.endswith("TRANSFER"):
+            continue
+        try:
+            income_sum += Decimal(str(row.get("income") or "0"))
+        except (InvalidOperation, ValueError):
+            return f"อ่านรายได้หลังเงินโอนไม่สำเร็จ — {_OWNER_HIST_HINT}"
+    if abs(income_sum) > _OWNER_TX_MAX_INCOME:
+        return f"มียอดเทรดหลังเงินโอนเกิน 1 USDT — {_OWNER_HIST_HINT}"
+    return None
+
+
+def _handle_owner_tx(
+    conn: sqlite3.Connection,
+    *,
+    side: str,
+    amount: Decimal,
+    tran_id: str | None,
+    send: Any,
+    futures: Any,
+    now_ms: int,
+) -> dict[str, Any]:
+    from jarvise_assist.partner_audit import guard_check
+    from jarvise_assist.partner_ledger import plan_owner_deposit, plan_owner_redeem
+
+    client = _resolve_client(futures)
+    amount_micro = ps.usdt_to_micro(Decimal(amount))
+    if amount_micro > _OWNER_MAX_MICRO:
+        send(_OWNER_AMOUNT_MAX_MSG)
+        return {"ok": False, "reason": "amount_too_large"}
+    if tran_id and _owner_already_recorded(conn, side=side, tran_id=tran_id):
+        send("บันทึก tranId นี้แล้ว")
+        return {"ok": True, "cmd": "owner", "reason": "already_recorded"}
+    try:
+        guard = guard_check(conn, client, now_ms=int(now_ms))
+    except Exception:
+        _admin_guard_seen()
+        raise
+    _admin_guard_seen()
+    if guard.status != "ok":
+        send("อ่านรายการโอนไม่ได้ตอนนี้ — ลองใหม่")
+        return {"ok": False, "reason": guard.status}
+    matches = _owner_unrecorded_matches(guard.findings, side=side, amount=amount, tran_id=tran_id)
+    if not matches:
+        send("ไม่พบเงินโอนที่ยังไม่บันทึก")
+        return {"ok": False, "reason": "no_match"}
+    if len(matches) > 1:
+        lines = ["พบหลายรายการ — ระบุ tranId:"]
+        for f in matches[:8]:
+            fp = str(f.fingerprint or "")
+            tid = fp.rsplit(":", 1)[-1]
+            lines.append(f"• {tid} · {_bangkok_stamp(int(f.time_ms))} · {fmt_usdt(Decimal(f.amount))}")
+        lines.append(f"เช่น p owner {side} {fmt_usdt(amount).replace(',', '')} <tranId>")
+        send("\n".join(lines))
+        return {"ok": False, "reason": "ambiguous"}
+    finding = matches[0]
+    fp = str(finding.fingerprint or "")
+    tid = fp.rsplit(":", 1)[-1]
+    if ps.usdt_to_micro(Decimal(finding.amount)) > _OWNER_MAX_MICRO:
+        send(_OWNER_AMOUNT_MAX_MSG)
+        return {"ok": False, "reason": "amount_too_large"}
+    if _owner_already_recorded(conn, side=side, tran_id=tid):
+        send("บันทึก tranId นี้แล้ว")
+        return {"ok": True, "cmd": "owner", "reason": "already_recorded"}
+    refuse = _owner_safety_refuse(conn, client, finding=finding, findings=list(guard.findings), now_ms=now_ms)
+    if refuse is not None:
+        send(refuse)
+        return {"ok": False, "reason": "unsafe"}
+    av = _read_v(client, now_ms=now_ms)
+    if isinstance(av, AccountValueError):
+        send(thai_reason(av.reason, detail=av.detail))
+        return {"ok": False, "reason": av.reason}
+    if int(av.open_positions) > 0:
+        send(_OWNER_OPEN_POS_MSG)
+        return {"ok": False, "reason": "unsafe"}
+    if not ps.verify_ledger(conn)["ok"]:
+        send(thai_reason("ledger_unverified"))
+        return {"ok": False, "reason": "ledger_unverified"}
+    if ps.payouts_due_total(conn) < 0:
+        send(_FAIL_MSG)
+        return {"ok": False, "reason": "bad_due"}
+    # Preview uses live V (transfer already reflected).
+    due = ps.payouts_due_total(conn)
+    u_before = ps.total_units(conn)
+    admin = ps.admin_partner(conn)
+    if admin is None:
+        send(thai_reason("no_admin"))
+        return {"ok": False, "reason": "no_admin"}
+    admin_units = ps.units_from_e8(int(admin["units_e8"]))
+    admin_cost = ps.usdt_from_micro(int(admin["cost_micro"]))
+    amount_q = Decimal(finding.amount)
+    if side == "dep":
+        nav_pre = pl.nav(av.value - amount_q - due, u_before)
+        if isinstance(nav_pre, pl.Refusal):
+            send(thai_reason(nav_pre.reason))
+            return {"ok": False, "reason": nav_pre.reason}
+        plan_d = plan_owner_deposit(amount_q, nav_pre, admin_units, admin_cost)
+        if isinstance(plan_d, pl.Refusal):
+            send(thai_reason(plan_d.reason))
+            return {"ok": False, "reason": plan_d.reason}
+        units_line = f"หน่วยเพิ่ม {fmt_units(plan_d.units_issued)}"
+        cost_after = plan_d.cost_after
+        kind_label = "เงินเข้าเจ้าของ"
+    else:
+        nav_pre = pl.nav(av.value + amount_q - due, u_before)
+        if isinstance(nav_pre, pl.Refusal):
+            send(thai_reason(nav_pre.reason))
+            return {"ok": False, "reason": nav_pre.reason}
+        plan_r = plan_owner_redeem(amount_q, nav_pre, admin_units, admin_cost)
+        if isinstance(plan_r, pl.Refusal):
+            send(thai_reason(plan_r.reason))
+            return {"ok": False, "reason": plan_r.reason}
+        units_line = f"หน่วยลด {fmt_units(plan_r.burned_units)}"
+        cost_after = plan_r.cost_after
+        kind_label = "เงินออกเจ้าของ"
+    text = (
+        f"{kind_label}\n"
+        f"tranId {tid} · {_bangkok_stamp(int(finding.time_ms))}\n"
+        f"จำนวน {fmt_usdt(amount_q)} USDT\n"
+        f"V ตอนนี้ {fmt_usdt(av.value)} · NAV ก่อน {fmt_nav(nav_pre)}\n"
+        f"{units_line} · ทุนหลัง {fmt_usdt(cost_after)}"
+    )
+    send(
+        text,
+        reply_markup=_owner_buttons(side, tid, int(now_ms) // 1000, ps.usdt_to_micro(amount_q)),
+    )
+    return {"ok": True, "cmd": "owner", "tran_id": tid, "side": side}
+
+
 def _handle_overview(conn: sqlite3.Connection, *, send: Any, futures: Any, now_ms: int) -> dict[str, Any]:
     av = _read_v(futures, now_ms=now_ms)
-    send(_overview_text(conn, av, now_ms=now_ms))
+    send(_overview_text(conn, av, now_ms=now_ms, futures=futures))
     return {"ok": True, "cmd": "overview"}
 
 
@@ -1586,6 +1949,16 @@ def handle_partner_text(
                 send=send,
                 now_ms=now_ms,
             )
+        if cmd == "owner":
+            return _handle_owner_tx(
+                conn,
+                side=str(parsed["side"]),
+                amount=Decimal(parsed["amount"]),
+                tran_id=parsed.get("tran_id"),
+                send=send,
+                futures=futures,
+                now_ms=now_ms,
+            )
         send(HELP_TEXT)
         return {"ok": False, "reason": "usage"}
     except Exception:  # noqa: BLE001
@@ -1628,6 +2001,128 @@ def handle_partner_callback(
             return {"ok": False, "refused": "not_private"}
 
         mid = msg.get("message_id")
+        owner_cancel = _OWNER_CANCEL_RE.match(data)
+        if owner_cancel is not None:
+            _answer()
+            if mid is not None:
+                edit(int(mid), "ยกเลิกแล้ว", reply_markup={"inline_keyboard": []})
+            return {"ok": True, "cmd": "owner_cancel"}
+        owner_confirm = _OWNER_CONFIRM_RE.match(data)
+        if owner_confirm is not None:
+            side_code, tran_id, owner_ts_s, amount_micro_s = (
+                owner_confirm.group(1),
+                owner_confirm.group(2),
+                int(owner_confirm.group(3)),
+                owner_confirm.group(4),
+            )
+            side = _OWNER_SIDE[side_code]
+            preview_micro = int(amount_micro_s)
+            if not _owner_confirm_ts_ok(owner_ts_s, now_ms=now_ms):
+                _answer("การ์ดหมดอายุแล้ว — พิมพ์คำสั่งใหม่")
+                return {"ok": False, "reason": "stale_confirm"}
+            if _owner_already_recorded(conn, side=side, tran_id=tran_id):
+                _answer("บันทึกแล้ว")
+                if mid is not None:
+                    edit(int(mid), "บันทึกแล้ว", reply_markup={"inline_keyboard": []})
+                return {"ok": True, "cmd": "owner_confirm", "reason": "already_recorded"}
+            from jarvise_assist.partner_audit import guard_check
+
+            client = _resolve_client(futures)
+            try:
+                guard = guard_check(conn, client, now_ms=int(now_ms))
+            except Exception:
+                _admin_guard_seen()
+                raise
+            _admin_guard_seen()
+            if guard.status != "ok":
+                _answer("อ่านรายการโอนไม่ได้ตอนนี้")
+                return {"ok": False, "reason": guard.status}
+            code = "transfer_in_unrecorded" if side == "dep" else "transfer_out_unrecorded"
+            finding = None
+            for f in guard.findings:
+                if str(f.code) != code:
+                    continue
+                fp = str(f.fingerprint or "")
+                if fp.rsplit(":", 1)[-1] == tran_id:
+                    finding = f
+                    break
+            if finding is None:
+                _answer("ไม่พบเงินโอนที่ยังไม่บันทึก")
+                return {"ok": False, "reason": "no_match"}
+            amount = Decimal(finding.amount)
+            if ps.usdt_to_micro(amount) != preview_micro:
+                _answer("จำนวนไม่ตรงกับที่ตรวจแล้ว — พิมพ์คำสั่งใหม่")
+                return {"ok": False, "reason": "amount_mismatch"}
+            refuse = _owner_safety_refuse(
+                conn,
+                client,
+                finding=finding,
+                findings=list(guard.findings),
+                now_ms=now_ms,
+            )
+            if refuse is not None:
+                _answer(refuse)
+                return {"ok": False, "reason": "unsafe"}
+            av = _read_v(client, now_ms=now_ms)
+            if isinstance(av, AccountValueError):
+                _answer(thai_reason(av.reason, detail=av.detail))
+                return {"ok": False, "reason": av.reason}
+            if int(av.open_positions) > 0:
+                _answer(_OWNER_OPEN_POS_MSG)
+                return {"ok": False, "reason": "unsafe"}
+            note = _owner_note(tran_id)
+            eid = _owner_event_id(tran_id)
+            if side == "dep":
+                result = ps.apply_owner_deposit(
+                    conn,
+                    amount=amount,
+                    account_value=av.value,
+                    now_ms=now_ms,
+                    effective_at_ms=int(finding.time_ms),
+                    note=note,
+                    event_id=eid,
+                )
+            else:
+                result = ps.apply_owner_redeem(
+                    conn,
+                    amount=amount,
+                    account_value=av.value,
+                    now_ms=now_ms,
+                    effective_at_ms=int(finding.time_ms),
+                    note=note,
+                    event_id=eid,
+                )
+            if result.get("reason") == "already_recorded":
+                _answer("บันทึกแล้ว")
+                if mid is not None:
+                    edit(int(mid), "บันทึกแล้ว", reply_markup={"inline_keyboard": []})
+                return {"ok": True, "cmd": "owner_confirm", "reason": "already_recorded"}
+            if not result.get("ok"):
+                reason = str(result.get("reason") or "")
+                _answer(thai_reason(reason))
+                return {"ok": False, "reason": reason}
+            from jarvise_assist import partner_unrecorded as pu
+
+            pu.remove_booked_tran(conn, tran_id)
+            _answer()
+            if side == "dep":
+                body = (
+                    f"✅ บันทึกเงินเข้าเจ้าของแล้ว\n"
+                    f"tranId {tran_id} · {fmt_usdt(amount)} USDT\n"
+                    f"หน่วยเพิ่ม {fmt_units(Decimal(result.get('units_issued') or 0))} · "
+                    f"ทุนหลัง {fmt_usdt(Decimal(result.get('cost_after') or 0))}"
+                )
+            else:
+                body = (
+                    f"✅ บันทึกเงินออกเจ้าของแล้ว\n"
+                    f"tranId {tran_id} · {fmt_usdt(amount)} USDT\n"
+                    f"หน่วยลด {fmt_units(Decimal(result.get('burned_units') or 0))} · "
+                    f"ทุนหลัง {fmt_usdt(Decimal(result.get('cost_after') or 0))}"
+                )
+            if mid is not None:
+                edit(int(mid), body, reply_markup={"inline_keyboard": []})
+            return {"ok": True, "cmd": "owner_confirm", "tran_id": tran_id, "side": side}
+
         if data == "pa:in":
             _answer()
             if mid is not None:
@@ -1816,14 +2311,14 @@ def handle_partner_callback(
 
         if data.startswith("pa:ry:") or data.startswith("pa:rf:"):
             force = data.startswith("pa:rf:")
-            ts_s = None
+            force_ts: int | None = None
             if force:
                 m = _GUARD_FORCE_RE.match(data[len("pa:rf:") :])
                 if m is None:
                     _answer("รายการนี้ปิดไปแล้ว")
                     return {"ok": False, "reason": "bad_id"}
                 rid = m.group(1)
-                ts_s = int(m.group(2))
+                force_ts = int(m.group(2))
             else:
                 rid = data[len("pa:ry:") :]
                 if not _REQ_ID_RE.match(rid):
@@ -1857,17 +2352,32 @@ def handle_partner_callback(
 
             client = _resolve_client(futures)
             guard_suffix = ""
-            if _should_run_guard(force=force, ts_s=ts_s, now_ms=now_ms):
-                guard_result, guard_text = _transfer_guard(conn, client, now_ms=now_ms, req=req)
+            # Always run the guard for cv/wd/close so unrecorded transfers and
+            # fetch failures cannot be force-confirmed (including forged pa:rf:).
+            guard_result, guard_text = _transfer_guard(conn, client, now_ms=now_ms, req=req)
+            if _blocks_on_unrecorded(guard_result):
+                _answer(_UNRECORDED_MSG)
+                text = _merge_guard_text(str(msg.get("text") or ""), guard_text)
+                # No force button — owner must book with p owner first.
+                refuse_markup: dict[str, Any] = {
+                    "inline_keyboard": [[{"text": "✖️ ปฏิเสธ", "callback_data": f"pa:rn:{rid}"}]]
+                }
+                edited_ok = False
+                if mid is not None:
+                    edited_ok = bool(edit(int(mid), text, reply_markup=refuse_markup))
+                if mid is None or not edited_ok:
+                    send(text, reply_markup=refuse_markup)
+                return {"ok": False, "reason": "unrecorded_transfer"}
+            if _should_run_guard(force=force, ts_s=force_ts, now_ms=now_ms):
                 if guard_result.warn:
                     _answer("มีเรื่องยอดโอน — อ่านบนการ์ดก่อนยืนยัน")
                     text = _merge_guard_text(str(msg.get("text") or ""), guard_text)
-                    buttons = _guard_request_buttons(rid, int(now_ms) // 1000)
+                    warn_markup = _guard_request_buttons(rid, int(now_ms) // 1000)
                     edited_ok = False
                     if mid is not None:
-                        edited_ok = bool(edit(int(mid), text, reply_markup=buttons))
+                        edited_ok = bool(edit(int(mid), text, reply_markup=warn_markup))
                     if mid is None or not edited_ok:
-                        send(text, reply_markup=buttons)
+                        send(text, reply_markup=warn_markup)
                     return {"ok": False, "reason": "guard_warn"}
                 guard_suffix = _guard_ok_suffix(guard_result)
             else:

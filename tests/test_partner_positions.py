@@ -30,6 +30,14 @@ def _env_chat(monkeypatch: Any) -> None:
     monkeypatch.setenv("TELEGRAM_CHAT_ID", ADMIN)
     ppos.reset_positions_cache()
     portal.reset_value_cache()
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.guard_unrecorded_status",
+        lambda *_a, **_k: "clear",
+    )
+    monkeypatch.setattr(
+        "jarvise_assist.partner_unrecorded.resolve_unrecorded_status",
+        lambda *_a, **_k: "clear",
+    )
 
 
 class FakePosClient:
