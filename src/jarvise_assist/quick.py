@@ -27,7 +27,12 @@ from jarvise_assist.quick_errors import (
     e_setting_risk_over_cap,
 )
 from jarvise_assist.quick_tags import quick_symbols
-from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
+from jarvise_assist.real_trades import (
+    _fee_usdt_and_other,
+    fetch_all_orders,
+    fetch_all_user_trades,
+    fetch_income_range,
+)
 from jarvise_assist.sizing import portfolio_risk_cap_pct
 from jarvise_assist.store import ensure_settings, list_explore_symbols
 
@@ -498,29 +503,31 @@ def sync_quick_trades(
             if exec_intent_id and not bot_order_id:
                 if int(now_ms) <= created + UNRESOLVED_EXEC_KEEP_MS:
                     continue
-                # Past keep window: read-only resolve of jv-<short>-mkt, then
-                # still-open check. Expire only when resolve fails AND flat.
+                # Past keep window: read-only resolve of jv-<short>-mkt via
+                # allOrders (production BinanceFuturesClient has no
+                # query_order_by_client_id), then still-open check. Expire
+                # only when resolve finds nothing AND flat. A read failure
+                # keeps the registration open for the next pass.
                 if bot_client_id:
                     try:
-                        qfn = getattr(client, "query_order_by_client_id", None)
-                        if callable(qfn):
-                            try:
-                                order = qfn(symbol=sym, client_id=bot_client_id)
-                            except TypeError:
-                                order = qfn(bot_client_id)
-                            if isinstance(order, dict):
-                                oid = str(order.get("orderId") or "") or None
-                                if oid:
-                                    bot_order_id = oid
-                                    after = [f for f in fills if str(f.get("orderId") or "") == bot_order_id]
-                                    after.sort(
-                                        key=lambda r: (
-                                            int(r.get("time") or 0),
-                                            int(r.get("id") or 0),
-                                        )
+                        orders = fetch_all_orders(client, sym, start_ms=fetch_start, end_ms=int(now_ms) + 1)
+                        for order in orders:
+                            if str(order.get("clientOrderId") or "") != bot_client_id:
+                                continue
+                            oid = str(order.get("orderId") or "") or None
+                            if oid:
+                                bot_order_id = oid
+                                after = [f for f in fills if str(f.get("orderId") or "") == bot_order_id]
+                                after.sort(
+                                    key=lambda r: (
+                                        int(r.get("time") or 0),
+                                        int(r.get("id") or 0),
                                     )
+                                )
+                                break
                     except Exception:  # noqa: BLE001
                         logger.warning("quick sync mkt order resolve failed intent=%s", exec_intent_id)
+                        continue
                 if after:
                     pass  # fall through to tagging with resolved orderId
                 else:
