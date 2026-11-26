@@ -733,9 +733,9 @@ networkx==3.7 \
     --hash=sha256:e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0 \
     --hash=sha256:fd77a511bd90f39f3d016351345b52cf5319b813bdca01de3f755d3cca62e96a
     # via torch
-notebooklm-mcp-cli==0.15.7 \
-    --hash=sha256:51779f95a6762d3e2ac49714ab1b696b8dfdea828b0bdbfa86d2809c9ed9e34b \
-    --hash=sha256:ec18f73a188d33a688f8ead711e8e22c8408bfb1a2d72768429446e0165ad52d
+notebooklm-mcp-cli==0.16.5 \
+    --hash=sha256:3c33cac11a47f59179ab170e6e06135b3aaf44c5153b5a469b6bd11157aee94f \
+    --hash=sha256:ec845d537d310e9d4865467dd11ea64a55b3569b867355f370b582abe910ad1c
     # via -r requirements/worker.in
 numpy==2.5.3 \
     --hash=sha256:012e66aca395d795496446e52aeeb5866312a5d4d3f27da270e5a0b43f70dc5c \
