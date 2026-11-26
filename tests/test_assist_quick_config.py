@@ -154,6 +154,47 @@ def test_get_quick_config_clamp_and_no_write(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_kv_clamp_on_read_not_default(tmp_path: Path) -> None:
+    """OOB-but-parseable KV values clamp to nearest bound; junk → default (#4)."""
+
+    def _seed(name: str, rows: list[tuple[str, str]]) -> Any:
+        c = open_db(tmp_path / f"{name}.db")
+        for key, raw in rows:
+            c.execute(
+                "INSERT INTO assist_quick_config (key, value, updated_at_ms) VALUES (?, ?, 1)",
+                (key, raw),
+            )
+        c.commit()
+        before = c.total_changes
+        v = get_quick_config(c)
+        assert c.total_changes == before
+        c.close()
+        return v
+
+    v0 = _seed(
+        "lev0",
+        [
+            ("quick_max_leverage", "0"),
+            ("quick_chase_r", "3"),
+            ("quick_stop_buffer_pct", "9"),
+        ],
+    )
+    assert v0.values["quick_max_leverage"] == 1
+    assert "quick_max_leverage" in v0.clamped_keys
+    assert v0.values["quick_chase_r"] == Decimal("1.0")
+    assert "quick_chase_r" in v0.clamped_keys
+    assert v0.values["quick_stop_buffer_pct"] == Decimal("1.0")
+    assert "quick_stop_buffer_pct" in v0.clamped_keys
+
+    v9 = _seed("lev9", [("quick_max_leverage", "9")])
+    assert v9.values["quick_max_leverage"] == 5
+    assert "quick_max_leverage" in v9.clamped_keys
+
+    vj = _seed("junk", [("quick_chase_r", "nope")])
+    assert vj.values["quick_chase_r"] == Decimal("0.3")
+    assert "quick_chase_r" in vj.defaulted_keys
+
+
 def test_get_quick_config_empty_row_no_insert(tmp_path: Path) -> None:
     conn = open_db(tmp_path / "empty.db")
     conn.execute("DELETE FROM assist_quick_settings")
@@ -179,6 +220,14 @@ def test_effective_clamps() -> None:
     cfg["quick_counter_risk_pct"] = Decimal("1.2")
     eff = effective_quick_values(cfg)
     assert eff["counter_used"] == Decimal("1.0")
+
+
+def test_effective_lev_used_caps_above_5() -> None:
+    """lev_used ≤ 5 even when dict input has quick_max_leverage > 5 (#7c)."""
+    cfg = _defaults()
+    cfg["quick_max_leverage"] = 9
+    eff = effective_quick_values(cfg)
+    assert eff["lev_used"] == 5
 
 
 def test_needs_confirm_directions() -> None:
@@ -217,6 +266,19 @@ def test_reset_key_and_all(tmp_path: Path) -> None:
     assert get_quick_config(conn).values["quick_counter_risk_pct"] == Decimal("0.25")
     reset_quick_config(conn, "all", source="reset_all", now_ms=4)
     assert get_quick_config(conn).values["quick_risk_pct"] == Decimal("0.5")
+    conn.close()
+
+
+def test_reset_all_validates_final_night_pair(tmp_path: Path) -> None:
+    """01:00–12:00 → reset-all must not fail on intermediate 23:30–12:00 (#5)."""
+    conn = open_db(tmp_path / "night_reset.db")
+    set_quick_config(conn, "quick_night_start", "01:00", source="t", now_ms=1)
+    set_quick_config(conn, "quick_night_end", "12:00", source="t", now_ms=2)
+    changes = reset_quick_config(conn, "all", source="reset_all", now_ms=3)
+    assert any(c[0] == "quick_night_start" for c in changes)
+    view = get_quick_config(conn)
+    assert view.values["quick_night_start"] == "23:30"
+    assert view.values["quick_night_end"] == "07:30"
     conn.close()
 
 
