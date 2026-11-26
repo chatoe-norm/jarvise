@@ -31,6 +31,7 @@ def test_quick_menu_long_short_first_row(conn: Any) -> None:
     row0 = kb["inline_keyboard"][0]
     assert row0[0]["callback_data"] == "qk:sd:l"
     assert row0[1]["callback_data"] == "qk:sd:s"
+    assert kb["inline_keyboard"][-1] == [{"text": "⚙️ ตั้งค่า quick", "callback_data": "qc:h"}]
 
 
 def test_qk_sd_long_symbol_step(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:

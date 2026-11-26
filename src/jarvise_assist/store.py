@@ -62,7 +62,7 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
     row = conn.execute(
         """
         SELECT risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct,
-               awaiting_explore, pause_reason
+               awaiting_explore, pause_reason, awaiting_quick_input, awaiting_quick_until_ms
         FROM assist_settings WHERE id=1
         """
     ).fetchone()
@@ -77,6 +77,8 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
             "pending_risk_pct": None,
             "awaiting_explore": False,
             "pause_reason": None,
+            "awaiting_quick_input": None,
+            "awaiting_quick_until_ms": None,
         }
     # Older DBs before migration 16 may lack the trailing columns.
     paused = row[2] if len(row) > 2 else None
@@ -84,6 +86,8 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
     pending = row[4] if len(row) > 4 else None
     exploring = row[5] if len(row) > 5 else 0
     reason = row[6] if len(row) > 6 else None
+    aq = row[7] if len(row) > 7 else None
+    aq_until = row[8] if len(row) > 8 else None
     return {
         "risk_pct": float(row[0]),
         "enabled": bool(int(row[1])),
@@ -92,6 +96,8 @@ def ensure_settings(conn: Any) -> dict[str, Any]:
         "pending_risk_pct": float(pending) if pending is not None else None,
         "awaiting_explore": bool(int(exploring or 0)),
         "pause_reason": str(reason) if reason else None,
+        "awaiting_quick_input": str(aq) if aq else None,
+        "awaiting_quick_until_ms": int(aq_until) if aq_until is not None else None,
     }
 
 
@@ -105,6 +111,8 @@ def write_settings(
     pending_risk_pct: Any = _UNSET,
     awaiting_explore: Any = _UNSET,
     pause_reason: Any = _UNSET,
+    awaiting_quick_input: Any = _UNSET,
+    awaiting_quick_until_ms: Any = _UNSET,
 ) -> None:
     if pause_reason is not _UNSET and paused_until_ms is _UNSET:
         raise ValueError("pause_reason requires paused_until_ms")
@@ -125,12 +133,23 @@ def write_settings(
         reason = cur["pause_reason"]
     else:
         reason = pause_reason
+    aq = cur["awaiting_quick_input"] if awaiting_quick_input is _UNSET else awaiting_quick_input
+    aq_until = (
+        cur["awaiting_quick_until_ms"] if awaiting_quick_until_ms is _UNSET else awaiting_quick_until_ms
+    )
+    # Mutual exclusion: explore/risk awaiting clears quick pending input.
+    if awaiting_quick_input is _UNSET and (
+        (awaiting_explore is not _UNSET and bool(awaiting_explore))
+        or (awaiting_risk is not _UNSET and awaiting_risk is not None)
+    ):
+        aq = None
+        aq_until = None
     conn.execute(
         """
         INSERT INTO assist_settings (
             id, risk_pct, enabled, paused_until_ms, awaiting_risk, pending_risk_pct,
-            awaiting_explore, pause_reason
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            awaiting_explore, pause_reason, awaiting_quick_input, awaiting_quick_until_ms
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             risk_pct=excluded.risk_pct,
             enabled=excluded.enabled,
@@ -138,11 +157,30 @@ def write_settings(
             awaiting_risk=excluded.awaiting_risk,
             pending_risk_pct=excluded.pending_risk_pct,
             awaiting_explore=excluded.awaiting_explore,
-            pause_reason=excluded.pause_reason
+            pause_reason=excluded.pause_reason,
+            awaiting_quick_input=excluded.awaiting_quick_input,
+            awaiting_quick_until_ms=excluded.awaiting_quick_until_ms
         """,
-        (rp, en, paused, awaiting, pending, int(bool(exploring)), reason),
+        (rp, en, paused, awaiting, pending, int(bool(exploring)), reason, aq, aq_until),
     )
     conn.commit()
+
+
+def clear_awaiting_quick_input(conn: Any) -> None:
+    """Clear Quick pending-input state only."""
+    write_settings(conn, awaiting_quick_input=None, awaiting_quick_until_ms=None)
+
+
+def set_awaiting_quick_input(conn: Any, value: str, *, until_ms: int) -> None:
+    """Set Quick pending input; clears explore/risk awaiting (mutually exclusive)."""
+    write_settings(
+        conn,
+        awaiting_quick_input=value,
+        awaiting_quick_until_ms=int(until_ms),
+        awaiting_explore=False,
+        awaiting_risk=None,
+        pending_risk_pct=None,
+    )
 
 
 def get_edge(conn: Any) -> dict[str, Any]:
