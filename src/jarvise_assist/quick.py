@@ -989,10 +989,15 @@ def _quick_live_lines(conn: Any, *, now_ms: int) -> list[str]:
 
 def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
     from jarvise_assist.quick_card import quick_mode_tag
+    from jarvise_assist.quick_config import effective_quick_values, get_quick_config
 
-    settings = get_quick_settings(conn)
-    risk = float(settings["risk_pct"])
-    cap = float(settings["cap_pct"])
+    cfg = get_quick_config(conn)
+    eff = effective_quick_values(cfg)
+    risk = float(eff["risk_used"])
+    cap = float(cfg.values["quick_risk_cap_pct"])
+    # Menu buttons still mark the stored (clamped-on-read) values.
+    risk_stored = float(cfg.values["quick_risk_pct"])
+    cap_stored = float(cfg.values["quick_risk_cap_pct"])
     main_cap = float(portfolio_risk_cap_pct(Decimal(str(ensure_settings(conn)["risk_pct"]))))
     total = main_cap + cap
     stats = summarize_quick(conn, until_ms=now_ms)
@@ -1046,16 +1051,16 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
     risk_row: list[dict[str, str]] = []
     for v in RISK_ALLOWED:
         fmt = _fmt_fixed(v)
-        if abs(risk - v) < 1e-9:
+        if abs(risk_stored - v) < 1e-9:
             risk_row.append({"text": f"✓ risk {fmt}%", "callback_data": f"qs:risk:{fmt}"})
         else:
             risk_row.append({"text": f"risk {fmt}%", "callback_data": f"qs:risk:{fmt}"})
-    if _is_quick_setting_preset("risk", risk):
+    if _is_quick_setting_preset("risk", risk_stored):
         risk_row.append({"text": "✏️ risk", "callback_data": "qs:risk:m"})
     else:
         risk_row.append(
             {
-                "text": f"✓ ✏️ risk {_fmt_fixed(risk)}%",
+                "text": f"✓ ✏️ risk {_fmt_fixed(risk_stored)}%",
                 "callback_data": "qs:risk:m",
             }
         )
@@ -1063,16 +1068,16 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
     cap_row: list[dict[str, str]] = []
     for v in CAP_ALLOWED:
         fmt = _fmt_fixed(v)
-        if abs(cap - v) < 1e-9:
+        if abs(cap_stored - v) < 1e-9:
             cap_row.append({"text": f"✓ cap {fmt}%", "callback_data": f"qs:cap:{fmt}"})
         else:
             cap_row.append({"text": f"cap {fmt}%", "callback_data": f"qs:cap:{fmt}"})
-    if _is_quick_setting_preset("cap", cap):
+    if _is_quick_setting_preset("cap", cap_stored):
         cap_row.append({"text": "✏️ cap", "callback_data": "qs:cap:m"})
     else:
         cap_row.append(
             {
-                "text": f"✓ ✏️ cap {_fmt_fixed(cap)}%",
+                "text": f"✓ ✏️ cap {_fmt_fixed(cap_stored)}%",
                 "callback_data": "qs:cap:m",
             }
         )
@@ -1085,6 +1090,7 @@ def render_quick_menu(conn: Any, *, now_ms: int) -> tuple[str, dict[str, Any]]:
             ],
             risk_row,
             cap_row,
+            [{"text": "⚙️ ตั้งค่า quick", "callback_data": "qc:h"}],
         ]
     }
     return "\n".join(lines), keyboard
@@ -1158,60 +1164,45 @@ def _apply_quick_setting(
         send(MSG_QUICK_SETTING_HINT_RISK if key == "risk" else MSG_QUICK_SETTING_HINT_CAP)
         return {"ok": True, "hint": True}
 
-    parsed = _parse_quick_setting_value(raw, allow_trailing_pct=allow_trailing_pct)
+    if key not in ("risk", "cap"):
+        send("คำสั่งไม่รู้จัก")
+        return {"ok": False}
+
+    # Strip a trailing % for typed values; callbacks use bare numbers.
+    token = raw.strip()
+    if allow_trailing_pct and token.endswith("%"):
+        token = token[:-1].strip()
+
+    from jarvise_assist.quick_config import canonical_string, parse_value
+    from jarvise_assist.quick_config_ui import apply_quick_config_change
+
+    cfg_key = "quick_risk_pct" if key == "risk" else "quick_risk_cap_pct"
+    parsed, err = parse_value(cfg_key, token)
     if parsed is None:
-        send(e_setting_reject(raw))
+        # Junk / ≤0 / >100 → legacy reject; (0,100] outside new bounds → bounds Thai.
+        if not _QUICK_SETTING_VALUE_RE.fullmatch(token):
+            send(e_setting_reject(raw))
+            return {"ok": False, "rejected": True}
+        try:
+            d_raw = Decimal(token)
+            d_q = d_raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError):
+            send(e_setting_reject(raw))
+            return {"ok": False, "rejected": True}
+        if d_raw <= 0 or d_q > 100:
+            send(e_setting_reject(raw))
+            return {"ok": False, "rejected": True}
+        send(err or e_setting_reject(raw))
         return {"ok": False, "rejected": True}
-    val = float(parsed)
 
-    if key == "risk":
-        current_risk = float(get_quick_settings(conn)["risk_pct"])
-        if Decimal(str(val)) > Decimal(str(current_risk)) and not confirmed:
-            fmt = _fmt_fixed(val)
-            ts_s = int(now_ms) // 1000
-            send(
-                f"ยืนยันความเสี่ยงต่อไม้ {fmt}%?\nกดยืนยันภายใน 60 วิ",
-                reply_markup={
-                    "inline_keyboard": [
-                        [
-                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:risk:{fmt}:{ts_s}"},
-                            {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"},
-                        ]
-                    ]
-                },
-            )
-            return {"ok": True, "confirm": True}
-        write_quick_settings(conn, risk_pct=val, updated_at_ms=now_ms)
-        msg, kb = _quick_settings_saved_lines(conn, key="risk", val=val, now_ms=now_ms)
-        send(msg, reply_markup=kb)
-        return {"ok": True, "risk_pct": val}
-
-    if key == "cap":
-        current_cap = float(get_quick_settings(conn)["cap_pct"])
-        if Decimal(str(val)) > Decimal(str(current_cap)) and not confirmed:
-            main_cap = float(portfolio_risk_cap_pct(Decimal(str(ensure_settings(conn)["risk_pct"]))))
-            total = main_cap + val
-            fmt = _fmt_fixed(val)
-            ts_s = int(now_ms) // 1000
-            send(
-                f"ยืนยันเพดาน {fmt}%? "
-                f"ความเสี่ยงรวมสูงสุด {_fmt_fixed(total)}% "
-                f"(หลัก {_fmt_fixed(main_cap)}% + quick {fmt}%)\n"
-                "กดยืนยันภายใน 60 วิ",
-                reply_markup={
-                    "inline_keyboard": [
-                        [
-                            {"text": "✅ ยืนยัน", "callback_data": f"qs:ok:cap:{fmt}:{ts_s}"},
-                            {"text": "↩️ ไม่เปลี่ยน", "callback_data": "qs:no"},
-                        ]
-                    ]
-                },
-            )
-            return {"ok": True, "confirm": True}
-        write_quick_settings(conn, cap_pct=val, updated_at_ms=now_ms)
-        msg, kb = _quick_settings_saved_lines(conn, key="cap", val=val, now_ms=now_ms)
-        send(msg, reply_markup=kb)
-        return {"ok": True, "cap_pct": val}
-
-    send("คำสั่งไม่รู้จัก")
-    return {"ok": False}
+    # Stale/TTL for qs:ok is checked in handle_quick_callback before this call.
+    return apply_quick_config_change(
+        conn,
+        key,
+        canonical_string(cfg_key, parsed),
+        send=send,
+        now_ms=now_ms,
+        confirmed=confirmed,
+        source="qs:callback" if confirmed else "qs:apply",
+        confirm_ts=None,
+    )

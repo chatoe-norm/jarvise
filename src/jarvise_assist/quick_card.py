@@ -32,7 +32,6 @@ from jarvise_assist.pause import format_paused_until, main_week_loss_pause_until
 from jarvise_assist.quick import (
     QUICK_USAGE,
     RISK_ALLOWED,
-    get_quick_settings,
 )
 from jarvise_assist.quick_cutoff import cutoff_block_text, in_entry_block
 from jarvise_assist.quick_minlot import (
@@ -686,9 +685,12 @@ def build_quick_card(
             dist_pct = abs(raw_price - mark) / mark * Decimal("100")
             return _fail("stop_far", quick_errors.e_stop_far(dist_pct))
 
-    qs = get_quick_settings(conn)
-    risk_pct = Decimal(str(qs["risk_pct"]))
-    cap_pct = Decimal(str(qs["cap_pct"]))
+    from jarvise_assist.quick_config import effective_quick_values, get_quick_config
+
+    _cfg = get_quick_config(conn)
+    _eff = effective_quick_values(_cfg)
+    risk_pct = Decimal(str(_eff["risk_used"]))
+    cap_pct = Decimal(str(_cfg.values["quick_risk_cap_pct"]))
 
     size_mode = "risk"
     offer_bound: str | None = None

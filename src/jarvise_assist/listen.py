@@ -42,6 +42,12 @@ from jarvise_assist.quick_card import (
     handle_quick_text,
     parse_quick_command,
 )
+from jarvise_assist.quick_config_ui import (
+    handle_awaiting_quick_input,
+    handle_quick_config_callback,
+    handle_quick_config_text,
+    parse_quick_config_command,
+)
 from jarvise_assist.quick_m1a1 import (
     handle_quick_draft_text,
     handle_quick_trade_callback,
@@ -155,6 +161,9 @@ def process_update(
         if data.startswith("qs:"):
             answer_fn(cq_id)
             return handle_quick_callback(conn, data, send=send_fn, now_ms=ts)
+        if data.startswith("qc:"):
+            answer_fn(cq_id)
+            return handle_quick_config_callback(conn, data, send=send_fn, now_ms=ts)
         if data.startswith("qk:"):
 
             def _qk_answer(text: str | None = None) -> None:
@@ -265,12 +274,20 @@ def process_update(
             futures=futures,
             now_ms=ts,
         )
+    # Menu labels clear awaiting_quick_input inside handle_menu_text.
     risk_num = handle_risk_number(conn, text, send=send_fn, now_ms=ts)
     if risk_num.get("handled"):
         return risk_num
+    qc_parsed = parse_quick_config_command(text)
+    if qc_parsed is not None:
+        return handle_quick_config_text(conn, qc_parsed, send=send_fn, now_ms=ts)
     qs_parsed = parse_quick_setting_command(text)
     if qs_parsed is not None:
         return handle_quick_setting_text(conn, qs_parsed, send=send_fn, now_ms=ts)
+    if match_menu_label(text) is None:
+        awaiting_out = handle_awaiting_quick_input(conn, text, send=send_fn, now_ms=ts)
+        if awaiting_out is not None:
+            return awaiting_out
     if parse_quick_command(text) is not None:
         client = futures if futures is not None else build_futures_client()
         quick_out = handle_quick_text(conn, text, futures=client, send=send_fn, now_ms=ts)
@@ -281,6 +298,7 @@ def process_update(
         match_menu_label(text) is None
         and not settings_row.get("awaiting_explore")
         and settings_row.get("awaiting_risk") is None
+        and settings_row.get("awaiting_quick_input") is None
         and has_active_quick_draft(conn, now_ms=ts)
     ):
         client = futures if futures is not None else build_futures_client()

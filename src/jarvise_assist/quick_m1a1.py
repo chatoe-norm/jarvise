@@ -661,7 +661,14 @@ def handle_quick_trade_callback(
         cancel_quick_drafts(conn, now_ms=now_ms)
         from jarvise_assist.store import write_settings
 
-        write_settings(conn, awaiting_explore=False, awaiting_risk=None, pending_risk_pct=None)
+        write_settings(
+            conn,
+            awaiting_explore=False,
+            awaiting_risk=None,
+            pending_risk_pct=None,
+            awaiting_quick_input=None,
+            awaiting_quick_until_ms=None,
+        )
         card_id = _new_card_id(conn)
         conn.execute(
             """

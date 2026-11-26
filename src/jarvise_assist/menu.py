@@ -156,6 +156,9 @@ def handle_menu_text(
     from jarvise_assist.quick_m1a1 import cancel_quick_drafts
 
     cancel_quick_drafts(conn, now_ms=now_ms)
+    from jarvise_assist.store import clear_awaiting_quick_input
+
+    clear_awaiting_quick_input(conn)
     if kind != "explore" and ensure_settings(conn).get("awaiting_explore"):
         write_settings(conn, awaiting_explore=False)
     send_fn = send or (lambda t, **kw: send_message(t, reply_markup=kw.get("reply_markup")) is not None)
