@@ -25,7 +25,9 @@ from jarvise_assist.quick_config import (
     ConfigEntry,
     _bounds_th,
     canonical_string,
+    get_confirm_cancel_ms,
     get_quick_config,
+    mark_confirm_cancelled,
     needs_confirm,
     parse_value,
     quick_config_active_warnings,
@@ -86,6 +88,8 @@ def _fmt_display(entry: ConfigEntry, value: Any) -> str:
 
 
 def _encode_val(entry: ConfigEntry, value: Any) -> str:
+    if entry.type == "enum":
+        return str(value)
     if entry.type == "list_pct":
         return "_".join(_fmt_one(x) for x in value)
     if entry.type == "hhmm":
@@ -521,23 +525,37 @@ def _send_confirm(
 def _confirm_stale(
     conn: Any,
     *,
-    entry: ConfigEntry,
+    entry: ConfigEntry | None,
     confirm_ts: int,
     now_ms: int,
+    any_change: bool = False,
 ) -> str | None:
+    """TTL / future / cancel-epoch / post-card changes. ``entry=None`` → reset-all."""
     now_s = int(now_ms) // 1000
     if now_s - confirm_ts > QUICK_CONFIRM_TTL_S:
         return e_confirm_stale_ttl()
     if confirm_ts > now_s + QUICK_CONFIRM_FUTURE_S:
         return MSG_QUICK_CONFIRM_STALE
-    if entry.key in {"quick_risk_pct", "quick_risk_cap_pct"}:
+
+    cancel_ms = get_confirm_cancel_ms(conn)
+    if cancel_ms is not None and confirm_ts <= int(cancel_ms) // 1000:
+        return MSG_QUICK_CONFIRM_STALE
+
+    check_settings = any_change or (
+        entry is not None and entry.key in {"quick_risk_pct", "quick_risk_cap_pct"}
+    )
+    if check_settings:
         updated_at_ms = get_quick_settings(conn).get("updated_at_ms")
         if updated_at_ms is not None and int(updated_at_ms) // 1000 > confirm_ts:
             return MSG_QUICK_CONFIRM_STALE
-    row = conn.execute(
-        "SELECT MAX(at_ms) AS m FROM assist_quick_config_log WHERE key=?",
-        (entry.key,),
-    ).fetchone()
+
+    if any_change or entry is None:
+        row = conn.execute("SELECT MAX(at_ms) AS m FROM assist_quick_config_log").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MAX(at_ms) AS m FROM assist_quick_config_log WHERE key=?",
+            (entry.key,),
+        ).fetchone()
     if row is not None:
         m = row["m"] if hasattr(row, "keys") else row[0]
         if m is not None and int(m) // 1000 > confirm_ts:
@@ -552,6 +570,7 @@ def handle_reset(
     send: SendFn,
     now_ms: int,
     confirmed: bool,
+    confirm_ts: int | None = None,
 ) -> dict[str, Any]:
     if key_or_all == "all":
         view = get_quick_config(conn)
@@ -578,8 +597,23 @@ def handle_reset(
                 },
             )
             return {"ok": True, "confirm": True}
+        if confirmed and confirm_ts is not None:
+            stale = _confirm_stale(
+                conn,
+                entry=None,
+                confirm_ts=confirm_ts,
+                now_ms=now_ms,
+                any_change=True,
+            )
+            if stale is not None:
+                send(stale)
+                return {"ok": False, "rejected": True, "reason": "stale"}
         before = dict(view.values)
-        reset_quick_config(conn, "all", source="text:reset_all", now_ms=now_ms)
+        try:
+            reset_quick_config(conn, "all", source="text:reset_all", now_ms=now_ms)
+        except ValueError as exc:
+            send(str(exc))
+            return {"ok": False, "rejected": True}
         after = get_quick_config(conn).values
         advice = quick_config_advice(before, after, main_risk_pct=_main_risk(conn))
         lines = ["รีเซ็ตทั้งหมด ✅", *_advice_lines(advice)]
@@ -602,6 +636,7 @@ def handle_reset(
         now_ms=now_ms,
         confirmed=confirmed,
         source="text:reset",
+        confirm_ts=confirm_ts,
     )
 
 
@@ -613,6 +648,7 @@ def handle_quick_config_callback(
     now_ms: int,
 ) -> dict[str, Any]:
     if data == "qc:no":
+        mark_confirm_cancelled(conn, now_ms=now_ms)
         write_quick_settings(conn, updated_at_ms=now_ms)
         send("ยกเลิก")
         return {"ok": True, "cancelled": True}
@@ -665,7 +701,14 @@ def handle_quick_config_callback(
     if m_ok:
         alias, enc, ts_s = m_ok.group(1), m_ok.group(2), int(m_ok.group(3))
         if alias == "all":
-            return handle_reset(conn, "all", send=send, now_ms=now_ms, confirmed=True)
+            return handle_reset(
+                conn,
+                "all",
+                send=send,
+                now_ms=now_ms,
+                confirmed=True,
+                confirm_ts=ts_s,
+            )
         entry = resolve_entry(alias)
         if entry is None:
             send(MSG_QUICK_CONFIRM_STALE)

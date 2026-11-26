@@ -20,6 +20,9 @@ AdviceLevel = Literal["warn", "suggest"]
 UNIVERSE_ORDER = ("core", "core_explore", "any")
 COLUMN_KEYS = frozenset({"quick_risk_pct", "quick_risk_cap_pct"})
 AWAITING_QUICK_TTL_MS = 300_000
+# Reserved KV marker: invalidate outstanding qc:ok cards. Not a registry key;
+# get_quick_config / history / reset ignore it (never logged as config history).
+CONFIRM_CANCEL_KEY = "_confirm_cancel_ms"
 
 _NUM_RE = re.compile(r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")
 _HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
@@ -464,8 +467,17 @@ def _bounds_th(entry: ConfigEntry) -> str:
     return f"{_fmt_num(Decimal(str(lo)))}–{_fmt_num(Decimal(str(hi)))}{unit}"
 
 
-def parse_value(key: str, raw: str) -> tuple[Any | None, str | None]:
-    """Parse raw text for ``key``. Returns (value, None) or (None, thai_error)."""
+def parse_value(
+    key: str,
+    raw: str,
+    *,
+    check_bounds: bool = True,
+) -> tuple[Any | None, str | None]:
+    """Parse raw text for ``key``. Returns (value, None) or (None, thai_error).
+
+    Write path uses ``check_bounds=True`` (strict). Read path uses
+    ``check_bounds=False`` then clamps via ``_clamp_value``.
+    """
     entry = _BY_KEY.get(key) or resolve_entry(key)
     if entry is None:
         return None, "❌ ไม่รู้จักคีย์นี้"
@@ -508,7 +520,7 @@ def parse_value(key: str, raw: str) -> tuple[Any | None, str | None]:
                 d = Decimal(tok).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             except InvalidOperation:
                 return None, f'❌ ค่า "{p}" ใช้ไม่ได้ — {_bounds_th(entry)}'
-            if d < entry.hard_min or d > entry.hard_max:  # type: ignore[operator]
+            if check_bounds and (d < entry.hard_min or d > entry.hard_max):  # type: ignore[operator]
                 return None, f"❌ {_fmt_num(d)} เกินขอบเขต — {_bounds_th(entry)}"
             vals.append(d)
         if len(set(vals)) != len(vals):
@@ -535,7 +547,9 @@ def parse_value(key: str, raw: str) -> tuple[Any | None, str | None]:
             if d != d.to_integral_value():
                 return None, f"❌ ต้องเป็นจำนวนเต็ม — ขอบเขต {_bounds_th(entry)}"
             iv = int(d)
-            if iv < int(entry.hard_min) or iv > int(entry.hard_max):  # type: ignore[arg-type]
+            if check_bounds and (
+                iv < int(entry.hard_min) or iv > int(entry.hard_max)  # type: ignore[arg-type]
+            ):
                 return None, f"❌ {iv} เกินขอบเขต — {_bounds_th(entry)}"
             return iv, None
         places = "0.01"
@@ -545,11 +559,41 @@ def parse_value(key: str, raw: str) -> tuple[Any | None, str | None]:
     except InvalidOperation:
         return None, f'❌ ค่า "{_truncate(s)}" ใช้ไม่ได้ — ขอบเขต {_bounds_th(entry)}'
 
-    lo = Decimal(str(entry.hard_min))
-    hi = Decimal(str(entry.hard_max))
-    if d < lo or d > hi:
-        return None, f"❌ {_fmt_num(d)} เกินขอบเขต — {_bounds_th(entry)}"
+    if check_bounds:
+        lo = Decimal(str(entry.hard_min))
+        hi = Decimal(str(entry.hard_max))
+        if d < lo or d > hi:
+            return None, f"❌ {_fmt_num(d)} เกินขอบเขต — {_bounds_th(entry)}"
     return d, None
+
+
+def mark_confirm_cancelled(conn: Any, *, now_ms: int) -> None:
+    """Store cancel epoch so outstanding qc:ok cards become stale. No history row."""
+    conn.execute(
+        """
+        INSERT INTO assist_quick_config (key, value, updated_at_ms)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value=excluded.value,
+            updated_at_ms=excluded.updated_at_ms
+        """,
+        (CONFIRM_CANCEL_KEY, str(int(now_ms)), int(now_ms)),
+    )
+    conn.commit()
+
+
+def get_confirm_cancel_ms(conn: Any) -> int | None:
+    row = conn.execute(
+        "SELECT value FROM assist_quick_config WHERE key=?",
+        (CONFIRM_CANCEL_KEY,),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row["value"] if hasattr(row, "keys") else row[0]
+    try:
+        return int(str(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def _truncate(tok: str) -> str:
@@ -681,8 +725,8 @@ def get_quick_config(conn: Any) -> QuickConfigView:
                 notes[key] = f"ค่าที่เก็บ {_fmt_num(parsed)} เกินขอบเขต → ใช้ {_fmt_num(Decimal(str(val)))}"
             continue
 
-        # config table: re-parse canonical string
-        parsed_val, err = parse_value(key, str(raw))
+        # config table: lenient parse (no bounds), then clamp. Junk → default.
+        parsed_val, err = parse_value(key, str(raw), check_bounds=False)
         if err is not None or parsed_val is None:
             values[key] = entry.default
             defaulted.add(key)
@@ -774,6 +818,7 @@ def set_quick_config(
     source: str,
     now_ms: int,
     commit: bool = True,
+    skip_cross_key: bool = False,
 ) -> tuple[Any, Any]:
     """Validate, write column or config upsert, append log. One transaction."""
     entry = _BY_KEY.get(key) or resolve_entry(key)
@@ -792,7 +837,7 @@ def set_quick_config(
     view = get_quick_config(conn)
     old = view.values[key]
 
-    if key in {"quick_night_start", "quick_night_end"}:
+    if not skip_cross_key and key in {"quick_night_start", "quick_night_end"}:
         start = value if key == "quick_night_start" else view.values["quick_night_start"]
         end = value if key == "quick_night_end" else view.values["quick_night_end"]
         night_err = _validate_night_pair(str(start), str(end))
@@ -858,14 +903,25 @@ def reset_quick_config(
     source: str,
     now_ms: int,
 ) -> list[tuple[str, Any, Any]]:
-    """Reset one key or all to registry defaults. Never auto-called."""
+    """Reset one key or all to registry defaults. Never auto-called.
+
+    Reset-all validates the FINAL night pair (not intermediate states) and
+    applies atomically.
+    """
     if key_or_all == "all":
         keys = [e.key for e in QUICK_CONFIG]
+        final_start = next(e.default for e in QUICK_CONFIG if e.key == "quick_night_start")
+        final_end = next(e.default for e in QUICK_CONFIG if e.key == "quick_night_end")
+        night_err = _validate_night_pair(str(final_start), str(final_end))
+        if night_err:
+            raise ValueError(night_err)
+        skip_cross = True
     else:
         entry = resolve_entry(key_or_all)
         if entry is None:
             raise ValueError(f"unknown key: {key_or_all}")
         keys = [entry.key]
+        skip_cross = False
 
     changes: list[tuple[str, Any, Any]] = []
     conn.execute("BEGIN IMMEDIATE")
@@ -879,6 +935,7 @@ def reset_quick_config(
                 source=source,
                 now_ms=now_ms,
                 commit=False,
+                skip_cross_key=skip_cross,
             )
             if canonical_string(key, old) != canonical_string(key, new):
                 changes.append((key, old, new))
