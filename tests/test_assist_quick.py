@@ -1183,26 +1183,39 @@ def test_quick_settings_manual_v21(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     def _msg(text: str) -> dict[str, Any]:
         return {"message": {"chat": {"id": 42}, "text": text}}
 
-    # Menu rows: presets + manual buttons (defaults risk/cap 1%)
+    # Menu rows: coin grid then risk/cap presets (defaults risk/cap 1%)
     text, kb = render_quick_menu(conn, now_ms=now)
     rows = kb["inline_keyboard"]
-    risk_labels = [b["text"] for b in rows[1]]
-    cap_labels = [b["text"] for b in rows[2]]
+
+    def _row_starting(prefix: str) -> list[dict[str, str]]:
+        for row in rows:
+            if row and str(row[0].get("callback_data", "")).startswith(prefix):
+                return row
+        raise AssertionError(f"no row starting with {prefix}")
+
+    risk_labels = [b["text"] for b in _row_starting("qs:risk:")]
+    cap_labels = [b["text"] for b in _row_starting("qs:cap:")]
     assert risk_labels == ["risk 0.5%", "risk 0.75%", "✓ risk 1%", "✏️ risk"]
     assert cap_labels == ["✓ cap 1%", "cap 1.5%", "cap 2%", "✏️ cap"]
     callbacks = [btn["callback_data"] for row in rows for btn in row]
     assert all(len(cd.encode("utf-8")) <= 64 for cd in callbacks)
 
+    def _risk_row(kb0: dict[str, Any]) -> list[dict[str, str]]:
+        for row in kb0["inline_keyboard"]:
+            if row and str(row[0].get("callback_data", "")).startswith("qs:risk:"):
+                return row
+        raise AssertionError("no risk row")
+
     write_quick_settings(conn, risk_pct=0.6)
     _, kb_custom = render_quick_menu(conn, now_ms=now)
-    assert kb_custom["inline_keyboard"][1][-1]["text"] == "✓ ✏️ risk 0.6%"
+    assert _risk_row(kb_custom)[-1]["text"] == "✓ ✏️ risk 0.6%"
     write_quick_settings(conn, risk_pct=0.25)
     _, kb_legacy = render_quick_menu(conn, now_ms=now)
-    assert kb_legacy["inline_keyboard"][1][-1]["text"] == "✓ ✏️ risk 0.25%"
+    assert _risk_row(kb_legacy)[-1]["text"] == "✓ ✏️ risk 0.25%"
     write_quick_settings(conn, risk_pct=0.5)
     _, kb_preset = render_quick_menu(conn, now_ms=now)
-    assert kb_preset["inline_keyboard"][1][0]["text"] == "✓ risk 0.5%"
-    assert kb_preset["inline_keyboard"][1][-1]["text"] == "✏️ risk"
+    assert _risk_row(kb_preset)[0]["text"] == "✓ risk 0.5%"
+    assert _risk_row(kb_preset)[-1]["text"] == "✏️ risk"
 
     # Manual callback hints only
     before = dict(get_quick_settings(conn))

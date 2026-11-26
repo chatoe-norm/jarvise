@@ -10,10 +10,18 @@ from datetime import timedelta, timezone
 from decimal import Decimal, Overflow
 from typing import Any
 
+from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.explore import normalize_explore_symbol
 from jarvise_assist.messages import STOP_INSTRUCTION, _fmt_price_tick, fmt_price, fmt_qty
 from jarvise_assist.pause import main_week_loss_pause_until
-from jarvise_assist.quick import REG_TTL_MS, create_quick_registration
+from jarvise_assist.quick import (
+    REG_TTL_MS,
+    _cb,
+    _fmt_pct,
+    create_quick_registration,
+    quick_symbol_busy_toast,
+    render_quick_menu,
+)
 from jarvise_assist.quick_card import (
     CARD_TTL_PREFIX,
     QUICK_CARD_TTL_MS,
@@ -21,6 +29,12 @@ from jarvise_assist.quick_card import (
     _fail,
     _hhmm,
     _refusal_week_loss,
+)
+from jarvise_assist.quick_config import (
+    AWAITING_QUICK_TTL_MS,
+    canonical_string,
+    effective_quick_values,
+    get_quick_config,
 )
 from jarvise_assist.quick_cutoff import cutoff_block_text, in_entry_block
 from jarvise_assist.quick_errors import (
@@ -31,6 +45,15 @@ from jarvise_assist.quick_errors import (
     e_stop_far,
     fmt_pct_bounded,
 )
+from jarvise_assist.quick_regime import Trend, quick_side_risk, quick_trend_4h
+from jarvise_assist.quick_tags import quick_symbols
+from jarvise_assist.store import (
+    clear_awaiting_quick_input,
+    ensure_settings,
+    list_explore_symbols,
+    set_awaiting_quick_input,
+    write_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +62,7 @@ SendFn = Callable[..., Any]
 
 QUICK_DRAFT_TTL_MS = 300_000
 QUICK_CARD_MAX_AGE_MS = 1_800_000
+QUICK_ISSUED_FUTURE_S = 60
 STOP_PRESETS = frozenset({"0.3", "0.5", "1"})
 _BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 
@@ -48,6 +72,17 @@ _BTN_REFRESH = "🔄 อัปเดตราคา"
 _BTN_REGISTER = "⚡ เริ่มไม้ quick"
 _BTN_REGISTER_OFFER = "⚡ ยืนยันขนาดที่เสนอ"
 _BTN_CANCEL = "✖️ ยกเลิก"
+_TREND_TH: dict[Trend, str] = {"up": "ขาขึ้น", "down": "ขาลง", "unknown": "ไม่ทราบ"}
+
+
+def _stop_preset_strings(conn: Any | None = None) -> list[str]:
+    """Canonical stop-preset % strings (default byte-identical to STOP_PRESETS order)."""
+    if conn is None:
+        return ["0.3", "0.5", "1"]
+    cfg = get_quick_config(conn)
+    presets = cfg.values.get("quick_stop_presets") or (Decimal("0.3"), Decimal("0.5"), Decimal("1"))
+    return canonical_string("quick_stop_presets", tuple(presets)).split(",")
+
 
 MSG_DRAFT_EXPIRED = "หมดเวลา — เริ่มใหม่จากเมนู ⚡ Quick"
 MSG_BAD_BUTTON = "ข้อมูลปุ่มไม่ถูกต้อง — เริ่มใหม่จากเมนู ⚡ Quick"
@@ -208,19 +243,23 @@ def _symbol_buttons(card_id: str, symbols: list[str]) -> list[list[dict[str, str
     return rows
 
 
-def _stop_step_markup(card_id: str) -> dict[str, Any]:
-    presets = [
-        {"text": "0.3%", "callback_data": f"qk:sl:{card_id}:0.3"},
-        {"text": "0.5%", "callback_data": f"qk:sl:{card_id}:0.5"},
-        {"text": "1%", "callback_data": f"qk:sl:{card_id}:1"},
+def _stop_step_markup(card_id: str, presets: list[str] | None = None) -> dict[str, Any]:
+    pcts = list(presets) if presets is not None else ["0.3", "0.5", "1"]
+    buttons = [
+        {"text": f"{p}%", "callback_data": _cb(f"qk:sl:{card_id}:{p}")}
+        for p in pcts
+        if len(f"qk:sl:{card_id}:{p}".encode()) <= 64
     ]
-    presets = [p for p in presets if len(p["callback_data"].encode("utf-8")) <= 64]
     return {
         "inline_keyboard": [
-            presets,
-            [{"text": _BTN_CANCEL, "callback_data": f"qk:x:{card_id}"}],
+            buttons,
+            [{"text": _BTN_CANCEL, "callback_data": _cb(f"qk:x:{card_id}")}],
         ]
     }
+
+
+def _stop_step_markup_for(conn: Any, card_id: str) -> dict[str, Any]:
+    return _stop_step_markup(card_id, _stop_preset_strings(conn))
 
 
 def _refresh_only_markup(card_id: str) -> dict[str, Any]:
@@ -634,6 +673,139 @@ def _handle_qk_register(
     return {"ok": True, "registration_id": rid}
 
 
+def _universe_line_and_button(
+    conn: Any,
+    symbol: str,
+    *,
+    counter_used: Decimal,
+) -> tuple[str | None, dict[str, str] | None]:
+    """A0b labels only — record-only Quick stays open to any valid USDT-M perp."""
+    sym = str(symbol).upper()
+    cfg = get_quick_config(conn)
+    universe = str(cfg.values.get("quick_exec_universe") or "core_explore")
+    if sym in ASSIST_SYMBOLS:
+        return None, None
+    explore = set(list_explore_symbols(conn))
+    if sym in explore:
+        return "🧪 เหรียญทดลอง", None
+    counter_s = _fmt_pct(float(counter_used))
+    if universe == "core":
+        return "บอทเข้าไม้ (A1) ได้เฉพาะ 7 เหรียญหลัก · การ์ดนี้บันทึกอย่างเดียว", None
+    if universe == "any":
+        return f"🔴 ไม่ทราบเทรนด์ — บอท (A1) จะใช้ risk สวนเทรนด์ {counter_s}%", None
+    # core_explore (default)
+    line = "บอทเข้าไม้ (A1) ได้เฉพาะ 7 เหรียญหลัก + เหรียญทดลอง · การ์ดนี้บันทึกอย่างเดียว"
+    btn = {
+        "text": "🧪 เพิ่มเข้าเหรียญทดลอง",
+        "callback_data": _cb(f"qk:ea:{sym}"),
+    }
+    return line, btn
+
+
+def render_side_picker(
+    conn: Any,
+    symbol: str,
+    *,
+    now_ms: int,
+    futures: Any = None,
+    explore_conn: Any | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Build the coin→side picker message + markup."""
+    sym = str(symbol).upper()
+    eff = effective_quick_values(get_quick_config(conn))
+    trend = quick_trend_4h(conn, sym, now_ms=now_ms, explore_conn=explore_conn)
+    mark_s = "—"
+    if futures is not None:
+        try:
+            mark_s = fmt_price(Decimal(str(futures.mark_price(sym))))
+        except Exception:  # noqa: BLE001
+            mark_s = "—"
+    lines = [
+        f"⚡ {sym} · 4h: {_TREND_TH[trend]} · mark {mark_s}",
+        _mode_tag(),
+    ]
+    uni_line, uni_btn = _universe_line_and_button(conn, sym, counter_used=Decimal(str(eff["counter_used"])))
+    if uni_line:
+        lines.append(uni_line)
+
+    long_counter, _ = quick_side_risk(trend, "long", eff)
+    short_counter, _ = quick_side_risk(trend, "short", eff)
+    if long_counter or short_counter:
+        risk_s = _fmt_pct(float(eff["risk_used"]))
+        lines.append(f"การ์ดบันทึกอย่างเดียวคิดขนาดที่ risk {risk_s}% · risk สวนเทรนด์ใช้เมื่อบอทเข้าไม้ (A1)")
+
+    issued_s = int(now_ms) // 1000
+    counter_s = _fmt_pct(float(eff["counter_used"]))
+
+    def _side_btn(code: str, label: str, is_counter: bool) -> dict[str, str]:
+        text = label
+        if is_counter:
+            text = f"{label} (สวนเทรนด์ · risk {counter_s}%)"
+        return {"text": text, "callback_data": _cb(f"qk:sd:{code}:{sym}:{issued_s}")}
+
+    rows: list[list[dict[str, str]]] = [
+        [
+            _side_btn("l", _BTN_LONG, long_counter),
+            _side_btn("s", _BTN_SHORT, short_counter),
+        ]
+    ]
+    if uni_btn is not None:
+        rows.append([uni_btn])
+    rows.append(
+        [
+            {"text": "↩️ เลือกเหรียญใหม่", "callback_data": _cb("qk:bk")},
+            {"text": "✖️ ยกเลิก", "callback_data": _cb("qk:cx")},
+        ]
+    )
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def _edit_callback_message(
+    *,
+    message: dict[str, Any],
+    text: str,
+    markup: dict[str, Any] | None,
+    send: SendFn,
+    edit: EditFn,
+    fallback_send: bool = True,
+) -> None:
+    mid = message.get("message_id")
+    chat_id = (message.get("chat") or {}).get("id")
+    if mid is None or chat_id is None:
+        if fallback_send:
+            send(text, reply_markup=markup)
+        return
+    try:
+        if edit(
+            int(mid),
+            text,
+            reply_markup=markup or {"inline_keyboard": []},
+            chat_id=str(chat_id),
+        ):
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    if fallback_send:
+        send(text, reply_markup=markup)
+
+
+def _clear_symbol_await_only(conn: Any) -> None:
+    """Clear typed-symbol await; leave cfg:<key> settings prompts alone."""
+    if ensure_settings(conn).get("awaiting_quick_input") == "symbol":
+        clear_awaiting_quick_input(conn)
+
+
+def _clear_other_awaitings(conn: Any) -> None:
+    write_settings(
+        conn,
+        awaiting_explore=False,
+        awaiting_risk=None,
+        pending_risk_pct=None,
+        awaiting_quick_input=None,
+        awaiting_quick_until_ms=None,
+    )
+
+
 def handle_quick_trade_callback(
     conn: Any,
     data: str,
@@ -644,13 +816,109 @@ def handle_quick_trade_callback(
     edit: EditFn,
     message: dict[str, Any],
     now_ms: int,
+    explore_lookup: Callable[[str], dict[str, Any] | None] | None = None,
+    explore_fetch: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     parts = data.split(":")
-    if len(parts) < 3 or parts[0] != "qk":
+    if len(parts) < 2 or parts[0] != "qk":
         answer(MSG_BAD_BUTTON)
         return {"ok": False}
 
     op = parts[1]
+
+    # --- Menu-level ops (no card id) -----------------------------------------
+    if op == "bz":
+        if len(parts) < 3:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+        sym = normalize_explore_symbol(":".join(parts[2:]).upper())
+        if sym is None:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+        answer(quick_symbol_busy_toast(sym))
+        return {"ok": True, "busy": True}
+
+    if op == "mx":
+        # Close drops the keyboard in place; never re-send the whole Quick menu.
+        _edit_callback_message(
+            message=message,
+            text=str(message.get("text") or "⚡ Quick"),
+            markup={"inline_keyboard": []},
+            send=send,
+            edit=edit,
+            fallback_send=False,
+        )
+        answer(None)
+        return {"ok": True, "closed": True}
+
+    if op == "cx":
+        _clear_symbol_await_only(conn)
+        _edit_callback_message(
+            message=message,
+            text="ยกเลิกแล้ว",
+            markup={"inline_keyboard": []},
+            send=send,
+            edit=edit,
+        )
+        answer(None)
+        return {"ok": True, "cancelled": True}
+
+    if op == "bk":
+        _clear_symbol_await_only(conn)
+        text, kb = render_quick_menu(conn, now_ms=now_ms)
+        # Coin grid only (no status prose re-send): keep full menu text for context.
+        _edit_callback_message(message=message, text=text, markup=kb, send=send, edit=edit)
+        answer(None)
+        return {"ok": True, "step": "coin_menu"}
+
+    if op == "ot":
+        cancel_quick_drafts(conn, now_ms=now_ms)
+        set_awaiting_quick_input(conn, "symbol", until_ms=int(now_ms) + AWAITING_QUICK_TTL_MS)
+        prompt = "พิมพ์รหัสเหรียญ เช่น PEPE, WIF, 1000PEPEUSDT"
+        markup = {"inline_keyboard": [[{"text": "✖️ ยกเลิก", "callback_data": _cb("qk:cx")}]]}
+        _edit_callback_message(message=message, text=prompt, markup=markup, send=send, edit=edit)
+        answer(None)
+        return {"ok": True, "awaiting": "symbol"}
+
+    if op == "cs":
+        if len(parts) < 3:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+        sym = normalize_explore_symbol(":".join(parts[2:]).upper())
+        if sym is None:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+        if sym in quick_symbols(conn):
+            answer(quick_symbol_busy_toast(sym))
+            return {"ok": True, "busy": True}
+        _clear_symbol_await_only(conn)
+        text, markup = render_side_picker(conn, sym, now_ms=now_ms, futures=futures)
+        _edit_callback_message(message=message, text=text, markup=markup, send=send, edit=edit)
+        answer(None)
+        return {"ok": True, "step": "pick_side", "symbol": sym}
+
+    if op == "ea":
+        if len(parts) < 3:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+        sym = normalize_explore_symbol(":".join(parts[2:]).upper())
+        if sym is None:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+        from jarvise_assist.explore import submit_explore_symbol
+        from jarvise_ingest.providers.binance_klines import fetch_klines
+
+        lookup = explore_lookup
+        fetch = explore_fetch or fetch_klines
+        if lookup is None:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+        result = submit_explore_symbol(conn, sym, lookup=lookup, fetch=fetch, now_ms_value=now_ms)
+        send(str(result.get("text") or ""), reply_markup=result.get("reply_markup"))
+        text, markup = render_side_picker(conn, sym, now_ms=now_ms, futures=futures)
+        _edit_callback_message(message=message, text=text, markup=markup, send=send, edit=edit)
+        answer(None)
+        return {"ok": bool(result.get("ok")), "explore": result, "step": "pick_side", "symbol": sym}
 
     if op == "sd":
         side_code = parts[2] if len(parts) > 2 else ""
@@ -658,17 +926,96 @@ def handle_quick_trade_callback(
             answer(MSG_BAD_BUTTON)
             return {"ok": False}
         side = "long" if side_code == "l" else "short"
-        cancel_quick_drafts(conn, now_ms=now_ms)
-        from jarvise_assist.store import write_settings
 
-        write_settings(
-            conn,
-            awaiting_explore=False,
-            awaiting_risk=None,
-            pending_risk_pct=None,
-            awaiting_quick_input=None,
-            awaiting_quick_until_ms=None,
-        )
+        # Extended form: qk:sd:<l|s>:<SYMBOL>:<issued_s> (exactly 5 parts)
+        if len(parts) == 5:
+            sym = normalize_explore_symbol(parts[3].upper())
+            if sym is None:
+                answer(MSG_BAD_BUTTON)
+                return {"ok": False}
+            try:
+                issued_s = int(parts[4])
+            except (TypeError, ValueError):
+                answer(MSG_BAD_BUTTON)
+                return {"ok": False}
+            now_s = int(now_ms) // 1000
+            if issued_s > now_s + QUICK_ISSUED_FUTURE_S:
+                answer(MSG_BAD_BUTTON)
+                return {"ok": False}
+            if (now_s - issued_s) * 1000 > QUICK_DRAFT_TTL_MS:
+                answer(MSG_DRAFT_EXPIRED)
+                return {"ok": False, "expired": True}
+            if sym in quick_symbols(conn):
+                answer(quick_symbol_busy_toast(sym))
+                return {"ok": True, "busy": True}
+            cancel_quick_drafts(conn, now_ms=now_ms)
+            _clear_other_awaitings(conn)
+            card_id = _new_card_id(conn)
+            conn.execute(
+                """
+                INSERT INTO assist_quick_card (
+                    id, side, symbol, status, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, 'pick_stop', ?, ?)
+                """,
+                (card_id, side, sym, int(now_ms), int(now_ms)),
+            )
+            conn.commit()
+            body = "\n".join(
+                [
+                    f"⚡ Quick · {sym} · {_side_label(side)} — {STOP_STEP_HINT}",
+                    _mode_tag(),
+                ]
+            )
+            markup = _stop_step_markup_for(conn, card_id)
+            mid = message.get("message_id")
+            chat_id = (message.get("chat") or {}).get("id")
+
+            def _edit_sd(text: str, mk: dict[str, Any] | None = None) -> bool:
+                if mid is None or chat_id is None:
+                    new_mid = send(text, reply_markup=mk)
+                    if new_mid is not None:
+                        conn.execute(
+                            "UPDATE assist_quick_card SET message_id=? WHERE id=?",
+                            (int(new_mid), card_id),
+                        )
+                        conn.commit()
+                    return new_mid is not None
+                try:
+                    ok = edit(
+                        int(mid),
+                        text,
+                        reply_markup=mk or {"inline_keyboard": []},
+                        chat_id=str(chat_id),
+                    )
+                    if ok:
+                        conn.execute(
+                            "UPDATE assist_quick_card SET message_id=? WHERE id=?",
+                            (int(mid), card_id),
+                        )
+                        conn.commit()
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+                new_mid = send(text, reply_markup=mk)
+                if new_mid is not None:
+                    conn.execute(
+                        "UPDATE assist_quick_card SET message_id=? WHERE id=?",
+                        (int(new_mid), card_id),
+                    )
+                    conn.commit()
+                return new_mid is not None
+
+            _edit_sd(body, markup)
+            answer(None)
+            return {"ok": True, "step": "pick_stop", "card_id": card_id}
+
+        if len(parts) != 3:
+            answer(MSG_BAD_BUTTON)
+            return {"ok": False}
+
+        # Legacy 3-part: qk:sd:l|s → pick_symbol
+        cancel_quick_drafts(conn, now_ms=now_ms)
+        _clear_other_awaitings(conn)
         card_id = _new_card_id(conn)
         conn.execute(
             """
@@ -696,6 +1043,10 @@ def handle_quick_trade_callback(
             conn.commit()
         answer(None)
         return {"ok": True, "step": "pick_symbol", "card_id": card_id}
+
+    if len(parts) < 3:
+        answer(MSG_BAD_BUTTON)
+        return {"ok": False}
 
     card_id = parts[2] if len(parts) > 2 else ""
     row = _load_card(conn, card_id)
@@ -813,7 +1164,7 @@ def handle_quick_trade_callback(
                 _mode_tag(),
             ]
         )
-        _edit(text, _stop_step_markup(card_id))
+        _edit(text, _stop_step_markup_for(conn, card_id))
         answer(None)
         return {"ok": True, "step": "pick_stop"}
 
@@ -822,12 +1173,13 @@ def handle_quick_trade_callback(
             answer(MSG_BAD_BUTTON)
             return {"ok": False}
         pct_s = parts[3]
-        if pct_s not in STOP_PRESETS:
+        allowed = set(_stop_preset_strings(conn))
+        if pct_s not in allowed:
             answer(MSG_BAD_BUTTON)
             return {"ok": False, "stale": True}
         if in_entry_block(now_ms):
             answer(None)
-            send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup(card_id))
+            send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup_for(conn, card_id))
             return {"ok": False, "reason": "cutoff_block"}
         cur = conn.execute(
             """
@@ -878,7 +1230,7 @@ def handle_quick_trade_callback(
             _cancel_other_drafts(conn, card_id, now_ms=now_ms, commit=False)
             conn.commit()
             text = f"stop {stop_v} อยู่ผิดฝั่งของราคาแล้ว (ตอนนี้ {mark_s}) — เลือก stop ใหม่"
-            _edit("\n".join([text, _mode_tag()]), _stop_step_markup(card_id))
+            _edit("\n".join([text, _mode_tag()]), _stop_step_markup_for(conn, card_id))
             answer(None)
             return {"ok": False, "stop_wrong_side": True}
         if not rebuilt.get("ok"):
@@ -925,7 +1277,7 @@ def _finalize_quoted_card(
     card = build_card_for_row(conn, futures, row, now_ms=now_ms)
     if not card.get("ok"):
         # sl/qk:sl presets only produce pct cards; price wrong-side uses qk:rf or typed draft.
-        edit(_decorate_card_text(str(card.get("text") or "")), _stop_step_markup(card_id))
+        edit(_decorate_card_text(str(card.get("text") or "")), _stop_step_markup_for(conn, card_id))
         answer(None)
         return {"ok": False, "reason": card.get("reason")}
     stop_kind = str(row.get("stop_kind") or "pct")
@@ -1026,7 +1378,7 @@ def handle_quick_draft_text(
             card_id=card_id,
             message_id=int(mid) if mid is not None else None,
             text=body,
-            markup=_stop_step_markup(card_id),
+            markup=_stop_step_markup_for(conn, card_id),
             send=send,
             edit=edit,
         )
@@ -1055,13 +1407,13 @@ def handle_quick_draft_text(
                     card_id=card_id,
                     message_id=int(draft["message_id"]) if draft.get("message_id") else None,
                     text=hint,
-                    markup=_stop_step_markup(card_id),
+                    markup=_stop_step_markup_for(conn, card_id),
                     send=send,
                     edit=edit,
                 )
                 return {"handled": True, "rejected": True}
             if in_entry_block(now_ms):
-                send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup(card_id))
+                send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup_for(conn, card_id))
                 return {"handled": True, "rejected": True}
             cur = conn.execute(
                 """
@@ -1083,7 +1435,7 @@ def handle_quick_draft_text(
                     card_id=card_id,
                     message_id=int(draft["message_id"]) if draft.get("message_id") else None,
                     text=_decorate_card_text(str(card.get("text") or "")),
-                    markup=_stop_step_markup(card_id),
+                    markup=_stop_step_markup_for(conn, card_id),
                     send=send,
                     edit=edit,
                 )
@@ -1111,7 +1463,7 @@ def handle_quick_draft_text(
                 return {"handled": True, "rejected": True}
             return None
         if in_entry_block(now_ms):
-            send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup(card_id))
+            send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup_for(conn, card_id))
             return {"handled": True, "rejected": True}
         far_pct: Decimal | None = None
         if futures is not None:
@@ -1150,7 +1502,7 @@ def handle_quick_draft_text(
                 card_id=card_id,
                 message_id=int(draft["message_id"]) if draft.get("message_id") else None,
                 text=_decorate_card_text(str(card.get("text") or "")),
-                markup=_stop_step_markup(card_id),
+                markup=_stop_step_markup_for(conn, card_id),
                 send=send,
                 edit=edit,
             )

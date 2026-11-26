@@ -322,7 +322,7 @@ QUICK_CONFIG: tuple[ConfigEntry, ...] = (
         "none",
         "A0b",
         "ปุ่ม stop สำเร็จรูป",
-        "รายการ % stop บน stepper (1–4 ค่า) (ใช้ตั้งแต่ A0b)",
+        "รายการ % stop บน stepper (1–4 ค่า)",
     ),
     ConfigEntry(
         "quick_be_offset_pct",

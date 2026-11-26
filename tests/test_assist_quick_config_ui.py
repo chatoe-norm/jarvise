@@ -264,10 +264,12 @@ def test_menu_has_settings_row_parity_qs(tmp_path: Path) -> None:
     ensure_settings(conn)
     text, kb = render_quick_menu(conn, now_ms=NOW)
     rows = kb["inline_keyboard"]
-    assert rows[0][0]["callback_data"] == "qk:sd:l"
-    assert rows[1][0]["callback_data"].startswith("qs:risk:")
-    assert rows[2][0]["callback_data"].startswith("qs:cap:")
-    assert rows[3] == [{"text": "⚙️ ตั้งค่า quick", "callback_data": "qc:h"}]
+    assert rows[0][0]["callback_data"] == "qk:cs:BTCUSDT"
+    # risk / cap / settings sit after the coin grid + "other" row.
+    assert any(b["callback_data"].startswith("qs:risk:") for row in rows for b in row)
+    assert any(b["callback_data"].startswith("qs:cap:") for row in rows for b in row)
+    assert rows[-2] == [{"text": "⚙️ ตั้งค่า quick", "callback_data": "qc:h"}]
+    assert rows[-1] == [{"text": "✖️ ปิด", "callback_data": "qk:mx"}]
     conn.close()
 
 

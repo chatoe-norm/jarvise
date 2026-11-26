@@ -54,6 +54,7 @@ from jarvise_assist.quick_m1a1 import (
     has_active_quick_draft,
 )
 from jarvise_assist.store import (
+    clear_awaiting_quick_input,
     ensure_settings,
     get_edge,
     get_signal,
@@ -172,8 +173,11 @@ def process_update(
             qk_parts = data.split(":")
             qk_op = qk_parts[1] if len(qk_parts) > 1 else ""
             client: Any = None
-            if qk_op in {"sl", "rf", "rg"}:
+            if qk_op in {"sl", "rf", "rg", "cs", "ea"}:
                 client = futures if futures is not None else build_futures_client()
+            ea_lookup = None
+            if qk_op == "ea":
+                ea_lookup = explore_lookup or _explore_lookup(client)
             return handle_quick_trade_callback(
                 conn,
                 data,
@@ -183,6 +187,8 @@ def process_update(
                 edit=edit_fn,
                 message=msg if isinstance(msg, dict) else {},
                 now_ms=ts,
+                explore_lookup=ea_lookup,
+                explore_fetch=explore_fetch if qk_op == "ea" else None,
             )
         if data.startswith(QUICK_REGISTER_PREFIX):
             answer_fn(cq_id)
@@ -274,6 +280,7 @@ def process_update(
             futures=futures,
             now_ms=ts,
         )
+    # Order: menu labels (later) → q … commands → awaiting_quick_input → draft → explore.
     # Menu labels clear awaiting_quick_input inside handle_menu_text.
     risk_num = handle_risk_number(conn, text, send=send_fn, now_ms=ts)
     if risk_num.get("handled"):
@@ -284,15 +291,34 @@ def process_update(
     qs_parsed = parse_quick_setting_command(text)
     if qs_parsed is not None:
         return handle_quick_setting_text(conn, qs_parsed, send=send_fn, now_ms=ts)
-    if match_menu_label(text) is None:
-        awaiting_out = handle_awaiting_quick_input(conn, text, send=send_fn, now_ms=ts)
-        if awaiting_out is not None:
-            return awaiting_out
     if parse_quick_command(text) is not None:
+        # Clear a pending typed-symbol await in listen (not inside the card builder).
+        if ensure_settings(conn).get("awaiting_quick_input") == "symbol":
+            clear_awaiting_quick_input(conn)
         client = futures if futures is not None else build_futures_client()
         quick_out = handle_quick_text(conn, text, futures=client, send=send_fn, now_ms=ts)
         if quick_out is not None:
             return quick_out
+    if match_menu_label(text) is None and ensure_settings(conn).get("awaiting_quick_input"):
+        pending = ensure_settings(conn).get("awaiting_quick_input")
+        lookup = None
+        fut_for_await: Any = futures
+        if pending == "symbol":
+            # Quick typed-symbol: let lookup errors propagate so validate_quick_symbol
+            # can return lookup_error (not "coin not found"). Explore keep swallowing.
+            lookup = explore_lookup or _quick_symbol_lookup(futures)
+            if fut_for_await is None:
+                fut_for_await = build_futures_client()
+        awaiting_out = handle_awaiting_quick_input(
+            conn,
+            text,
+            send=send_fn,
+            now_ms=ts,
+            lookup=lookup,
+            futures=fut_for_await,
+        )
+        if awaiting_out is not None:
+            return awaiting_out
     settings_row = ensure_settings(conn)
     if (
         match_menu_label(text) is None
@@ -332,6 +358,19 @@ def _explore_lookup(futures: Any) -> Callable[[str], dict[str, Any] | None]:
         except Exception:  # noqa: BLE001 — a bad lookup is a Thai rejection, not a listener crash
             logger.warning("assist explore exchangeInfo lookup failed for %s", symbol)
             return None
+        return row if isinstance(row, dict) else None
+
+    return lookup
+
+
+def _quick_symbol_lookup(futures: Any) -> Callable[[str], dict[str, Any] | None]:
+    """Lookup for typed Quick symbols. Exceptions propagate to validate_quick_symbol."""
+    client = futures if futures is not None else build_futures_client()
+
+    def lookup(symbol: str) -> dict[str, Any] | None:
+        if client is None:
+            return public_exchange_symbol(symbol)
+        row = client.exchange_symbol(symbol)
         return row if isinstance(row, dict) else None
 
     return lookup
