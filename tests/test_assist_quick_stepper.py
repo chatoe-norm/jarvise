@@ -24,14 +24,16 @@ def conn(tmp_path: Any) -> Any:
     c.close()
 
 
-def test_quick_menu_long_short_first_row(conn: Any) -> None:
+def test_quick_menu_coin_first_row(conn: Any) -> None:
+    """A0b: coin grid replaces LONG/SHORT; settings + close trail the menu."""
     text, kb = render_quick_menu(conn, now_ms=NOW)
     assert text.split("\n")[0] == "⚡ Quick (scalping) — แยกจากระบบหลัก"
     assert quick_mode_tag() in text
     row0 = kb["inline_keyboard"][0]
-    assert row0[0]["callback_data"] == "qk:sd:l"
-    assert row0[1]["callback_data"] == "qk:sd:s"
-    assert kb["inline_keyboard"][-1] == [{"text": "⚙️ ตั้งค่า quick", "callback_data": "qc:h"}]
+    assert row0[0]["callback_data"] == "qk:cs:BTCUSDT"
+    assert row0[0]["text"] == "BTC"
+    assert kb["inline_keyboard"][-2] == [{"text": "⚙️ ตั้งค่า quick", "callback_data": "qc:h"}]
+    assert kb["inline_keyboard"][-1] == [{"text": "✖️ ปิด", "callback_data": "qk:mx"}]
 
 
 def test_qk_sd_long_symbol_step(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
