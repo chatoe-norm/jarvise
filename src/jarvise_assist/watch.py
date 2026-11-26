@@ -1418,6 +1418,48 @@ def _merge_quick_cutoff(payload: dict[str, Any], counts: dict[str, int]) -> None
         payload["quick_cutoff"] = counts
 
 
+def _cleanup_exec_linked_quick_jv(
+    conn: Any,
+    *,
+    positions: list[FuturesPosition],
+    quick_info: dict[str, Any],
+    now_ms: int,
+) -> list[dict[str, str]]:
+    """Cancel leftover jv- orders after an exec-linked Quick close.
+
+    Runs whether JARVISE_ASSIST_CANCEL_OWNER is on or off. Owner orders are
+    untouched. No-op when no registration is exec-linked (flag-off parity).
+    """
+    del now_ms  # reserved for future lease / logging
+    closed = quick_info.get("closed") or []
+    exec_closed = [r for r in closed if r.get("exec_linked")]
+    if not exec_closed:
+        return []
+    if assist_execute_mode() != "live":
+        return []
+    open_syms = {str(p.symbol).upper() for p in positions}
+    trade, _auth = build_trade_client()
+    if trade is None:
+        return []
+    cancelled: list[dict[str, str]] = []
+    for qrow in exec_closed:
+        qsym = str(qrow.get("symbol") or "").upper()
+        if not qsym:
+            continue
+        if qsym in open_syms:
+            continue
+        if symbol_has_in_flight_exec(conn, qsym):
+            continue
+        try:
+            ids, _ok = cancel_jv_orders_for_symbol(trade, qsym)
+        except Exception:  # noqa: BLE001
+            logger.exception("exec-linked quick jv- cancel failed for %s", qsym)
+            continue
+        for algo_id in ids:
+            cancelled.append({"symbol": qsym, "algo_id": str(algo_id)})
+    return cancelled
+
+
 def run_assist_watch(
     conn: Any,
     *,
@@ -1501,6 +1543,16 @@ def run_assist_watch(
     except Exception:  # noqa: BLE001 — quick sync must not stop advice, journal, or pauses
         logger.exception("assist quick sync failed")
         quick_sync_ok = False
+    # A1: jv- leftover cleanup for exec-linked Quick closes (independent of CANCEL_OWNER).
+    try:
+        _cleanup_exec_linked_quick_jv(
+            conn,
+            positions=positions,
+            quick_info=quick_info,
+            now_ms=ts,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("exec-linked quick jv- cleanup failed")
     cutoff_after_sync = _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=quick_sync_ok)
     quick = quick_symbols(conn)
 

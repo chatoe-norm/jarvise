@@ -866,10 +866,13 @@ def build_real_rows(
             entry_time = min(int(f.get("time") or 0) for f in fills)
             if log is None:
                 continue
-            mkt_entry_order_ids.add(oid)
             intent_id = str(log["intent_id"])
             meta = _intent_preview(conn, intent_id)
             preview = meta.get("preview") or {}
+            # Bot Quick never becomes assist_real_trade / day-loss R / main journal.
+            if isinstance(preview, dict) and preview.get("origin") == "quick":
+                continue
+            mkt_entry_order_ids.add(oid)
             side = str(meta.get("side") or preview.get("side") or "").lower()
             if side in {"buy", "sell"}:
                 side = "long" if side == "buy" else "short"

@@ -154,6 +154,7 @@ def create_quick_registration(
     now_ms: int,
     live_positions: Sequence[FuturesPosition] | None = None,
     commit: bool = True,
+    exec_intent_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Create an open registration. Returns (id, None) or (None, reason_code)."""
     sym = str(symbol).upper()
@@ -210,10 +211,22 @@ def create_quick_registration(
         """
         INSERT INTO assist_quick_registration (
             id, symbol, side, planned_entry, planned_stop, qty,
-            created_at_ms, expires_at_ms, status, trade_id, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, ?)
+            created_at_ms, expires_at_ms, status, trade_id, updated_at_ms,
+            exec_intent_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?)
         """,
-        (rid, sym, side_l, entry, stop, float(qty), int(now_ms), expires, int(now_ms)),
+        (
+            rid,
+            sym,
+            side_l,
+            entry,
+            stop,
+            float(qty),
+            int(now_ms),
+            expires,
+            int(now_ms),
+            str(exec_intent_id) if exec_intent_id else None,
+        ),
     )
     if commit:
         conn.commit()
@@ -415,10 +428,38 @@ def sync_quick_trades(
         side = str(reg["side"])
         created = int(reg["created_at_ms"])
         expires = int(reg["expires_at_ms"])
-        fills = fetch_all_user_trades(client, sym, start_ms=created, end_ms=int(now_ms) + 1)
-        # First fill after created decides: wrong side → expire; opening → tag or grace.
-        after = [f for f in fills if int(f.get("time") or 0) >= created]
-        after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
+        exec_intent_id = None
+        try:
+            raw_eid = reg["exec_intent_id"] if "exec_intent_id" in reg.keys() else None
+            exec_intent_id = str(raw_eid) if raw_eid else None
+        except Exception:  # noqa: BLE001
+            exec_intent_id = None
+
+        # Exec-linked: tag by bot jv-<intent>-mkt orderId (clock-skew safe).
+        bot_order_id: str | None = None
+        if exec_intent_id:
+            log = conn.execute(
+                """
+                SELECT order_or_algo_id, client_order_id FROM assist_exec_log
+                WHERE intent_id=? AND step='market'
+                ORDER BY created_at_ms DESC LIMIT 1
+                """,
+                (exec_intent_id,),
+            ).fetchone()
+            if log is not None:
+                bot_order_id = str(log["order_or_algo_id"] or "") or None
+
+        # Broaden fetch window for exec-linked (fill may precede created_at on clock skew).
+        fetch_start = created - (3_600_000 if exec_intent_id else 0)
+        fills = fetch_all_user_trades(client, sym, start_ms=fetch_start, end_ms=int(now_ms) + 1)
+
+        if bot_order_id:
+            after = [f for f in fills if str(f.get("orderId") or "") == bot_order_id]
+            after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
+        else:
+            # First fill after created decides: wrong side → expire; opening → tag or grace.
+            after = [f for f in fills if int(f.get("time") or 0) >= created]
+            after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
 
         if not after:
             if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
@@ -458,7 +499,8 @@ def sync_quick_trades(
             _send_reg_expire_notice(send, sym=sym, side=side, kind="wrong_side", opposite=opp)
             continue
 
-        if first_time > expires:
+        # Time-window late_fill only for record-only (non-exec) registrations.
+        if not exec_intent_id and first_time > expires:
             if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
                 conn.execute(
                     """
@@ -503,7 +545,9 @@ def sync_quick_trades(
         conn.commit()
         tagged_trade_ids.add(trade_id)
         info["tagged"] += 1
-        _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
+        # Suppress tag notice for exec-linked (its copy would be false).
+        if not exec_intent_id:
+            _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
         if str(rebuilt.get("status")) == "closed":
             raw_closed = rebuilt.get("closed_at_ms")
             try:
@@ -518,6 +562,8 @@ def sync_quick_trades(
                     "side": side,
                     "closed_at_ms": closed_at,
                     "trade_id": trade_id,
+                    "exec_linked": bool(exec_intent_id),
+                    "registration_id": rid,
                 }
             )
             _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
@@ -568,12 +614,19 @@ def sync_quick_trades(
                 closed_at = None
             if closed_at is not None and closed_at <= 0:
                 closed_at = None
+            reg_row = conn.execute(
+                "SELECT exec_intent_id FROM assist_quick_registration WHERE id=?",
+                (str(trade["registration_id"]),),
+            ).fetchone()
+            exec_linked = bool(reg_row and reg_row["exec_intent_id"])
             info["closed"].append(
                 {
                     "symbol": sym,
                     "side": side,
                     "closed_at_ms": closed_at,
                     "trade_id": trade_id,
+                    "exec_linked": exec_linked,
+                    "registration_id": str(trade["registration_id"]),
                 }
             )
             _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
