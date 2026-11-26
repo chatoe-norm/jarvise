@@ -250,7 +250,8 @@ def test_r5_emergency_close_logs_resolve_and_sync_tags(
         intent_id=iid, mark=Decimal("100"), fill_qty=Decimal("0.05"), resolve_oid="424242"
     )
     result = run_entry_sequence(conn, iid, trade=trade, origin="quick", sleep=lambda _s: None)
-    assert result.status == "failed", result  # emergency close succeeded → failed
+    # Position-fallback stamps status NEW (non-final) → emergency close keeps unknown.
+    assert result.status == "unknown", result
     rows = conn.execute(
         """
         SELECT order_or_algo_id FROM assist_exec_log
@@ -259,6 +260,9 @@ def test_r5_emergency_close_logs_resolve_and_sync_tags(
         (iid,),
     ).fetchall()
     assert any(str(r["order_or_algo_id"]) == "424242" for r in rows), rows
+    # Registration must stay open (unknown ≠ proven unfilled).
+    reg0 = conn.execute("SELECT status FROM assist_quick_registration WHERE id=?", (rid,)).fetchone()
+    assert reg0 is not None and reg0["status"] == "open", reg0
 
     # Sync tags/closes via resolved orderId; fills lack clientOrderId (loss counted, not expired).
     buy_t = ts + 1_000
@@ -655,7 +659,14 @@ def test_r5_a45_first_fallback_branch_keeps_nonfinal(tmp_path: Path, monkeypatch
 def test_r5_a47_main_recovery_verified_final_no_resolve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A47: main recovery with stop VERIFIED + order final → no mkt_order_resolve / resolve query."""
+    """A47: main recovery VERIFIED+final must not call `_ensure_mkt_order_id_logged`.
+
+    Pre-logged orderId from recover_market_query would short-circuit the helper and
+    hide the A47 mutant (`if True: _ensure_mkt_order_id_logged`). Track the helper
+    itself so the mutant fails even when a query already logged an orderId.
+    """
+    import jarvise_assist.execute as execute_mod
+
     monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
     conn = open_db(tmp_path / "r5_a47.db")
     _seed_settings(conn)
@@ -692,6 +703,17 @@ def test_r5_a47_main_recovery_verified_final_no_resolve(
         created_at_ms=ts,
     )
     mkt_cid = client_order_id(iid, "mkt")
+    resolve_helper_calls: list[str] = []
+    real_ensure = execute_mod._ensure_mkt_order_id_logged
+
+    def _track_ensure(*args: Any, **kwargs: Any) -> Any:
+        iid_s = kwargs.get("intent_id")
+        if iid_s is None and len(args) > 2:
+            iid_s = args[2]
+        resolve_helper_calls.append(str(iid_s or ""))
+        return real_ensure(*args, **kwargs)
+
+    monkeypatch.setattr(execute_mod, "_ensure_mkt_order_id_logged", _track_ensure)
 
     class _MainVerifiedTrade(RecordingTrade):
         def __init__(self) -> None:
@@ -715,13 +737,13 @@ def test_r5_a47_main_recovery_verified_final_no_resolve(
                     "positionSide": "BOTH",
                 }
             ]
-            self.resolve_extra: list[str] = []
 
         def query_order(self, *, symbol: str, client_id: str) -> dict[str, Any]:
             self.calls.append(("query_order", {"symbol": symbol, "client_id": client_id}))
             if client_id == mkt_cid:
+                # FOUND final — no orderId logged as resolve source (empty → trim skip).
                 return {
-                    "orderId": 7001,
+                    "orderId": "",
                     "status": "FILLED",
                     "executedQty": "0.05",
                     "avgPrice": "100",
@@ -745,5 +767,5 @@ def test_r5_a47_main_recovery_verified_final_no_resolve(
         (iid,),
     ).fetchall()
     assert rows == []
-    # recover_market_query may query once; attribution resolve must not add a second resolve log.
+    assert resolve_helper_calls == [], resolve_helper_calls
     conn.close()
