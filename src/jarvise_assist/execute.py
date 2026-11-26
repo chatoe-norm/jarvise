@@ -2867,15 +2867,14 @@ def run_entry_sequence(
                         pos_fill = None
                     if pos_fill is None:
                         return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
-                    oid = _ensure_mkt_order_id_logged(
-                        trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid
-                    )
+                    # Main: base fill dict. Quick: non-final so recovery re-reads.
                     fill = {
                         "executedQty": str(pos_fill[0]),
                         "avgPrice": str(pos_fill[1]),
-                        "orderId": oid or "",
-                        "status": "NEW",
+                        "orderId": "",
                     }
+                    if is_quick:
+                        fill["status"] = "NEW"
             else:
                 try:
                     pos_fill = _fill_from_position(trade, symbol=symbol)
@@ -2883,15 +2882,13 @@ def run_entry_sequence(
                     logger.exception("position read failed after unknown market body")
                     return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
                 if pos_fill is not None:
-                    oid = _ensure_mkt_order_id_logged(
-                        trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid
-                    )
                     fill = {
                         "executedQty": str(pos_fill[0]),
                         "avgPrice": str(pos_fill[1]),
-                        "orderId": oid or "",
-                        "status": "NEW",
+                        "orderId": "",
                     }
+                    if is_quick:
+                        fill["status"] = "NEW"
                 else:
                     return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
     except Exception as exc:  # noqa: BLE001
@@ -2933,15 +2930,13 @@ def run_entry_sequence(
                 return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
             if pos_fill is not None:
                 # Query unreadable/not_found but position present → continue to stop.
-                oid = _ensure_mkt_order_id_logged(
-                    trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid
-                )
                 fill = {
                     "executedQty": str(pos_fill[0]),
                     "avgPrice": str(pos_fill[1]),
-                    "orderId": oid or "",
-                    "status": "NEW",
+                    "orderId": "",
                 }
+                if is_quick:
+                    fill["status"] = "NEW"
             else:
                 # First-burst not_found + flat (or unreadable + flat) → unknown, not failed.
                 return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
@@ -2962,7 +2957,6 @@ def run_entry_sequence(
             pos_fill = None
         if pos_fill is not None and pos_fill[0] > 0:
             protect_qty = pos_fill[0]
-        _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
 
     vr, keep_tag, stop_err = _place_and_verify_stop(
         trade,
@@ -3004,6 +2998,9 @@ def run_entry_sequence(
         _cancel_dup_stops_after_verified(
             trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=keep_tag
         )
+    # Quick attribution only after protective SL — never delay main-path stop placement.
+    if is_quick:
+        _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
 
     tp_note = ""
     tp_qty_used: Decimal | None = None
@@ -5826,13 +5823,7 @@ def _recover_entry_intent(
         return
 
     _mark_recover_found(conn, intent_id, client_order_id=cid)
-    # Position-fallback attribution: resolve deterministic mkt orderId for Quick sync.
-    if str(preview.get("origin") or "") == "quick" or not (
-        queried.kind == QueryResultKind.FOUND
-        and queried.order is not None
-        and str(queried.order.get("orderId") or "")
-    ):
-        _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
+    is_quick_recover = str(preview.get("origin") or "") == "quick"
     pos = positions[0]
     if pos.side != side:
         _recovery_notify(
@@ -5845,9 +5836,17 @@ def _recover_entry_intent(
         )
         return
     qty = pos.qty
-    order_final = True
-    if queried.kind == QueryResultKind.FOUND and queried.order is not None:
-        order_final = _order_is_final(queried.order)
+    # Main: keep 5608315 default (True unless FOUND non-final). Quick: require FOUND+terminal.
+    if is_quick_recover:
+        order_final = (
+            queried.kind == QueryResultKind.FOUND
+            and queried.order is not None
+            and _order_is_final(queried.order)
+        )
+    else:
+        order_final = True
+        if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+            order_final = _order_is_final(queried.order)
     vr, keep_tag, open_list = _verify_stop_ids(
         trade,
         conn=conn,
@@ -5872,6 +5871,8 @@ def _recover_entry_intent(
             _cancel_dup_stops_after_verified(
                 trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=keep_tag
             )
+        if is_quick_recover:
+            _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
         _recovery_notify(
             send,
             conn,
@@ -5882,6 +5883,8 @@ def _recover_entry_intent(
         )
         return
     if vr == StopVerifyResult.VERIFIED and not order_final:
+        if is_quick_recover:
+            _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
         _keep_recovering_unknown(conn, intent_id)
         return
     if vr == StopVerifyResult.UNVERIFIABLE:
@@ -5958,6 +5961,8 @@ def _recover_entry_intent(
             position_flat=False,
         )
         if vr_err == StopVerifyResult.VERIFIED:
+            if is_quick_recover:
+                _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
             _finish_placed_recovery_stop(
                 trade,
                 conn,
@@ -5971,7 +5976,6 @@ def _recover_entry_intent(
             return
         if vr_err == StopVerifyResult.UNVERIFIABLE:
             return
-        is_quick_recover = str(preview.get("origin") or "") == "quick"
         reply = _emergency_close_reply(
             trade,
             conn=conn,
@@ -6004,6 +6008,8 @@ def _recover_entry_intent(
         position_flat=False,
     )
     if vr2 == StopVerifyResult.VERIFIED:
+        if is_quick_recover:
+            _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
         _finish_placed_recovery_stop(
             trade,
             conn,
@@ -6017,7 +6023,6 @@ def _recover_entry_intent(
         return
     if vr2 == StopVerifyResult.UNVERIFIABLE:
         return
-    is_quick_recover = str(preview.get("origin") or "") == "quick"
     reply = _emergency_close_reply(
         trade,
         conn=conn,
