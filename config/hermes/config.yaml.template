@@ -6,10 +6,23 @@
 # (mcp-serve 1.0.1). Use: hermes mcp-serve --tools-only
 # --tools-only omits conversation bridge, messages_send, and permissions_*.
 # Profile toolsets below further limit the agent surface for /v1 runs.
+# Key names confirmed against the pinned image DEFAULT_CONFIG (v0.23.4).
 
 model:
   default: "" # set via HERMES_MODEL env; empty fails closed in the adapter
   provider: "" # set via HERMES_PROVIDER env (openrouter)
+
+# Empty chain: no silent model/provider substitution (R8).
+fallback_providers: []
+
+plugins:
+  auto_apply: false
+  isolation: in_process
+  enabled:
+    - mcp-serve
+  entries:
+    mcp-serve:
+      allow_tool_override: false
 
 agent:
   max_turns: 24

@@ -6,8 +6,10 @@ import io
 import ipaddress
 import json
 import os
+import socket
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -16,14 +18,53 @@ import pytest
 
 from jarvise_intel.app import AdapterConfig, handle_ingest, redact
 from jarvise_intel.digest import (
+    BANGKOK,
+    assert_current_slot,
     extract_json_object,
     parse_slot,
     publish_digest,
+    release_inflight,
     render_markdown,
+    try_acquire_inflight,
     validate_items,
 )
-from jarvise_intel.gateway import GatewayConfig, GatewayError, create_run, wait_for_run
-from jarvise_intel.policy import allow_connect_target, allow_https_url, is_blocked_ip
+from jarvise_intel.egress import connect_validated
+from jarvise_intel.gateway import (
+    GatewayConfig,
+    GatewayError,
+    assert_runtime_identity,
+    create_run,
+    wait_for_run,
+)
+from jarvise_intel.policy import (
+    allow_connect_target,
+    allow_https_url,
+    allow_redirect_url,
+    allow_source_url,
+    is_blocked_ip,
+    validate_host_addrs,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURE = ROOT / "tests" / "fixtures" / "hermes_v0.23.4_run.json"
+SOURCE_POLICY = ROOT / "config" / "hermes" / "source-policy.json"
+
+
+def _public_resolve(_host: str) -> list[str]:
+    return ["8.8.8.8"]
+
+
+def _footer_in(md: str) -> bool:
+    return "Not a trade signal. Research context only." in md
+
+
+def _slot_now(label: str) -> datetime:
+    """Wall clock inside the Bangkok window for *label* (YYYY-MM-DDTHH)."""
+    day, hour_s = label.split("T", 1)
+    hour = int(hour_s)
+    # Mid-window: 07→12:00, 19→22:00 Bangkok.
+    mid = 12 if hour == 7 else 22
+    return datetime.fromisoformat(f"{day}T{mid:02d}:00:00").replace(tzinfo=BANGKOK)
 
 
 def test_policy_blocks_private_and_metadata() -> None:
@@ -49,16 +90,82 @@ def test_policy_dns_rebinding_denied() -> None:
     assert allow_connect_target("evil.example", 80, resolve=lambda h: ["8.8.8.8"])[0] is False
 
 
-def test_policy_allows_public_https() -> None:
-    ok, reason = allow_https_url("https://nvidia.com/news", resolve=lambda h: ["8.8.8.8"])
+def test_policy_ipv6_unique_local_denied() -> None:
+    ok, reason, addrs = allow_connect_target("evil6.example", 443, resolve=lambda _h: ["fc00::1"])
+    assert ok is False
+    assert reason == "blocked_dns"
+    assert addrs == []
+
+
+def test_policy_redirect_checker() -> None:
+    ok, reason = allow_redirect_url("https://nvidia.com/x", resolve=_public_resolve)
     assert ok is True
     assert reason == "ok"
+    bad, why = allow_redirect_url("https://127.0.0.1/x")
+    assert bad is False
+    assert why == "blocked_ip"
+
+
+def test_policy_allows_public_https() -> None:
+    ok, reason = allow_https_url("https://nvidia.com/news", resolve=_public_resolve)
+    assert ok is True
+    assert reason == "ok"
+
+
+def test_connect_validated_uses_first_lookup_not_rebinding() -> None:
+    """R2: first resolve 8.8.8.8; a later resolve must not be consulted for connect."""
+    lookups = {"n": 0}
+
+    def resolve(_host: str) -> list[str]:
+        lookups["n"] += 1
+        if lookups["n"] == 1:
+            return ["8.8.8.8"]
+        return ["127.0.0.1"]
+
+    addrs, reason = validate_host_addrs("rebinding.example", resolve=resolve)
+    assert reason == "ok"
+    assert addrs == ["8.8.8.8"]
+
+    connected: list[tuple[str, int]] = []
+
+    class _FakeSock:
+        def __init__(self, *_a: Any, **_k: Any) -> None:
+            self._peer = ("8.8.8.8", 443)
+
+        def settimeout(self, _t: float) -> None:
+            return None
+
+        def connect(self, endpoint: tuple[str, int]) -> None:
+            connected.append(endpoint)
+            if endpoint[0] != "8.8.8.8":
+                raise OSError("refused")
+            self._peer = (endpoint[0], endpoint[1])
+
+        def getpeername(self) -> tuple[str, int]:
+            return self._peer
+
+        def close(self) -> None:
+            return None
+
+    orig = socket.socket
+    try:
+        socket.socket = lambda *a, **k: _FakeSock()  # type: ignore[assignment, misc]
+        sock = connect_validated(addrs, 443, timeout=1.0)
+        sock.close()
+    finally:
+        socket.socket = orig  # type: ignore[misc]
+    assert connected == [("8.8.8.8", 443)]
+    # A later lookup that returns only loopback is denied; connect must never use it.
+    later, later_reason = validate_host_addrs("rebinding.example", resolve=resolve)
+    assert later == []
+    assert later_reason == "blocked_dns"
 
 
 def test_parse_slot_bangkok_to_utc_filename() -> None:
     morning = parse_slot("2026-11-26T07")
     assert morning.filename == "2026-11-26-00.md"
     evening = parse_slot("2026-11-26T19")
+    assert morning.filename == "2026-11-26-00.md"
     assert evening.filename == "2026-11-26-12.md"
     with pytest.raises(ValueError):
         parse_slot("2026-11-26T08")
@@ -66,14 +173,18 @@ def test_parse_slot_bangkok_to_utc_filename() -> None:
         parse_slot("smoke-2026-11-26T07")
     smoke = parse_slot("smoke-2026-11-26T07", smoke_allowed=True)
     assert smoke.smoke is True
+    assert smoke.filename.startswith("smoke-")
 
 
-def _public_resolve(_host: str) -> list[str]:
-    return ["8.8.8.8"]
-
-
-def _footer_in(md: str) -> bool:
-    return "Not a trade signal. Research context only." in md
+def test_assert_current_slot_window() -> None:
+    morning = parse_slot("2026-11-26T07")
+    assert_current_slot(morning, now=_slot_now("2026-11-26T07"))
+    with pytest.raises(ValueError, match="slot_not_current"):
+        assert_current_slot(morning, now=_slot_now("2026-11-26T19"))
+    with pytest.raises(ValueError, match="slot_not_current"):
+        assert_current_slot(parse_slot("2000-01-01T07"), now=_slot_now("2026-11-26T07"))
+    with pytest.raises(ValueError, match="slot_not_current"):
+        assert_current_slot(parse_slot("2099-01-01T19"), now=_slot_now("2026-11-26T19"))
 
 
 def test_validate_and_render_matches_parser() -> None:
@@ -95,7 +206,12 @@ def test_validate_and_render_matches_parser() -> None:
             },
         ]
     }
-    items, no_news = validate_items(payload, resolve=_public_resolve)
+    items, no_news = validate_items(
+        payload,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+        slot=parse_slot("2026-10-15T07"),
+    )
     assert no_news is False
     md = render_markdown(items)
     parsed = parse_digest_text(md)
@@ -107,19 +223,21 @@ def test_validate_and_render_matches_parser() -> None:
 
 def test_validate_rejects_bad_url_and_empty() -> None:
     with pytest.raises(ValueError, match="empty_items"):
-        validate_items({"items": []})
+        validate_items({"items": []}, policy_path=SOURCE_POLICY)
     with pytest.raises(ValueError, match="url_denied"):
         validate_items(
             {
                 "items": [
                     {
                         "title": "x",
-                        "day": "2026-10-14",
+                        "day": "2026-11-26",
                         "url": "https://127.0.0.1/x",
                         "comment": "c",
                     }
                 ]
-            }
+            },
+            policy_path=SOURCE_POLICY,
+            slot=parse_slot("2026-11-26T07"),
         )
     with pytest.raises(ValueError, match="bad_timestamp"):
         validate_items(
@@ -127,18 +245,65 @@ def test_validate_rejects_bad_url_and_empty() -> None:
                 "items": [
                     {
                         "title": "x",
-                        "day": "14/10/2026",
+                        "day": "2026-99-99",
+                        "url": "https://nvidia.com/x",
+                        "comment": "c",
+                    }
+                ]
+            },
+            resolve=_public_resolve,
+            policy_path=SOURCE_POLICY,
+        )
+
+
+def test_validate_no_news_must_be_bool() -> None:
+    with pytest.raises(ValueError, match="no_news_type"):
+        validate_items({"no_news": "false", "items": []}, policy_path=SOURCE_POLICY)
+    items, no_news = validate_items({"no_news": True, "items": []}, policy_path=SOURCE_POLICY)
+    assert no_news is True
+    assert items == []
+
+
+def test_validate_unknown_source_and_shortener() -> None:
+    with pytest.raises(ValueError, match="unknown_source"):
+        validate_items(
+            {
+                "items": [
+                    {
+                        "title": "x",
+                        "day": "2026-10-14",
                         "url": "https://example.com/x",
                         "comment": "c",
                     }
                 ]
             },
             resolve=_public_resolve,
+            policy_path=SOURCE_POLICY,
+            slot=parse_slot("2026-10-15T07"),
         )
+    with pytest.raises(ValueError, match="denied"):
+        validate_items(
+            {
+                "items": [
+                    {
+                        "title": "x",
+                        "day": "2026-10-14",
+                        "url": "https://bit.ly/abc",
+                        "comment": "c",
+                    }
+                ]
+            },
+            resolve=_public_resolve,
+            policy_path=SOURCE_POLICY,
+            slot=parse_slot("2026-10-15T07"),
+        )
+    assert allow_source_url(
+        "https://federalreserve.gov/a", resolve=_public_resolve, policy_path=SOURCE_POLICY
+    )[0]
 
 
 def test_no_news_digest() -> None:
-    items, no_news = validate_items({"no_news": True, "items": []})
+    items, no_news = validate_items({"no_news": True, "items": []}, policy_path=SOURCE_POLICY)
     assert no_news is True
     md = render_markdown(items, no_news=True)
     assert "No confirmed watchlist coverage" in md
@@ -156,12 +321,14 @@ def test_atomic_publish_idempotent_and_conflict(tmp_path: Path) -> None:
                     {
                         "title": "One",
                         "day": "2026-11-26",
-                        "url": "https://example.com/a",
+                        "url": "https://nvidia.com/a",
                         "comment": "note",
                     }
                 ]
             },
             resolve=_public_resolve,
+            policy_path=SOURCE_POLICY,
+            slot=slot,
         )[0]
     )
     first = publish_digest(
@@ -173,6 +340,7 @@ def test_atomic_publish_idempotent_and_conflict(tmp_path: Path) -> None:
     )
     assert first["status"] == "completed"
     assert (digest_dir / slot.filename).is_file()
+    incumbent_mtime = (digest_dir / slot.filename).stat().st_mtime
     second = publish_digest(
         digest_dir=digest_dir,
         state_dir=state_dir,
@@ -181,7 +349,6 @@ def test_atomic_publish_idempotent_and_conflict(tmp_path: Path) -> None:
         meta={"provider": "openrouter", "model": "test"},
     )
     assert second.get("replay") is True
-    # Immutable completed slot: different markdown still returns the original.
     third = publish_digest(
         digest_dir=digest_dir,
         state_dir=state_dir,
@@ -191,6 +358,7 @@ def test_atomic_publish_idempotent_and_conflict(tmp_path: Path) -> None:
     )
     assert third.get("replay") is True
     assert third["output_hash"] == first["output_hash"]
+    assert (digest_dir / slot.filename).stat().st_mtime == incumbent_mtime
 
     other = parse_slot("2026-11-27T07")
     (digest_dir / other.filename).write_text("foreign digest\n", encoding="utf-8")
@@ -296,10 +464,7 @@ def test_gateway_auth_and_incomplete() -> None:
         create_run(cfg, instructions="i", input_text="u", idempotency_key="id", open_url=open_401)
     assert exc.value.category == "auth_error"
 
-    calls = {"n": 0}
-
     def open_incomplete(request: Any, timeout: float) -> Any:
-        calls["n"] += 1
         if "POST" in str(getattr(request, "method", "GET")) or request.get_method() == "POST":
             return _Resp({"run_id": "r1"})
         return _Resp(
@@ -347,6 +512,43 @@ def test_gateway_timeout() -> None:
     assert exc.value.category == "timeout"
 
 
+def test_runtime_identity_exact_and_fixture() -> None:
+    cfg = GatewayConfig(
+        base_url="http://hermes:8642",
+        api_key="k",
+        provider="openrouter",
+        model="anthropic/claude-sonnet-5.5",
+    )
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert_runtime_identity(cfg, fixture["runtime"])
+    with pytest.raises(GatewayError) as empty:
+        assert_runtime_identity(cfg, {})
+    assert empty.value.category == "provider_mismatch"
+    with pytest.raises(GatewayError) as missing_model:
+        assert_runtime_identity(cfg, {"provider": "openrouter"})
+    assert missing_model.value.category == "model_mismatch"
+    # endswith must not pass: pin is anthropic/claude-sonnet-5.5, not suffix match on a longer id.
+    with pytest.raises(GatewayError) as suffix:
+        assert_runtime_identity(
+            cfg,
+            {
+                "provider": "openrouter",
+                "model": "prefix/anthropic/claude-sonnet-5.5",
+            },
+        )
+    assert suffix.value.category == "model_mismatch"
+    with pytest.raises(GatewayError) as subst:
+        assert_runtime_identity(
+            cfg,
+            {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-5.5",
+                "requested": {"provider": "openrouter", "model": "other/model"},
+            },
+        )
+    assert subst.value.category == "model_mismatch"
+
+
 def test_handle_ingest_success_and_replay(tmp_path: Path, monkeypatch: Any) -> None:
     prompt = tmp_path / "prompt.md"
     prompt.write_text("fixed prompt", encoding="utf-8")
@@ -359,6 +561,7 @@ def test_handle_ingest_success_and_replay(tmp_path: Path, monkeypatch: Any) -> N
     monkeypatch.setenv("JARVISE_HERMES_DIGEST_DIR", str(digest_dir))
     monkeypatch.setenv("JARVISE_HERMES_STATE_DIR", str(state_dir))
     monkeypatch.setenv("JARVISE_HERMES_PROMPT_PATH", str(prompt))
+    monkeypatch.setenv("JARVISE_HERMES_SOURCE_POLICY", str(SOURCE_POLICY))
 
     payload = {
         "items": [
@@ -384,11 +587,8 @@ def test_handle_ingest_success_and_replay(tmp_path: Path, monkeypatch: Any) -> N
         )
 
     monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
-    monkeypatch.setattr(
-        "jarvise_intel.digest.allow_https_url",
-        lambda url, resolve=None, require_port_443=True: (True, "ok"),
-    )
     cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
     code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
     assert code == 200
     assert body["ok"] is True
@@ -396,6 +596,51 @@ def test_handle_ingest_success_and_replay(tmp_path: Path, monkeypatch: Any) -> N
     code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
     assert code2 == 200
     assert body2["replay"] is True
+
+
+def test_handle_ingest_rejects_non_current_and_inflight(tmp_path: Path, monkeypatch: Any) -> None:
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("p", encoding="utf-8")
+    monkeypatch.setenv("JARVISE_HERMES_INGEST_TOKEN", "ingest-token-12345678")
+    monkeypatch.setenv("JARVISE_HERMES_API_KEY", "api-key-12345678")
+    monkeypatch.setenv("HERMES_PROVIDER", "openrouter")
+    monkeypatch.setenv("HERMES_MODEL", "test-model")
+    monkeypatch.setenv("JARVISE_HERMES_DIGEST_DIR", str(tmp_path / "d"))
+    monkeypatch.setenv("JARVISE_HERMES_STATE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("JARVISE_HERMES_PROMPT_PATH", str(prompt))
+    monkeypatch.setenv("JARVISE_HERMES_SOURCE_POLICY", str(SOURCE_POLICY))
+    called = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        called["n"] += 1
+        time.sleep(0.2)
+        from jarvise_intel.gateway import RunResult
+
+        return RunResult(
+            run_id="r",
+            status="completed",
+            output=json.dumps({"no_news": True, "items": []}),
+            usage={},
+            runtime={"provider": "openrouter", "model": "test-model"},
+            raw={},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2000-01-01T07"})
+    assert code == 400
+    assert body["error"] == "slot_not_current"
+    assert called["n"] == 0
+
+    assert try_acquire_inflight() is True
+    try:
+        code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+        assert code2 == 429
+        assert body2["error"] == "inflight_busy"
+        assert called["n"] == 0
+    finally:
+        release_inflight()
 
 
 def test_handle_ingest_unconfigured_and_auth_fields(tmp_path: Path, monkeypatch: Any) -> None:
@@ -427,6 +672,7 @@ def test_malformed_gateway_output(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("JARVISE_HERMES_DIGEST_DIR", str(tmp_path / "d"))
     monkeypatch.setenv("JARVISE_HERMES_STATE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("JARVISE_HERMES_PROMPT_PATH", str(prompt))
+    monkeypatch.setenv("JARVISE_HERMES_SOURCE_POLICY", str(SOURCE_POLICY))
 
     def fake_run(*_a: Any, **_k: Any) -> Any:
         from jarvise_intel.gateway import RunResult
@@ -441,6 +687,39 @@ def test_malformed_gateway_output(tmp_path: Path, monkeypatch: Any) -> None:
         )
 
     monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
-    code, body = handle_ingest(AdapterConfig(), {"slot": "2026-11-26T19"})
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T19"})
     assert code == 502
     assert body["ok"] is False
+
+
+def test_egress_http_non_connect_rejected() -> None:
+    """HTTP non-CONNECT must not return 200 (R2)."""
+    from jarvise_intel.egress import _ProxyHandler
+
+    class _Srv:
+        def __init__(self) -> None:
+            self.RequestHandlerClass = type(
+                "H",
+                (_ProxyHandler,),
+                {"resolve": staticmethod(_public_resolve)},
+            )
+
+    replies: list[int] = []
+
+    class H(_ProxyHandler):
+        resolve = staticmethod(_public_resolve)
+
+        def __init__(self) -> None:  # noqa: ANN204 — test stub
+            self.rfile = io.BytesIO(b"GET http://example.com/ HTTP/1.1\r\n\r\n")
+            self.wfile = io.BytesIO()
+            self.connection = None  # type: ignore[assignment]
+            self.server = _Srv()  # type: ignore[assignment]
+            self.client_address = ("127.0.0.1", 1)
+
+        def _reply(self, code: int, body: bytes) -> None:
+            replies.append(code)
+
+    H().handle()
+    assert replies == [405]

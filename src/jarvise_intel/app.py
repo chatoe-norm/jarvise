@@ -8,17 +8,21 @@ import logging
 import os
 import re
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from jarvise_intel.digest import (
+    assert_current_slot,
     extract_json_object,
     load_slot_record,
     parse_slot,
     publish_digest,
+    release_inflight,
     render_markdown,
+    try_acquire_inflight,
     validate_items,
 )
 from jarvise_intel.gateway import GatewayConfig, GatewayError, run_research
@@ -45,10 +49,15 @@ class AdapterConfig:
         self.prompt_path = Path(
             os.environ.get("JARVISE_HERMES_PROMPT_PATH") or "/config/hermes/ingest-prompt.md"
         )
+        self.source_policy_path = Path(
+            os.environ.get("JARVISE_HERMES_SOURCE_POLICY") or "/config/hermes/source-policy.json"
+        )
         self.smoke = (os.environ.get("JARVISE_HERMES_SMOKE") or "").strip() == "1"
         self.host = os.environ.get("HERMES_INGEST_HOST", "0.0.0.0")
         self.port = int(os.environ.get("HERMES_INGEST_PORT", "8092"))
         self.deadline_s = float(os.environ.get("JARVISE_HERMES_DEADLINE_S", "600"))
+        # Injected clock for tests; production uses wall clock.
+        self.now: datetime | None = None
 
     def provider_ready(self) -> bool:
         return bool(self.api_key and self.provider and self.model and self.ingest_token)
@@ -79,6 +88,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
 
     try:
         slot = parse_slot(slot_raw, smoke_allowed=cfg.smoke)
+        assert_current_slot(slot, now=cfg.now, smoke_allowed=cfg.smoke)
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
 
@@ -86,66 +96,81 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
     if existing and existing.get("status") == "completed":
         return 200, {"ok": True, "replay": True, "result": existing}
 
-    try:
-        instructions = _load_prompt(cfg.prompt_path)
-    except OSError:
-        return 500, {"ok": False, "error": "prompt_unreadable"}
+    if not try_acquire_inflight():
+        return 429, {"ok": False, "error": "inflight_busy"}
 
-    gateway = GatewayConfig(
-        base_url=cfg.gateway_url,
-        api_key=cfg.api_key,
-        provider=cfg.provider,
-        model=cfg.model,
-        deadline_s=cfg.deadline_s,
-    )
-    input_text = (
-        f"Produce the news digest JSON for slot {slot.label} "
-        f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
-    )
     try:
-        result = run_research(
-            gateway,
-            instructions=instructions,
-            input_text=input_text,
-            idempotency_key=slot.idempotency_key,
+        # Re-check completed under the admission lock (another worker may have finished).
+        existing = load_slot_record(cfg.state_dir, slot)
+        if existing and existing.get("status") == "completed":
+            return 200, {"ok": True, "replay": True, "result": existing}
+
+        try:
+            instructions = _load_prompt(cfg.prompt_path)
+        except OSError:
+            return 500, {"ok": False, "error": "prompt_unreadable"}
+
+        gateway = GatewayConfig(
+            base_url=cfg.gateway_url,
+            api_key=cfg.api_key,
+            provider=cfg.provider,
+            model=cfg.model,
+            deadline_s=cfg.deadline_s,
         )
-        payload = extract_json_object(result.output)
-        items, no_news = validate_items(payload)
-        markdown = render_markdown(items, no_news=no_news)
-        meta = {
-            "provider": cfg.provider,
-            "model": cfg.model,
-            "runtime": result.runtime,
-            "usage": result.usage,
-            "source_urls": [item.url for item in items],
-            "run_id": result.run_id,
-            "no_news": no_news,
-            "item_count": len(items),
-        }
-        record = publish_digest(
-            digest_dir=cfg.digest_dir,
-            state_dir=cfg.state_dir,
-            slot=slot,
-            markdown=markdown,
-            meta=meta,
+        input_text = (
+            f"Produce the news digest JSON for slot {slot.label} "
+            f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
         )
-        return 200, {"ok": True, "replay": bool(record.get("replay")), "result": record}
-    except GatewayError as exc:
-        logger.warning("ingest gateway failure category=%s", exc.category)
-        code = 401 if exc.category == "auth_error" and exc.status_code == 401 else 502
-        if exc.category == "auth_error" and exc.status_code == 403:
-            code = 403
-        if exc.category == "timeout":
-            code = 504
-        return code, {"ok": False, "error": exc.category}
-    except FileExistsError:
-        return 409, {"ok": False, "error": "filename_conflict"}
-    except ValueError as exc:
-        logger.warning("ingest validation failure type=%s", type(exc).__name__)
-        return 502, {"ok": False, "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 — fail closed; never leak secrets
-        logger.warning("ingest failure type=%s", type(exc).__name__)
-        return 500, {"ok": False, "error": "internal_error"}
+        try:
+            result = run_research(
+                gateway,
+                instructions=instructions,
+                input_text=input_text,
+                idempotency_key=slot.idempotency_key,
+            )
+            payload = extract_json_object(result.output)
+            items, no_news = validate_items(
+                payload,
+                slot=slot,
+                policy_path=cfg.source_policy_path,
+            )
+            markdown = render_markdown(items, no_news=no_news)
+            meta = {
+                "provider": str(result.runtime.get("provider") or cfg.provider),
+                "model": str(result.runtime.get("model") or cfg.model),
+                "runtime": result.runtime,
+                "usage": result.usage,
+                "source_urls": [item.url for item in items],
+                "run_id": result.run_id,
+                "no_news": no_news,
+                "item_count": len(items),
+            }
+            record = publish_digest(
+                digest_dir=cfg.digest_dir,
+                state_dir=cfg.state_dir,
+                slot=slot,
+                markdown=markdown,
+                meta=meta,
+            )
+            return 200, {"ok": True, "replay": bool(record.get("replay")), "result": record}
+        except GatewayError as exc:
+            logger.warning("ingest gateway failure category=%s", exc.category)
+            code = 401 if exc.category == "auth_error" and exc.status_code == 401 else 502
+            if exc.category == "auth_error" and exc.status_code == 403:
+                code = 403
+            if exc.category == "timeout":
+                code = 504
+            return code, {"ok": False, "error": exc.category}
+        except FileExistsError:
+            return 409, {"ok": False, "error": "filename_conflict"}
+        except ValueError as exc:
+            logger.warning("ingest validation failure type=%s", type(exc).__name__)
+            return 502, {"ok": False, "error": str(exc)}
+        except Exception:  # noqa: BLE001 — fail closed; never leak secrets
+            logger.warning("ingest failure type=internal_error")
+            return 500, {"ok": False, "error": "internal_error"}
+    finally:
+        release_inflight()
 
 
 def make_handler(cfg: AdapterConfig) -> type[BaseHTTPRequestHandler]:

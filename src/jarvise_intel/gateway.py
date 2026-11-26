@@ -165,6 +165,40 @@ def get_run(
     )
 
 
+def normalize_runtime_identity(provider: str, model: str) -> tuple[str, str]:
+    """Exact normalized identity: provider + model, or provider/model form of the pin."""
+    prov = (provider or "").strip().lower()
+    mod = (model or "").strip()
+    return prov, mod
+
+
+def assert_runtime_identity(cfg: GatewayConfig, runtime: dict[str, Any]) -> None:
+    """Fail closed when actual provider/model evidence is missing or mismatched."""
+    if not isinstance(runtime, dict) or not runtime:
+        raise GatewayError("provider_mismatch", "runtime_missing")
+    provider = str(runtime.get("provider") or "").strip()
+    model = str(runtime.get("model") or "").strip()
+    if not provider:
+        raise GatewayError("provider_mismatch", "provider_missing")
+    if not model:
+        raise GatewayError("model_mismatch", "model_missing")
+    want_p, want_m = normalize_runtime_identity(cfg.provider, cfg.model)
+    got_p, got_m = normalize_runtime_identity(provider, model)
+    if got_p != want_p:
+        raise GatewayError("provider_mismatch", provider)
+    allowed_models = {want_m, f"{want_p}/{want_m}"}
+    if got_m not in allowed_models and got_m.lower() not in {m.lower() for m in allowed_models}:
+        raise GatewayError("model_mismatch", model)
+    requested = runtime.get("requested")
+    if isinstance(requested, dict) and requested:
+        req_p = str(requested.get("provider") or "").strip()
+        req_m = str(requested.get("model") or "").strip()
+        if req_p and normalize_runtime_identity(req_p, "")[0] != want_p:
+            raise GatewayError("provider_mismatch", f"requested:{req_p}")
+        if req_m and req_m not in allowed_models and req_m.lower() not in {m.lower() for m in allowed_models}:
+            raise GatewayError("model_mismatch", f"requested:{req_m}")
+
+
 def wait_for_run(
     cfg: GatewayConfig,
     run_id: str,
@@ -182,14 +216,7 @@ def wait_for_run(
             finish = str(last.raw.get("finish_reason") or "")
             if error_code == "iteration_budget_exhausted" or finish == "length":
                 raise GatewayError("incomplete_run", "iteration_budget_exhausted")
-            provider = str(last.runtime.get("provider") or "").strip()
-            model = str(last.runtime.get("model") or "").strip()
-            if provider and provider != cfg.provider:
-                raise GatewayError("provider_mismatch", provider)
-            if model and cfg.model and model != cfg.model:
-                # Allow provider-qualified model names that end with the pin.
-                if not model.endswith(cfg.model) and model != cfg.model:
-                    raise GatewayError("model_mismatch", model)
+            assert_runtime_identity(cfg, last.runtime)
             return last
         if last.status in TERMINAL_FAIL:
             raise GatewayError("incomplete_run", last.status)

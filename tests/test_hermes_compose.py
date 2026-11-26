@@ -11,7 +11,11 @@ COMPOSE = ROOT / "docker-compose.yml"
 PROD = ROOT / "docker-compose.prod.yml"
 DEPLOY = ROOT / "infra" / "deploy" / "vps-deploy.sh"
 MCP = ROOT / "scripts" / "hermes-mcp-stdio.ps1"
+CI = ROOT / ".github" / "workflows" / "ci.yml"
 WORKFLOWS = ROOT / "infra" / "n8n" / "workflows"
+PLUGIN_PIN = ROOT / "config" / "hermes" / "plugins" / "mcp-serve" / "PIN"
+CONFIG_TMPL = ROOT / "config" / "hermes" / "config.yaml.template"
+INIT = ROOT / "infra" / "docker" / "init-hermes-plugins.sh"
 
 
 def _service_block(text: str, service: str) -> str:
@@ -24,6 +28,12 @@ def _networks(block: str) -> set[str]:
     match = re.search(r"^    networks: \[(.*)\]", block, re.M)
     assert match, "networks list missing"
     return {part.strip() for part in match.group(1).split(",") if part.strip()}
+
+
+def _network_block(text: str, name: str) -> str:
+    match = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][\w-]*:\n|^volumes:\n|\Z)", text, re.M | re.S)
+    assert match, f"network {name!r} not found"
+    return match.group(1)
 
 
 def test_hermes_services_are_profile_gated() -> None:
@@ -43,7 +53,7 @@ def test_hermes_services_are_profile_gated() -> None:
         assert "REDIS_URL" not in block
 
 
-def test_hermes_image_pin_and_isolation() -> None:
+def test_hermes_image_pin_gateway_run_and_isolation() -> None:
     text = COMPOSE.read_text(encoding="utf-8")
     hermes = _service_block(text, "hermes")
     image_lines = [line for line in hermes.splitlines() if "image:" in line]
@@ -54,18 +64,36 @@ def test_hermes_image_pin_and_isolation() -> None:
     )
     assert "latest" not in image_lines[0]
     assert "stable" not in image_lines[0]
-    assert _networks(hermes) == {"hermes_net"}
+    assert 'command: ["gateway", "run"]' in hermes
+    assert "hermes-entrypoint.sh" in hermes
+    assert _networks(hermes) == {"hermes_net", "hermes_api"}
+    assert "hermes_egress" not in _networks(hermes)
     assert "jarvise_net" not in _networks(hermes)
     assert "openclaw_net" not in _networks(hermes)
     assert "mem_limit: 3072m" in hermes
     assert "cpus: 1.5" in hermes
+
+    egress = _service_block(text, "hermes-egress")
+    assert _networks(egress) == {"hermes_net", "hermes_egress"}
+
     ingest = _service_block(text, "hermes-ingest")
-    assert _networks(ingest) == {"hermes_net", "hermes_ingress"}
+    assert _networks(ingest) == {"hermes_api", "hermes_ingress"}
     assert "pilot-digests" in ingest
+    assert "hermes_egress" not in _networks(ingest)
+    assert "hermes_net" not in _networks(ingest)
+
     n8n = _networks(_service_block(text, "n8n"))
     assert "hermes_ingress" in n8n
     assert "openclaw_net" in n8n
     assert "8642" not in PROD.read_text(encoding="utf-8")
+
+    for name in ("hermes_net", "hermes_api", "hermes_ingress"):
+        block = _network_block(text, name)
+        assert "internal: true" in block
+        assert "enable_ipv6: false" in block
+    egress_net = _network_block(text, "hermes_egress")
+    assert "internal: true" not in egress_net
+    assert "enable_ipv6: false" in egress_net
 
 
 def test_openclaw_still_default_and_isolated() -> None:
@@ -96,6 +124,30 @@ def test_mcp_wrapper_is_tools_only_non_root() -> None:
     assert "8642" not in text
     assert "Authorization" not in text
     assert "API_KEY" not in text
+
+
+def test_vendored_mcp_serve_pin_and_init() -> None:
+    assert PLUGIN_PIN.is_file()
+    pin = PLUGIN_PIN.read_text(encoding="utf-8")
+    assert "80025332933bf84fb3c7b68f369d9fe59a771e98" in pin
+    assert "1.0.1" in pin
+    assert (ROOT / "config" / "hermes" / "plugins" / "mcp-serve" / "plugin.yaml").is_file()
+    assert INIT.is_file()
+    init = INIT.read_text(encoding="utf-8")
+    assert "mcp-serve" in init
+    assert "git clone" not in init.lower()
+    assert "plugins enable mcp-serve" in init
+    assert "PIN" in init
+    tmpl = CONFIG_TMPL.read_text(encoding="utf-8")
+    assert "fallback_providers: []" in tmpl
+    assert "mcp-serve" in tmpl
+    assert 'default: ""' in tmpl
+
+
+def test_ci_builds_hermes_images() -> None:
+    text = CI.read_text(encoding="utf-8")
+    assert "Dockerfile.hermes-ingest" in text
+    assert "Dockerfile.hermes-egress" in text
 
 
 def test_hermes_workflow_inactive_fixed_body() -> None:

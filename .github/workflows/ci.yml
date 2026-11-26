@@ -66,7 +66,7 @@ jobs:
       - run: npm run build
 
   images:
-    name: docker images (worker + web)
+    name: docker images (worker + web + hermes)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -74,3 +74,7 @@ jobs:
         run: docker build -f infra/docker/Dockerfile.worker -t jarvise-worker:ci .
       - name: Build web image
         run: docker build -f infra/docker/Dockerfile.web -t jarvise-web:ci .
+      - name: Build hermes-ingest image
+        run: docker build -f infra/docker/Dockerfile.hermes-ingest -t jarvise-hermes-ingest:ci .
+      - name: Build hermes-egress image
+        run: docker build -f infra/docker/Dockerfile.hermes-egress -t jarvise-hermes-egress:ci .

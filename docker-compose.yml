@@ -398,7 +398,8 @@ services:
         JARVISE_GID: ${JARVISE_GID:-1000}
     image: jarvise-hermes-egress:local
     restart: unless-stopped
-    networks: [hermes_net]
+    # hermes_net (internal): accept CONNECT from Hermes. hermes_egress: sole public route.
+    networks: [hermes_net, hermes_egress]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     read_only: true
@@ -432,8 +433,12 @@ services:
     # Pin amd64 digest; tag v0.23.4 is documentation only — never use latest/stable/main.
     image: nousresearch/hermes-agent@sha256:3bc37fd8546e90fc41fe0d29511b4052840c281617cbcec6093bfe03d86a4ad9
     restart: unless-stopped
-    networks: [hermes_net]
-    # Keep default entrypoint (s6). Do not override; gateway drops to UID 10000.
+    # hermes_net → proxy only; hermes_api → adapter only. No public route, no host ports.
+    networks: [hermes_net, hermes_api]
+    # Wrap dispatch so vendored mcp-serve is copied/enabled before s6. Keep PID 1.
+    entrypoint: ["/bin/sh", "/opt/jarvise/hermes-entrypoint.sh"]
+    # Empty image Cmd falls through to chat — force gateway.
+    command: ["gateway", "run"]
     # no-new-privileges left off: s6 must drop root → hermes for supervised services.
     mem_limit: 3072m
     cpus: 1.5
@@ -451,12 +456,17 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - HERMES_PROVIDER=${HERMES_PROVIDER:-}
       - HERMES_MODEL=${HERMES_MODEL:-}
+      - HERMES_HOME=/opt/data
       - HTTPS_PROXY=http://hermes-egress:8899
       - ALL_PROXY=http://hermes-egress:8899
       - NO_PROXY=
       - HTTP_PROXY=
     volumes:
       - ./data/hermes/gateway:/opt/data
+      - ./config/hermes/plugins:/opt/jarvise/hermes-plugins:ro
+      - ./config/hermes/config.yaml.template:/opt/jarvise/hermes-config.yaml.template:ro
+      - ./infra/docker/init-hermes-plugins.sh:/opt/jarvise/init-hermes-plugins.sh:ro
+      - ./infra/docker/hermes-entrypoint.sh:/opt/jarvise/hermes-entrypoint.sh:ro
     depends_on:
       hermes-egress:
         condition: service_healthy
@@ -468,8 +478,8 @@ services:
         ]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 90s
+      retries: 8
+      start_period: 180s
 
   hermes-ingest:
     profiles: [hermes]
@@ -481,7 +491,8 @@ services:
         JARVISE_GID: ${JARVISE_GID:-1000}
     image: jarvise-hermes-ingest:local
     restart: unless-stopped
-    networks: [hermes_net, hermes_ingress]
+    # hermes_api reaches gateway; hermes_ingress reaches n8n. No proxy, no public route.
+    networks: [hermes_api, hermes_ingress]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     read_only: true
@@ -503,6 +514,7 @@ services:
       - JARVISE_HERMES_DIGEST_DIR=/data/hermes/pilot-digests
       - JARVISE_HERMES_STATE_DIR=/data/hermes/adapter
       - JARVISE_HERMES_PROMPT_PATH=/config/hermes/ingest-prompt.md
+      - JARVISE_HERMES_SOURCE_POLICY=/config/hermes/source-policy.json
       - JARVISE_HERMES_SMOKE=${JARVISE_HERMES_SMOKE:-0}
       - HERMES_INGEST_HOST=0.0.0.0
       - HERMES_INGEST_PORT=8092
@@ -531,10 +543,25 @@ networks:
     driver: bridge
   openclaw_net:
     driver: bridge
+  # Hermes ↔ egress only (no default route out).
   hermes_net:
     driver: bridge
+    internal: true
+    enable_ipv6: false
+  # Adapter ↔ gateway only.
+  hermes_api:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+  # n8n ↔ adapter only.
   hermes_ingress:
     driver: bridge
+    internal: true
+    enable_ipv6: false
+  # Sole public egress for the Hermes profile (proxy only).
+  hermes_egress:
+    driver: bridge
+    enable_ipv6: false
 
 volumes:
   jarvise_redis:

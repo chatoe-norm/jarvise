@@ -1,6 +1,6 @@
 # Hermes Stage A — dormant OpenClaw replacement path
 
-Status: **implementation only**. Production OpenClaw remains the digest producer. No pilot, n8n import, VPS `.env` edit, or container replacement is authorized by this document alone.
+Status: **implementation only**. Production OpenClaw remains the digest producer. No pilot, n8n import, VPS `.env` edit, or container replacement is authorized by this document alone. **Stage C remains blocked** until owner gates below are cleared and Claude Stage B has approved the shipped SHA.
 
 ## Pins (resolved 2026-11-26)
 
@@ -11,13 +11,41 @@ Status: **implementation only**. Production OpenClaw remains the digest producer
 | Compose pin (linux/amd64) | `nousresearch/hermes-agent@sha256:3bc37fd8546e90fc41fe0d29511b4052840c281617cbcec6093bfe03d86a4ad9` |
 | Source revision | `8fc0374447313e276f6b9a2764bfc750190c966a` |
 | Runtime user | `hermes` UID/GID `10000` |
-| Entrypoint | `/opt/hermes/docker/entrypoint-dispatch.sh` (s6; do not override) |
-| Plugin | `mcp-serve` 1.0.1 at `NousResearch/hermes-official-plugins` commit `80025332933bf84fb3c7b68f369d9fe59a771e98` |
+| Entrypoint | `/opt/jarvise/hermes-entrypoint.sh` → image `/opt/hermes/docker/entrypoint-dispatch.sh` (s6; do not drop dispatch) |
+| Gateway command | `gateway run` (empty image `Cmd` would fall through to chat) |
+| Plugin | Vendored `config/hermes/plugins/mcp-serve/` = official-plugins commit `80025332933bf84fb3c7b68f369d9fe59a771e98` (`mcp-serve` 1.0.1). Init copies into `/opt/data/plugins` when `PIN` differs; no install from floating `main`. |
 | MCP mode | `hermes mcp-serve --tools-only` (no conversation bridge, no `messages_send`, no `permissions_*`) |
 
-Local image inspect confirmed the version string and UID. A full supervised gateway start was not left running in CI; prove start/restart on an isolated host before Stage C.
+`HERMES_PROVIDER` and `HERMES_MODEL` have no silent default. Empty values make `/ingest` return `503 provider_unconfigured`. `fallback_providers: []` in the template. Do not use `openrouter/openrouter/auto`.
 
-`HERMES_PROVIDER` and `HERMES_MODEL` have no silent default. Empty values make `/ingest` return `503 provider_unconfigured`. Do not use `openrouter/openrouter/auto`.
+## Network shape (R1)
+
+| Network | Internal | Members |
+| --- | --- | --- |
+| `hermes_net` | yes (IPv6 off) | `hermes`, `hermes-egress` |
+| `hermes_api` | yes (IPv6 off) | `hermes`, `hermes-ingest` |
+| `hermes_ingress` | yes (IPv6 off) | `hermes-ingest`, `n8n` |
+| `hermes_egress` | **no** (sole public Hermes route) | `hermes-egress` only |
+
+`HTTPS_PROXY` / `ALL_PROXY` point at `hermes-egress:8899` as a convenience. The control is the internal networks: gateway has no default route; only the proxy attaches to `hermes_egress`.
+
+## Publication and slots (R5/R6)
+
+- Create-if-absent: cross-process file lock, temp + `os.link` (or `O_EXCL`), never overwrite an incumbent `*.md`. Matching hash replays; differing bytes → `filename_conflict`.
+- Smoke slots use distinct `smoke-YYYY-MM-DD-HH.md` names and require `JARVISE_HERMES_SMOKE=1`.
+- Normal slots are admitted only for the **current** Asia/Bangkok window (`07` from 07:00–19:00, `19` from 19:00–next 07:00). Historical/future labels (e.g. `2000-01-01T07`, `2099-01-01T19`) return `400`.
+- One adapter-wide in-flight lock: a second distinct slot gets `429` and does not call Hermes. Hermes `Idempotency-Key` retention (~24h) is **not** the publication lock.
+
+## Digest schema and sources (R7)
+
+- `no_news` must be a real boolean (`"false"` is invalid).
+- Titles/comments/URLs are typed strings with length caps; `day` must parse `%Y-%m-%d` and lie within 14 days before the slot day.
+- `config/hermes/source-policy.json`: deny shorteners and IP-literal hosts; allow only listed publisher suffixes (includes `federalreserve.gov`, `nvidia.com`). Other hosts → `unknown_source` (not published).
+- Rendered Markdown must still match `parse_digest_text`.
+
+## Runtime identity (R8)
+
+Completed runs without `runtime.provider` and `runtime.model` fail closed (`provider_mismatch` / `model_mismatch`). Exact normalized match only (no `str.endswith`). Differing `runtime.requested` is substitution and rejected. Fixture: `tests/fixtures/hermes_v0.23.4_run.json`.
 
 ## Capability matrix
 
@@ -28,9 +56,9 @@ Local image inspect confirmed the version string and UID. A full supervised gate
 | Canonical `data/openclaw/workspace-ingest/digests` | Still OpenClaw; Hermes has no mount |
 | Messaging / Telegram / Discord | Disabled |
 | Approvals / shell / terminal / file / orders | Disabled in template + MCP `--tools-only` |
-| Qdrant / jobs / web / Redis / ledger | No network path (`hermes_net` / `hermes_ingress` only) |
+| Qdrant / jobs / web / Redis / ledger | No network path (internal Hermes nets only) |
 | Host port 8642 | Not published (LearningYard owns `127.0.0.1:8642`) |
-| Cursor MCP | Opt-in SSH stdio example only |
+| Cursor MCP | Opt-in SSH stdio example only (`scripts/hermes-mcp-stdio.ps1`) |
 
 ## Resource bounds
 
@@ -43,30 +71,30 @@ Local image inspect confirmed the version string and UID. A full supervised gate
 
 OpenClaw remains 4g / 2.0 until Stage C retirement. A concurrent pilot needs free host RAM beside both stacks.
 
-## Skill inventory
+## Local isolation proof
 
-| OpenClaw skill | Stage A disposition |
-| --- | --- |
-| `jarvise-news-ingest` | Ported into `config/hermes/ingest-prompt.md` |
-| `jarvise-doctrine-rag` | Retained by Python (`jarvise rag sync-openclaw`) |
-| `jarvise-signal-analyzer` / `jarvise-risk-guard` / `jarvise-paper-research` / `jarvise-binance-intel` | Retained by Python |
-| `jarvise-order-router` | Never port |
-| `crypto-market-intel` / `blackswan` / `secretclaw` / `ggshield-scanner` / `claw-compactor` | Deferred |
-| Missing required digest capability | Blocks OpenClaw retirement |
+```bash
+# From the worktree, Docker Desktop required. Synthetic env only.
+bash scripts/hermes-isolation-check.sh
+# or: JARVISE_HERMES_ISO=1 pytest tests/test_hermes_isolation.py -q
+```
 
-## Shadow-study continuity gate
+The script cold-starts a throwaway compose project, waits for in-container `http://127.0.0.1:8642/health`, restarts, checks `id hermes` → UID `10000`, runs `hermes mcp-serve --tools-only` initialize + `tools/list` (fails if messaging/approvals/shell/file/execution/delegation/order/image/audio/vision tool names appear), and asserts hermes is not on `hermes_egress`.
+
+CI builds `Dockerfile.hermes-ingest` and `Dockerfile.hermes-egress` in addition to worker/web. Worker/web builds alone are **not** proof of Hermes.
+
+## Shadow-study continuity gate (unresolved)
 
 Pre-registration: `docs/research/2026-10-17-openclaw-shadow-veto-plan.md` §C.
 
 - Window start: `2026-10-18T06:00:00Z`
 - Close: 40 scored entries **or** 60 days (optional 30-day extension needs owner)
-- On 2026-11-26 the window can still be open
 
-Stage A does **not** query production. Canonical cutover stays blocked until a later read-only check on merged tooling reports the window closed, or the owner documents an explicit deviation. Never pool evidence across the producer boundary or reset/extend the study silently.
+Stage A does **not** query production. Canonical cutover stays blocked until a later read-only check on merged tooling reports the window closed, or the owner documents an explicit deviation.
 
 ## Activation (Stage C — owner instruction required)
 
-1. `wdpy` until CI/Deploy idle. Confirm Claude Stage B approval.
+1. `wdpy` until CI/Deploy idle. Confirm Claude Stage B approval on the revised SHA.
 2. Refresh runtime SHA, health, free RAM, workflow IDs, universe (`jarvise universe show --json`), and shadow gate.
 3. Owner sets `JARVISE_HERMES_API_KEY`, `JARVISE_HERMES_INGEST_TOKEN`, `HERMES_PROVIDER`, `HERMES_MODEL` in VPS `.env` (agents report set/EMPTY only).
 4. Start opt-in stack from merged code: `docker compose --profile hermes up -d` (with prod overlay on VPS).
@@ -89,7 +117,7 @@ Order:
 5. Keep already-published valid Hermes files immutable; mark the producer boundary in metadata.
 6. Keep trading/safety jobs running. Never `compose down -v`, never prune volumes, never restore the trading ledger for this rollback.
 
-## Owner gates before any pilot
+## Owner gates before any pilot (still open)
 
 - [ ] Three Hermes secrets set (API key, ingest token, provider model pin)
 - [ ] Free RAM confirmed beside still-running 4 GiB OpenClaw
@@ -106,8 +134,6 @@ Order:
 # Expect absent: messages_send, permissions_*, terminal, file, execution, order tools
 # Expect: internal URL (http://127.0.0.1, http://jobs:8090) refused by egress
 ```
-
-If the hermes profile is not running, record that the live `tools/list` check was not executed.
 
 ## Deploy ownership note
 

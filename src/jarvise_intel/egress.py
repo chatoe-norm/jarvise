@@ -14,9 +14,44 @@ from jarvise_intel.policy import Resolver, allow_connect_target
 _BUFFER = 65536
 
 
+def connect_validated(
+    addrs: list[str],
+    port: int,
+    *,
+    timeout: float = 30.0,
+) -> socket.socket:
+    """Connect to a previously validated numeric address. Never re-resolve a hostname."""
+    last_err: OSError | None = None
+    allowed = {str(a) for a in addrs}
+    for addr in addrs:
+        family = socket.AF_INET6 if ":" in addr else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect((addr, port))
+            peer = sock.getpeername()[0]
+            # Normalize IPv6 peer presentation.
+            peer_s = str(peer).split("%", 1)[0]
+            if peer_s not in allowed and peer not in allowed:
+                sock.close()
+                raise OSError(f"peer_not_validated:{peer}")
+            return sock
+        except OSError as exc:
+            last_err = exc
+            try:
+                sock.close()
+            except OSError:
+                pass
+    if last_err is not None:
+        raise last_err
+    raise OSError("no_validated_addrs")
+
+
 class _ProxyHandler(socketserver.StreamRequestHandler):
     resolve: Resolver | None = None
     on_deny: Callable[[str, str], None] | None = None
+    # Test hook: records the address used for the upstream connect.
+    last_connect_addr: str | None = None
 
     def handle(self) -> None:
         try:
@@ -40,7 +75,7 @@ class _ProxyHandler(socketserver.StreamRequestHandler):
         except ValueError:
             self._reply(400, b"Bad Request")
             return
-        ok, reason = allow_connect_target(host, port, resolve=self.resolve)
+        ok, reason, addrs = allow_connect_target(host, port, resolve=self.resolve)
         if not ok:
             if self.on_deny:
                 self.on_deny(target, reason)
@@ -52,7 +87,8 @@ class _ProxyHandler(socketserver.StreamRequestHandler):
             if not hdr or hdr in (b"\r\n", b"\n"):
                 break
         try:
-            upstream = socket.create_connection((host, port), timeout=30)
+            upstream = connect_validated(addrs, port, timeout=30)
+            type(self).last_connect_addr = upstream.getpeername()[0]
         except OSError:
             self._reply(502, b"Bad Gateway")
             return
@@ -65,7 +101,6 @@ class _ProxyHandler(socketserver.StreamRequestHandler):
 
     def _split_host_port(self, target: str) -> tuple[str | None, str | None]:
         if target.startswith("["):
-            # [ipv6]:port
             end = target.find("]")
             if end < 0:
                 return None, None
@@ -130,13 +165,15 @@ class EgressProxy:
         self.resolve = resolve
         self._server: socketserver.ThreadingTCPServer | None = None
         self._thread: threading.Thread | None = None
+        self.handler_cls: type[_ProxyHandler] | None = None
 
     def start(self) -> None:
         handler = type(
             "BoundProxyHandler",
             (_ProxyHandler,),
-            {"resolve": self.resolve, "on_deny": None},
+            {"resolve": self.resolve, "on_deny": None, "last_connect_addr": None},
         )
+        self.handler_cls = handler
         server = socketserver.ThreadingTCPServer((self.host, self.port), handler)
         server.daemon_threads = True
         server.allow_reuse_address = True

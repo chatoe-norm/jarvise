@@ -1,0 +1,19 @@
+{
+  "run_id": "run_fixture_001",
+  "status": "completed",
+  "output": "{\"no_news\": true, \"items\": []}",
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 40,
+    "total_tokens": 160
+  },
+  "runtime": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-5.5",
+    "requested": {
+      "provider": "openrouter",
+      "model": "anthropic/claude-sonnet-5.5"
+    }
+  },
+  "finish_reason": "stop"
+}
