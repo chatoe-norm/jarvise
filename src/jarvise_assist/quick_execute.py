@@ -198,23 +198,12 @@ def cfg_became_stricter(frozen: dict[str, Any], live: dict[str, Any]) -> bool:
         frozen["quick_fee_bps_per_side"]
     ):
         return True
-    # Night window wider (more minutes blocked)
+    # Night window: any newly blocked minute is stricter (coverage, not just width).
     if "quick_night_start" in frozen and "quick_night_end" in frozen:
-        from jarvise_assist.quick_config import night_window_minutes
-
-        frozen_mins = night_window_minutes(str(frozen["quick_night_start"]), str(frozen["quick_night_end"]))
-        live_mins = night_window_minutes(str(live["quick_night_start"]), str(live["quick_night_end"]))
-        if live_mins > frozen_mins:
+        frozen_block = night_blocked_minutes(str(frozen["quick_night_start"]), str(frozen["quick_night_end"]))
+        live_block = night_blocked_minutes(str(live["quick_night_start"]), str(live["quick_night_end"]))
+        if live_block - frozen_block:
             return True
-        if str(live["quick_night_start"]) != str(frozen["quick_night_start"]) or str(
-            live["quick_night_end"]
-        ) != str(frozen["quick_night_end"]):
-            # Same width but shifted still refuses — safer than guessing.
-            if live_mins >= frozen_mins and (
-                str(live["quick_night_start"]) != str(frozen["quick_night_start"])
-                or str(live["quick_night_end"]) != str(frozen["quick_night_end"])
-            ):
-                return True
     # Universe narrower: core < core_explore < any
     if "quick_exec_universe" in frozen:
         try:
@@ -517,17 +506,27 @@ def build_bot_plan(
     }
 
 
-def unfinished_entry_for_card(conn: Any, card_id: str) -> str | None:
-    """Return intent id of an unfinished entry for this card, if any."""
+def unfinished_entry_for_card(conn: Any, card_id: str, *, now_ms: int | None = None) -> str | None:
+    """Return intent id of an unfinished entry for this card, if any.
+
+    Elapsed ``preview`` intents are ignored so a refreshed card is not stuck on
+    ``double_tap``. Confirmed / unknown / recovering still block.
+    """
+    from jarvise_assist.store import now_ms as _store_now_ms
+
+    ts = int(now_ms if now_ms is not None else _store_now_ms())
     rows = conn.execute(
         """
-        SELECT id, preview_json, status FROM assist_exec_intent
+        SELECT id, preview_json, status, expires_at_ms FROM assist_exec_intent
         WHERE kind='entry' AND status IN ('preview', 'confirmed', 'unknown', 'recovering')
         """
     ).fetchall()
     import json
 
     for row in rows:
+        status = str(row["status"] or "")
+        if status == "preview" and int(row["expires_at_ms"] or 0) <= ts:
+            continue
         try:
             preview = json.loads(str(row["preview_json"] or "{}"))
         except Exception:  # noqa: BLE001
@@ -535,6 +534,49 @@ def unfinished_entry_for_card(conn: Any, card_id: str) -> str | None:
         if str(preview.get("card_id") or "") == str(card_id) and str(preview.get("origin") or "") == "quick":
             return str(row["id"])
     return None
+
+
+def quick_entry_proven_unfilled(conn: Any, intent_id: str) -> bool:
+    """True only when the market entry never filled (safe to expire registration).
+
+    Filled entries (stop/TP/emergency after fill) and unresolved unknowns keep
+    the registration so sync can tag the Quick loss.
+    """
+    rows = conn.execute(
+        """
+        SELECT step, order_or_algo_id FROM assist_exec_log
+        WHERE intent_id=?
+        ORDER BY created_at_ms ASC
+        """,
+        (str(intent_id),),
+    ).fetchall()
+    steps = {str(r["step"] or "") for r in rows}
+    fill_evidence = {
+        "stop",
+        "tp",
+        "emergency_close",
+        "cls",
+        "exit_market",
+        "recover_slr",
+        "dup_stop_cancel",
+        "orphan_cancel",
+    }
+    if steps & fill_evidence:
+        return False
+    market_steps = {"market", "market_query", "recovery", "entry_price_query"}
+    if not (steps & market_steps):
+        return True
+    intent = conn.execute(
+        "SELECT status, result_text FROM assist_exec_intent WHERE id=?",
+        (str(intent_id),),
+    ).fetchone()
+    if intent is not None and str(intent["status"] or "") in {"unknown", "recovering", "confirmed"}:
+        return False
+    text = str(intent["result_text"] or "") if intent is not None else ""
+    if "เข้าไม้ไม่สำเร็จ" in text or "ยังไม่ได้ส่งคำสั่ง" in text:
+        return True
+    # Ambiguous market attempt without fill-evidence steps — keep registration.
+    return False
 
 
 def expire_quick_registration_for_intent(conn: Any, intent_id: str, *, now_ms: int) -> None:
@@ -551,6 +593,13 @@ def expire_quick_registration_for_intent(conn: Any, intent_id: str, *, now_ms: i
         conn.commit()
     except Exception:  # noqa: BLE001
         logger.exception("expire quick registration for intent failed")
+
+
+def maybe_expire_quick_registration(conn: Any, intent_id: str, *, now_ms: int) -> None:
+    """Expire only when the entry is proven unfilled."""
+    if not quick_entry_proven_unfilled(conn, intent_id):
+        return
+    expire_quick_registration_for_intent(conn, intent_id, now_ms=now_ms)
 
 
 def any_non_jv_open_order(orders: list[Any], symbol: str) -> bool:
@@ -605,8 +654,11 @@ def pause_blocks_bot(conn: Any, *, now_ms: int) -> bool:
     return is_paused(ensure_settings(conn), now_ms=now_ms)
 
 
-def same_side_blocks(conn: Any, side: str) -> bool:
-    return same_side_cap_reached(count_open_same_side(conn, side))
+def same_side_blocks(conn: Any, side: str, *, cap: int | None = None) -> bool:
+    """Bot path: use configured ``quick_same_side_cap`` (or an explicit stricter cap)."""
+    if cap is None:
+        cap = int(get_quick_config(conn).values["quick_same_side_cap"])
+    return same_side_cap_reached(count_open_same_side(conn, side), cap=int(cap))
 
 
 def has_open_watch(conn: Any, symbol: str) -> bool:
@@ -620,13 +672,34 @@ def has_open_watch(conn: Any, symbol: str) -> bool:
     return row is not None
 
 
-def symbol_busy_for_bot(conn: Any, symbol: str) -> str | None:
-    """Return a reason when the symbol cannot take a new bot Quick entry."""
+def symbol_busy_for_bot(conn: Any, symbol: str, *, exclude_id: str | None = None) -> str | None:
+    """Return a reason when the symbol cannot take a new bot Quick entry.
+
+    ``exclude_id`` skips the current claimed intent so confirm does not refuse itself.
+    """
     sym = str(symbol).upper()
     if sym in quick_symbols(conn):
         return "quick_open"
     if has_open_watch(conn, sym):
         return "open_watch"
-    if symbol_has_in_flight_exec(conn, sym):
+    if symbol_has_in_flight_exec(conn, sym, exclude_id=exclude_id):
         return "in_flight"
     return None
+
+
+def night_blocked_minutes(start: str, end: str) -> set[int]:
+    """Set of Asia/Bangkok minute-of-day values blocked by [start, end)."""
+    s = _hhmm_minutes(start)
+    e = _hhmm_minutes(end)
+    if s == e:
+        return set()
+    if s < e:
+        return set(range(s, e))
+    return set(range(s, 24 * 60)) | set(range(0, e))
+
+
+def cfg_val(frozen: dict[str, Any], key: str, live: Any) -> Any:
+    """Frozen snapshot value when present (incl. 0); else live. Never treat 0 as missing."""
+    if key in frozen and frozen[key] is not None:
+        return frozen[key]
+    return live

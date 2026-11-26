@@ -766,6 +766,60 @@ def _logged_client_ids(conn: Any) -> set[str]:
     return {str(row[0]) for row in cur.fetchall() if row[0]}
 
 
+def _quick_owned_client_and_order_ids(conn: Any) -> tuple[set[str], set[str]]:
+    """Client ids and order/algo ids belonging to origin=quick intents (and exec-linked regs)."""
+    cids: set[str] = set()
+    oids: set[str] = set()
+    rows = conn.execute(
+        """
+        SELECT l.client_order_id, l.order_or_algo_id, i.preview_json
+        FROM assist_exec_log l
+        JOIN assist_exec_intent i ON i.id = l.intent_id
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            preview = json.loads(str(row["preview_json"] or "{}"))
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(preview, dict) or preview.get("origin") != "quick":
+            continue
+        if row["client_order_id"]:
+            cids.add(str(row["client_order_id"]))
+        if row["order_or_algo_id"]:
+            oids.add(str(row["order_or_algo_id"]))
+    # Exec-linked registrations whose market fill may only live on the registration.
+    try:
+        regs = conn.execute(
+            """
+            SELECT exec_intent_id FROM assist_quick_registration
+            WHERE exec_intent_id IS NOT NULL
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        regs = []
+    for reg in regs:
+        eid = str(reg["exec_intent_id"] or "")
+        if not eid:
+            continue
+        meta = _intent_preview(conn, eid)
+        preview = meta.get("preview") or {}
+        if not isinstance(preview, dict) or preview.get("origin") != "quick":
+            continue
+        for log in conn.execute(
+            """
+            SELECT client_order_id, order_or_algo_id FROM assist_exec_log
+            WHERE intent_id=?
+            """,
+            (eid,),
+        ).fetchall():
+            if log["client_order_id"]:
+                cids.add(str(log["client_order_id"]))
+            if log["order_or_algo_id"]:
+                oids.add(str(log["order_or_algo_id"]))
+    return cids, oids
+
+
 def _unmatched_reason(*, cid: str, logged: set[str]) -> str:
     """Why a traded order matched no in-window entry.
 
@@ -802,6 +856,7 @@ def build_real_rows(
     market_logs = _log_market_by_client(conn)
     move_stop_by_cid = _move_stop_intent_by_client(conn)
     logged_cids = _logged_client_ids(conn)
+    quick_cids, quick_oids = _quick_owned_client_and_order_ids(conn)
     income_cache = _complete_income_cache(conn, start)
     frozen_missing = _frozen_missing_income(conn, start, end)
     rows_out: list[dict[str, Any]] = []
@@ -870,6 +925,7 @@ def build_real_rows(
             meta = _intent_preview(conn, intent_id)
             preview = meta.get("preview") or {}
             # Bot Quick never becomes assist_real_trade / day-loss R / main journal.
+            # Skip here; quick_owned_* also blocks the unmatched loop for SL/TP/cls.
             if isinstance(preview, dict) and preview.get("origin") == "quick":
                 continue
             mkt_entry_order_ids.add(oid)
@@ -1225,6 +1281,12 @@ def build_real_rows(
             side = "buy" if side_raw == "BUY" else "sell"
             entry_time = min(int(f.get("time") or 0) for f in fills)
             cid = str(order.get("clientOrderId") or "")
+            # Exclude Quick-owned orders/fills from the main ledger entirely.
+            if oid in quick_oids or (cid and cid in quick_cids):
+                continue
+            fill_cids = {str(f.get("clientOrderId") or "") for f in fills}
+            if fill_cids & quick_cids:
+                continue
             reason = _unmatched_reason(cid=cid, logged=logged_cids)
             rows_out.append(
                 {

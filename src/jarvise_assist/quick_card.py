@@ -1100,6 +1100,7 @@ def build_quick_card(
             trend = quick_trend_4h(conn, sym, now_ms=now_ms)
             is_counter, bot_risk = quick_side_risk(trend, side_l, _eff)
             if is_counter:
+                fee_bps = Decimal(str(_cfg.values.get("quick_fee_bps_per_side") or QUICK_FEE_BPS_PER_SIDE))
                 bot_sized = size_signal(
                     symbol=sym,
                     side=side_l,
@@ -1108,9 +1109,10 @@ def build_quick_card(
                     balance=balance,
                     risk_pct=bot_risk,
                     step_size=step,
+                    fee_bps_per_side=fee_bps,
                 )
                 if bot_sized is not None:
-                    bot_fee = (Decimal("2") * QUICK_FEE_BPS_PER_SIDE / Decimal("10000")) * bot_sized.notional
+                    bot_fee = (Decimal("2") * fee_bps / Decimal("10000")) * bot_sized.notional
                     bot_loss = bot_sized.loss_at_stop + bot_fee
                     if trend == "unknown":
                         lines.append(

@@ -560,7 +560,7 @@ def _handle_qk_ex(
         send("บอทเข้าไม้ได้เฉพาะขนาดตาม risk — ข้อเสนอ min-lot/fit-margin บันทึกอย่างเดียว")
         return {"ok": False, "reason": "size_mode"}
 
-    if unfinished_entry_for_card(conn, card_id):
+    if unfinished_entry_for_card(conn, card_id, now_ms=now_ms):
         answer(None)
         send("มีคำยืนยันเข้าไม้ของการ์ดนี้อยู่แล้ว — รอให้หมดอายุหรือกดยกเลิกก่อน")
         return {"ok": False, "reason": "double_tap"}

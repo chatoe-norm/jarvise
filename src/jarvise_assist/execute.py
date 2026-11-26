@@ -1477,6 +1477,7 @@ _REASON_TH: dict[str, str] = {
     "quick_cap": "เต็มเพดานความเสี่ยง quick",
     "portfolio_cap": "เต็มเพดานความเสี่ยงรวม",
     "cfg_changed": "ค่าตั้งเปลี่ยน — กด 🔄 อัปเดตราคา",
+    "budget_exceeded": "ความเสี่ยงที่ stop (รวมค่าธรรมเนียม) เกินงบ risk — ไม่ส่ง",
 }
 
 
@@ -2057,23 +2058,29 @@ def _confirm_guards_quick_entry(
         return "kill_switch"
     if pause_blocks_bot(conn, now_ms=now_ms_value):
         return "paused"
+    from jarvise_assist.quick_execute import cfg_val
+
     cfg_view = get_quick_config(conn)
     values = cfg_view.values
-    if in_quick_bot_night(
-        now_ms_value,
-        start=str(values["quick_night_start"]),
-        end=str(values["quick_night_end"]),
-    ):
-        return "night"
-    if in_entry_block_for_bot(now_ms_value):
-        return "cutoff_block"
-
     preview_raw = intent.get("preview")
     preview: dict[str, Any] = preview_raw if isinstance(preview_raw, dict) else {}
     symbol = str(intent["symbol"])
     side = str(intent["side"])
     cfg_raw = preview.get("cfg")
     frozen_cfg: dict[str, Any] = cfg_raw if isinstance(cfg_raw, dict) else {}
+
+    live_night_start = str(values["quick_night_start"])
+    live_night_end = str(values["quick_night_end"])
+    frozen_night_start = str(cfg_val(frozen_cfg, "quick_night_start", live_night_start))
+    frozen_night_end = str(cfg_val(frozen_cfg, "quick_night_end", live_night_end))
+    # Enforce union of frozen and live night windows (either blocked → refuse).
+    if in_quick_bot_night(now_ms_value, start=live_night_start, end=live_night_end) or in_quick_bot_night(
+        now_ms_value, start=frozen_night_start, end=frozen_night_end
+    ):
+        return "night"
+    if in_entry_block_for_bot(now_ms_value):
+        return "cutoff_block"
+
     if frozen_cfg and cfg_became_stricter(frozen_cfg, values):
         return "cfg_changed"
 
@@ -2081,14 +2088,17 @@ def _confirm_guards_quick_entry(
     if not symbol_in_quick_exec_universe(conn, symbol, universe=universe):
         return "universe"
 
-    busy = symbol_busy_for_bot(conn, symbol)
+    busy = symbol_busy_for_bot(conn, symbol, exclude_id=str(intent["id"]))
     # Registration does not exist yet — busy for open Quick/watch/in-flight only.
     if busy in {"open_watch", "in_flight"}:
         return busy
     if busy == "quick_open":
         # Allow if the only open item is ourselves after a prior partial path; else refuse.
         return "quick_open"
-    if same_side_blocks(conn, side):
+    live_cap = int(values["quick_same_side_cap"])
+    frozen_cap_raw = frozen_cfg.get("quick_same_side_cap")
+    frozen_cap = int(frozen_cap_raw) if frozen_cap_raw is not None else live_cap
+    if same_side_blocks(conn, side, cap=min(frozen_cap, live_cap)):
         return "same_side_cap"
 
     positions = trade.position_risk()
@@ -2104,17 +2114,35 @@ def _confirm_guards_quick_entry(
     entry = Decimal(str(preview["entry"]))
     stop = Decimal(str(preview["stop"]))
     preview_qty = Decimal(str(preview["qty"]))
-    risk_pct = Decimal(str(preview.get("risk_pct_used") or frozen_cfg.get("risk_used") or "0.5"))
-    fee_bps = Decimal(str(frozen_cfg.get("quick_fee_bps_per_side") or values["quick_fee_bps_per_side"]))
-    chase_r = Decimal(str(frozen_cfg.get("quick_chase_r") or values["quick_chase_r"]))
-    buf_pct = Decimal(str(frozen_cfg.get("quick_stop_buffer_pct") or values["quick_stop_buffer_pct"]))
-    buf_ticks = int(frozen_cfg.get("quick_stop_buffer_ticks") or values["quick_stop_buffer_ticks"])
-    max_fee_r = Decimal(str(frozen_cfg.get("quick_max_fee_r") or values["quick_max_fee_r"]))
+    risk_pct = Decimal(str(preview.get("risk_pct_used") or cfg_val(frozen_cfg, "risk_used", "0.5")))
+    fee_bps = Decimal(str(cfg_val(frozen_cfg, "quick_fee_bps_per_side", values["quick_fee_bps_per_side"])))
+    chase_r = Decimal(str(cfg_val(frozen_cfg, "quick_chase_r", values["quick_chase_r"])))
+    buf_pct = Decimal(str(cfg_val(frozen_cfg, "quick_stop_buffer_pct", values["quick_stop_buffer_pct"])))
+    buf_ticks = int(cfg_val(frozen_cfg, "quick_stop_buffer_ticks", values["quick_stop_buffer_ticks"]))
+    max_fee_r = Decimal(str(cfg_val(frozen_cfg, "quick_max_fee_r", values["quick_max_fee_r"])))
     lev_cap = int(effective_quick_values(cfg_view)["lev_used"])
     if frozen_cfg.get("lev_used") is not None:
         lev_cap = min(lev_cap, int(frozen_cfg["lev_used"]))
 
     mark = trade.mark_price(symbol)
+    # Testnet: map mainnet preview levels by % onto the demo mark before guards.
+    if assist_execute_mode() == "testnet":
+        t1_prev = Decimal(str(preview.get("t1") or preview.get("target") or entry))
+        stop, t1_mapped = _apply_pct_levels(
+            mainnet_entry=entry,
+            mainnet_stop=stop,
+            mainnet_target=t1_prev,
+            testnet_mark=mark,
+            side=side,
+        )
+        entry = mark
+        preview = {
+            **preview,
+            "entry": str(entry),
+            "stop": str(stop),
+            "t1": str(t1_mapped),
+            "target": str(t1_mapped),
+        }
     if quick_chase_exceeded(side=side, entry=entry, stop=stop, mark=mark, chase_r=chase_r):
         return "chase"
 
@@ -2168,9 +2196,9 @@ def _confirm_guards_quick_entry(
     loss_at_stop = qty * abs(mark - stop)
     budget = balance * (risk_pct / Decimal("100")) if balance > 0 else Decimal("0")
     if budget > 0 and real_stop_loss_usdt(qty=qty, entry=mark, stop=stop, fee_bps_per_side=fee_bps) > budget:
-        return "below_min_notional"
+        return "budget_exceeded"
 
-    cap_pct = Decimal(str(frozen_cfg.get("quick_risk_cap_pct") or values["quick_risk_cap_pct"]))
+    cap_pct = Decimal(str(cfg_val(frozen_cfg, "quick_risk_cap_pct", values["quick_risk_cap_pct"])))
     # Cap check must not count a registration that does not exist yet.
     cap_hit = check_quick_and_portfolio_caps(
         conn,
@@ -2210,7 +2238,8 @@ def _confirm_guards_quick_entry(
     final = admitted[0].sized
 
     t1 = Decimal(str(preview.get("t1") or preview.get("target") or "0"))
-    tp1_pct = Decimal(str(frozen_cfg.get("quick_tp1_close_pct") or values["quick_tp1_close_pct"]))
+    tp1_raw = cfg_val(frozen_cfg, "quick_tp1_close_pct", values["quick_tp1_close_pct"])
+    tp1_pct = Decimal(str(tp1_raw))
     close_q, _leave_q, refuse = half_close_legs(
         final.qty,
         step=filters.step_size,
@@ -2225,6 +2254,7 @@ def _confirm_guards_quick_entry(
         **preview,
         "qty": str(final.qty),
         "confirm_entry": str(final.entry),
+        "entry": str(final.entry),
         "stop": str(stop),
         "t1": str(t1),
         "target": str(t1),
@@ -2620,6 +2650,7 @@ def _emergency_close_reply(
     stop: Decimal,
     stop_err: str | None,
     sleep: Callable[[float], None],
+    unresolved_as_unknown: bool = False,
 ) -> ExecResult:
     closed = _emergency_close_verified(
         trade,
@@ -2643,9 +2674,10 @@ def _emergency_close_reply(
             remain_qty = still[0].qty
     except Exception:  # noqa: BLE001
         pass
+    # Unresolved close may leave exposure — keep unknown for recovery when requested.
     return _exec_result(
         _msg_close_unconfirmed(symbol, side, qty=remain_qty, stop=stop),
-        status="failed",
+        status="unknown" if unresolved_as_unknown else "failed",
     )
 
 
@@ -2881,6 +2913,7 @@ def run_entry_sequence(
             stop=stop,
             stop_err=stop_err,
             sleep=sleep,
+            unresolved_as_unknown=is_quick,
         )
     if _position_flat_now(trade, symbol=symbol) is True:
         return _exec_result(MSG_ALREADY_CLOSED, status="done")
@@ -2893,14 +2926,17 @@ def run_entry_sequence(
     tp_qty_used: Decimal | None = None
     if is_quick:
         # (a) TP1 share only — never a full-qty TP by default. SL stays on full qty.
+        from jarvise_assist.quick_execute import cfg_val as _cfg_val
+
         qcfg_raw = preview.get("cfg")
         qcfg: dict[str, Any] = qcfg_raw if isinstance(qcfg_raw, dict) else {}
-        tp1_pct = Decimal(str(qcfg.get("quick_tp1_close_pct") or "50"))
+        tp1_raw = _cfg_val(qcfg, "quick_tp1_close_pct", "50")
+        tp1_pct = Decimal(str(tp1_raw))
         t1 = Decimal(str(preview.get("t1") or target))
         # Prefer avg for TP1 distance when known; else preview entry.
         base_px = avg if (avg is not None and avg > 0) else Decimal(str(preview.get("entry") or stop))
         r_dist = abs(base_px - stop)
-        tp1_r = Decimal(str(qcfg.get("quick_tp1_r") or "1"))
+        tp1_r = Decimal(str(_cfg_val(qcfg, "quick_tp1_r", "1")))
         if side == "long":
             t1 = base_px + tp1_r * r_dist
         else:
@@ -2946,8 +2982,26 @@ def run_entry_sequence(
                     http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
                     binance_code=code,
                 )
-                tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
+                if not _is_clear_rejection(exc):
+                    found_tp = _safe_find_algo(trade, symbol=symbol, client_id=tcid)
+                    if found_tp is not None:
+                        _log_write(
+                            conn,
+                            intent_id=intent_id,
+                            step="tp",
+                            endpoint="/fapi/v1/algoOrder",
+                            client_order_id=tcid,
+                            http_status=200,
+                            order_or_algo_id=str(found_tp.get("algoId") or ""),
+                        )
+                    else:
+                        tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
+                else:
+                    tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
                 # Intent outcome is not "failed" — SL protects.
+        elif tp1_pct <= 0:
+            tp_note = "\nไม่วาง TP1 — ปิดครึ่ง 0%"
+            t1 = target
         else:
             tp_note = "\nไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"
             t1 = target
@@ -4095,17 +4149,32 @@ def run_reduce_sequence(
     )
 
 
-def cancel_jv_orders_for_symbol(trade: BinanceTradeClient, symbol: str) -> tuple[list[str], bool]:
+def cancel_jv_orders_for_symbol(
+    trade: BinanceTradeClient,
+    symbol: str,
+    *,
+    intent_id: str | None = None,
+) -> tuple[list[str], bool]:
     """Cancel leftover jv- reduce-only algo orders. Never touches non-jv ids.
+
+    When ``intent_id`` is set, only cancels that intent's ``jv-<short>-…`` client
+    ids (so a reopened position's new protection is not wiped).
 
     Returns (cancelled_algo_ids, all_confirmed). Unknown-order (-2011/-2013) counts
     as confirmed. Any other failure logs the exception class and is not confirmed.
     """
     cancelled: list[str] = []
     all_ok = True
+    prefix: str | None = None
+    if intent_id is not None:
+        short = str(intent_id).replace("aei_", "")[:12]
+        prefix = f"jv-{short}-"
     for order in trade.open_algo_orders(symbol=symbol):
         cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
-        if not cid.startswith("jv-"):
+        if prefix is not None:
+            if not cid.startswith(prefix):
+                continue
+        elif not cid.startswith("jv-"):
             continue
         algo_id = order.get("algoId")
         if algo_id is None:
@@ -5246,8 +5315,13 @@ def handle_exec_callback(
                         return {"ok": False, "reason": guard}
                     if is_quick_ey and assist_execute_mode() == "live":
                         # One SQLite transaction: registration + card → registered BEFORE exchange.
+                        # Use the final persisted preview (post-guard re-size), not the pre-guard capture.
                         from jarvise_assist.quick import create_quick_registration
 
+                        final_preview_raw = intent.get("preview")
+                        final_preview: dict[str, Any] = (
+                            final_preview_raw if isinstance(final_preview_raw, dict) else preview_ey
+                        )
                         try:
                             if not conn.in_transaction:
                                 conn.execute("BEGIN")
@@ -5255,9 +5329,11 @@ def handle_exec_callback(
                                 conn,
                                 symbol=str(intent["symbol"]),
                                 side=str(intent["side"]),
-                                planned_entry=float(preview_ey.get("confirm_entry") or preview_ey["entry"]),
-                                planned_stop=float(preview_ey["stop"]),
-                                qty=float(preview_ey["qty"]),
+                                planned_entry=float(
+                                    final_preview.get("confirm_entry") or final_preview["entry"]
+                                ),
+                                planned_stop=float(final_preview["stop"]),
+                                qty=float(final_preview["qty"]),
                                 now_ms=ts,
                                 commit=False,
                                 exec_intent_id=intent_id,
@@ -5274,9 +5350,9 @@ def handle_exec_callback(
                                 )
                                 send(text)
                                 return {"ok": False, "reason": reg_reason}
-                            card_id = preview_ey.get("card_id")
+                            card_id = final_preview.get("card_id") or preview_ey.get("card_id")
                             if card_id:
-                                conn.execute(
+                                cur = conn.execute(
                                     """
                                     UPDATE assist_quick_card
                                     SET status='registered', registration_id=?, updated_at_ms=?
@@ -5284,6 +5360,18 @@ def handle_exec_callback(
                                     """,
                                     (rid, int(ts), str(card_id)),
                                 )
+                                if cur.rowcount == 0:
+                                    conn.rollback()
+                                    text = "การ์ดไม่อยู่ในสถานะ quoted แล้ว — ไม่ส่งคำสั่ง"
+                                    finish_exec_intent(
+                                        conn,
+                                        intent_id,
+                                        status="failed",
+                                        result_text=text,
+                                        expect_status="confirmed",
+                                    )
+                                    send(text)
+                                    return {"ok": False, "reason": "card_not_quoted"}
                             _log_write(
                                 conn,
                                 intent_id=intent_id,
@@ -5323,10 +5411,10 @@ def handle_exec_callback(
                         )
                         if status_r == "failed":
                             from jarvise_assist.quick_execute import (
-                                expire_quick_registration_for_intent,
+                                maybe_expire_quick_registration,
                             )
 
-                            expire_quick_registration_for_intent(conn, intent_id, now_ms=ts)
+                            maybe_expire_quick_registration(conn, intent_id, now_ms=ts)
                     return _finish_send(result)
 
                 if prefix == "ms:":
@@ -5558,9 +5646,9 @@ def _recovery_notify(
     if wrote and status in {"failed", "expired", "not_found"}:
         preview = (prev or {}).get("preview") if isinstance((prev or {}).get("preview"), dict) else {}
         if isinstance(preview, dict) and preview.get("origin") == "quick":
-            from jarvise_assist.quick_execute import expire_quick_registration_for_intent
+            from jarvise_assist.quick_execute import maybe_expire_quick_registration
 
-            expire_quick_registration_for_intent(conn, intent_id, now_ms=now_ms())
+            maybe_expire_quick_registration(conn, intent_id, now_ms=now_ms())
     if wrote and send is not None and text != prev_text:
         send(text)
 

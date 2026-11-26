@@ -1418,6 +1418,26 @@ def _merge_quick_cutoff(payload: dict[str, Any], counts: dict[str, int]) -> None
         payload["quick_cutoff"] = counts
 
 
+def _intent_finished_after(conn: Any, symbol: str, *, after_ms: int, exclude_intent_id: str | None) -> bool:
+    """True when another intent on the symbol was created after ``after_ms`` and finished."""
+    rows = conn.execute(
+        """
+        SELECT id, status, created_at_ms FROM assist_exec_intent
+        WHERE upper(symbol)=?
+          AND status IN (
+              'done', 'failed', 'expired', 'cancelled', 'declined', 'not_found', 'stale'
+          )
+        """,
+        (str(symbol).upper(),),
+    ).fetchall()
+    for row in rows:
+        if exclude_intent_id is not None and str(row["id"]) == str(exclude_intent_id):
+            continue
+        if int(row["created_at_ms"] or 0) > int(after_ms):
+            return True
+    return False
+
+
 def _cleanup_exec_linked_quick_jv(
     conn: Any,
     *,
@@ -1429,15 +1449,18 @@ def _cleanup_exec_linked_quick_jv(
 
     Runs whether JARVISE_ASSIST_CANCEL_OWNER is on or off. Owner orders are
     untouched. No-op when no registration is exec-linked (flag-off parity).
+
+    Re-reads live positions immediately before cancel (snapshot from before sync
+    can miss a reopen). Cancels only the closed intent's ``jv-<intent>-…`` ids.
     """
     del now_ms  # reserved for future lease / logging
+    del positions  # always re-read live; do not trust the pre-sync snapshot
     closed = quick_info.get("closed") or []
     exec_closed = [r for r in closed if r.get("exec_linked")]
     if not exec_closed:
         return []
     if assist_execute_mode() != "live":
         return []
-    open_syms = {str(p.symbol).upper() for p in positions}
     trade, _auth = build_trade_client()
     if trade is None:
         return []
@@ -1446,12 +1469,25 @@ def _cleanup_exec_linked_quick_jv(
         qsym = str(qrow.get("symbol") or "").upper()
         if not qsym:
             continue
-        if qsym in open_syms:
+        intent_id = qrow.get("exec_intent_id")
+        if not intent_id:
             continue
+        closed_at = qrow.get("closed_at_ms")
         if symbol_has_in_flight_exec(conn, qsym):
             continue
+        if closed_at is not None and _intent_finished_after(
+            conn, qsym, after_ms=int(closed_at), exclude_intent_id=str(intent_id)
+        ):
+            continue
         try:
-            ids, _ok = cancel_jv_orders_for_symbol(trade, qsym)
+            live = trade.position_risk()
+        except Exception:  # noqa: BLE001
+            logger.exception("exec-linked quick jv- position re-read failed for %s", qsym)
+            continue
+        if any(str(p.symbol).upper() == qsym for p in live):
+            continue
+        try:
+            ids, _ok = cancel_jv_orders_for_symbol(trade, qsym, intent_id=str(intent_id))
         except Exception:  # noqa: BLE001
             logger.exception("exec-linked quick jv- cancel failed for %s", qsym)
             continue

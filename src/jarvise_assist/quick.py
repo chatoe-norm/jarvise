@@ -435,26 +435,49 @@ def sync_quick_trades(
         except Exception:  # noqa: BLE001
             exec_intent_id = None
 
-        # Exec-linked: tag by bot jv-<intent>-mkt orderId (clock-skew safe).
+        # Exec-linked: tag by bot market orderId only (never time-match).
         bot_order_id: str | None = None
+        bot_client_id: str | None = None
         if exec_intent_id:
+            # Same formula as execute.client_order_id — avoid importing execute (cycle).
+            short = str(exec_intent_id).replace("aei_", "")[:12]
+            bot_client_id = f"jv-{short}-mkt"[:36]
             log = conn.execute(
                 """
-                SELECT order_or_algo_id, client_order_id FROM assist_exec_log
-                WHERE intent_id=? AND step='market'
-                ORDER BY created_at_ms DESC LIMIT 1
+                SELECT order_or_algo_id, client_order_id, step FROM assist_exec_log
+                WHERE intent_id=? AND step IN ('market', 'market_query', 'recovery', 'entry_price_query')
+                ORDER BY created_at_ms DESC
                 """,
                 (exec_intent_id,),
-            ).fetchone()
-            if log is not None:
-                bot_order_id = str(log["order_or_algo_id"] or "") or None
+            ).fetchall()
+            for row in log:
+                oid = str(row["order_or_algo_id"] or "") or None
+                if oid:
+                    bot_order_id = oid
+                    break
+                cid = str(row["client_order_id"] or "")
+                if cid:
+                    bot_client_id = cid
 
         # Broaden fetch window for exec-linked (fill may precede created_at on clock skew).
         fetch_start = created - (3_600_000 if exec_intent_id else 0)
         fills = fetch_all_user_trades(client, sym, start_ms=fetch_start, end_ms=int(now_ms) + 1)
 
-        if bot_order_id:
-            after = [f for f in fills if str(f.get("orderId") or "") == bot_order_id]
+        if exec_intent_id:
+            # Resolve order id via fill clientOrderId when log only has the deterministic cid.
+            if not bot_order_id and bot_client_id:
+                for f in fills:
+                    if str(f.get("clientOrderId") or "") == bot_client_id:
+                        bot_order_id = str(f.get("orderId") or "") or None
+                        if bot_order_id:
+                            break
+            if bot_order_id:
+                after = [f for f in fills if str(f.get("orderId") or "") == bot_order_id]
+            elif bot_client_id:
+                after = [f for f in fills if str(f.get("clientOrderId") or "") == bot_client_id]
+            else:
+                # Unresolved — wait; do not time-tag. Expiry grace still applies below.
+                after = []
             after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
         else:
             # First fill after created decides: wrong side → expire; opening → tag or grace.
@@ -563,6 +586,7 @@ def sync_quick_trades(
                     "closed_at_ms": closed_at,
                     "trade_id": trade_id,
                     "exec_linked": bool(exec_intent_id),
+                    "exec_intent_id": exec_intent_id,
                     "registration_id": rid,
                 }
             )
@@ -618,7 +642,8 @@ def sync_quick_trades(
                 "SELECT exec_intent_id FROM assist_quick_registration WHERE id=?",
                 (str(trade["registration_id"]),),
             ).fetchone()
-            exec_linked = bool(reg_row and reg_row["exec_intent_id"])
+            eid = str(reg_row["exec_intent_id"]) if reg_row and reg_row["exec_intent_id"] else None
+            exec_linked = bool(eid)
             info["closed"].append(
                 {
                     "symbol": sym,
@@ -626,6 +651,7 @@ def sync_quick_trades(
                     "closed_at_ms": closed_at,
                     "trade_id": trade_id,
                     "exec_linked": exec_linked,
+                    "exec_intent_id": eid,
                     "registration_id": str(trade["registration_id"]),
                 }
             )
