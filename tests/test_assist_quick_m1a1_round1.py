@@ -60,6 +60,9 @@ def _run_qk(
     *,
     now_ms: int = NOW,
     edit_returns: bool | None = True,
+    explore_lookup: Any = None,
+    explore_fetch: Any = None,
+    message_text: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[str | None], dict[str, Any], list[dict[str, Any]]]:
     sent: list[dict[str, Any]] = []
     edits: list[dict[str, Any]] = []
@@ -75,11 +78,14 @@ def _run_qk(
 
     answer_texts, answer = _answer_capture()
     chat_id = int((__import__("os").environ.get("TELEGRAM_CHAT_ID") or "42").strip())
+    msg: dict[str, Any] = {"chat": {"id": chat_id}, "message_id": 1}
+    if message_text is not None:
+        msg["text"] = message_text
     upd = {
         "callback_query": {
             "id": f"cq-{data}",
             "data": data,
-            "message": {"chat": {"id": chat_id}, "message_id": 1},
+            "message": msg,
         }
     }
     out = process_update(
@@ -90,6 +96,8 @@ def _run_qk(
         edit=edit,
         futures=fake,
         now_ms_value=now_ms,
+        explore_lookup=explore_lookup,
+        explore_fetch=explore_fetch,
     )
     return sent, answer_texts, out, edits
 

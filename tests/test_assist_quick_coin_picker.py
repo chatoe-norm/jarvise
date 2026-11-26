@@ -12,6 +12,7 @@ from tests.test_assist_quick_card import _happy_fake, _seed_settings
 from tests.test_assist_quick_m1a1_round1 import _run_qk
 
 from jarvise_assist import ASSIST_SYMBOLS
+from jarvise_assist.explore import connection_path, explore_db_path
 from jarvise_assist.listen import process_update
 from jarvise_assist.quick import build_coin_menu_keyboard, render_quick_menu
 from jarvise_assist.quick_card import parse_quick_command, quick_mode_tag
@@ -31,11 +32,30 @@ from jarvise_assist.sizing import expected_analysis_bar_ms
 from jarvise_assist.store import (
     ensure_settings,
     insert_explore_symbol,
+    list_explore_symbols,
     set_awaiting_quick_input,
 )
 from jarvise_ingest.db import open_db, upsert_analysis_output
 
 NOW = _ms_bangkok(2026, 11, 20, 12, 0)
+
+
+def _raise_network(*_a: Any, **_k: Any) -> Any:
+    raise AssertionError("network")
+
+
+@pytest.fixture(autouse=True)
+def _forbid_quick_picker_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any real Binance/kline entry from this file fails loudly."""
+    targets = (
+        "jarvise_ingest.providers.binance_klines.fetch_klines",
+        "jarvise_assist.futures.public_exchange_symbol",
+        "jarvise_assist.explore.fetch_klines",
+        "jarvise_assist.listen.fetch_klines",
+        "jarvise_assist.listen.public_exchange_symbol",
+    )
+    for path in targets:
+        monkeypatch.setattr(path, _raise_network)
 
 
 def _perp(symbol: str) -> dict[str, Any]:
@@ -274,7 +294,7 @@ def test_universe_lines(conn: Any) -> None:
     assert "0.25%" in text_a
 
 
-def test_qk_ea_happy_and_reject(conn: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+def test_qk_ea_happy_and_reject(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     _forbid_trade_client(monkeypatch)
     fake = _happy_fake()
@@ -284,12 +304,11 @@ def test_qk_ea_happy_and_reject(conn: Any, monkeypatch: pytest.MonkeyPatch, tmp_
         return _perp(sym) if sym.endswith("USDT") else None
 
     def fetch(symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
-        del interval, limit
-        # Minimal closed candle for seed
+        del limit
         return [
             {
                 "symbol": symbol,
-                "timeframe": "4h",
+                "timeframe": interval,
                 "timestamp": NOW - 4 * 3_600_000,
                 "open": 1.0,
                 "high": 1.1,
@@ -299,51 +318,38 @@ def test_qk_ea_happy_and_reject(conn: Any, monkeypatch: pytest.MonkeyPatch, tmp_
             }
         ]
 
-    sent, answers, out, edits = _run_qk(conn, "qk:ea:WIFUSDT", fake, now_ms=NOW)
-    # Without injected fetch/lookup via process_update — call handler directly
-    from jarvise_assist.quick_m1a1 import handle_quick_trade_callback
-
-    sent2: list[dict[str, Any]] = []
-    edits2: list[dict[str, Any]] = []
-    answers2: list[str | None] = []
-
-    def send(t: str, **kw: Any) -> int:
-        sent2.append({"text": t, **kw})
-        return 50 + len(sent2)
-
-    def edit(mid: int, text: str, **kw: Any) -> bool:
-        edits2.append({"mid": mid, "text": text, **kw})
-        return True
-
-    out2 = handle_quick_trade_callback(
+    sent, answers, out, edits = _run_qk(
         conn,
         "qk:ea:WIFUSDT",
-        futures=fake,
-        send=send,
-        answer=lambda t=None: answers2.append(t),
-        edit=edit,
-        message={"message_id": 1, "chat": {"id": 1}},
+        fake,
         now_ms=NOW,
         explore_lookup=lookup,
         explore_fetch=fetch,
     )
-    assert out2.get("step") == "pick_side"
-    assert any("WIF" in (s.get("text") or "") or "ทดลอง" in (s.get("text") or "") for s in sent2)
-    # reject core
-    out3 = handle_quick_trade_callback(
+    assert out.get("step") == "pick_side"
+    assert list_explore_symbols(conn) == ["WIFUSDT"]
+    explore = open_db(explore_db_path(connection_path(conn)))
+    try:
+        n = explore.execute(
+            "SELECT COUNT(*) AS n FROM market_technicals WHERE symbol=?",
+            ("WIFUSDT",),
+        ).fetchone()["n"]
+        assert int(n) > 0
+    finally:
+        explore.close()
+    assert any("WIF" in (s.get("text") or "") or "ทดลอง" in (s.get("text") or "") for s in sent)
+    assert any("WIF" in (e.get("text") or "") for e in edits) or out.get("step") == "pick_side"
+
+    sent2, _, out2, _ = _run_qk(
         conn,
         "qk:ea:BTCUSDT",
-        futures=fake,
-        send=send,
-        answer=lambda t=None: answers2.append(t),
-        edit=edit,
-        message={"message_id": 1, "chat": {"id": 1}},
+        fake,
         now_ms=NOW,
         explore_lookup=lookup,
         explore_fetch=fetch,
     )
-    assert out3.get("ok") is False or out3.get("explore", {}).get("ok") is False
-    del sent, answers, out, edits, tmp_path
+    assert out2.get("ok") is False or out2.get("explore", {}).get("ok") is False
+    del answers, sent2
 
 
 # --- 5-part sd --------------------------------------------------------------
@@ -681,6 +687,73 @@ def test_bk_cx_mx_bz(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         for b in row
     )
     del sent
+
+
+def test_qk_cx_bk_cs_preserve_cfg_await(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stale side-picker Cancel/Back/coin must not wipe a settings cfg: await."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    _forbid_trade_client(monkeypatch)
+    fake = _happy_fake()
+
+    set_awaiting_quick_input(conn, "cfg:quick_risk_pct", until_ms=NOW + 300_000)
+    _run_qk(conn, "qk:cx", fake, now_ms=NOW)
+    assert ensure_settings(conn)["awaiting_quick_input"] == "cfg:quick_risk_pct"
+
+    set_awaiting_quick_input(conn, "cfg:quick_risk_pct", until_ms=NOW + 300_000)
+    _run_qk(conn, "qk:bk", fake, now_ms=NOW)
+    assert ensure_settings(conn)["awaiting_quick_input"] == "cfg:quick_risk_pct"
+
+    set_awaiting_quick_input(conn, "cfg:quick_risk_pct", until_ms=NOW + 300_000)
+    _run_qk(conn, "qk:cs:BTCUSDT", fake, now_ms=NOW)
+    assert ensure_settings(conn)["awaiting_quick_input"] == "cfg:quick_risk_pct"
+
+
+def test_qk_mx_no_send_fallback_on_edit_fail(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    _forbid_trade_client(monkeypatch)
+    fake = _happy_fake()
+    sent, answers, out, edits = _run_qk(
+        conn,
+        "qk:mx",
+        fake,
+        now_ms=NOW,
+        edit_returns=False,
+        message_text="⚡ Quick · menu",
+    )
+    assert out.get("closed") is True
+    assert sent == []
+    assert answers[-1] is None
+    assert edits  # edit was attempted
+    assert edits[-1]["reply_markup"] == {"inline_keyboard": []}
+
+
+def test_typed_symbol_lookup_error_via_process_update(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prod Quick lookup must surface lookup_error, not 'coin not found'."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    _forbid_trade_client(monkeypatch)
+
+    class _BoomFutures:
+        def exchange_symbol(self, symbol: str) -> dict[str, Any] | None:
+            raise RuntimeError(f"boom:{symbol}")
+
+        def mark_price(self, symbol: str) -> Decimal:
+            del symbol
+            return Decimal("1")
+
+    set_awaiting_quick_input(conn, "symbol", until_ms=NOW + 300_000)
+    sent: list[str] = []
+    out = process_update(
+        conn,
+        {"message": {"chat": {"id": 1}, "text": "WIF"}},
+        send=lambda t, **_k: sent.append(t),
+        futures=_BoomFutures(),
+        now_ms_value=NOW,
+    )
+    assert out is not None
+    assert out.get("awaiting") == "symbol"
+    assert out.get("outcome") == "lookup_error"
+    assert sent[-1] == "อ่าน Binance ไม่ได้ — ลองพิมพ์ใหม่"
+    assert ensure_settings(conn)["awaiting_quick_input"] == "symbol"
 
 
 def test_qk_ot_sets_await(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
