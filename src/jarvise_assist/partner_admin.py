@@ -57,6 +57,7 @@ _OWNER_V_FAIL_MSG = f"อ่านยอดพอร์ตไม่ได้ —
 _OWNER_AMOUNT_MAX_MSG = "จำนวนใหญ่เกินที่ปุ่มยืนยันรองรับ — แบ่งรายการหรือใช้เครื่องมือย้อนหลัง"
 _OWNER_MAX_MICRO = 999_999_999_999
 _UNRECORDED_MSG = "มีเงินโอนเข้า/ออกที่ยังไม่บันทึก — บันทึกด้วย p owner ก่อน"
+_DEPOSIT_BLOCK_MSG = "ยกเลิกแล้วพิมพ์ p dep <ชื่อ> <ยอดจริง> ใหม่ — ยังไม่เห็นเงินเข้าหรือยอดไม่ตรง"
 
 _CENT = Decimal("0.01")
 _NAV_Q = Decimal("0.000001")
@@ -543,28 +544,58 @@ def _blocks_on_unrecorded(result: GuardResult) -> bool:
     return any(f.code in ("transfer_in_unrecorded", "transfer_out_unrecorded") for f in result.findings)
 
 
+def _blocks_on_deposit(result: GuardResult) -> str | None:
+    """Deposit confirm hard-block reason, or None when confirm may proceed/force.
+
+    Always refuse on fetch failure and on leftover / this-deposit findings.
+    Returns a short reason code for the callback result.
+    """
+    if result.status != "ok":
+        return "unrecorded_transfer"
+    codes = {str(f.code) for f in result.findings}
+    if codes & {"transfer_in_unrecorded", "transfer_out_unrecorded"}:
+        return "unrecorded_transfer"
+    if codes & {"this_deposit_not_seen", "this_deposit_amount_diff"}:
+        return "deposit_not_matched"
+    return None
+
+
 def _open_unrecorded_overview(conn: sqlite3.Connection, futures: Any, *, now_ms: int) -> tuple[str, int]:
     """Return (status, count). Live clear overrides a stale state-file list.
+
+    When live guard succeeds, count is from transfer_in/out_unrecorded findings
+    (not the state-file hint). Fetch failure / unknown stays unknown with 0.
 
     Invalidates the portal display cache on every evaluation (never stores),
     including a raising guard stub.
     """
-    from jarvise_assist import partner_unrecorded as pu
+    from jarvise_assist.partner_audit import guard_check
 
     client = _resolve_client(futures)
     try:
-        live = pu.guard_unrecorded_status(conn, client, now_ms=int(now_ms))
+        if client is None:
+            live = "unknown"
+            live_count = 0
+        else:
+            result = guard_check(conn, client, now_ms=int(now_ms))
+            if str(result.status) != "ok":
+                live = "unknown"
+                live_count = 0
+            else:
+                live_count = sum(
+                    1
+                    for f in result.findings
+                    if str(f.code) in ("transfer_in_unrecorded", "transfer_out_unrecorded")
+                )
+                live = "unrecorded" if live_count else "clear"
     except Exception:
         _admin_guard_seen()
         raise
     _admin_guard_seen()
-    hint = pu.open_unrecorded_hint(conn)
     if live == "clear":
         return "clear", 0
     if live == "unrecorded":
-        return "unrecorded", max(len(hint), 1)
-    if hint:
-        return "unrecorded", len(hint)
+        return "unrecorded", live_count
     return "unknown", 0
 
 
@@ -2256,8 +2287,24 @@ def handle_partner_callback(
 
             client = _resolve_client(futures)
             guard_suffix = ""
+            # Always run the guard for deposit so unrecorded / this_deposit_* /
+            # fetch failures cannot be force-confirmed (including forged pa:df:).
+            guard_result, guard_text = _transfer_guard(conn, client, now_ms=now_ms, req=req)
+            block_reason = _blocks_on_deposit(guard_result)
+            if block_reason is not None:
+                refuse_msg = _UNRECORDED_MSG if block_reason == "unrecorded_transfer" else _DEPOSIT_BLOCK_MSG
+                _answer(refuse_msg)
+                text = _merge_guard_text(str(msg.get("text") or ""), guard_text)
+                dep_refuse: dict[str, Any] = {
+                    "inline_keyboard": [[{"text": "✖️ ยกเลิก", "callback_data": f"pa:dn:{rid}"}]]
+                }
+                edited_ok = False
+                if mid is not None:
+                    edited_ok = bool(edit(int(mid), text, reply_markup=dep_refuse))
+                if mid is None or not edited_ok:
+                    send(text, reply_markup=dep_refuse)
+                return {"ok": False, "reason": block_reason}
             if _should_run_guard(force=force, ts_s=ts_s, now_ms=now_ms):
-                guard_result, guard_text = _transfer_guard(conn, client, now_ms=now_ms, req=req)
                 if guard_result.warn:
                     _answer("มีเรื่องยอดโอน — อ่านบนการ์ดก่อนยืนยัน")
                     text = _merge_guard_text(str(msg.get("text") or ""), guard_text)

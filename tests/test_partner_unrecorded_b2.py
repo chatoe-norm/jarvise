@@ -364,29 +364,7 @@ def test_cv_near_amount_warn_force_no_guard_text_to_partner(
     conn.close()
 
 
-def test_deposit_confirm_keeps_warn_force(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
-    conn = open_db(tmp_path / "dep.db")
-    _admin, bob = _seed(conn)
-    created = ps.create_request(conn, bob, "deposit", NOW, amount=D("50"), source="admin")
-    assert created["ok"]
-    rid = str(created["request_id"])
-    finding = Finding(
-        code="transfer_in_unrecorded",
-        fingerprint="bx:TRANSFER:d1",
-        time_ms=NOW - HOUR,
-        amount=D("50"),
-        partner_name=None,
-        detail="",
-        alertable=True,
-    )
-
-    def _fake_guard(conn: Any, client: Any, *, now_ms: int, req: Any) -> tuple[GuardResult, str]:
-        return (
-            GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[finding], warn=True),
-            "dep guard",
-        )
-
-    monkeypatch.setattr(pa, "_transfer_guard", _fake_guard)
+def _dep_cb_helpers() -> tuple[list[str | None], list[dict[str, Any]], Any, Any, Any]:
     answers: list[str | None] = []
     sent: list[dict[str, Any]] = []
 
@@ -400,6 +378,176 @@ def test_deposit_confirm_keeps_warn_force(tmp_path: Path, env_chat: None, monkey
         sent.append({"text": text, **kwargs})
         return True
 
+    return answers, sent, answer, send, edit
+
+
+def _assert_no_force_button(sent: list[dict[str, Any]]) -> None:
+    for entry in sent:
+        markup = entry.get("reply_markup") or {}
+        flat = [b.get("callback_data") for row in markup.get("inline_keyboard") or [] for b in row]
+        assert not any(str(c).startswith("pa:df:") for c in flat)
+
+
+def test_deposit_confirm_matching_inflow_books(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+    """Happy path: only this partner's matching inbound → pa:dy: confirms, no force."""
+    db = tmp_path / "dep_ok.db"
+    conn = open_db(db)
+    # Init-only ledger (skip historical partner deposits) so the only cash flow
+    # under guard is this pending request — mirrors test_cb_pa_dy_matching_inflow.
+    admin = ps.create_partner(conn, name="admin", is_admin=True, now_ms=NOW)
+    assert ps.apply_deposit(conn, admin["partner_id"], D("1000"), D("1000"), NOW)["ok"]
+    bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
+    created = ps.create_request(conn, bob["partner_id"], "deposit", NOW + 2, amount=D("100"), source="admin")
+    assert created["ok"]
+    rid = str(created["request_id"])
+    t_xfer = NOW + 3
+    client = FakeClient([_xfer(time_ms=t_xfer, amount="100", tran_id="dep_match")], wallet="1100")
+    monkeypatch.setattr(
+        pa,
+        "_read_v",
+        lambda *_a, **_k: AccountValue(
+            value=D("1100"),
+            wallet=D("1100"),
+            unrealized=D("0"),
+            open_positions=0,
+            read_at_ms=t_xfer + 30_000,
+        ),
+    )
+    _answers, sent, answer, send, edit = _dep_cb_helpers()
+    out = pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid}",
+        callback=_owner_cb(f"pa:dy:{rid}"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=t_xfer + 30_000,
+    )
+    assert out.get("ok") is True
+    assert out.get("cmd") == "dep_confirm"
+    assert str(ps.get_request(conn, rid)["status"]) == "confirmed"
+    _assert_no_force_button(sent)
+    conn.close()
+
+
+def test_deposit_confirm_other_unrecorded_blocks_force(
+    tmp_path: Path, env_chat: None, monkeypatch: Any
+) -> None:
+    """Partner 100 pairs; leftover owner 588 blocks pa:dy: and forged pa:df:."""
+    conn = open_db(tmp_path / "dep_other.db")
+    _admin, bob = _seed(conn)
+    created = ps.create_request(conn, bob, "deposit", NOW, amount=D("100"), source="admin")
+    assert created["ok"]
+    rid = str(created["request_id"])
+    t_xfer = NOW - 60_000
+    client = FakeClient(
+        [
+            _xfer(time_ms=t_xfer, amount="100", tran_id="partner100"),
+            _xfer(time_ms=t_xfer - 1000, amount="588", tran_id="owner588"),
+        ],
+        wallet="1688",
+    )
+    _answers, sent, answer, send, edit = _dep_cb_helpers()
+    out = pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid}",
+        callback=_owner_cb(f"pa:dy:{rid}"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    _assert_no_force_button(sent)
+    assert any(pa._UNRECORDED_MSG in (a or "") for a in _answers)
+
+    sent.clear()
+    _answers.clear()
+    stamp = NOW // 1000
+    out_f = pa.handle_partner_callback(
+        conn,
+        f"pa:df:{rid}:{stamp}",
+        callback=_owner_cb(f"pa:df:{rid}:{stamp}"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW + 1000,
+    )
+    assert out_f == {"ok": False, "reason": "unrecorded_transfer"}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    _assert_no_force_button(sent)
+    conn.close()
+
+
+def test_deposit_confirm_two_same_amount_blocks(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+    """Two same-amount unrecorded inbounds: leftover stays unrecorded → block."""
+    conn = open_db(tmp_path / "dep_dup.db")
+    _admin, bob = _seed(conn)
+    created = ps.create_request(conn, bob, "deposit", NOW, amount=D("100"), source="admin")
+    assert created["ok"]
+    rid = str(created["request_id"])
+    t_xfer = NOW - 60_000
+    client = FakeClient(
+        [
+            _xfer(time_ms=t_xfer, amount="100", tran_id="a100"),
+            _xfer(time_ms=t_xfer - 5000, amount="100", tran_id="b100"),
+        ],
+        wallet="1200",
+    )
+    _answers, sent, answer, send, edit = _dep_cb_helpers()
+    out = pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid}",
+        callback=_owner_cb(f"pa:dy:{rid}"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=client,
+        now_ms=NOW,
+    )
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    _assert_no_force_button(sent)
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    (
+        ("this_deposit_not_seen", "deposit_not_matched"),
+        ("this_deposit_amount_diff", "deposit_not_matched"),
+    ),
+)
+def test_deposit_confirm_this_deposit_hard_block(
+    tmp_path: Path, env_chat: None, monkeypatch: Any, code: str, reason: str
+) -> None:
+    conn = open_db(tmp_path / f"dep_{code}.db")
+    _admin, bob = _seed(conn)
+    created = ps.create_request(conn, bob, "deposit", NOW, amount=D("50"), source="admin")
+    assert created["ok"]
+    rid = str(created["request_id"])
+    finding = Finding(
+        code=code,
+        fingerprint=f"dep:{rid}",
+        time_ms=NOW - HOUR,
+        amount=D("50"),
+        partner_name="Bob",
+        detail="",
+        alertable=True,
+    )
+
+    def _fake_guard(conn: Any, client: Any, *, now_ms: int, req: Any) -> tuple[GuardResult, str]:
+        return (
+            GuardResult(status="ok", checked_at_ms=int(now_ms), findings=[finding], warn=True),
+            "dep guard",
+        )
+
+    monkeypatch.setattr(pa, "_transfer_guard", _fake_guard)
+    _answers, sent, answer, send, edit = _dep_cb_helpers()
     out = pa.handle_partner_callback(
         conn,
         f"pa:dy:{rid}",
@@ -409,10 +557,136 @@ def test_deposit_confirm_keeps_warn_force(tmp_path: Path, env_chat: None, monkey
         edit=edit,
         now_ms=NOW,
     )
-    assert out["reason"] == "guard_warn"
-    markup = sent[-1].get("reply_markup") or {}
-    flat = [b.get("callback_data") for row in markup.get("inline_keyboard") or [] for b in row]
-    assert any(str(c).startswith("pa:df:") for c in flat)
+    assert out == {"ok": False, "reason": reason}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    _assert_no_force_button(sent)
+    assert any(pa._DEPOSIT_BLOCK_MSG in (a or "") for a in _answers)
+
+    sent.clear()
+    stamp = NOW // 1000
+    out_f = pa.handle_partner_callback(
+        conn,
+        f"pa:df:{rid}:{stamp}",
+        callback=_owner_cb(f"pa:df:{rid}:{stamp}"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        now_ms=NOW + 1000,
+    )
+    assert out_f == {"ok": False, "reason": reason}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    conn.close()
+
+
+def test_deposit_confirm_guard_status_not_ok_blocks(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+    conn = open_db(tmp_path / "dep_fail.db")
+    _admin, bob = _seed(conn)
+    created = ps.create_request(conn, bob, "deposit", NOW, amount=D("50"), source="admin")
+    assert created["ok"]
+    rid = str(created["request_id"])
+
+    def _fake_guard(conn: Any, client: Any, *, now_ms: int, req: Any) -> tuple[GuardResult, str]:
+        return (
+            GuardResult(
+                status="read_failed",
+                checked_at_ms=int(now_ms),
+                findings=[],
+                warn=True,
+                error="xfer",
+            ),
+            "fetch failed",
+        )
+
+    monkeypatch.setattr(pa, "_transfer_guard", _fake_guard)
+    _answers, sent, answer, send, edit = _dep_cb_helpers()
+    out = pa.handle_partner_callback(
+        conn,
+        f"pa:dy:{rid}",
+        callback=_owner_cb(f"pa:dy:{rid}"),
+        send=send,
+        answer=answer,
+        edit=edit,
+        now_ms=NOW,
+    )
+    assert out == {"ok": False, "reason": "unrecorded_transfer"}
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
+    _assert_no_force_button(sent)
+    assert any(pa._UNRECORDED_MSG in (a or "") for a in _answers)
+    conn.close()
+
+
+def test_portal_deposit_still_works_while_unrecorded(
+    tmp_path: Path, monkeypatch: Any, env_chat: None
+) -> None:
+    """While unrecorded: partner can still open แจ้งฝาก / ฝาก N; cv stays locked."""
+    db = tmp_path / "portal_dep.db"
+    conn = open_db(db)
+    _admin, bob = _seed(conn)
+    conn.execute("UPDATE partner SET telegram_user_id = ? WHERE id = ?", ("99", bob))
+    conn.commit()
+    save_state(
+        Path(str(db)).with_name("partner_audit_state.json"),
+        {
+            "v": 1,
+            "alerted": {},
+            "open_unrecorded": ["bx:TRANSFER:open1"],
+            "last_ok_ms": NOW,
+            "fail_since_ms": None,
+            "fail_alerted": False,
+        },
+    )
+    row = ps.get_partner(conn, bob)
+    assert row is not None
+    av = AccountValue(value=D("1000"), wallet=D("1000"), unrealized=D("0"), open_positions=0, read_at_ms=NOW)
+    text, markup = portal._build_card(conn, row, av, now_ms=NOW, futures=None)
+    flat_text = [b.get("text") for row_b in (markup or {}).get("inline_keyboard") or [] for b in row_b]
+    assert any("แจ้งฝาก" in str(t) for t in flat_text)
+
+    answers: list[str | None] = []
+
+    def answer(_id: str, text: str | None = None) -> None:
+        answers.append(text)
+
+    def send(*_a: Any, **_k: Any) -> None:
+        return None
+
+    def edit(*_a: Any, **_k: Any) -> bool:
+        return True
+
+    out_cv = portal._submit_request(
+        conn,
+        row,
+        "cv",
+        answer=answer,
+        edit=edit,
+        send=send,
+        msg={"message_id": 1, "chat": {"id": "99", "type": "private"}},
+        futures=None,
+        now_ms=NOW,
+    )
+    assert out_cv["reason"] == "unrecorded_transfer"
+
+    created = ps.create_request(conn, bob, "deposit", NOW, amount=D("50"), source="portal")
+    assert created["ok"] is True
+    assert str(created.get("request_id") or "").startswith("pr_")
+    # Portal tip path still opens while locked.
+    tip = portal.handle_portal_callback(
+        conn,
+        "pp:dep",
+        callback={
+            "id": "cdep",
+            "data": "pp:dep",
+            "from": {"id": 99},
+            "message": {"message_id": 2, "chat": {"id": 99, "type": "private"}, "text": "x"},
+        },
+        send=send,
+        answer=answer,
+        edit=edit,
+        futures=None,
+        now_ms=NOW + 1,
+    )
+    assert tip.get("ok") is True
+    assert tip.get("cmd") == "dep_help"
     conn.close()
 
 
@@ -1007,8 +1281,66 @@ def test_live_clear_overrides_stale_state_hint(tmp_path: Path, monkeypatch: Any)
     conn.close()
 
 
-def test_overview_warns_unrecorded(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+def test_overview_warns_unrecorded_uses_live_count(tmp_path: Path, env_chat: None, monkeypatch: Any) -> None:
+    """4.1: overview count comes from live findings, not the state-file hint."""
     db = tmp_path / "ov.db"
+    conn = open_db(db)
+    _seed(conn)
+    save_state(
+        Path(str(db)).with_name("partner_audit_state.json"),
+        {
+            "v": 1,
+            "alerted": {},
+            "open_unrecorded": ["bx:TRANSFER:a", "bx:TRANSFER:b"],
+            "last_ok_ms": NOW,
+            "fail_since_ms": None,
+            "fail_alerted": False,
+        },
+    )
+    finding = Finding(
+        code="transfer_in_unrecorded",
+        fingerprint="bx:TRANSFER:live1",
+        time_ms=NOW - HOUR,
+        amount=D("50"),
+        partner_name=None,
+        detail="",
+        alertable=True,
+    )
+
+    def _one_live(*_a: Any, **_k: Any) -> GuardResult:
+        return GuardResult(status="ok", checked_at_ms=NOW, findings=[finding], warn=True)
+
+    monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _one_live)
+    av = AccountValue(value=D("1000"), wallet=D("1000"), unrealized=D("0"), open_positions=0, read_at_ms=NOW)
+    text = pa._overview_text(conn, av, now_ms=NOW, futures=FakeClient())
+    assert "มีเงินโอนที่ยังไม่บันทึก 1 รายการ" in text
+    assert "มีเงินโอนที่ยังไม่บันทึก 2 รายการ" not in text
+    assert "ตัวเลข partner ยังไม่ถูกต้อง" in text
+    assert "+10.00%" not in text
+    assert "220.00" not in text
+
+    # Stale empty hint + 1 live finding → still shows 1 (not max(0,1) from hint).
+    save_state(
+        Path(str(db)).with_name("partner_audit_state.json"),
+        {
+            "v": 1,
+            "alerted": {},
+            "open_unrecorded": [],
+            "last_ok_ms": NOW,
+            "fail_since_ms": None,
+            "fail_alerted": False,
+        },
+    )
+    text2 = pa._overview_text(conn, av, now_ms=NOW + 1, futures=FakeClient())
+    assert "มีเงินโอนที่ยังไม่บันทึก 1 รายการ" in text2
+    conn.close()
+
+
+def test_overview_fetch_failure_unknown_not_stale_hint_count(
+    tmp_path: Path, env_chat: None, monkeypatch: Any
+) -> None:
+    """4.1: fetch failure stays unknown with count 0 — do not advertise hint."""
+    db = tmp_path / "ov_hint.db"
     conn = open_db(db)
     _seed(conn)
     save_state(
@@ -1029,11 +1361,9 @@ def test_overview_warns_unrecorded(tmp_path: Path, env_chat: None, monkeypatch: 
     monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", _unknown)
     av = AccountValue(value=D("1000"), wallet=D("1000"), unrealized=D("0"), open_positions=0, read_at_ms=NOW)
     text = pa._overview_text(conn, av, now_ms=NOW, futures=FakeClient())
-    assert "มีเงินโอนที่ยังไม่บันทึก 2 รายการ" in text
-    assert "ตัวเลข partner ยังไม่ถูกต้อง" in text
-    # Unrecorded: suppress per-partner net / %
+    assert "กำลังตรวจยอดโอน" in text
+    assert "มีเงินโอนที่ยังไม่บันทึก" not in text
     assert "+10.00%" not in text
-    assert "220.00" not in text
     conn.close()
 
 
@@ -1638,13 +1968,10 @@ def test_admin_overview_invalidates_portal_display_cache(
 
     if after_mode == "exception":
 
-        def boom_status(*_a: Any, **_k: Any) -> str:
+        def boom_check(*_a: Any, **_k: Any) -> GuardResult:
             raise RuntimeError("overview guard boom")
 
-        monkeypatch.setattr(
-            "jarvise_assist.partner_unrecorded.guard_unrecorded_status",
-            boom_status,
-        )
+        monkeypatch.setattr("jarvise_assist.partner_audit.guard_check", boom_check)
     else:
         mode["v"] = after_mode
 
@@ -2215,7 +2542,7 @@ def test_deposit_amount_diff_does_not_store_clear_over_unrecorded(
         futures=FakeClient(),
         now_ms=NOW + 1,
     )
-    assert out["reason"] == "guard_warn"
+    assert out["reason"] == "deposit_not_matched"
     # Must not promote to clear (the class of bug under test).
     assert pu._display_cache is None or pu._display_cache[1] != "clear"
 

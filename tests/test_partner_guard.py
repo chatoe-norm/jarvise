@@ -676,7 +676,7 @@ def test_cb_pa_dy_matching_inflow_confirms(tmp_path: Path, monkeypatch: Any, env
     conn.close()
 
 
-def test_cb_pa_dy_no_inflow_warns_no_event(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+def test_cb_pa_dy_no_inflow_hard_blocks_no_event(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
     conn = open_db(tmp_path / "dy_miss.db")
     _init_ledger(conn)
     bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
@@ -685,9 +685,16 @@ def test_cb_pa_dy_no_inflow_warns_no_event(tmp_path: Path, monkeypatch: Any, env
     rid = str(created["request_id"])
     client = FakeClient()
     client.wallet = "1100"
-    out, _s, edited, _a = _pa_cb(conn, f"pa:dy:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 3)
-    assert out == {"ok": False, "reason": "guard_warn"}
+    out, _s, edited, answers = _pa_cb(
+        conn, f"pa:dy:{rid}", client=client, monkeypatch=monkeypatch, now_ms=NOW + 3
+    )
+    assert out == {"ok": False, "reason": "deposit_not_matched"}
     assert "ยังไม่เห็นเงินฝาก" in edited[0]["text"]
+    markup = edited[0].get("reply_markup") or {}
+    flat = [b.get("callback_data") for row in markup.get("inline_keyboard") or [] for b in row]
+    assert not any(str(c).startswith("pa:df:") for c in flat)
+    assert any(str(c).startswith("pa:dn:") for c in flat)
+    assert any(pa._DEPOSIT_BLOCK_MSG in (a[1] or "") for a in answers)
     assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == n_ev
     assert str(ps.get_request(conn, rid)["status"]) == "pending"
     conn.close()
@@ -790,7 +797,8 @@ def test_cb_portal_request_pa_ry_runs_guard(tmp_path: Path, monkeypatch: Any, en
     conn.close()
 
 
-def test_cb_pa_dy_warn_then_df_override(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+def test_cb_pa_dy_no_inflow_force_also_blocked(tmp_path: Path, monkeypatch: Any, env_chat: None) -> None:
+    """1B: this_deposit_not_seen hard-blocks; forged pa:df: inside window cannot book."""
     conn = open_db(tmp_path / "dy_df.db")
     _init_ledger(conn)
     bob = ps.create_partner(conn, name="Bob", now_ms=NOW + 1)
@@ -805,15 +813,13 @@ def test_cb_pa_dy_warn_then_df_override(tmp_path: Path, monkeypatch: Any, env_ch
     out1, sent1, edited1, _a1 = _pa_cb(
         conn, f"pa:dy:{rid}", client=client, monkeypatch=monkeypatch, now_ms=now
     )
-    assert out1 == {"ok": False, "reason": "guard_warn"}
-    assert edited1[0]["reply_markup"]["inline_keyboard"] == [
-        [{"text": "⚠️ ยืนยันทั้งที่มีเตือน", "callback_data": f"pa:df:{rid}:{now // 1000}"}],
-        [{"text": "✖️ ยกเลิก", "callback_data": f"pa:dn:{rid}"}],
-    ]
+    assert out1 == {"ok": False, "reason": "deposit_not_matched"}
+    markup = edited1[0]["reply_markup"]["inline_keyboard"]
+    assert markup == [[{"text": "✖️ ยกเลิก", "callback_data": f"pa:dn:{rid}"}]]
     assert sent1 == []
     stamp = now // 1000
-    client.calls.clear()
-    out2, sent2, edited2, _a2 = _pa_cb(
+    n_ev = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
+    out2, sent2, _edited2, _a2 = _pa_cb(
         conn,
         f"pa:df:{rid}:{stamp}",
         client=client,
@@ -821,24 +827,11 @@ def test_cb_pa_dy_warn_then_df_override(tmp_path: Path, monkeypatch: Any, env_ch
         now_ms=now + 899_000,
         text=edited1[0]["text"],
     )
-    assert out2.get("ok") is True
-    assert client.calls == []
-    assert "บันทึกฝากแล้ว" in edited2[0]["text"]
-    assert "⚠️ ยืนยันทั้งที่มีคำเตือนยอดโอน" in edited2[0]["text"]
-    partner_msgs = [s["text"] for s in sent2 if s.get("chat_id") == "501"]
-    assert partner_msgs == ["✅ บันทึกเงินฝาก 100.00 USDT แล้ว · ทุนรวม 100.00 USDT"]
-    n_ev = int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"])
-    out3, _s3, _e3, _a3 = _pa_cb(
-        conn,
-        f"pa:df:{rid}:{stamp}",
-        client=client,
-        monkeypatch=monkeypatch,
-        now_ms=now + 899_000,
-        text=edited2[0]["text"],
-    )
-    assert out3.get("ok") is False
-    assert out3.get("reason") == "request_not_pending"
+    assert out2 == {"ok": False, "reason": "deposit_not_matched"}
+    assert client.calls != []  # force still re-runs the guard
+    assert str(ps.get_request(conn, rid)["status"]) == "pending"
     assert int(conn.execute("SELECT COUNT(*) AS n FROM partner_event").fetchone()["n"]) == n_ev
+    assert sent2 == [] or all(s.get("chat_id") != "501" for s in sent2)
     conn.close()
 
 
