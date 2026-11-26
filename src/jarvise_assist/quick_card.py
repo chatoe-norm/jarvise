@@ -907,17 +907,9 @@ def build_quick_card(
     )
     main_open = sum((i.risk_usdt for i in main_ideas), Decimal("0"))
 
-    quick_open = Decimal("0")
-    for row in conn.execute("SELECT risk_usdt FROM assist_quick_trade WHERE status='open'").fetchall():
-        quick_open += Decimal(str(row[0] or 0))
-    for row in conn.execute(
-        """
-        SELECT planned_entry, planned_stop, qty FROM assist_quick_registration
-        WHERE status='open'
-        """
-    ).fetchall():
-        pe, ps, q = Decimal(str(row[0])), Decimal(str(row[1])), Decimal(str(row[2]))
-        quick_open += abs(pe - ps) * q
+    from jarvise_assist.quick_execute import sum_quick_open_risk_usdt
+
+    quick_open = sum_quick_open_risk_usdt(conn)
 
     new_risk = sized.loss_at_stop
     cap_usdt = balance * (cap_pct / Decimal("100"))
@@ -1088,6 +1080,64 @@ def build_quick_card(
         f"quick {_pct_of_bal(quick_open)}% + ไม้นี้ {_pct_of_bal(new_risk)}% (ไม่รวมค่าธรรมเนียม) "
         f"(เพดาน quick {fmt_price(cap_pct)}% · รวม {fmt_price(portfolio_cap_pct)}%)"
     )
+
+    bot_eligible = False
+    from jarvise_assist.quick_execute import (
+        combined_same_side_risk_usdt,
+        quick_execute_enabled,
+        symbol_in_quick_exec_universe,
+        universe_line_for_mode,
+    )
+    from jarvise_assist.quick_regime import quick_side_risk, quick_trend_4h
+
+    if quick_execute_enabled():
+        universe = str(_cfg.values.get("quick_exec_universe") or "core_explore")
+        in_uni = symbol_in_quick_exec_universe(conn, sym, universe=universe)
+        if not in_uni:
+            lines.append(universe_line_for_mode(universe))
+        elif size_mode == "risk":
+            bot_eligible = True
+            trend = quick_trend_4h(conn, sym, now_ms=now_ms)
+            is_counter, bot_risk = quick_side_risk(trend, side_l, _eff)
+            if is_counter:
+                bot_sized = size_signal(
+                    symbol=sym,
+                    side=side_l,
+                    entry=mark,
+                    stop=stop_level,
+                    balance=balance,
+                    risk_pct=bot_risk,
+                    step_size=step,
+                )
+                if bot_sized is not None:
+                    bot_fee = (Decimal("2") * QUICK_FEE_BPS_PER_SIDE / Decimal("10000")) * bot_sized.notional
+                    bot_loss = bot_sized.loss_at_stop + bot_fee
+                    if trend == "unknown":
+                        lines.append(
+                            f"🔴 ไม่ทราบเทรนด์ · บอทใช้ risk {fmt_price(bot_risk)}%"
+                            f" · qty {fmt_qty(bot_sized.qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
+                        )
+                    else:
+                        lines.append(
+                            f"🔴 สวนเทรนด์ · บอทใช้ risk {fmt_price(bot_risk)}%"
+                            f" · qty {fmt_qty(bot_sized.qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
+                        )
+            warn_pct = Decimal(str(_cfg.values["quick_combined_risk_warn_pct"]))
+            combined = combined_same_side_risk_usdt(
+                conn,
+                side=side_l,
+                new_risk=new_risk,
+                positions=positions,
+                orders=orders,
+                balance=balance,
+                now_ms=now_ms,
+            )
+            if balance > 0 and (combined / balance * Decimal("100")) > warn_pct:
+                lines.append(
+                    f"⚠ ความเสี่ยงทางเดียวกัน (หลัก+quick) รวม {_pct_of_bal(combined)}%"
+                    f" เกินระดับเตือน {fmt_price(warn_pct)}%"
+                )
+
     lines.append(
         f"{CARD_TTL_PREFIX} {_hhmmss(card_until)} (หมดแล้วกด 🔄 อัปเดตราคา) · "
         "บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน 10 นาที"
@@ -1115,9 +1165,11 @@ def build_quick_card(
         "symbol": sym,
         "side": side_l,
         "positions": positions,
+        "orders": orders,
         "fees": fees,
         "callback_data": cb if reply_markup is not None else None,
         "size_mode": size_mode,
+        "bot_eligible": bot_eligible,
     }
 
 
@@ -1129,10 +1181,7 @@ def handle_quick_text(
     send: SendFn,
     now_ms: int,
 ) -> dict[str, Any] | None:
-    from jarvise_assist.quick_m1a1 import (
-        _quoted_markup_for,
-        create_card_from_typed_command,
-    )
+    from jarvise_assist.quick_m1a1 import create_card_from_typed_command
 
     parsed = parse_quick_command(text)
     if parsed is None:
@@ -1154,7 +1203,9 @@ def handle_quick_text(
     card_id, card = create_card_from_typed_command(conn, futures, parsed, now_ms=now_ms)
     markup = card.get("reply_markup")
     if card.get("ok") and card_id:
-        markup = _quoted_markup_for(card_id, str(card.get("size_mode") or "risk"))
+        from jarvise_assist.quick_m1a1 import _quoted_markup_for_card
+
+        markup = _quoted_markup_for_card(conn, card_id, card)
     elif not card.get("ok"):
         markup = None
     send(card["text"], reply_markup=markup)

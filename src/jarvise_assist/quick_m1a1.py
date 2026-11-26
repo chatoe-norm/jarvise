@@ -276,21 +276,45 @@ def _quoted_markup(card_id: str) -> dict[str, Any]:
     return _quoted_markup_for(card_id, "risk")
 
 
-def _quoted_markup_for(card_id: str, size_mode: str) -> dict[str, Any]:
+def _quoted_markup_for(
+    card_id: str,
+    size_mode: str,
+    *,
+    show_bot: bool = False,
+) -> dict[str, Any]:
     rg = f"qk:rg:{card_id}"
     rf = f"qk:rf:{card_id}"
     xb = f"qk:x:{card_id}"
-    for cb in (rg, rf, xb):
+    ex = f"qk:ex:{card_id}"
+    for cb in (rg, rf, xb, ex):
         if len(cb.encode("utf-8")) > 64:
             raise ValueError(f"callback_data exceeds 64 bytes: {cb!r}")
     mode = str(size_mode or "risk")
     reg_label = _BTN_REGISTER_OFFER if mode in {"min_lot", "fit_margin"} else _BTN_REGISTER
-    return {
-        "inline_keyboard": [
-            [{"text": reg_label, "callback_data": rg}],
-            [{"text": _BTN_REFRESH, "callback_data": rf}, {"text": _BTN_CANCEL, "callback_data": xb}],
-        ]
-    }
+    rows: list[list[dict[str, str]]] = []
+    if show_bot and mode == "risk":
+        from jarvise_assist.quick_execute import BTN_QUICK_BOT_ENTER
+
+        rows.append([{"text": BTN_QUICK_BOT_ENTER, "callback_data": ex}])
+    rows.append([{"text": reg_label, "callback_data": rg}])
+    rows.append([{"text": _BTN_REFRESH, "callback_data": rf}, {"text": _BTN_CANCEL, "callback_data": xb}])
+    return {"inline_keyboard": rows}
+
+
+def _quoted_markup_for_card(conn: Any, card_id: str, card: dict[str, Any]) -> dict[str, Any]:
+    """Build quoted markup; bot button only when flag on + eligible (D4/universe)."""
+    from jarvise_assist.quick_execute import quick_execute_enabled, symbol_in_quick_exec_universe
+
+    size_mode = str(card.get("size_mode") or "risk")
+    show_bot = False
+    if quick_execute_enabled() and size_mode == "risk":
+        if card.get("bot_eligible") is True:
+            show_bot = True
+        else:
+            sym = str(card.get("symbol") or "").upper()
+            if sym and symbol_in_quick_exec_universe(conn, sym):
+                show_bot = True
+    return _quoted_markup_for(card_id, size_mode, show_bot=show_bot)
 
 
 def _mode_tag() -> str:
@@ -483,6 +507,221 @@ def _render_registered_card_edit(
         edit(body, {"inline_keyboard": []})
     except Exception:  # noqa: BLE001
         logger.exception("qk:rg idempotent edit failed card_id=%s", row.get("id"))
+
+
+def _handle_qk_ex(
+    conn: Any,
+    card_id: str,
+    row: dict[str, Any],
+    st: str,
+    *,
+    futures: Any,
+    send: SendFn,
+    answer: Callable[[str | None], None],
+    edit: Callable[[str, dict[str, Any] | None], bool],
+    now_ms: int,
+) -> dict[str, Any]:
+    """qk:ex — preview bot Quick entry. Zero trade-client writes."""
+    from jarvise_assist.execute import assist_execute_mode
+    from jarvise_assist.quick_execute import (
+        any_non_jv_open_order,
+        build_bot_plan,
+        format_quick_confirm_text,
+        in_quick_bot_night,
+        pause_blocks_bot,
+        quick_execute_enabled,
+        same_side_blocks,
+        symbol_busy_for_bot,
+        symbol_in_quick_exec_universe,
+        unfinished_entry_for_card,
+        universe_line_for_mode,
+    )
+    from jarvise_assist.store import insert_exec_intent
+
+    # Flag / execute mode off → refuse with zero trade writes.
+    if not quick_execute_enabled() or assist_execute_mode() == "off":
+        answer("ปิดอยู่")
+        send("บอทเข้าไม้ quick ปิดอยู่")
+        return {"ok": False, "reason": "off"}
+
+    if st != "quoted":
+        answer(MSG_BAD_BUTTON)
+        return {"ok": False}
+
+    quoted_at = int(row.get("quoted_at_ms") or 0)
+    if _quote_is_expired(quoted_at, now_ms):
+        body = _decorate_card_text("\n".join([MSG_CARD_QUOTE_EXPIRED, _mode_tag()]))
+        edit(body, _refresh_only_markup(card_id))
+        answer(MSG_CARD_QUOTE_EXPIRED)
+        return {"ok": False, "quote_expired": True}
+
+    if str(row.get("size_mode") or "risk") != "risk":
+        answer(None)
+        send("บอทเข้าไม้ได้เฉพาะขนาดตาม risk — ข้อเสนอ min-lot/fit-margin บันทึกอย่างเดียว")
+        return {"ok": False, "reason": "size_mode"}
+
+    if unfinished_entry_for_card(conn, card_id):
+        answer(None)
+        send("มีคำยืนยันเข้าไม้ของการ์ดนี้อยู่แล้ว — รอให้หมดอายุหรือกดยกเลิกก่อน")
+        return {"ok": False, "reason": "double_tap"}
+
+    sym = str(row["symbol"]).upper()
+    side = str(row["side"])
+    cfg = get_quick_config(conn)
+    values = cfg.values
+    universe = str(values.get("quick_exec_universe") or "core_explore")
+    if not symbol_in_quick_exec_universe(conn, sym, universe=universe):
+        answer(None)
+        send(universe_line_for_mode(universe))
+        return {"ok": False, "reason": "universe"}
+
+    if pause_blocks_bot(conn, now_ms=now_ms):
+        answer(None)
+        send("⏸ ระบบหลักพักอยู่ — บอทเข้าไม้ quick ไม่ได้")
+        return {"ok": False, "reason": "paused"}
+
+    night_start = str(values["quick_night_start"])
+    night_end = str(values["quick_night_end"])
+    if in_quick_bot_night(now_ms, start=night_start, end=night_end):
+        answer(None)
+        send(f"🌙 ช่วงคืนของบอท ({night_start}–{night_end}) — เข้าไม้ไม่ได้")
+        return {"ok": False, "reason": "night"}
+
+    if in_entry_block(now_ms):
+        send(cutoff_block_text(now_ms))
+        answer(None)
+        return {"ok": False, "reason": "cutoff_block"}
+
+    busy = symbol_busy_for_bot(conn, sym)
+    if busy:
+        answer(None)
+        send(REFUSAL.get(busy, REFUSAL.get("read_failed", "ไม่พร้อม")))
+        return {"ok": False, "reason": busy}
+
+    if same_side_blocks(conn, side):
+        from jarvise_assist.quick_cap import count_open_same_side, same_side_cap_text
+
+        answer(None)
+        send(same_side_cap_text(side, count_open_same_side(conn, side)))
+        return {"ok": False, "reason": "same_side_cap"}
+
+    try:
+        card = build_card_at_quoted_stop(conn, futures, row, now_ms=now_ms)
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:ex build card failed card_id=%s", card_id)
+        answer(MSG_REGISTER_FAILED)
+        return {"ok": False, "reason": "read_failed"}
+
+    if not card.get("ok"):
+        send(str(card.get("text") or REFUSAL.get("read_failed", "")))
+        answer(None)
+        return {"ok": False, "reason": card.get("reason")}
+
+    orders = list(card.get("orders") or [])
+    if not orders and futures is not None:
+        try:
+            orders = list(futures.all_open_orders())
+        except Exception:  # noqa: BLE001
+            orders = []
+    if any_non_jv_open_order(orders, sym):
+        answer(None)
+        send("มีออเดอร์ที่ไม่ใช่ jv- บนสัญลักษณ์นี้ (รวม reduce-only) — ยกเลิกก่อน")
+        return {"ok": False, "reason": "non_jv_order"}
+
+    positions = list(card.get("positions") or [])
+    for pos in positions:
+        if str(getattr(pos, "symbol", "") or "").upper() == sym:
+            answer(None)
+            send(REFUSAL.get("main_position", "ถือ position อยู่แล้ว"))
+            return {"ok": False, "reason": "open_position"}
+
+    entry = Decimal(str(card["entry"]))
+    stop = Decimal(str(card["stop"]))
+    tick = Decimal(str(card.get("tick") or "0.0001"))
+    try:
+        balance, available = futures.usdt_wallet_and_available()
+        filters = futures.symbol_filters(sym)
+        balance = Decimal(str(balance))
+        available = Decimal(str(available))
+        step = Decimal(str(filters.step_size))
+        min_qty = Decimal(str(filters.min_qty))
+        min_notional = Decimal(str(filters.min_notional))
+    except Exception:  # noqa: BLE001
+        logger.exception("qk:ex wallet/filters failed")
+        answer(MSG_REGISTER_FAILED)
+        return {"ok": False, "reason": "read_failed"}
+
+    plan = build_bot_plan(
+        conn,
+        symbol=sym,
+        side=side,
+        entry=entry,
+        stop=stop,
+        balance=balance,
+        available=available,
+        step=step,
+        tick=tick,
+        min_qty=min_qty,
+        min_notional=min_notional,
+        now_ms=now_ms,
+        positions=positions,
+        orders=orders,
+    )
+    if plan is None:
+        answer(None)
+        send("คำนวณขนาดบอทไม่ได้ — กด 🔄 อัปเดตราคา")
+        return {"ok": False, "reason": "size_failed"}
+
+    ttl_s = int(values["quick_confirm_ttl_s"])
+    preview = {
+        "origin": "quick",
+        "cohort": "quick",
+        "card_id": card_id,
+        "symbol": sym,
+        "side": side,
+        "qty": str(plan["qty"]),
+        "entry": str(plan["entry"]),
+        "stop": str(plan["stop"]),
+        "t1": str(plan["t1"]),
+        "target": str(plan["t1"]),  # run_entry_sequence reads target; Quick uses t1
+        "tp_half_qty": str(plan["tp_half_qty"]) if plan["tp_half_qty"] is not None else None,
+        "tp_refuse": plan.get("tp_refuse"),
+        "leverage": int(plan["leverage"]),
+        "loss_at_stop": str(plan["loss_at_stop"]),
+        "loss_at_stop_incl_fees": str(plan["loss_at_stop_incl_fees"]),
+        "risk_pct_used": str(plan["risk_pct_used"]),
+        "counter_trend": bool(plan["counter_trend"]),
+        "trend": plan["trend"],
+        "combined_warn": bool(plan["combined_warn"]),
+        "tick": str(tick),
+        "cfg": plan["cfg"],
+    }
+    intent_id = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol=sym,
+        side=side,
+        preview=preview,
+        created_at_ms=int(now_ms),
+        expires_at_ms=int(now_ms) + int(ttl_s) * 1000,
+    )
+    confirm = format_quick_confirm_text(plan, symbol=sym, side=side, ttl_s=ttl_s, tick=tick)
+    ey_cb = f"ey:{intent_id}"
+    en_cb = f"en:{intent_id}"
+    for cb in (ey_cb, en_cb):
+        if len(cb.encode("utf-8")) > 64:
+            answer(None)
+            send("ปุ่มยืนยันยาวเกิน 64 ไบต์")
+            return {"ok": False, "reason": "callback_too_long"}
+    markup = {
+        "inline_keyboard": [
+            [{"text": "✅ ยืนยันให้บอทเข้า", "callback_data": ey_cb}],
+            [{"text": "✖️ ยกเลิก", "callback_data": en_cb}],
+        ]
+    }
+    send(confirm, reply_markup=markup)
+    answer(None)
+    return {"ok": True, "intent_id": intent_id, "preview": True}
 
 
 def _handle_qk_register(
@@ -1118,6 +1357,19 @@ def handle_quick_trade_callback(
         answer(None)
         return {"ok": True, "cancelled": True}
 
+    if op == "ex":
+        return _handle_qk_ex(
+            conn,
+            card_id,
+            row,
+            st,
+            futures=futures,
+            send=send,
+            answer=answer,
+            edit=_edit,
+            now_ms=now_ms,
+        )
+
     if op == "rg":
         return _handle_qk_register(
             conn,
@@ -1255,7 +1507,7 @@ def handle_quick_trade_callback(
             now_ms=now_ms,
         )
         body = _decorate_card_text(str(rebuilt["text"]))
-        _edit(body, _quoted_markup_for(card_id, str(rebuilt.get("size_mode") or "risk")))
+        _edit(body, _quoted_markup_for_card(conn, card_id, rebuilt))
         answer(None)
         return {"ok": True, "refreshed": True}
 
@@ -1285,7 +1537,7 @@ def _finalize_quoted_card(
     _persist_quote(conn, card_id, card, stop_kind=stop_kind, stop_value=stop_value, now_ms=now_ms)
     edit(
         _decorate_card_text(str(card["text"])),
-        _quoted_markup_for(card_id, str(card.get("size_mode") or "risk")),
+        _quoted_markup_for_card(conn, card_id, card),
     )
     answer(None)
     return {"ok": True, "quoted": True}
@@ -1446,7 +1698,7 @@ def handle_quick_draft_text(
                 card_id=card_id,
                 message_id=int(draft["message_id"]) if draft.get("message_id") else None,
                 text=_decorate_card_text(str(card["text"])),
-                markup=_quoted_markup_for(card_id, str(card.get("size_mode") or "risk")),
+                markup=_quoted_markup_for_card(conn, card_id, card),
                 send=send,
                 edit=edit,
             )
@@ -1513,7 +1765,7 @@ def handle_quick_draft_text(
             card_id=card_id,
             message_id=int(draft["message_id"]) if draft.get("message_id") else None,
             text=_decorate_card_text(str(card["text"])),
-            markup=_quoted_markup_for(card_id, str(card.get("size_mode") or "risk")),
+            markup=_quoted_markup_for_card(conn, card_id, card),
             send=send,
             edit=edit,
         )
