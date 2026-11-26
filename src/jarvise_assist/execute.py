@@ -2125,7 +2125,12 @@ def _confirm_guards_quick_entry(
         lev_cap = min(lev_cap, int(frozen_cfg["lev_used"]))
 
     mark = trade.mark_price(symbol)
-    # Testnet: map mainnet preview levels by % onto the demo mark before guards.
+    # Chase against frozen preview levels BEFORE testnet remaps entry→mark
+    # (mapping would make chase always zero). Preview entry is the quote-time
+    # reference (mainnet or demo mark frozen at confirm-card).
+    if quick_chase_exceeded(side=side, entry=entry, stop=stop, mark=mark, chase_r=chase_r):
+        return "chase"
+    # Testnet: map mainnet preview levels by % onto the demo mark after chase.
     if assist_execute_mode() == "testnet":
         t1_prev = Decimal(str(preview.get("t1") or preview.get("target") or entry))
         stop, t1_mapped = _apply_pct_levels(
@@ -2143,8 +2148,6 @@ def _confirm_guards_quick_entry(
             "t1": str(t1_mapped),
             "target": str(t1_mapped),
         }
-    if quick_chase_exceeded(side=side, entry=entry, stop=stop, mark=mark, chase_r=chase_r):
-        return "chase"
 
     filters = trade.symbol_filters(symbol)
     if not quick_stop_buffer_ok(
@@ -5404,17 +5407,15 @@ def handle_exec_callback(
                         origin="quick" if is_quick_ey else None,
                     )
                     if is_quick_ey:
-                        status_r = (
-                            result.status
-                            if isinstance(result, ExecResult)
-                            else ("done" if str(result).startswith("✅") else "failed")
+                        # Persist outcome first — proven_unfilled reads intent status
+                        # (still "confirmed" before _finish_send would refuse expire).
+                        out = _finish_send(result)
+                        from jarvise_assist.quick_execute import (
+                            maybe_expire_quick_registration,
                         )
-                        if status_r == "failed":
-                            from jarvise_assist.quick_execute import (
-                                maybe_expire_quick_registration,
-                            )
 
-                            maybe_expire_quick_registration(conn, intent_id, now_ms=ts)
+                        maybe_expire_quick_registration(conn, intent_id, now_ms=ts)
+                        return out
                     return _finish_send(result)
 
                 if prefix == "ms:":
@@ -5879,6 +5880,7 @@ def _recover_entry_intent(
             return
         if vr_err == StopVerifyResult.UNVERIFIABLE:
             return
+        is_quick_recover = str(preview.get("origin") or "") == "quick"
         reply = _emergency_close_reply(
             trade,
             conn=conn,
@@ -5889,6 +5891,7 @@ def _recover_entry_intent(
             stop=stop,
             stop_err=str(exc),
             sleep=sleep,
+            unresolved_as_unknown=is_quick_recover,
         )
         _recovery_notify(
             send,
@@ -5923,6 +5926,7 @@ def _recover_entry_intent(
         return
     if vr2 == StopVerifyResult.UNVERIFIABLE:
         return
+    is_quick_recover = str(preview.get("origin") or "") == "quick"
     reply = _emergency_close_reply(
         trade,
         conn=conn,
@@ -5933,6 +5937,7 @@ def _recover_entry_intent(
         stop=stop,
         stop_err="slr not verified",
         sleep=sleep,
+        unresolved_as_unknown=is_quick_recover,
     )
     _recovery_notify(
         send,

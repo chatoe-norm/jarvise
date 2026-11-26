@@ -563,7 +563,13 @@ def quick_entry_proven_unfilled(conn: Any, intent_id: str) -> bool:
     }
     if steps & fill_evidence:
         return False
-    market_steps = {"market", "market_query", "recovery", "entry_price_query"}
+    market_steps = {
+        "market",
+        "market_query",
+        "recover_market_query",
+        "recovery",
+        "entry_price_query",
+    }
     if not (steps & market_steps):
         return True
     intent = conn.execute(

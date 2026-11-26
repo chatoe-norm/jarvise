@@ -1744,13 +1744,15 @@ def test_fix1_testnet_pct_levels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     claim_exec_intent(conn, iid)
     intent = get_exec_intent(conn, iid)
     assert intent is not None
-    # Demo mark far from mainnet levels — without mapping this would chase/refuse.
-    trade = RecordingTrade(mark=Decimal("200"), balance=Decimal("10000"))
+    # Demo mark within chase of preview entry; mapping still remaps stop/t1 by %.
+    # (Far marks are covered by test_a4_testnet_chase_refuses_beyond_limit.)
+    trade = RecordingTrade(mark=Decimal("100.1"), balance=Decimal("10000"))
     guard = _confirm_guards_quick_entry(conn, intent, trade, now_ms_value=ts + 1_000)
     assert guard is None, guard
     updated = get_exec_intent(conn, iid)
     assert updated is not None
-    assert Decimal(str(updated["preview"]["stop"])) == Decimal("198")
+    # stop_pct = (99-100)/100 = -1% → 100.1 * 0.99
+    assert Decimal(str(updated["preview"]["stop"])) == Decimal("99.099")
     conn.close()
 
 

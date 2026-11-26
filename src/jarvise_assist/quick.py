@@ -445,7 +445,10 @@ def sync_quick_trades(
             log = conn.execute(
                 """
                 SELECT order_or_algo_id, client_order_id, step FROM assist_exec_log
-                WHERE intent_id=? AND step IN ('market', 'market_query', 'recovery', 'entry_price_query')
+                WHERE intent_id=? AND step IN (
+                    'market', 'market_query', 'recover_market_query',
+                    'recovery', 'entry_price_query'
+                )
                 ORDER BY created_at_ms DESC
                 """,
                 (exec_intent_id,),
