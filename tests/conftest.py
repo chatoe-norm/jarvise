@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import secrets
+import socket
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,66 @@ import pytest
 from jarvise_assist import partner_fx as fx
 from jarvise_assist import partner_kyc as pk
 from jarvise_assist import partner_store as ps
+
+
+class NetworkBlockedError(RuntimeError):
+    """Raised when a test accidentally opens a non-loopback socket."""
+
+
+def _is_loopback_host(host: object) -> bool:
+    if host is None:
+        return False
+    h = str(host).strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    if "%" in h:
+        h = h.split("%", 1)[0]
+    return h in {"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"}
+
+
+@pytest.fixture(autouse=True)
+def _block_non_loopback_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail closed: no real HTTP/DNS to the public internet during the suite.
+
+    Loopback stays allowed (local test servers). External connect / getaddrinfo
+    for non-local hosts raise immediately so a slipped Binance/Telegram call
+    cannot leave the machine.
+    """
+    real_connect = socket.socket.connect
+    real_create_connection = socket.create_connection
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _guard_host(host: object) -> None:
+        if _is_loopback_host(host):
+            return
+        raise NetworkBlockedError(f"non-loopback network blocked in tests: {host!r}")
+
+    def connect(self: socket.socket, address: object) -> None:  # noqa: ANN001
+        host: object
+        if isinstance(address, tuple) and address:
+            host = address[0]
+        else:
+            host = address
+        _guard_host(host)
+        return real_connect(self, address)  # type: ignore[arg-type]
+
+    def create_connection(address: object, *args: object, **kwargs: object) -> socket.socket:
+        host: object
+        if isinstance(address, tuple) and address:
+            host = address[0]
+        else:
+            host = address
+        _guard_host(host)
+        return real_create_connection(address, *args, **kwargs)  # type: ignore[arg-type]
+
+    def getaddrinfo(host: object, *args: object, **kwargs: object) -> list[object]:
+        if not _is_loopback_host(host):
+            raise NetworkBlockedError(f"non-loopback DNS blocked in tests: {host!r}")
+        return real_getaddrinfo(host, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket, "create_connection", create_connection)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
 def _seed_kyc_form(partner_id: str) -> str:
