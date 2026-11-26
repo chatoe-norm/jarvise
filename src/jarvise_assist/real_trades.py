@@ -766,13 +766,32 @@ def _logged_client_ids(conn: Any) -> set[str]:
     return {str(row[0]) for row in cur.fetchall() if row[0]}
 
 
-def _quick_owned_client_and_order_ids(conn: Any) -> tuple[set[str], set[str]]:
-    """Client ids and order/algo ids belonging to origin=quick intents (and exec-linked regs)."""
+def _quick_owned_client_and_order_ids(
+    conn: Any,
+) -> tuple[set[str], set[tuple[str, str]], set[tuple[str, str]]]:
+    """Quick-owned ids scoped by symbol; trade order ids kept separate from algo ids.
+
+    Returns ``(cids, order_ids, algo_ids)`` where the id sets are ``(symbol, id)``.
+    Mixing algoIds into trade orderId exclusion hid unrelated owner fills that
+    shared a numeric id on another symbol.
+    """
     cids: set[str] = set()
-    oids: set[str] = set()
+    order_ids: set[tuple[str, str]] = set()
+    algo_ids: set[tuple[str, str]] = set()
+    _ALGO_STEPS = frozenset(
+        {
+            "stop",
+            "tp",
+            "recover_slr",
+            "dup_stop_cancel",
+            "orphan_cancel",
+            "ms",
+            "move_stop",
+        }
+    )
     rows = conn.execute(
         """
-        SELECT l.client_order_id, l.order_or_algo_id, i.preview_json
+        SELECT l.client_order_id, l.order_or_algo_id, l.step, i.preview_json, i.symbol
         FROM assist_exec_log l
         JOIN assist_exec_intent i ON i.id = l.intent_id
         """
@@ -784,10 +803,17 @@ def _quick_owned_client_and_order_ids(conn: Any) -> tuple[set[str], set[str]]:
             continue
         if not isinstance(preview, dict) or preview.get("origin") != "quick":
             continue
+        sym = str(row["symbol"] or preview.get("symbol") or "").upper()
         if row["client_order_id"]:
             cids.add(str(row["client_order_id"]))
-        if row["order_or_algo_id"]:
-            oids.add(str(row["order_or_algo_id"]))
+        oid = str(row["order_or_algo_id"] or "")
+        if not oid or not sym:
+            continue
+        step = str(row["step"] or "")
+        if step in _ALGO_STEPS or step.endswith("_algo"):
+            algo_ids.add((sym, oid))
+        else:
+            order_ids.add((sym, oid))
     # Exec-linked registrations whose market fill may only live on the registration.
     try:
         regs = conn.execute(
@@ -806,18 +832,25 @@ def _quick_owned_client_and_order_ids(conn: Any) -> tuple[set[str], set[str]]:
         preview = meta.get("preview") or {}
         if not isinstance(preview, dict) or preview.get("origin") != "quick":
             continue
+        sym = str(meta.get("symbol") or preview.get("symbol") or "").upper()
         for log in conn.execute(
             """
-            SELECT client_order_id, order_or_algo_id FROM assist_exec_log
+            SELECT client_order_id, order_or_algo_id, step FROM assist_exec_log
             WHERE intent_id=?
             """,
             (eid,),
         ).fetchall():
             if log["client_order_id"]:
                 cids.add(str(log["client_order_id"]))
-            if log["order_or_algo_id"]:
-                oids.add(str(log["order_or_algo_id"]))
-    return cids, oids
+            oid = str(log["order_or_algo_id"] or "")
+            if not oid or not sym:
+                continue
+            step = str(log["step"] or "")
+            if step in _ALGO_STEPS or step.endswith("_algo"):
+                algo_ids.add((sym, oid))
+            else:
+                order_ids.add((sym, oid))
+    return cids, order_ids, algo_ids
 
 
 def _unmatched_reason(*, cid: str, logged: set[str]) -> str:
@@ -856,7 +889,7 @@ def build_real_rows(
     market_logs = _log_market_by_client(conn)
     move_stop_by_cid = _move_stop_intent_by_client(conn)
     logged_cids = _logged_client_ids(conn)
-    quick_cids, quick_oids = _quick_owned_client_and_order_ids(conn)
+    quick_cids, quick_order_ids, _quick_algo_ids = _quick_owned_client_and_order_ids(conn)
     income_cache = _complete_income_cache(conn, start)
     frozen_missing = _frozen_missing_income(conn, start, end)
     rows_out: list[dict[str, Any]] = []
@@ -1281,8 +1314,8 @@ def build_real_rows(
             side = "buy" if side_raw == "BUY" else "sell"
             entry_time = min(int(f.get("time") or 0) for f in fills)
             cid = str(order.get("clientOrderId") or "")
-            # Exclude Quick-owned orders/fills from the main ledger entirely.
-            if oid in quick_oids or (cid and cid in quick_cids):
+            # Exclude Quick-owned trade orders/fills (symbol-scoped; never match algo ids).
+            if (symbol, oid) in quick_order_ids or (cid and cid in quick_cids):
                 continue
             fill_cids = {str(f.get("clientOrderId") or "") for f in fills}
             if fill_cids & quick_cids:

@@ -638,6 +638,38 @@ def _handle_qk_ex(
     entry = Decimal(str(card["entry"]))
     stop = Decimal(str(card["stop"]))
     tick = Decimal(str(card.get("tick") or "0.0001"))
+    testnet_levels = False
+    # Testnet: freeze demo mark into the preview so confirm chase is demo-to-demo
+    # (card futures is mainnet read; trade client is demo).
+    if assist_execute_mode() == "testnet":
+        from jarvise_assist.execute import _apply_pct_levels, build_trade_client
+
+        trade_ro, _reason = build_trade_client()
+        if trade_ro is None:
+            answer(None)
+            send("อ่านราคา demo ไม่ได้ — กด 🔄 อัปเดตราคา")
+            return {"ok": False, "reason": "read_failed"}
+        try:
+            demo_mark = Decimal(str(trade_ro.mark_price(sym)))
+        except Exception:  # noqa: BLE001
+            logger.exception("qk:ex demo mark failed")
+            answer(MSG_REGISTER_FAILED)
+            return {"ok": False, "reason": "read_failed"}
+        if demo_mark <= 0:
+            answer(None)
+            send("อ่านราคา demo ไม่ได้ — กด 🔄 อัปเดตราคา")
+            return {"ok": False, "reason": "read_failed"}
+        # Placeholder target for % remap; build_bot_plan recomputes t1 from remapped levels.
+        t1_ph = entry + (entry - stop) if side.lower() == "long" else entry - (stop - entry)
+        stop, _t1_mapped = _apply_pct_levels(
+            mainnet_entry=entry,
+            mainnet_stop=stop,
+            mainnet_target=t1_ph,
+            testnet_mark=demo_mark,
+            side=side,
+        )
+        entry = demo_mark
+        testnet_levels = True
     try:
         balance, available = futures.usdt_wallet_and_available()
         filters = futures.symbol_filters(sym)
@@ -695,6 +727,7 @@ def _handle_qk_ex(
         "combined_warn": bool(plan["combined_warn"]),
         "tick": str(tick),
         "cfg": plan["cfg"],
+        "testnet_levels": testnet_levels,
     }
     intent_id = insert_exec_intent(
         conn,

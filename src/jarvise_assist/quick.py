@@ -489,6 +489,25 @@ def sync_quick_trades(
 
         if not after:
             if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
+                # Exec-linked + unresolved: keep open while the symbol still has a
+                # position (position-fallback may lack orderId until recovery resolves it).
+                if exec_intent_id:
+                    still_open = False
+                    try:
+                        pos_fn = getattr(client, "position_risk", None)
+                        if callable(pos_fn):
+                            try:
+                                live = pos_fn(symbol=sym)
+                            except TypeError:
+                                live = pos_fn()
+                            still_open = any(
+                                str(getattr(p, "symbol", "") or "").upper() == sym for p in (live or [])
+                            )
+                    except Exception:  # noqa: BLE001
+                        # Unreadable position → do not expire (fail closed for attribution).
+                        still_open = True
+                    if still_open:
+                        continue
                 conn.execute(
                     """
                     UPDATE assist_quick_registration

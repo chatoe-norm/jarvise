@@ -455,6 +455,14 @@ def build_bot_plan(
         return None
     sized = admitted[0].sized
     leverage = int(sized.leverage)
+    # Margin shrink can drop below exchange minimums — refuse before registration.
+    if below_min_notional(
+        qty=sized.qty,
+        notional=sized.qty * entry,
+        min_qty=min_qty,
+        min_notional=min_notional,
+    ):
+        return None
 
     tp1_r = Decimal(str(values["quick_tp1_r"]))
     tp1_pct = Decimal(str(values["quick_tp1_close_pct"]))

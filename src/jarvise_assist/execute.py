@@ -1156,6 +1156,54 @@ def _fill_from_position(
     return pos.qty, pos.entry_price
 
 
+def _ensure_mkt_order_id_logged(
+    trade: BinanceTradeClient,
+    conn: Any,
+    *,
+    intent_id: str,
+    symbol: str,
+    client_id: str,
+) -> str | None:
+    """Resolve ``jv-<intent>-mkt`` orderId and log it (position-fallback attribution).
+
+    Sync tags exec-linked Quick by orderId; fills often lack clientOrderId.
+    """
+    existing = conn.execute(
+        """
+        SELECT order_or_algo_id FROM assist_exec_log
+        WHERE intent_id=? AND step IN (
+            'market', 'market_query', 'recover_market_query',
+            'entry_price_query', 'mkt_order_resolve'
+        )
+          AND order_or_algo_id IS NOT NULL AND TRIM(order_or_algo_id) != ''
+        ORDER BY created_at_ms DESC LIMIT 1
+        """,
+        (str(intent_id),),
+    ).fetchone()
+    if existing is not None:
+        oid = str(existing["order_or_algo_id"] if hasattr(existing, "keys") else existing[0] or "")
+        if oid:
+            return oid
+    try:
+        order = trade.query_order_by_client_id(symbol=symbol, client_id=client_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("mkt order resolve failed intent=%s", intent_id)
+        return None
+    oid = str(order.get("orderId") or "")
+    if not oid:
+        return None
+    _log_write(
+        conn,
+        intent_id=intent_id,
+        step="mkt_order_resolve",
+        endpoint="/fapi/v1/order",
+        client_order_id=client_id,
+        http_status=200,
+        order_or_algo_id=oid,
+    )
+    return oid
+
+
 def _emergency_close_step(attempt: int) -> str:
     return "emergency_close" if attempt == 0 else f"emergency_close_{attempt + 1}"
 
@@ -2239,6 +2287,14 @@ def _confirm_guards_quick_entry(
     if dropped or not admitted:
         return "margin_cap"
     final = admitted[0].sized
+    # Margin shrink can drop below exchange minimums — refuse before any write.
+    if below_min_notional(
+        qty=final.qty,
+        notional=final.qty * mark,
+        min_qty=filters.min_qty,
+        min_notional=filters.min_notional,
+    ):
+        return "below_min_notional"
 
     t1 = Decimal(str(preview.get("t1") or preview.get("target") or "0"))
     tp1_raw = cfg_val(frozen_cfg, "quick_tp1_close_pct", values["quick_tp1_close_pct"])
@@ -2811,10 +2867,14 @@ def run_entry_sequence(
                         pos_fill = None
                     if pos_fill is None:
                         return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+                    oid = _ensure_mkt_order_id_logged(
+                        trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid
+                    )
                     fill = {
                         "executedQty": str(pos_fill[0]),
                         "avgPrice": str(pos_fill[1]),
-                        "orderId": "",
+                        "orderId": oid or "",
+                        "status": "NEW",
                     }
             else:
                 try:
@@ -2823,10 +2883,14 @@ def run_entry_sequence(
                     logger.exception("position read failed after unknown market body")
                     return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
                 if pos_fill is not None:
+                    oid = _ensure_mkt_order_id_logged(
+                        trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid
+                    )
                     fill = {
                         "executedQty": str(pos_fill[0]),
                         "avgPrice": str(pos_fill[1]),
-                        "orderId": "",
+                        "orderId": oid or "",
+                        "status": "NEW",
                     }
                 else:
                     return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
@@ -2869,10 +2933,14 @@ def run_entry_sequence(
                 return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
             if pos_fill is not None:
                 # Query unreadable/not_found but position present → continue to stop.
+                oid = _ensure_mkt_order_id_logged(
+                    trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid
+                )
                 fill = {
                     "executedQty": str(pos_fill[0]),
                     "avgPrice": str(pos_fill[1]),
-                    "orderId": "",
+                    "orderId": oid or "",
+                    "status": "NEW",
                 }
             else:
                 # First-burst not_found + flat (or unreadable + flat) → unknown, not failed.
@@ -2884,13 +2952,25 @@ def run_entry_sequence(
     if exec_qty <= 0:
         return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
 
+    # Quick non-terminal partial: protect current position qty; keep unknown for recovery.
+    order_final = _order_is_final(fill)
+    protect_qty = exec_qty
+    if is_quick and not order_final:
+        try:
+            pos_fill = _fill_from_position(trade, symbol=symbol)
+        except Exception:  # noqa: BLE001
+            pos_fill = None
+        if pos_fill is not None and pos_fill[0] > 0:
+            protect_qty = pos_fill[0]
+        _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
+
     vr, keep_tag, stop_err = _place_and_verify_stop(
         trade,
         conn=conn,
         intent_id=intent_id,
         symbol=symbol,
         side=side,
-        qty=exec_qty,
+        qty=protect_qty,
         stop=stop,
         client_id=client_order_id(intent_id, "sl0"),
         sleep=sleep,
@@ -2900,7 +2980,7 @@ def run_entry_sequence(
         return _exec_result(MSG_ALREADY_CLOSED, status="done")
     if vr == StopVerifyResult.UNVERIFIABLE:
         return _exec_result(
-            msg_stop_unverifiable(symbol=symbol, qty=exec_qty, stop=stop),
+            msg_stop_unverifiable(symbol=symbol, qty=protect_qty, stop=stop),
             status="unknown",
         )
     if vr != StopVerifyResult.VERIFIED:
@@ -2912,7 +2992,7 @@ def run_entry_sequence(
             intent_id=intent_id,
             symbol=symbol,
             side=side,
-            qty=exec_qty,
+            qty=protect_qty,
             stop=stop,
             stop_err=stop_err,
             sleep=sleep,
@@ -2946,7 +3026,7 @@ def run_entry_sequence(
             t1 = base_px - tp1_r * r_dist
         t1 = round_level_to_tick(t1, filters.tick_size, side=side, kind="target")
         close_q, _leave, refuse = half_close_legs(
-            exec_qty,
+            protect_qty,
             step=filters.step_size,
             min_qty=filters.min_qty,
             min_notional=filters.min_notional,
@@ -3131,15 +3211,19 @@ def run_entry_sequence(
     target_s = _fmt_price_tick(target, filters.tick_size)
     # (c) Quick-specific Thai success text.
     if is_quick:
+        # Non-terminal partial (or any non-final status with qty): protected but unknown
+        # so recovery re-reads final fill / full stop coverage. Main path unchanged.
+        done_status = "done" if order_final else "unknown"
+        report_qty = protect_qty
         lev = int(preview.get("leverage") or leverage)
         if avg is None or avg <= 0:
             tp_line = f"TP1 {target_s} × {fmt_qty(tp_qty_used)}" if tp_qty_used is not None else "ไม่มี TP1"
             return _exec_result(
-                f"✅ Quick เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\n"
+                f"✅ Quick เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {report_qty}\n"
                 f"SL {stop_s} · {tp_line} · lev {lev}x{tp_note}",
-                status="done",
+                status=done_status,
             )
-        loss = abs(avg - stop) * exec_qty
+        loss = abs(avg - stop) * report_qty
         avg_s = _fmt_price_tick(avg, filters.tick_size)
         if tp_qty_used is not None:
             tp_line = f"TP1 {target_s} × {fmt_qty(tp_qty_used)}"
@@ -3148,12 +3232,12 @@ def run_entry_sequence(
         return _exec_result(
             (
                 f"✅ Quick เข้า {symbol} {side_l}\n"
-                f"fill {avg_s} × {exec_qty}\n"
+                f"fill {avg_s} × {report_qty}\n"
                 f"SL {stop_s} · {tp_line} · lev {lev}x\n"
                 f"ถ้าชน stop ≈ {loss.quantize(Decimal('0.01'))} USDT"
                 f"{tp_note}"
             ),
-            status="done",
+            status=done_status,
         )
     if avg is None or avg <= 0:
         return _exec_result(
@@ -5742,6 +5826,13 @@ def _recover_entry_intent(
         return
 
     _mark_recover_found(conn, intent_id, client_order_id=cid)
+    # Position-fallback attribution: resolve deterministic mkt orderId for Quick sync.
+    if str(preview.get("origin") or "") == "quick" or not (
+        queried.kind == QueryResultKind.FOUND
+        and queried.order is not None
+        and str(queried.order.get("orderId") or "")
+    ):
+        _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
     pos = positions[0]
     if pos.side != side:
         _recovery_notify(
