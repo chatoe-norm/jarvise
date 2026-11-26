@@ -1223,22 +1223,33 @@ def test_build_real_rows_day_loss_unaffected(tmp_path: Path, monkeypatch: pytest
 
 
 def test_jv_cleanup_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.execute import client_order_id
     from jarvise_assist.watch import _cleanup_exec_linked_quick_jv
 
     conn = open_db(tmp_path / "jvclean.db")
     _seed_settings(conn)
+    intent_btc = "aei_cleanbtc01"
+    intent_eth = "aei_cleaneth01"
+    cid_btc = client_order_id(intent_btc, "sl0")
+    cid_other = client_order_id("aei_otherintent", "sl0")
     trade = RecordingTrade()
     trade._orders = [
         {
             "symbol": "BTCUSDT",
             "algoId": "501",
-            "clientAlgoId": "jv-aei1-sl0",
+            "clientAlgoId": cid_btc,
             "reduceOnly": True,
         },
         {
             "symbol": "BTCUSDT",
             "algoId": "502",
             "clientOrderId": "owner-manual",
+            "reduceOnly": True,
+        },
+        {
+            "symbol": "BTCUSDT",
+            "algoId": "503",
+            "clientAlgoId": cid_other,
             "reduceOnly": True,
         },
     ]
@@ -1257,27 +1268,44 @@ def test_jv_cleanup_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         == []
     )
 
-    # Exec-linked + flat + not in flight → cancel jv only
+    # Exec-linked + flat + not in flight → cancel only that intent's jv-
     cancelled = _cleanup_exec_linked_quick_jv(
         conn,
         positions=[],
         quick_info={
-            "closed": [{"symbol": "BTCUSDT", "exec_linked": True}],
+            "closed": [
+                {
+                    "symbol": "BTCUSDT",
+                    "exec_linked": True,
+                    "exec_intent_id": intent_btc,
+                    "closed_at_ms": 100,
+                }
+            ],
         },
         now_ms=1,
     )
     assert any(c["algo_id"] == "501" for c in cancelled)
     assert not any(c["algo_id"] == "502" for c in cancelled)
+    assert not any(c["algo_id"] == "503" for c in cancelled)
 
-    # Position still open → no cancel
+    # Position still open (live re-read) → no cancel
     trade2 = RecordingTrade(positions=[_Pos("BTCUSDT")])
     trade2._orders = list(trade._orders)
     monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade2, None))
     assert (
         _cleanup_exec_linked_quick_jv(
             conn,
-            positions=[_Pos("BTCUSDT")],
-            quick_info={"closed": [{"symbol": "BTCUSDT", "exec_linked": True}]},
+            positions=[],  # stale empty snapshot — live re-read must win
+            quick_info={
+                "closed": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "exec_linked": True,
+                        "exec_intent_id": intent_btc,
+                        "closed_at_ms": 100,
+                    }
+                ]
+            },
             now_ms=1,
         )
         == []
@@ -1285,15 +1313,23 @@ def test_jv_cleanup_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
     # CANCEL_OWNER on does not change jv cleanup path
     monkeypatch.setenv("JARVISE_ASSIST_CANCEL_OWNER", "on")
+    cid_eth = client_order_id(intent_eth, "sl0")
     trade3 = RecordingTrade()
-    trade3._orders = [
-        {"symbol": "ETHUSDT", "algoId": "601", "clientAlgoId": "jv-aei2-sl0", "reduceOnly": True}
-    ]
+    trade3._orders = [{"symbol": "ETHUSDT", "algoId": "601", "clientAlgoId": cid_eth, "reduceOnly": True}]
     monkeypatch.setattr("jarvise_assist.watch.build_trade_client", lambda: (trade3, None))
     cancelled_on = _cleanup_exec_linked_quick_jv(
         conn,
         positions=[],
-        quick_info={"closed": [{"symbol": "ETHUSDT", "exec_linked": True}]},
+        quick_info={
+            "closed": [
+                {
+                    "symbol": "ETHUSDT",
+                    "exec_linked": True,
+                    "exec_intent_id": intent_eth,
+                    "closed_at_ms": 100,
+                }
+            ]
+        },
         now_ms=1,
     )
     assert any(c["algo_id"] == "601" for c in cancelled_on)
@@ -1361,4 +1397,480 @@ def test_flag_off_minlot_markup_identical(tmp_path: Path, monkeypatch: pytest.Mo
     m3 = _quoted_markup_for_card(conn, cid, card)
     flat = json.dumps(m3, ensure_ascii=False)
     assert BTN_QUICK_BOT_ENTER not in flat
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1
+# ---------------------------------------------------------------------------
+
+
+def _quick_preview(
+    *, side: str = "long", qty: str = "0.05", tp1pct: Any = "50", **extra: Any
+) -> dict[str, Any]:
+    entry, stop, t1 = ("100", "99", "101") if side == "long" else ("100", "101", "99")
+    preview: dict[str, Any] = {
+        "origin": "quick",
+        "cohort": "quick",
+        "qty": qty,
+        "entry": entry,
+        "stop": stop,
+        "t1": t1,
+        "target": t1,
+        "leverage": 2,
+        "loss_at_stop": "0.05",
+        "risk_pct_used": "0.5",
+        "cfg": _full_cfg(**({"quick_tp1_close_pct": Decimal(str(tp1pct))} if tp1pct is not None else {})),
+    }
+    preview.update(extra)
+    return preview
+
+
+def test_fix1_ey_happy_long_and_short_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claimed confirm must not refuse itself; places mkt + SL full + TP1 reduce-only."""
+    from jarvise_assist.execute import handle_exec_callback
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_QUICK_EXECUTE", "on")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+
+    for side in ("long", "short"):
+        conn = open_db(tmp_path / f"e2e_{side}.db")
+        _seed_settings(conn)
+        _seed_quick_settings(conn)
+        ts = _daytime_ms()
+        card = _insert_quoted_card(conn, side=side, now_ms_value=ts, qty=0.2)
+        # qty large enough that TP1 half clears minNotional at ~$100.
+        preview = _quick_preview(side=side, qty="0.2", card_id=card, loss_at_stop="0.2")
+        iid = insert_exec_intent(
+            conn,
+            kind="entry",
+            symbol="BTCUSDT",
+            side=side,
+            preview=preview,
+            created_at_ms=ts,
+            expires_at_ms=ts + 30_000,
+        )
+        trade = RecordingTrade(mark=Decimal("100"), fill_qty=Decimal("0.2"))
+        out = handle_exec_callback(
+            conn,
+            f"ey:{iid}",
+            send=lambda *_a, **_k: True,
+            answer=lambda *_a, **_k: None,
+            edit=lambda *_a, **_k: None,
+            trade=trade,
+            now_ms_value=ts + 1_000,
+        )
+        assert out.get("ok") is True, (side, out)
+        mkts = [c for c in trade.calls if c[0] == "market_order"]
+        assert len(mkts) == 1 and mkts[0][1]["reduce_only"] is False
+        stops = [c for c in trade.calls if c[0] == "place_algo_stop" and c[1]["order_type"] == "STOP_MARKET"]
+        assert len(stops) == 1 and stops[0][1]["reduce_only"] is True
+        assert stops[0][1]["qty"] == Decimal("0.2")
+        tps = [
+            c for c in trade.calls if c[0] == "place_algo_stop" and c[1]["order_type"] == "TAKE_PROFIT_MARKET"
+        ]
+        assert len(tps) == 1 and tps[0][1]["reduce_only"] is True
+        reg = conn.execute(
+            "SELECT exec_intent_id, status FROM assist_quick_registration WHERE exec_intent_id=?",
+            (iid,),
+        ).fetchone()
+        assert reg is not None and str(reg["status"]) == "open"
+        assert any(c[0] == "set_isolated" for c in trade.calls)
+        conn.close()
+
+
+def test_fix1_ey_double_tap_one_mkt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.execute import handle_exec_callback
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_QUICK_EXECUTE", "on")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    conn = open_db(tmp_path / "dbl.db")
+    _seed_settings(conn)
+    _seed_quick_settings(conn)
+    ts = _daytime_ms()
+    card = _insert_quoted_card(conn, now_ms_value=ts)
+    preview = _quick_preview(card_id=card)
+    iid = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="BTCUSDT",
+        side="long",
+        preview=preview,
+        created_at_ms=ts,
+        expires_at_ms=ts + 30_000,
+    )
+    trade = RecordingTrade(mark=Decimal("100"), fill_qty=Decimal("0.05"))
+    handle_exec_callback(
+        conn,
+        f"ey:{iid}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=ts + 1_000,
+    )
+    handle_exec_callback(
+        conn,
+        f"ey:{iid}",
+        send=lambda *_a, **_k: True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: None,
+        trade=trade,
+        now_ms_value=ts + 2_000,
+    )
+    mkts = [c for c in trade.calls if c[0] == "market_order" and c[1].get("reduce_only") is False]
+    assert len(mkts) == 1
+    conn.close()
+
+
+def test_fix1_qk_ex_via_listen_dispatcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """listen.py must supply a futures client for qk:ex."""
+    from jarvise_assist.listen import process_update
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_QUICK_EXECUTE", "on")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    conn = open_db(tmp_path / "listen_ex.db")
+    _seed_settings(conn)
+    _seed_quick_settings(conn)
+    ts = _daytime_ms()
+    card = _insert_quoted_card(conn, now_ms_value=ts, entry=100.0, stop=99.0, qty=0.05)
+    futures = _FuturesRead(mark=Decimal("100"), balance=Decimal("10000"))
+    futures._positions = []
+    futures._orders = []
+    sent: list[str] = []
+    update = {
+        "callback_query": {
+            "id": "cq1",
+            "data": f"qk:ex:{card}",
+            "from": {"id": 42},
+            "message": {"chat": {"id": 42}, "message_id": 9, "text": "card"},
+        }
+    }
+    process_update(
+        conn,
+        update,
+        send=lambda t, **_: sent.append(t) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: True,
+        now_ms_value=ts,
+        futures=futures,
+    )
+    # Confirm card text or a refusal — but must have used futures (mark/wallet calls).
+    assert any(
+        c[0] in {"mark_price", "usdt_wallet_and_available", "all_open_orders", "symbol_filters"}
+        for c in futures.calls
+    ), futures.calls
+    conn.close()
+
+
+def test_fix1_emergency_keeps_registration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.quick import create_quick_registration
+    from jarvise_assist.quick_execute import maybe_expire_quick_registration, quick_entry_proven_unfilled
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_QUICK_EXECUTE", "on")
+    conn = open_db(tmp_path / "emg_keep.db")
+    _seed_settings(conn)
+    ts = _daytime_ms()
+    preview = _quick_preview()
+    iid = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="BTCUSDT",
+        side="long",
+        preview=preview,
+        created_at_ms=ts,
+        expires_at_ms=ts + 30_000,
+    )
+    claim_exec_intent(conn, iid)
+    rid, _ = create_quick_registration(
+        conn,
+        symbol="BTCUSDT",
+        side="long",
+        planned_entry=100.0,
+        planned_stop=99.0,
+        qty=0.05,
+        now_ms=ts,
+        exec_intent_id=iid,
+    )
+    assert rid is not None
+    trade = RecordingTrade(mark=Decimal("100"), fill_qty=Decimal("0.05"), stop_ok=False)
+    run_entry_sequence(conn, iid, trade=trade, origin="quick", sleep=lambda _s: None)
+    assert quick_entry_proven_unfilled(conn, iid) is False
+    maybe_expire_quick_registration(conn, iid, now_ms=ts + 1)
+    st = conn.execute("SELECT status FROM assist_quick_registration WHERE id=?", (rid,)).fetchone()
+    assert st is not None and str(st["status"]) == "open"
+    conn.close()
+
+
+def test_fix1_same_side_cap_from_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.quick import create_quick_registration
+    from jarvise_assist.quick_config import set_quick_config
+    from jarvise_assist.quick_execute import same_side_blocks
+
+    conn = open_db(tmp_path / "cap.db")
+    _seed_settings(conn)
+    _seed_quick_settings(conn)
+    ts = now_ms()
+    set_quick_config(conn, "quick_same_side_cap", 1, source="test", now_ms=ts)
+    create_quick_registration(
+        conn,
+        symbol="ETHUSDT",
+        side="long",
+        planned_entry=100.0,
+        planned_stop=99.0,
+        qty=0.01,
+        now_ms=ts,
+    )
+    assert same_side_blocks(conn, "long") is True
+    # Record-only path still uses default 2 (parity) — count is 1, default cap 2 → not reached.
+    from jarvise_assist.quick_cap import count_open_same_side, same_side_cap_reached
+
+    assert same_side_cap_reached(count_open_same_side(conn, "long")) is False
+    conn.close()
+
+
+def test_fix1_tp1pct_zero_no_tp_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "live")
+    monkeypatch.setenv("JARVISE_QUICK_EXECUTE", "on")
+    conn = open_db(tmp_path / "tp0.db")
+    _seed_settings(conn)
+    ts = now_ms()
+    preview = _quick_preview(tp1pct=0)
+    iid = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="BTCUSDT",
+        side="long",
+        preview=preview,
+        created_at_ms=ts,
+        expires_at_ms=ts + 30_000,
+    )
+    claim_exec_intent(conn, iid)
+    trade = RecordingTrade(mark=Decimal("100"), fill_qty=Decimal("0.05"))
+    run_entry_sequence(conn, iid, trade=trade, origin="quick", sleep=lambda _s: None)
+    tps = [c for c in trade.calls if c[0] == "place_algo_stop" and c[1]["order_type"] == "TAKE_PROFIT_MARKET"]
+    assert tps == []
+    conn.close()
+
+
+def test_fix1_elapsed_preview_not_double_tap(tmp_path: Path) -> None:
+    from jarvise_assist.quick_execute import unfinished_entry_for_card
+
+    conn = open_db(tmp_path / "elapsed.db")
+    _seed_settings(conn)
+    ts = now_ms()
+    card = "aqc_elapsed"
+    iid = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"origin": "quick", "card_id": card},
+        created_at_ms=ts - 60_000,
+        expires_at_ms=ts - 1,
+    )
+    # Still preview (never claimed) but elapsed → ignore
+    assert unfinished_entry_for_card(conn, card, now_ms=ts) is None
+    # Confirmed still blocks even if past expires_at
+    claim_exec_intent(conn, iid)
+    # claim moves to confirmed — but claim may fail if already expired? claim works on preview
+    # Re-insert confirmed manually if needed
+    conn.execute("UPDATE assist_exec_intent SET status='confirmed' WHERE id=?", (iid,))
+    conn.commit()
+    assert unfinished_entry_for_card(conn, card, now_ms=ts) == iid
+    conn.close()
+
+
+def test_fix1_night_union_and_blocked_minutes() -> None:
+    from jarvise_assist.quick_execute import cfg_became_stricter, night_blocked_minutes
+
+    frozen = _full_cfg(quick_night_start="23:30", quick_night_end="07:30")
+    # Shorten night (remove morning minutes) → not stricter by coverage
+    live_shorter = dict(frozen)
+    live_shorter["quick_night_start"] = "23:30"
+    live_shorter["quick_night_end"] = "06:30"
+    assert cfg_became_stricter(frozen, live_shorter) is False
+    # Widen into previously free minutes → stricter
+    live_wider = dict(frozen)
+    live_wider["quick_night_start"] = "23:00"
+    live_wider["quick_night_end"] = "07:30"
+    assert cfg_became_stricter(frozen, live_wider) is True
+    assert 23 * 60 in night_blocked_minutes("23:00", "07:30")
+    assert 23 * 60 not in night_blocked_minutes("23:30", "07:30")
+
+
+def test_fix1_testnet_pct_levels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.execute import _apply_pct_levels, _confirm_guards_quick_entry
+
+    monkeypatch.setenv("JARVISE_ASSIST_EXECUTE", "testnet")
+    monkeypatch.setenv("JARVISE_QUICK_EXECUTE", "on")
+    monkeypatch.setattr(
+        "jarvise_assist.execute.kill_switch_state",
+        lambda **_: {"engaged": False, "known": True},
+    )
+    stop, t1 = _apply_pct_levels(
+        mainnet_entry=Decimal("100"),
+        mainnet_stop=Decimal("99"),
+        mainnet_target=Decimal("101"),
+        testnet_mark=Decimal("200"),
+        side="long",
+    )
+    assert stop == Decimal("198")
+    assert t1 == Decimal("202")
+    conn = open_db(tmp_path / "tn_pct.db")
+    _seed_settings(conn)
+    _seed_quick_settings(conn)
+    ts = _daytime_ms()
+    preview = _quick_preview()
+    iid = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="BTCUSDT",
+        side="long",
+        preview=preview,
+        created_at_ms=ts,
+        expires_at_ms=ts + 30_000,
+    )
+    claim_exec_intent(conn, iid)
+    intent = get_exec_intent(conn, iid)
+    assert intent is not None
+    # Demo mark far from mainnet levels — without mapping this would chase/refuse.
+    trade = RecordingTrade(mark=Decimal("200"), balance=Decimal("10000"))
+    guard = _confirm_guards_quick_entry(conn, intent, trade, now_ms_value=ts + 1_000)
+    assert guard is None, guard
+    updated = get_exec_intent(conn, iid)
+    assert updated is not None
+    assert Decimal(str(updated["preview"]["stop"])) == Decimal("198")
+    conn.close()
+
+
+def test_fix1_budget_exceeded_reason() -> None:
+    from jarvise_assist.execute import _reason_th
+
+    assert "งบ" in _reason_th("budget_exceeded")
+    assert _reason_th("budget_exceeded") != _reason_th("below_min_notional")
+
+
+def test_fix1_quick_absent_from_real_trades(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.pause import day_bot_net_r
+    from jarvise_assist.real_trades import build_real_rows
+
+    conn = open_db(tmp_path / "real_skip.db")
+    _seed_settings(conn)
+    ts = now_ms()
+    iid = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"origin": "quick", "entry": "100", "stop": "99", "qty": "0.1", "loss_at_stop": "0.1"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 30_000,
+    )
+    from jarvise_assist.execute import client_order_id
+
+    cid = client_order_id(iid, "mkt")
+    insert_exec_log(
+        conn,
+        intent_id=iid,
+        step="market",
+        endpoint="/fapi/v1/order",
+        client_order_id=cid,
+        order_or_algo_id="9001",
+        http_status=200,
+        created_at_ms=ts,
+    )
+    insert_exec_log(
+        conn,
+        intent_id=iid,
+        step="stop",
+        endpoint="/fapi/v1/algoOrder",
+        client_order_id=client_order_id(iid, "sl0"),
+        order_or_algo_id="8001",
+        http_status=200,
+        created_at_ms=ts + 1,
+    )
+
+    class _Client:
+        def all_orders(self, symbol: str, **_k: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "symbol": symbol,
+                    "orderId": 9001,
+                    "clientOrderId": cid,
+                    "side": "BUY",
+                    "status": "FILLED",
+                    "time": ts,
+                    "updateTime": ts,
+                },
+                {
+                    "symbol": symbol,
+                    "orderId": 9002,
+                    "clientOrderId": client_order_id(iid, "sl0"),
+                    "side": "SELL",
+                    "status": "FILLED",
+                    "time": ts + 10,
+                    "updateTime": ts + 10,
+                    "reduceOnly": True,
+                    "type": "MARKET",
+                    "origType": "STOP_MARKET",
+                },
+            ]
+
+        def user_trades(self, symbol: str, **_k: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": 1,
+                    "orderId": 9001,
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "price": "100",
+                    "qty": "0.1",
+                    "time": ts,
+                    "commission": "0",
+                    "commissionAsset": "USDT",
+                    "clientOrderId": cid,
+                },
+                {
+                    "id": 2,
+                    "orderId": 9002,
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "price": "99",
+                    "qty": "0.1",
+                    "time": ts + 10,
+                    "commission": "0",
+                    "commissionAsset": "USDT",
+                    "realizedPnl": "-0.1",
+                    "clientOrderId": client_order_id(iid, "sl0"),
+                },
+            ]
+
+        def income(self, **_k: Any) -> list[Any]:
+            return []
+
+    monkeypatch.setattr(
+        "jarvise_assist.real_trades.fetch_all_orders",
+        lambda client, symbol, **k: client.all_orders(symbol),
+    )
+    monkeypatch.setattr(
+        "jarvise_assist.real_trades.fetch_all_user_trades",
+        lambda client, symbol, **k: client.user_trades(symbol),
+    )
+    monkeypatch.setattr("jarvise_assist.real_trades.fetch_all_income", lambda *_a, **_k: [])
+    before = day_bot_net_r(conn, now_ms=ts + 100)
+    rows = build_real_rows(conn, _Client(), since_ms=ts - 1, until_ms=ts + 100)
+    assert rows == []
+    after = day_bot_net_r(conn, now_ms=ts + 100)
+    assert after == before
     conn.close()

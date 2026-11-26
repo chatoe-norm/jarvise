@@ -39,6 +39,8 @@ def _block_non_loopback_network(monkeypatch: pytest.MonkeyPatch) -> None:
     cannot leave the machine.
     """
     real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_sendto = socket.socket.sendto
     real_create_connection = socket.create_connection
     real_getaddrinfo = socket.getaddrinfo
 
@@ -47,22 +49,32 @@ def _block_non_loopback_network(monkeypatch: pytest.MonkeyPatch) -> None:
             return
         raise NetworkBlockedError(f"non-loopback network blocked in tests: {host!r}")
 
-    def connect(self: socket.socket, address: object) -> None:  # noqa: ANN001
-        host: object
+    def _host_from_address(address: object) -> object:
         if isinstance(address, tuple) and address:
-            host = address[0]
-        else:
-            host = address
-        _guard_host(host)
+            return address[0]
+        return address
+
+    def connect(self: socket.socket, address: object) -> None:  # noqa: ANN001
+        _guard_host(_host_from_address(address))
         return real_connect(self, address)  # type: ignore[arg-type]
 
+    def connect_ex(self: socket.socket, address: object) -> int:  # noqa: ANN001
+        _guard_host(_host_from_address(address))
+        return real_connect_ex(self, address)  # type: ignore[arg-type]
+
+    def sendto(self: socket.socket, data: object, *args: object, **kwargs: object) -> int:  # noqa: ANN001
+        # sendto(data, address) or sendto(data, flags, address)
+        address: object | None = None
+        if args:
+            address = args[-1]
+        elif "address" in kwargs:
+            address = kwargs["address"]
+        if address is not None:
+            _guard_host(_host_from_address(address))
+        return real_sendto(self, data, *args, **kwargs)  # type: ignore[arg-type]
+
     def create_connection(address: object, *args: object, **kwargs: object) -> socket.socket:
-        host: object
-        if isinstance(address, tuple) and address:
-            host = address[0]
-        else:
-            host = address
-        _guard_host(host)
+        _guard_host(_host_from_address(address))
         return real_create_connection(address, *args, **kwargs)  # type: ignore[arg-type]
 
     def getaddrinfo(host: object, *args: object, **kwargs: object) -> list[object]:
@@ -71,6 +83,8 @@ def _block_non_loopback_network(monkeypatch: pytest.MonkeyPatch) -> None:
         return real_getaddrinfo(host, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket.socket, "sendto", sendto)
     monkeypatch.setattr(socket, "create_connection", create_connection)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
