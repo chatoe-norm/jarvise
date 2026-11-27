@@ -343,29 +343,19 @@ def load_daily_candles(conn: Any, symbol: str) -> list[dict[str, Any]]:
 
 
 def parse_digest_text(content: str) -> list[dict[str, Any]]:
-    """Parse structured news items from an OpenClaw digest markdown file."""
-    if not content or not content.strip():
-        return []
-    blocks = re.split(r"\n(?=\d+\.\s+\*\*)", content)
+    """Parse structured news items from an OpenClaw digest markdown file.
+
+    Item split is shared with the Hermes adapter (jarvise_intel.digest_parse);
+    theme scoring stays here so the adapter image stays dependency-light.
+    """
+    from jarvise_intel.digest_parse import parse_digest_items
+
+    base = parse_digest_items(content)
     items: list[dict[str, Any]] = []
-    for b in blocks:
-        m = re.match(r"^\d+\.\s+\*\*(.*?)\*\*(?:[^\n]*)?\n(.*)", b.strip(), re.DOTALL)
-        if not m:
-            continue
-        title = m.group(1).strip()
-        title = re.sub(r"\s*[—–-]\s*\d{4}-\d{2}-\d{2}.*", "", title).strip()
-        body = m.group(2).strip()
-        url = ""
-        comment_lines = []
-        for line in body.split("\n"):
-            line = line.strip()
-            if not line or line.startswith("Not a trade signal"):
-                continue
-            if line.startswith("http://") or line.startswith("https://"):
-                url = line
-            else:
-                comment_lines.append(line)
-        comment = " ".join(comment_lines)
+    for raw in base:
+        title = str(raw.get("title") or "")
+        comment = str(raw.get("comment") or "")
+        url = str(raw.get("url") or "")
         scores: dict[str, int] = {}
         for theme, words in _THEME_WORDS:
             score = 0

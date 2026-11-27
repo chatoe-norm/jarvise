@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "jarvise-hermes-tools": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "D:/Projects/jarvise/scripts/hermes-mcp-stdio.ps1"
+      ]
+    }
+  },
+  "_comment": "Opt-in example only. Do not overwrite the owner's Cursor MCP config. Requires the hermes Compose profile running on Jarvise-VPS. Uses hermes mcp-serve --tools-only (no messaging, approvals, or conversation bridge). No tokens in this file."
+}

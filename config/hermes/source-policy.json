@@ -1,0 +1,45 @@
+{
+  "allow_suffixes": [
+    "federalreserve.gov",
+    "nvidia.com",
+    "amd.com",
+    "microsoft.com",
+    "google.com",
+    "blog.google",
+    "openai.com",
+    "anthropic.com",
+    "tsmc.com",
+    "samsung.com",
+    "asml.com",
+    "whitehouse.gov",
+    "state.gov",
+    "treasury.gov",
+    "sec.gov",
+    "ecb.europa.eu",
+    "boj.or.jp",
+    "reuters.com",
+    "apnews.com",
+    "bloomberg.com",
+    "cnbc.com",
+    "wsj.com",
+    "ft.com",
+    "nytimes.com",
+    "bbc.com",
+    "bbc.co.uk",
+    "nikkei.com",
+    "scmp.com"
+  ],
+  "deny_hosts": [
+    "bit.ly",
+    "t.co",
+    "tinyurl.com",
+    "goo.gl",
+    "ow.ly",
+    "buff.ly",
+    "rebrand.ly"
+  ],
+  "deny_suffixes": [
+    "bit.ly",
+    "tinyurl.com"
+  ]
+}

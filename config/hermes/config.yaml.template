@@ -1,0 +1,67 @@
+# Jarvise Hermes Stage A — non-secret skeleton.
+# Copied to data/hermes/gateway/config.yaml when missing (see vps-deploy.sh).
+# Owner supplies provider keys via container env / .env only.
+#
+# mcp-serve pin: official-plugins commit 80025332933bf84fb3c7b68f369d9fe59a771e98
+# (mcp-serve 1.0.1). Use: hermes mcp-serve --tools-only
+# --tools-only omits conversation bridge, messages_send, and permissions_*.
+# Profile toolsets below further limit the agent surface for /v1 runs.
+# Key names confirmed against the pinned image DEFAULT_CONFIG (v0.23.4).
+
+model:
+  default: "" # set via HERMES_MODEL env; empty fails closed in the adapter
+  provider: "" # set via HERMES_PROVIDER env (openrouter)
+
+# Empty chain: no silent model/provider substitution (R8).
+fallback_providers: []
+
+plugins:
+  auto_apply: false
+  isolation: in_process
+  enabled:
+    - mcp-serve
+  entries:
+    mcp-serve:
+      allow_tool_override: false
+
+agent:
+  max_turns: 24
+  # Strip dangerous / unused toolsets everywhere, including api_server.
+  disabled_toolsets:
+    - terminal
+    - file
+    - code_execution
+    - delegation
+    - computer_use
+    - image_gen
+    - vision
+    - tts
+    - clarify
+    - cronjob
+    - kanban
+    - messaging
+    - browser
+
+platform_toolsets:
+  # Research-only: web. Skills toolset dropped — skill_manage is a persistent write path.
+  # MCP --tools-only may still expose skill_view / skills_list for Cursor; /v1/runs does not.
+  api_server:
+    - web
+  cli:
+    - web
+
+platforms:
+  api_server:
+    enabled: true
+  telegram:
+    enabled: false
+  discord:
+    enabled: false
+  slack:
+    enabled: false
+  whatsapp:
+    enabled: false
+
+# Dashboard stays off for Stage A.
+dashboard:
+  enabled: false
