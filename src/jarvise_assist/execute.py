@@ -5664,6 +5664,22 @@ def handle_exec_callback(
                     )
                 if prefix == "ms:":
                     _strip_ms_buttons()
+                # Quick ey: after live registration committed, a pre-market audit
+                # failure leaves the intent failed with no order — expire the open
+                # registration so it does not block the symbol for ~2 h.
+                # maybe_expire only acts when quick_entry_proven_unfilled (unknown
+                # with market_attempt keeps the registration).
+                if prefix == "ey:":
+                    preview_fb = intent.get("preview")
+                    if isinstance(preview_fb, dict) and preview_fb.get("origin") == "quick":
+                        try:
+                            from jarvise_assist.quick_execute import (
+                                maybe_expire_quick_registration,
+                            )
+
+                            maybe_expire_quick_registration(conn, intent_id, now_ms=ts)
+                        except Exception:  # noqa: BLE001 — never mask the owner reply
+                            logger.exception("quick registration expire after ey handler error failed")
                 send(text)
             return {"ok": False, "reason": "handler_error"}
         finally:
