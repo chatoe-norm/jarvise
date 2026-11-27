@@ -959,6 +959,9 @@ def _quick_owned_client_and_order_ids(
             "ms",
             "move_stop",
             "move_stop_place",
+            "move_stop_cancel",
+            "exit_cancel",
+            "recover_move_cancel",
         }
     )
     rows = conn.execute(

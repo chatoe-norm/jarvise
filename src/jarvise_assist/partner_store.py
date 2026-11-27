@@ -107,6 +107,18 @@ def _q_usdt(value: Decimal) -> Decimal:
     return Decimal(value).quantize(USDT_QUANT, rounding=ROUND_DOWN)
 
 
+def _q_usdt_finite(value: Decimal) -> Decimal | None:
+    """USDT quantization, or None when the coefficient does not fit the context.
+
+    Mirrors ``owner_amount_refusal``: a finite value such as ``1e25`` raises
+    ``InvalidOperation`` inside ``quantize`` instead of returning a number.
+    """
+    try:
+        return _q_usdt(Decimal(value))
+    except InvalidOperation:
+        return None
+
+
 # Substring of notes written by ``assist partner-record-owner-tx``. Live ``p owner`` notes do not contain it.
 OWNER_HIST_NOTE_MARK = "partner-record-owner-tx (historical)"
 
@@ -1582,7 +1594,8 @@ def _owner_tx_prechecks(
     bad = _bad_number(Decimal(account_value))
     if bad:
         return None, bad
-    if _q_usdt(Decimal(account_value)) <= 0:
+    q_av = _q_usdt_finite(Decimal(account_value))
+    if q_av is None or q_av <= 0:
         return None, {"ok": False, "reason": "bad_account_value"}
     admin, err = _owner_admin_row(conn)
     if err is not None or admin is None:
@@ -1615,7 +1628,7 @@ def owner_events_after(conn: sqlite3.Connection, t_ms: int, *, historical: bool 
             WHERE CASE
                 WHEN kind IN ('owner_deposit', 'owner_redeem')
                  AND effective_at_ms IS NOT NULL
-                 AND id LIKE 'pe_owner_tran%'
+                 AND substr(id, 1, length('pe_owner_tran')) = 'pe_owner_tran'
                  AND instr(COALESCE(note, ''), ?) > 0
                 THEN effective_at_ms > ?
                 ELSE created_at_ms > ?
@@ -1662,7 +1675,9 @@ def _owner_tx_math(
 ) -> dict[str, Any]:
     """Numbers one owner tx books. Read-only; shared by plan_owner_tx and _apply_owner_tx."""
     amount_q = _q_usdt(Decimal(amount))
-    v_raw = _q_usdt(Decimal(account_value))
+    v_raw = _q_usdt_finite(Decimal(account_value))
+    if v_raw is None:
+        return {"ok": False, "reason": "bad_account_value"}
     due = payouts_due_total(conn)
     u_before = total_units(conn)
     admin_units = units_from_e8(int(admin["units_e8"]))

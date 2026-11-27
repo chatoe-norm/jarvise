@@ -70,7 +70,8 @@ def validate_args(
     if ps.usdt_to_micro(amount_n) > pa._OWNER_MAX_MICRO:
         return None, {"ok": False, "reason": "amount_too_large"}
     av = _parse_decimal(account_value)
-    if av is None or av <= 0 or ps._q_usdt(av) <= 0:
+    q_av = ps._q_usdt_finite(av) if av is not None else None
+    if av is None or av <= 0 or q_av is None or q_av <= 0:
         return None, {"ok": False, "reason": "bad_account_value"}
     eff = int(effective_at_ms)
     if eff > int(now_ms):

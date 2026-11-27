@@ -620,10 +620,15 @@ def _handle_qk_ex(
 
     try:
         card = build_card_at_quoted_stop(conn, futures, row, now_ms=now_ms)
-    except Exception:  # noqa: BLE001
-        logger.exception("qk:ex build card failed card_id=%s", card_id)
-        answer(MSG_REGISTER_FAILED)
-        return {"ok": False, "reason": "read_failed"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qk:ex build card failed type=%s", type(exc).__name__)
+        from jarvise_assist.execute import _reason_th
+
+        text = _reason_th("fapi_read_failed:card")
+        send(text)
+        edit(_decorate_card_text(text), {"inline_keyboard": []})
+        answer(None)
+        return {"ok": False, "reason": "fapi_read_failed:card"}
 
     card_text = str(card.get("text") or REFUSAL.get("read_failed", ""))
     quoted_ok = bool(card.get("ok"))
@@ -683,10 +688,15 @@ def _handle_qk_ex(
             return {"ok": False, "reason": "read_failed"}
         try:
             demo_mark = Decimal(str(trade_ro.mark_price(sym)))
-        except Exception:  # noqa: BLE001
-            logger.exception("qk:ex demo mark failed")
-            answer(MSG_REGISTER_FAILED)
-            return {"ok": False, "reason": "read_failed"}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("qk:ex demo mark failed type=%s", type(exc).__name__)
+            from jarvise_assist.execute import _reason_th
+
+            text = _reason_th("fapi_read_failed:mark")
+            send(text)
+            edit(_decorate_card_text(text), {"inline_keyboard": []})
+            answer(None)
+            return {"ok": False, "reason": "fapi_read_failed:mark"}
         if demo_mark <= 0:
             answer(None)
             send("อ่านราคา demo ไม่ได้ — กด 🔄 อัปเดตราคา")
