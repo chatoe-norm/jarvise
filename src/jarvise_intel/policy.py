@@ -21,6 +21,8 @@ Resolver = Callable[[str], list[str]]
 DEFAULT_SOURCE_POLICY = Path("config/hermes/source-policy.json")
 # Printable ASCII only — the exact string that will be rendered into Markdown.
 SOURCE_URL_RE = re.compile(r"^[\x21-\x7e]+$")
+# Strict DNS hostname: lowercase labels, no empty labels, at least two labels (F3).
+DNS_HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 
 
 def _default_resolve(hostname: str) -> list[str]:
@@ -125,13 +127,19 @@ def _https_syntax(url: str, *, require_port_443: bool = True) -> tuple[bool, str
         return False, "scheme_not_https", ""
     if parsed.username is not None or parsed.password is not None:
         return False, "userinfo_forbidden", ""
+    # Reject parser-differential authority before suffix allowlists (F3).
+    # netloc can contain backslash / percent / semicolon that urlparse keeps in hostname.
+    authority = parsed.netloc or ""
+    if "\\" in authority or "%" in authority or ";" in authority:
+        return False, "authority_forbidden_chars", ""
     host = parsed.hostname
     if not host:
         return False, "missing_host", ""
+    host_norm = host.lower().strip("[]")
     port = parsed.port
     if require_port_443 and port is not None and port != 443:
         return False, "port_not_443", ""
-    return True, "ok", host.lower().strip("[]")
+    return True, "ok", host_norm
 
 
 def allow_https_url(
@@ -211,6 +219,8 @@ def allow_source_url(
         return False, "ip_literal_host"
     except ValueError:
         pass
+    if not DNS_HOSTNAME_RE.fullmatch(host):
+        return False, "hostname_not_dns"
     rules = policy if policy is not None else load_source_policy(policy_path)
     if host in rules["deny_hosts"]:
         return False, "denied_host"

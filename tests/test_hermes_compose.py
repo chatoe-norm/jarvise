@@ -16,6 +16,7 @@ WORKFLOWS = ROOT / "infra" / "n8n" / "workflows"
 PLUGIN_PIN = ROOT / "config" / "hermes" / "plugins" / "mcp-serve" / "PIN"
 CONFIG_TMPL = ROOT / "config" / "hermes" / "config.yaml.template"
 INIT = ROOT / "infra" / "docker" / "init-hermes-plugins.sh"
+CONFIG_HELPER = ROOT / "infra" / "docker" / "hermes_config_toolsets.py"
 
 
 def _service_block(text: str, service: str) -> str:
@@ -138,8 +139,14 @@ def test_vendored_mcp_serve_pin_and_init() -> None:
     assert "mcp-serve" in init
     assert "git clone" not in init.lower()
     assert "plugins enable mcp-serve" in init
-    assert "treehash" in init or "tree_hash" in init
-    assert "skills" in init  # strip path
+    assert "tree_hash" in init
+    assert "hermes_config_toolsets.py" in init
+    assert CONFIG_HELPER.is_file()
+    helper = CONFIG_HELPER.read_text(encoding="utf-8")
+    assert "yaml.safe_load" in helper
+    assert "skills" in helper
+    hermes = _service_block(COMPOSE.read_text(encoding="utf-8"), "hermes")
+    assert "hermes_config_toolsets.py" in hermes
     tmpl = CONFIG_TMPL.read_text(encoding="utf-8")
     assert "fallback_providers: []" in tmpl
     assert "mcp-serve" in tmpl

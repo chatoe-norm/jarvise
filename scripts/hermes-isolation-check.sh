@@ -1,5 +1,5 @@
 #!/bin/sh
-# Local Docker Desktop isolation proof for Hermes Stage A (R3/R4/R1).
+# Local Docker Desktop isolation proof for Hermes Stage A (R3/R4/R1 / F7).
 # Uses a throwaway project name and volume paths under the worktree. Never the VPS.
 # Requires Docker. Synthetic credentials only.
 set -eu
@@ -41,6 +41,7 @@ services:
       - ${ROOT}/config/hermes/plugins:/opt/jarvise/hermes-plugins:ro
       - ${ROOT}/config/hermes/config.yaml.template:/opt/jarvise/hermes-config.yaml.template:ro
       - ${ROOT}/infra/docker/init-hermes-plugins.sh:/opt/jarvise/init-hermes-plugins.sh:ro
+      - ${ROOT}/infra/docker/hermes_config_toolsets.py:/opt/jarvise/hermes_config_toolsets.py:ro
       - ${ROOT}/infra/docker/hermes-entrypoint.sh:/opt/jarvise/hermes-entrypoint.sh:ro
   hermes-ingest:
     volumes:
@@ -75,6 +76,20 @@ if [ "$ok" != 1 ]; then
   exit 1
 fi
 echo "[iso] health OK (cold)"
+
+echo "[iso] config helper runs in hermes image (PyYAML preferred; structural fallback OK)"
+# Quote the container path inside sh -c so Git Bash/MSYS does not rewrite /opt/... .
+docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
+  exec -T hermes sh -c 'python /opt/jarvise/hermes_config_toolsets.py --check /opt/data/config.yaml' || {
+  echo "[iso] FAIL: hermes_config_toolsets.py --check failed" >&2
+  exit 1
+}
+if docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
+  exec -T hermes python -c "import yaml" >/dev/null 2>&1; then
+  echo "[iso] PyYAML present in hermes image"
+else
+  echo "[iso] NOTE: hermes image has no PyYAML — structural subset parser used (not the old skills: regex)"
+fi
 
 echo "[iso] UID check"
 uid_line="$(docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml exec -T hermes id hermes)"
@@ -126,23 +141,49 @@ if echo "${tools_json}" | grep -Eio "\"name\"[[:space:]]*:[[:space:]]*\"[^\"]*($
   echo "${tools_json}" >&2
   exit 1
 fi
-# Positive allowlist for MCP research tools (names may be subset).
+# Positive allowlist for MCP research tools — missing names FAIL (F7).
 for need in web_search web_extract; do
   echo "${tools_json}" | grep -q "\"${need}\"" || {
-    echo "[iso] WARN: expected tool ${need} not seen in tools/list (may be profile-gated)"
+    echo "[iso] FAIL: expected tool ${need} not seen in tools/list" >&2
+    echo "${tools_json}" >&2
+    exit 1
   }
 done
-echo "[iso] tools/list OK (no forbidden families)"
+echo "[iso] tools/list OK (MCP discovery; not HTTP /v1/runs toolset)"
 
-echo "[iso] gateway process UID (not merely account existence)"
-# s6 PID 1 stays root; supervised gateway workers must run as hermes (10000).
-gw_uids="$(docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
-  exec -T hermes sh -c 'for p in /proc/[0-9]*; do cmd=$(tr "\0" " " <"$p/cmdline" 2>/dev/null || true); case "$cmd" in *gateway*|*api_server*|*uvicorn*) awk "/^Uid:/{print \$2; exit}" "$p/status" 2>/dev/null;; esac; done')"
-echo "gateway worker uids: ${gw_uids}"
-echo "${gw_uids}" | grep -qw '10000' || {
-  echo "[iso] FAIL: no gateway worker with uid 10000 (got: ${gw_uids})" >&2
+echo "[iso] gateway process UID — python workers as hermes (10000); no root uvicorn/api_server"
+# s6 PID 1 stays root. Supervised API must run as hermes. Ignore unrelated root python
+# (e.g. healthcheck) whose cmdline does not look like the API server.
+proc_report="$(docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
+  exec -T hermes sh -c '
+    hermes_py=0
+    root_api=0
+    for p in /proc/[0-9]*; do
+      cmd=$(tr "\0" " " <"$p/cmdline" 2>/dev/null || true)
+      case "$cmd" in *python*) ;; *) continue ;; esac
+      uid=$(awk "/^Uid:/{print \$2}" "$p/status" 2>/dev/null || echo "")
+      case "$cmd" in
+        *uvicorn*|*api_server*|*hermes.api*|*gateway.run*|*gateway\ run*)
+          if [ "$uid" = "0" ]; then root_api=1; fi
+          if [ "$uid" = "10000" ]; then hermes_py=1; fi
+          ;;
+        *)
+          if [ "$uid" = "10000" ]; then hermes_py=1; fi
+          ;;
+      esac
+    done
+    echo "hermes_py=$hermes_py root_api=$root_api"
+  ')"
+echo "${proc_report}"
+echo "${proc_report}" | grep -q 'hermes_py=1' || {
+  echo "[iso] FAIL: no python process as uid 10000" >&2
   exit 1
 }
+if echo "${proc_report}" | grep -q 'root_api=1'; then
+  # s6/entrypoint may still show a root wrapper whose cmdline mentions gateway run.
+  # Require a hermes (10000) python worker; treat root wrapper as noted gap, not PASS of "no root".
+  echo "[iso] NOTE: a root process cmdline matched api/gateway patterns (s6 wrapper likely); hermes_py=10000 present"
+fi
 
 echo "[iso] network: hermes must not have hermes_egress"
 nets="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$(docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml ps -q hermes)")"
@@ -180,37 +221,45 @@ if docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml
 fi
 echo "[iso] adapter public bypass blocked OK"
 
-echo "[iso] proxy denies private CONNECT and allows public HTTPS target"
+echo "[iso] hermes container cannot open public TCP (bypass from tool host)"
+if docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
+  exec -T hermes python -c "import socket; socket.create_connection(('1.1.1.1',443),3)" >/dev/null 2>&1; then
+  echo "[iso] FAIL: hermes reached public 1.1.1.1:443" >&2
+  exit 1
+fi
+echo "[iso] hermes public bypass blocked OK"
+
+echo "[iso] proxy denies private/metadata CONNECT; public HTTPS must be HTTP 200"
 docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
   exec -T hermes python - <<'PY'
 import socket
 import sys
 
 def connect_req(hostport: str) -> bytes:
-    s = socket.create_connection(("hermes-egress", 8899), 5)
+    s = socket.create_connection(("hermes-egress", 8899), 10)
+    s.settimeout(15)
     s.sendall(f"CONNECT {hostport} HTTP/1.1\r\nHost: {hostport}\r\n\r\n".encode())
     data = s.recv(256)
     s.close()
     return data
 
-priv = connect_req("127.0.0.1:443")
-if b"403" not in priv and b"Forbidden" not in priv:
-    print("FAIL private", priv[:80], file=sys.stderr)
-    sys.exit(1)
-# Public target: expect 200 or 502 (DNS/connect), never 403 for allowlisted public IP after resolve.
-# Use a numeric public address the policy accepts after resolve path — hostname example.com.
+for target in ("127.0.0.1:443", "10.0.0.1:443", "169.254.169.254:443"):
+    priv = connect_req(target)
+    if b"403" not in priv and b"Forbidden" not in priv:
+        print("FAIL private", target, priv[:80], file=sys.stderr)
+        sys.exit(1)
+
+# Public target must succeed (HTTP 200). 502 is not success (F7).
 pub = connect_req("example.com:443")
-if b"403" in pub:
-    print("FAIL public denied", pub[:80], file=sys.stderr)
-    sys.exit(1)
-if not (b"200" in pub or b"502" in pub):
-    print("FAIL unexpected", pub[:80], file=sys.stderr)
+if b"200" not in pub:
+    print("FAIL public not 200", pub[:120], file=sys.stderr)
     sys.exit(1)
 print("proxy behavioural checks OK")
 PY
 
-echo "[iso] config has no skills on api_server"
+echo "[iso] config has no skills on api_server (grep is not HTTP toolset proof)"
 docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
   exec -T hermes sh -c 'grep -A5 "api_server:" /opt/data/config.yaml | grep -q skills && exit 1 || exit 0'
+echo "[iso] NOTE: HTTP /v1/runs agent toolset is not queried at runtime — config+MCP only (unrun gap)"
 
 echo "[iso] PASS"

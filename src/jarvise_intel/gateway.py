@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from typing import Any
 
 TERMINAL_OK = frozenset({"completed"})
+# Verified terminal failures only. Gateway status "unknown" is non-terminal (F2).
 TERMINAL_FAIL = frozenset(
     {
         "failed",
         "cancelled",
         "interrupted",
-        "unknown",
         "incomplete",
         "error",
     }
@@ -241,6 +241,21 @@ def assert_runtime_identity(cfg: GatewayConfig, runtime: dict[str, Any]) -> None
             raise GatewayError("model_mismatch", f"requested:{req_m}")
 
 
+def finalize_completed(cfg: GatewayConfig, run: RunResult) -> RunResult:
+    """Shared completed-result gate for wait_for_run and resume (F1 / R8).
+
+    Rejects budget-exhausted and incomplete results before identity checks.
+    Never substitutes configured/requested identity for missing actual runtime.
+    """
+    if run.status not in TERMINAL_OK:
+        raise GatewayError("incomplete_run", run.status or "not_completed")
+    error_code = str(run.raw.get("hermes.error_code") or run.raw.get("error_code") or "")
+    if error_code == "iteration_budget_exhausted":
+        raise GatewayError("incomplete_run", "iteration_budget_exhausted")
+    assert_runtime_identity(cfg, run.runtime)
+    return run
+
+
 def wait_for_run(
     cfg: GatewayConfig,
     run_id: str,
@@ -254,11 +269,7 @@ def wait_for_run(
     while monotonic() < deadline:
         last = get_run(cfg, run_id, open_url=open_url, timeout=min(30.0, max(1.0, deadline - monotonic())))
         if last.status in TERMINAL_OK:
-            error_code = str(last.raw.get("hermes.error_code") or last.raw.get("error_code") or "")
-            if error_code == "iteration_budget_exhausted":
-                raise GatewayError("incomplete_run", "iteration_budget_exhausted")
-            assert_runtime_identity(cfg, last.runtime)
-            return last
+            return finalize_completed(cfg, last)
         if last.status in TERMINAL_FAIL:
             raise GatewayError("incomplete_run", last.status)
         sleep(cfg.poll_s)
@@ -269,8 +280,7 @@ def wait_for_run(
     except GatewayError:
         raise GatewayError("unknown_run", "stop_unverified") from None
     if final.status in TERMINAL_OK:
-        assert_runtime_identity(cfg, final.runtime)
-        return final
+        return finalize_completed(cfg, final)
     if final.status in TERMINAL_FAIL:
         raise GatewayError("incomplete_run", final.status)
     raise GatewayError("unknown_run", final.status or "deadline_exceeded")

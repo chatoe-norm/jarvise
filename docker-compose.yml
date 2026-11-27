@@ -467,6 +467,7 @@ services:
       - ./config/hermes/plugins:/opt/jarvise/hermes-plugins:ro
       - ./config/hermes/config.yaml.template:/opt/jarvise/hermes-config.yaml.template:ro
       - ./infra/docker/init-hermes-plugins.sh:/opt/jarvise/init-hermes-plugins.sh:ro
+      - ./infra/docker/hermes_config_toolsets.py:/opt/jarvise/hermes_config_toolsets.py:ro
       - ./infra/docker/hermes-entrypoint.sh:/opt/jarvise/hermes-entrypoint.sh:ro
     depends_on:
       hermes-egress:

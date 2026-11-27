@@ -1,15 +1,16 @@
 #!/bin/sh
 # Idempotent: restore vendored mcp-serve into HERMES_HOME and enable it.
-# Never clones GitHub. Tree hash (not PIN text alone) decides whether to re-copy.
-# MCP probes run as uid hermes. Existing config.yaml is only stripped of the
-# managed skills toolset entry — model/provider/credentials are never overwritten.
+# Never clones GitHub. Installed tree hash vs read-only vendor decides re-copy (F5).
+# MCP probes and plugins enable run as uid hermes. Existing config.yaml is validated
+# structurally via hermes_config_toolsets.py — model/provider/credentials are never
+# overwritten when already valid.
 set -eu
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 VENDOR="${HERMES_PLUGIN_VENDOR:-/opt/jarvise/hermes-plugins/mcp-serve}"
 TARGET="${HERMES_HOME}/plugins/mcp-serve"
 PIN_VENDOR="${VENDOR}/PIN"
-HASH_STAMP="${HERMES_HOME}/plugins/.mcp-serve.treehash"
+CONFIG_HELPER="${HERMES_CONFIG_HELPER:-/opt/jarvise/hermes_config_toolsets.py}"
 
 if [ ! -f "${PIN_VENDOR}" ]; then
   echo "[hermes-init] missing vendored PIN at ${PIN_VENDOR}" >&2
@@ -25,8 +26,9 @@ tree_hash() {
 
 VENDOR_HASH="$(tree_hash "${VENDOR}")"
 NEED_COPY=1
-if [ -f "${HASH_STAMP}" ] && [ -d "${TARGET}" ]; then
-  CURRENT="$(cat "${HASH_STAMP}")"
+if [ -d "${TARGET}" ]; then
+  # Compare installed tree to vendor — not a writable stamp (F5).
+  CURRENT="$(tree_hash "${TARGET}")"
   if [ "${CURRENT}" = "${VENDOR_HASH}" ]; then
     NEED_COPY=0
   fi
@@ -37,54 +39,7 @@ if [ "${NEED_COPY}" = 1 ]; then
   mkdir -p "${HERMES_HOME}/plugins" "${HERMES_HOME}/installs"
   rm -rf "${TARGET}"
   cp -a "${VENDOR}" "${TARGET}"
-  printf '%s\n' "${VENDOR_HASH}" >"${HASH_STAMP}"
 fi
-
-strip_skills_toolset() {
-  # Managed non-secret edit only: remove list items that are exactly 'skills'
-  # under platform_toolsets. Does not touch model/provider/credential keys.
-  python3 - <<'PY'
-import os
-import re
-import sys
-from pathlib import Path
-
-path = Path(os.environ.get("HERMES_HOME", "/opt/data")) / "config.yaml"
-if not path.is_file():
-    sys.exit(0)
-text = path.read_text(encoding="utf-8")
-if "platform_toolsets" not in text:
-    sys.exit(0)
-# Refuse opaque / unreadable shapes that still mention skills.
-if re.search(r"skills\s*:", text) and "platform_toolsets" in text:
-    # mapping form skills: ... is unexpected here; fail closed.
-    print("[hermes-init] unexpected skills mapping in config.yaml; refusing", file=sys.stderr)
-    sys.exit(1)
-new_lines: list[str] = []
-changed = False
-in_platform = False
-for line in text.splitlines(keepends=True):
-    stripped = line.lstrip()
-    indent = len(line) - len(stripped)
-    if re.match(r"^platform_toolsets\s*:", line):
-        in_platform = True
-        new_lines.append(line)
-        continue
-    if in_platform and indent == 0 and stripped and not stripped.startswith("#"):
-        in_platform = False
-    if in_platform and re.match(r"^-\s*skills\s*(#.*)?$", stripped):
-        changed = True
-        continue
-    new_lines.append(line)
-out = "".join(new_lines)
-if changed:
-    path.write_text(out, encoding="utf-8")
-    print("[hermes-init] stripped skills from platform_toolsets")
-elif re.search(r"(?m)^\s*-\s*skills\s*$", text):
-    print("[hermes-init] skills list entry present but not under platform_toolsets; refusing", file=sys.stderr)
-    sys.exit(1)
-PY
-}
 
 if [ ! -f "${HERMES_HOME}/config.yaml" ]; then
   if [ -f /opt/jarvise/hermes-config.yaml.template ]; then
@@ -104,8 +59,12 @@ if [ ! -f "${HERMES_HOME}/config.yaml" ]; then
       >"${HERMES_HOME}/config.yaml"
   fi
 else
+  if [ ! -f "${CONFIG_HELPER}" ]; then
+    echo "[hermes-init] missing config helper at ${CONFIG_HELPER}" >&2
+    exit 1
+  fi
   export HERMES_HOME
-  strip_skills_toolset
+  python3 "${CONFIG_HELPER}" "${HERMES_HOME}/config.yaml"
 fi
 
 mkdir -p "${HERMES_HOME}/installs"
@@ -134,12 +93,10 @@ if run_as_hermes hermes mcp-serve --help >/dev/null 2>&1; then
 fi
 
 echo "[hermes-init] enabling mcp-serve (no tool override)"
-# Enable may need to write installs/; run as root then re-chown, or as hermes if writable.
-if [ "$(id -u)" = 0 ]; then
-  HERMES_HOME="${HERMES_HOME}" hermes plugins enable mcp-serve --no-allow-tool-override </dev/null
+# Prefer enable as hermes after chown (F5).
+run_as_hermes hermes plugins enable mcp-serve --no-allow-tool-override </dev/null
+if [ "$(id -u)" = 0 ] && id hermes >/dev/null 2>&1; then
   chown -R hermes:hermes "${HERMES_HOME}/plugins" "${HERMES_HOME}/installs" "${HERMES_HOME}/config.yaml" 2>/dev/null || true
-else
-  run_as_hermes hermes plugins enable mcp-serve --no-allow-tool-override </dev/null
 fi
 if ! run_as_hermes hermes mcp-serve --help >/dev/null 2>&1; then
   echo "[hermes-init] mcp-serve enable failed" >&2

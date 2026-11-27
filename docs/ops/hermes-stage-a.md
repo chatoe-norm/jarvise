@@ -19,7 +19,7 @@ Status: **implementation only**. Production OpenClaw remains the digest producer
 
 `HERMES_PROVIDER` and `HERMES_MODEL` have no silent default. Empty values make `/ingest` return `503 provider_unconfigured`. `fallback_providers: []` in the template. Do not use `openrouter/openrouter/auto`. Hermes reuses the shared `OPENROUTER_API_KEY` with jobs (same provider budget).
 
-**Config seeding:** a missing `data/hermes/gateway/config.yaml` is copied from `config/hermes/config.yaml.template`. An existing file is only stripped of the managed `skills` list entry under `platform_toolsets`; model/provider/credential keys are never overwritten. Unparseable YAML with a leftover skills entry refuses start.
+**Config seeding:** a missing `data/hermes/gateway/config.yaml` is copied from `config/hermes/config.yaml.template`. An existing file is validated by `infra/docker/hermes_config_toolsets.py`: strip only an exact list item `skills` under `platform_toolsets.api_server` / `cli`, then require each set to be exactly `{web}`. Prefers `yaml.safe_load` when PyYAML is present (CI); the pinned Hermes image has no PyYAML, so a structural subset parser handles block/flow lists for those two keys only — it does **not** refuse merely because an unrelated nested `skills:` key exists, and it is not the old text-regex check. Unsafe toolsets (`terminal`, `file`, `skill_manage`, …) refuse start without rewriting. When already valid, the file bytes are left unchanged so model/provider/credential keys are stable.
 
 ## Network shape (R1)
 
@@ -36,21 +36,21 @@ Status: **implementation only**. Production OpenClaw remains the digest producer
 
 - Create-if-absent: cross-process file lock, fully written + fsynced temp (`0644`), then `os.link`. Linux fails closed if hard links are unavailable (no partial final `*.md`). Matching hash replays; differing bytes → `filename_conflict`.
 - Provenance sidecar (slot, filename, sha256, length) is written before the link. A crash after link and before the slot record is recovered by adopting the file when the sidecar matches — without another Hermes call. Empty/truncated/untrusted files fail closed.
-- Smoke slots use distinct `smoke-YYYY-MM-DD-HH.md` names, require `JARVISE_HERMES_SMOKE=1`, and are refused unless the digest directory path contains `pilot-digests`.
+- Smoke slots use distinct `smoke-YYYY-MM-DD-HH.md` names, require `JARVISE_HERMES_SMOKE=1`, and are refused unless the digest directory’s **final** name is `pilot-digests`.
 - Normal slots are admitted only for the **current** Asia/Bangkok window (`07` from 07:00–19:00, `19` from 19:00–next 07:00). Historical/future labels return `400`.
-- One adapter-wide **cross-process** in-flight lock: a second distinct slot gets `429`. Idempotency keys are `{slot}-a{n}` with `n` capped at 2; a new key is minted only after a confirmed terminal failure. On deadline the adapter calls `POST /v1/runs/{id}/stop`; still-running/unknown blocks a replacement run. Hermes `Idempotency-Key` retention (~24h) is not the publication lock.
+- One adapter-wide **cross-process** in-flight lock: a second distinct slot gets `429`. Idempotency keys are `{slot}-a{n}` with `n` capped at 2. A new attempt is minted only after a **verified** terminal failure (`failed` / `cancelled` / …). Transport/`provider_error` mid-poll stores `unknown` with the same `run_id` and does not mint `-a{n+1}`. A lost create response (no `run_id`) stores `create_unconfirmed` and the next call reuses the **same** Idempotency-Key. Gateway status `unknown` is non-terminal. On deadline the adapter calls `POST /v1/runs/{id}/stop`; still-running/unknown blocks a replacement run. `started_at` is persisted with the running record so resume past the deadline stops before accept. Hermes `Idempotency-Key` retention (~24h) is not the publication lock.
 
 ## Digest schema and sources (R7)
 
 - `no_news` must be a real boolean (`"false"` is invalid).
 - Titles/comments/URLs reject control characters and line separators; URLs must be printable ASCII `[\x21-\x7e]+` and pass the allowlist on the exact rendered string. Titles may not contain `**`. Comments may not start with `http(s)://` or the research footer.
-- Adapter source validation is **syntax + allowlist only** (no DNS). DNS/IP checks stay on the CONNECT proxy. Experiment (2026-11-27): `getaddrinfo` from an adapter container on an `internal: true` network failed with `gaierror` for `federalreserve.gov`.
+- Adapter source validation is **syntax + allowlist only** (no DNS). Authority may not contain `\`, `%`, or `;`; hostname must match a strict DNS-label grammar before suffix matching (blocks `evil.com\.nvidia.com`-style parser differentials). DNS/IP checks stay on the CONNECT proxy. Experiment (2026-11-27): `getaddrinfo` from an adapter container on an `internal: true` network failed with `gaierror` for `federalreserve.gov`.
 - `config/hermes/source-policy.json` denies shorteners and IP-literal hosts. The allowlist includes watchlist publishers **and** secondary outlets (`reuters.com`, `cnbc.com`, …) plus `google.com` (includes user-content subdomains) by owner policy. Other hosts → `unknown_source` and the **whole slot** is rejected (dropping unknown items is a later owner decision, not Stage A default).
 - After render, `parse_digest_text` must recover the same item count, title, and URL.
 
 ## Runtime identity (R8)
 
-Completed runs without `runtime.provider` and `runtime.model` fail closed (`provider_mismatch` / `model_mismatch`). Exact normalized match only (no `str.endswith`). Differing `runtime.requested` is substitution and rejected. Fixture `tests/fixtures/hermes_v0.23.4_run.json` is **source-derived** (not a captured live response); `route_source` is accepted as an ignored extra.
+Completed runs without `runtime.provider` and `runtime.model` fail closed (`provider_mismatch` / `model_mismatch`). Exact normalized match only (no `str.endswith`). Differing `runtime.requested` is substitution and rejected. **All** completed paths — including restart resume — go through shared `finalize_completed` (budget-exhausted check then identity). Configured env is never substituted for missing actual runtime. Fixture `tests/fixtures/hermes_v0.23.4_run.json` is **source-derived** (not a captured live response); `route_source` is accepted as an ignored extra.
 
 ## Capability matrix
 
@@ -84,9 +84,9 @@ bash scripts/hermes-isolation-check.sh
 # or: JARVISE_HERMES_ISO=1 pytest tests/test_hermes_isolation.py -q
 ```
 
-The script cold-starts a throwaway compose project, waits for in-container `http://127.0.0.1:8642/health`, restarts, checks `id hermes` → UID `10000`, runs `hermes mcp-serve --tools-only` initialize + `tools/list` (fails if messaging/approvals/shell/file/execution/delegation/order/image/audio/vision tool names appear), and asserts hermes is not on `hermes_egress`.
+The script cold-starts a throwaway compose project, waits for in-container `http://127.0.0.1:8642/health`, restarts, checks account and gateway-worker UID `10000`, runs `hermes mcp-serve --tools-only` initialize + `tools/list` (fails on forbidden names **or** missing `web_search` / `web_extract`), asserts neither `hermes` nor `hermes-ingest` can open public TCP directly, denies CONNECT to `127.0.0.1` / RFC1918 / link-local metadata, and requires a public CONNECT through the proxy to return HTTP **200** (502 is not success). Config grep for `skills` is not proof of the HTTP `/v1/runs` toolset; that runtime query remains an unrun gap. Remaining nits (documented, not refactored here): egress per-read header timeout is not a total CONNECT ceiling; `printf '%q'` in the `su` fallback is not POSIX.
 
-CI builds `Dockerfile.hermes-ingest` and `Dockerfile.hermes-egress` in addition to worker/web. Worker/web builds alone are **not** proof of Hermes.
+CI builds `Dockerfile.hermes-ingest` and `Dockerfile.hermes-egress` in addition to worker/web. Worker/web builds alone are **not** proof of Hermes. Plugin restore compares the **installed** tree hash to the read-only vendor (not a writable stamp).
 
 ## Shadow-study continuity gate (unresolved)
 

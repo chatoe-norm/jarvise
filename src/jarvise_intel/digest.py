@@ -121,11 +121,11 @@ def assert_current_slot(slot: Slot, *, now: datetime | None = None, smoke_allowe
 
 
 def assert_smoke_confined(slot: Slot, digest_dir: Path) -> None:
-    """Refuse smoke when the digest directory is not the pilot tree."""
+    """Refuse smoke unless the final directory name is the pilot tree (F8)."""
     if not slot.smoke:
         return
     resolved = digest_dir.resolve()
-    if PILOT_DIGEST_MARKER not in resolved.as_posix():
+    if resolved.name != PILOT_DIGEST_MARKER:
         raise ValueError("smoke_not_pilot_dir")
 
 
@@ -452,7 +452,14 @@ def adopt_existing_digest(
         raise ValueError("recovery_filename_mismatch")
     if str(prov.get("sha256") or "") != prior_hash:
         raise ValueError("recovery_hash_mismatch")
-    if int(prov.get("byte_length") or -1) != len(data):
+    raw_len = prov.get("byte_length")
+    if raw_len is None:
+        raise ValueError("recovery_length_mismatch")
+    try:
+        byte_length = int(raw_len)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("recovery_length_mismatch") from exc
+    if byte_length != len(data):
         raise ValueError("recovery_length_mismatch")
     text = data.decode("utf-8")
     if FOOTER not in text:

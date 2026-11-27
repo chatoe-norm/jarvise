@@ -869,9 +869,10 @@ def test_adopt_existing_digest_without_research(tmp_path: Path, monkeypatch: Any
     assert code == 200
     assert body.get("replay") is True
     assert called["n"] == 0
-    # Direct adopt helper also works.
     record = adopt_existing_digest(digest_dir=digest_dir, state_dir=state_dir, slot=slot)
-    assert record is None or record.get("status") == "completed"
+    assert record is not None
+    assert record.get("status") == "completed"
+    assert record.get("recovered") is True
 
 
 def test_smoke_refuses_non_pilot_dir(tmp_path: Path, monkeypatch: Any) -> None:
@@ -922,3 +923,271 @@ def test_attempt_key_and_budget(tmp_path: Path, monkeypatch: Any) -> None:
 def test_ipv4_mapped_blocked() -> None:
     assert is_blocked_ip(ipaddress.ip_address("::ffff:127.0.0.1")) is True
     assert is_blocked_ip(ipaddress.ip_address("8.8.8.8")) is False
+
+
+def _cfg_env(tmp_path: Path, monkeypatch: Any) -> tuple[Path, Path]:
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("p", encoding="utf-8")
+    digest_dir = tmp_path / "pilot-digests"
+    state_dir = tmp_path / "adapter"
+    monkeypatch.setenv("JARVISE_HERMES_INGEST_TOKEN", "ingest-token-12345678")
+    monkeypatch.setenv("JARVISE_HERMES_API_KEY", "api-key-12345678")
+    monkeypatch.setenv("HERMES_PROVIDER", "openrouter")
+    monkeypatch.setenv("HERMES_MODEL", "test-model")
+    monkeypatch.setenv("JARVISE_HERMES_DIGEST_DIR", str(digest_dir))
+    monkeypatch.setenv("JARVISE_HERMES_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("JARVISE_HERMES_PROMPT_PATH", str(prompt))
+    monkeypatch.setenv("JARVISE_HERMES_SOURCE_POLICY", str(SOURCE_POLICY))
+    return digest_dir, state_dir
+
+
+def test_authority_backslash_percent_semicolon_rejected() -> None:
+    """F3: parser-differential authority must not pass the allowlist."""
+    for url in (
+        r"https://evil.com\.nvidia.com/x",
+        "https://evil.com;.nvidia.com/x",
+        "https://evil.com%2f.nvidia.com/x",
+    ):
+        ok, reason = allow_source_url(url, policy_path=SOURCE_POLICY)
+        assert ok is False, (url, reason)
+    ok_good, reason_good = allow_source_url("https://www.nvidia.com/a", policy_path=SOURCE_POLICY)
+    assert ok_good is True, reason_good
+    ok_fed, reason_fed = allow_source_url(
+        "https://federalreserve.gov/newsevents/pressreleases.htm",
+        policy_path=SOURCE_POLICY,
+    )
+    assert ok_fed is True, reason_fed
+
+
+def test_resume_rejects_missing_runtime_no_publish(tmp_path: Path, monkeypatch: Any) -> None:
+    """F1: resume completed without runtime must not publish and must not create."""
+    from jarvise_intel.digest import write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "running",
+            "attempt": 1,
+            "run_id": "run-resume",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+        },
+    )
+    creates = {"n": 0}
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> RunResult:
+        return RunResult(
+            run_id=run_id,
+            status="completed",
+            output=json.dumps({"no_news": True, "items": []}),
+            usage={},
+            runtime={},
+            raw={"status": "completed"},
+        )
+
+    def fake_create(*_a: Any, **_k: Any) -> str:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr(
+        "jarvise_intel.app.run_research", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError())
+    )
+    monkeypatch.setattr("jarvise_intel.gateway.create_run", fake_create)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 502
+    assert body["error"] == "provider_mismatch"
+    assert not list(digest_dir.glob("*.md"))
+    assert creates["n"] == 0
+    # Second call blocked as invalid_result — no paid replacement.
+    code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code2 == 409
+    assert body2["error"] == "invalid_result"
+
+
+def test_resume_rejects_budget_exhausted(tmp_path: Path, monkeypatch: Any) -> None:
+    from jarvise_intel.digest import write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {"status": "unknown", "attempt": 1, "run_id": "run-b", "idempotency_key": "2026-11-26T07-a1"},
+    )
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> RunResult:
+        return RunResult(
+            run_id=run_id,
+            status="completed",
+            output=json.dumps({"no_news": True, "items": []}),
+            usage={},
+            runtime={"provider": "openrouter", "model": "test-model"},
+            raw={"status": "completed", "hermes.error_code": "iteration_budget_exhausted"},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr(
+        "jarvise_intel.app.run_research",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no create")),
+    )
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 502
+    assert body["error"] == "incomplete_run"
+    assert not list(digest_dir.glob("*.md"))
+
+
+def test_provider_error_mid_poll_keeps_unknown_no_second_create(tmp_path: Path, monkeypatch: Any) -> None:
+    """F2: transport failure after create stores unknown; next ingest does not mint -a2."""
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    keys: list[str] = []
+    calls = {"create": 0}
+
+    def fake_run(*_a: Any, **kwargs: Any) -> Any:
+
+        keys.append(str(kwargs.get("idempotency_key")))
+        on_created = kwargs.get("on_created")
+        calls["create"] += 1
+        if on_created:
+            on_created("run-alive")
+        raise GatewayError("provider_error", "HTTP 502", status_code=502)
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code1, body1 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code1 == 409
+    assert body1["error"] == "unknown_run"
+    assert keys[0].endswith("-a1")
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> RunResult:
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code2 == 409
+    assert body2["error"] == "unknown_run"
+    assert calls["create"] == 1
+    assert len(keys) == 1
+
+
+def test_lost_create_reuses_same_idempotency_key(tmp_path: Path, monkeypatch: Any) -> None:
+    """F2: create with no run_id → create_unconfirmed → same key on retry."""
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    keys: list[str] = []
+    phase = {"n": 0}
+
+    def fake_run(*_a: Any, **kwargs: Any) -> Any:
+        from jarvise_intel.gateway import RunResult
+
+        keys.append(str(kwargs.get("idempotency_key")))
+        phase["n"] += 1
+        if phase["n"] == 1:
+            raise GatewayError("provider_error", "URLError")
+        return RunResult(
+            run_id="run-replay",
+            status="completed",
+            output=json.dumps({"no_news": True, "items": []}),
+            usage={},
+            runtime={"provider": "openrouter", "model": "test-model"},
+            raw={"status": "completed"},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code1, _body1 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code1 == 502
+    code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code2 == 200
+    assert keys[0] == keys[1]
+    assert keys[0].endswith("-a1")
+    assert (digest_dir / "2026-11-26-00.md").is_file()
+
+
+def test_adopt_rejects_empty_hash_mismatch_missing_sidecar(tmp_path: Path) -> None:
+    from jarvise_intel.digest import adopt_existing_digest, write_provenance
+
+    slot = parse_slot("2026-11-26T07")
+    digest_dir = tmp_path / "pilot-digests"
+    state_dir = tmp_path / "state"
+    digest_dir.mkdir(parents=True)
+    target = digest_dir / slot.filename
+
+    target.write_bytes(b"")
+    with pytest.raises(ValueError, match="recovery_empty_file"):
+        adopt_existing_digest(digest_dir=digest_dir, state_dir=state_dir, slot=slot)
+
+    target.write_bytes(b"# Digest\n\nNot a trade signal. Research context only.\n")
+    with pytest.raises(ValueError, match="recovery_missing_provenance"):
+        adopt_existing_digest(digest_dir=digest_dir, state_dir=state_dir, slot=slot)
+
+    write_provenance(state_dir, slot, sha256="deadbeef", byte_length=4)
+    with pytest.raises(ValueError, match="recovery_hash_mismatch"):
+        adopt_existing_digest(digest_dir=digest_dir, state_dir=state_dir, slot=slot)
+
+    other = parse_slot("2026-11-26T19")
+    good = target.read_bytes()
+    write_provenance(
+        state_dir,
+        slot,
+        sha256=__import__("hashlib").sha256(good).hexdigest(),
+        byte_length=len(good),
+    )
+    # Overwrite provenance with wrong slot label via load path: write other slot's file
+    # into this slot's sidecar path by calling write_provenance for other then swapping.
+    from jarvise_intel.digest import load_provenance
+
+    write_provenance(
+        state_dir,
+        other,
+        sha256=__import__("hashlib").sha256(good).hexdigest(),
+        byte_length=len(good),
+    )
+    # Malformed byte_length type
+    import json as _json
+
+    from jarvise_intel.digest import _provenance_path
+
+    path = _provenance_path(state_dir, slot)
+    path.write_text(
+        _json.dumps(
+            {
+                "slot": slot.label,
+                "filename": slot.filename,
+                "sha256": __import__("hashlib").sha256(good).hexdigest(),
+                "byte_length": "not-an-int",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="recovery_length_mismatch"):
+        adopt_existing_digest(digest_dir=digest_dir, state_dir=state_dir, slot=slot)
+    _ = load_provenance  # silence unused if optimized away
+
+
+def test_smoke_rejects_substring_pilot_path(tmp_path: Path) -> None:
+    from jarvise_intel.digest import assert_smoke_confined
+
+    slot = parse_slot("smoke-2026-11-26T07", smoke_allowed=True)
+    # Final component is not pilot-digests even though the marker appears earlier.
+    with pytest.raises(ValueError, match="smoke_not_pilot_dir"):
+        assert_smoke_confined(slot, tmp_path / "pilot-digests-backup" / "canonical")
