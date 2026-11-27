@@ -4368,7 +4368,21 @@ def cancel_jv_orders_for_symbol(
     if intent_id is not None:
         short = str(intent_id).replace("aei_", "")[:12]
         prefix = f"jv-{short}-"
-    for order in trade.open_algo_orders(symbol=symbol):
+        # A1 intent-scoped cleanup (watch exec-linked Quick close): a malformed
+        # HTTP-200 must not look like "no orders" — that would write quick_jv_cleanup
+        # and strand reduce-only SL/TP. Main callers (intent_id=None) stay non-strict.
+        try:
+            algo_orders = trade.open_algo_orders(symbol=symbol, strict=True)
+        except Exception as exc:  # noqa: BLE001 — not-confirmed; watch retries
+            logger.warning(
+                "intent-scoped jv- openAlgoOrders failed %s: %s",
+                symbol,
+                type(exc).__name__,
+            )
+            return [], False
+    else:
+        algo_orders = trade.open_algo_orders(symbol=symbol)
+    for order in algo_orders:
         cid = str(order.get("clientAlgoId") or order.get("clientOrderId") or "")
         if prefix is not None:
             if not cid.startswith(prefix):
