@@ -480,3 +480,53 @@ def test_cli_pending_deposit_refused(tmp_path: Path) -> None:
         conn.close()
     r = _invoke(path, *_args("wd", "80", "920", now - 2 * HOUR))
     assert r.exit_code == 1 and _json(r)["reason"] == "deposit_pending"
+
+
+def test_deposit_booked_by_note_blocks_wd_dry_run(tmp_path: Path) -> None:
+    now = _now()
+    eff = now - 7 * HOUR
+    path = _make_db(tmp_path / "depnote.db", wallet="400")
+    conn = open_db(path)
+    try:
+        assert ps.apply_owner_deposit(
+            conn,
+            amount=D("80"),
+            account_value=D("480"),
+            now_ms=eff + 1,
+            effective_at_ms=eff,
+            note=f"historical one-off; Binance TRANSFER tranId {TRAN}",
+        )["ok"]
+    finally:
+        conn.close()
+    r = _invoke(path, *_args("wd", "80", "400", eff + 10))
+    assert r.exit_code == 3, r.output
+    assert _json(r)["reason"] == "conflict"
+
+
+def test_apply_rechecks_late_ledger_inside_store_transaction(tmp_path: Path, monkeypatch: Any) -> None:
+    """Race: ledger moves after the read-only pre-check; the store's in-transaction check refuses."""
+    from jarvise_assist import partner_owner_history as poh
+
+    now = _now()
+    path = _make_db(tmp_path / "late-race.db", init_ms=now - DAY)
+    eff = now - 2 * DAY
+    real = ps.owner_events_after
+    calls: list[int] = []
+
+    def first_miss(conn: Any, t_ms: int) -> str | None:
+        calls.append(int(t_ms))
+        return None if len(calls) == 1 else real(conn, t_ms)
+
+    monkeypatch.setattr(ps, "owner_events_after", first_miss)
+    params, err = poh.validate_args(
+        side="wd", tran_id=TRAN, amount="80", account_value="920", effective_at_ms=eff, now_ms=now
+    )
+    assert err is None and params is not None
+    conn = open_db(path)
+    try:
+        out = poh.apply_owner_tx(conn, params, now_ms=now)
+    finally:
+        conn.close()
+    assert out["ok"] is False and out["reason"] == "events_after_effective"
+    assert len(calls) == 2
+    assert _owner_rows(path) == []
