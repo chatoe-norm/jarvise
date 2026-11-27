@@ -473,19 +473,20 @@ def sync_quick_trades(
 
         # Broaden fetch window for exec-linked (fill may precede created_at on clock skew).
         fetch_start = created - (3_600_000 if exec_intent_id else 0)
-        # Unresolved exec (no logged market orderId) can expire as no-fill after
-        # the keep window. A non-list userTrades body must not look like no fills.
-        unresolved_exec = bool(exec_intent_id) and not bot_order_id
+        # Every exec-linked registration can expire as no-fill once flat and past
+        # grace. A non-list userTrades body must not look like no fills, including
+        # when the market orderId is already logged. Record-only regs stay non-strict.
+        exec_linked = bool(exec_intent_id)
         try:
             fills = fetch_all_user_trades(
                 client,
                 sym,
                 start_ms=fetch_start,
                 end_ms=int(now_ms) + 1,
-                strict=unresolved_exec,
+                strict=exec_linked,
             )
         except Exception:  # noqa: BLE001 — unreadable history keeps this registration
-            if not unresolved_exec:
+            if not exec_linked:
                 raise
             logger.warning("quick sync userTrades unreadable intent=%s", exec_intent_id)
             continue
