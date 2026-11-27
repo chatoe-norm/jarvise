@@ -659,6 +659,22 @@ def test_r12_qk_ex_accepts_counter_near_cap(tmp_path: Path, monkeypatch: pytest.
     conn.close()
 
 
+def test_r12_qk_ex_refuses_counter_over_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record-only quick_cap bypass still re-checks the cap on the counter-trend bot plan."""
+    _bot(monkeypatch)
+    conn = _db(tmp_path, "capover.db")
+    ts = _daytime_ms()
+    _open_quick(conn, symbol="ETHUSDT", risk="90", now=ts)
+    fut = _FuturesRead(mark=Decimal("100"), balance=Decimal("10000"))
+    card = _insert_quoted_card(conn, now_ms_value=ts, entry=100.0, stop=99.0)
+    out, sent = _qk_ex(conn, card, fut, ts)
+    joined = "\n".join(sent)
+    assert out.get("ok") is False, (out, joined)
+    assert out.get("reason") in {"quick_cap", "portfolio_cap"}, out
+    assert "ยืนยันบอทเข้าไม้" not in joined
+    conn.close()
+
+
 def test_r12_qk_ex_refuses_fee_r(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _bot(monkeypatch)
     conn = _db(tmp_path, "fee.db")
@@ -829,4 +845,24 @@ def test_r12_expire_notice_unresolved_keep_window(tmp_path: Path, monkeypatch: p
     joined = "\n".join(sent)
     assert "ภายใน 2 ชม." in joined
     assert "10 นาที" not in joined
+    conn.close()
+
+
+def test_r12_expire_notice_known_order_uses_registration_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exec-linked reg with a logged market orderId, flat, no fills: real window in the notice."""
+    conn = _db(tmp_path, "expknown.db")
+    created = _daytime_ms()
+    _iid, rid, _mkt = _seed_unresolved_exec_reg(conn, created=created, order_id_logged="777001")
+    window = 15 * 60_000
+    expires = created + window
+    conn.execute("UPDATE assist_quick_registration SET expires_at_ms=? WHERE id=?", (expires, rid))
+    conn.commit()
+    sent = _sync_notice(conn, expires + REG_EXPIRE_GRACE_MS + 1, monkeypatch)
+    joined = "\n".join(sent)
+    status = conn.execute("SELECT status FROM assist_quick_registration WHERE id=?", (rid,)).fetchone()
+    assert str(status["status"]) == "expired", joined
+    assert "ภายใน 15 นาที" in joined
+    assert "ภายใน 10 นาที" not in joined
     conn.close()
