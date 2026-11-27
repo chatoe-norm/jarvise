@@ -300,21 +300,88 @@ def _inflight_lock_path(state_dir: Path) -> Path:
 
 
 ACTIVE_ADMISSION_STATUSES = frozenset({"running", "unknown", "create_unconfirmed"})
+# Blocks new paid work; only cleared after verified terminal or owner action.
+BLOCKING_ADMISSION_STATUSES = ACTIVE_ADMISSION_STATUSES | frozenset({"owner_recovery_required"})
+TERMINAL_SLOT_STATUSES = frozenset({"completed", "invalid_result", "failed_terminal"})
+
+
+class ActiveAdmissionError(Exception):
+    """Raised when the active-admission index is present but unreadable/invalid (S5)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _active_admission_path(state_dir: Path) -> Path:
     return state_dir / "active_admission.json"
 
 
+def validate_active_admission_record(data: dict[str, Any]) -> dict[str, Any]:
+    """Require a minimal schema before trusting or clearing a marker (S5)."""
+    status = str(data.get("status") or "").strip()
+    if not status:
+        raise ActiveAdmissionError("admission_missing_status")
+    if status not in BLOCKING_ADMISSION_STATUSES and status not in TERMINAL_SLOT_STATUSES:
+        raise ActiveAdmissionError(f"admission_unknown_status:{status}")
+    slot = str(data.get("slot") or "").strip()
+    if not slot:
+        raise ActiveAdmissionError("admission_missing_slot")
+    try:
+        attempt = int(data.get("attempt") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ActiveAdmissionError("admission_bad_attempt") from exc
+    if attempt < 1:
+        raise ActiveAdmissionError("admission_bad_attempt")
+    if status in ACTIVE_ADMISSION_STATUSES:
+        started = str(data.get("started_at") or "").strip()
+        if not started:
+            raise ActiveAdmissionError("admission_missing_started_at")
+        key = str(data.get("idempotency_key") or "").strip()
+        if not key:
+            raise ActiveAdmissionError("admission_missing_idempotency_key")
+    return data
+
+
 def load_active_admission(state_dir: Path) -> dict[str, Any] | None:
+    """Return the marker dict, None if absent, or raise ActiveAdmissionError (S5)."""
     path = _active_admission_path(state_dir)
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ActiveAdmissionError("admission_unreadable") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ActiveAdmissionError("admission_malformed_json") from exc
+    if not isinstance(data, dict):
+        raise ActiveAdmissionError("admission_not_object")
+    return validate_active_admission_record(data)
+
+
+def list_unresolved_slot_records(state_dir: Path) -> list[dict[str, Any]]:
+    """Scan durable slot files for unresolved paid admissions (S5 rebuild)."""
+    slots_dir = state_dir / "slots"
+    if not slots_dir.is_dir():
+        return []
+    found: list[dict[str, Any]] = []
+    for path in sorted(slots_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        status = str(data.get("status") or "")
+        if status not in ACTIVE_ADMISSION_STATUSES and status != "owner_recovery_required":
+            continue
+        slot = str(data.get("slot") or "").strip()
+        if not slot:
+            continue
+        found.append(data)
+    return found
 
 
 def write_active_admission(state_dir: Path, record: dict[str, Any]) -> None:
@@ -340,13 +407,20 @@ def write_active_admission(state_dir: Path, record: dict[str, Any]) -> None:
 
 
 def clear_active_admission(state_dir: Path, *, slot_label: str | None = None) -> None:
-    """Clear the adapter-wide admission when it matches *slot_label* (or always if None)."""
-    current = load_active_admission(state_dir)
-    if current is None:
-        return
-    if slot_label is not None and str(current.get("slot") or "") != slot_label:
-        return
+    """Clear the adapter-wide admission when it matches *slot_label* (or always if None).
+
+    Corrupt markers are not cleared by slot match alone — raise so the caller
+    fails closed (S5). Absent file is a no-op.
+    """
     path = _active_admission_path(state_dir)
+    if not path.is_file():
+        return
+    if slot_label is not None:
+        current = load_active_admission(state_dir)
+        if current is None:
+            return
+        if str(current.get("slot") or "") != slot_label:
+            return
     try:
         path.unlink()
     except OSError:

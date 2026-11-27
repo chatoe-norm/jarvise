@@ -263,9 +263,28 @@ def wait_for_run(
     open_url: HttpOpener | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    deadline_s: float | None = None,
 ) -> RunResult:
-    deadline = monotonic() + cfg.deadline_s
-    last: RunResult | None = None
+    """Poll until terminal or until *deadline_s* (default cfg.deadline_s) elapses.
+
+    A non-positive remaining budget stop-and-verifies immediately (S4 absolute
+    admission deadline) — never grants a fresh full cfg.deadline_s window.
+    """
+    limit = cfg.deadline_s if deadline_s is None else float(deadline_s)
+    stop_timeout = min(15.0, max(1.0, cfg.deadline_s))
+    if limit <= 0:
+        stop_run(cfg, run_id, open_url=open_url, timeout=stop_timeout)
+        try:
+            final = get_run(cfg, run_id, open_url=open_url, timeout=stop_timeout)
+        except GatewayError:
+            raise GatewayError("unknown_run", "stop_unverified") from None
+        if final.status in TERMINAL_OK:
+            return finalize_completed(cfg, final)
+        if final.status in TERMINAL_FAIL:
+            raise GatewayError("incomplete_run", final.status)
+        raise GatewayError("unknown_run", final.status or "deadline_exceeded")
+
+    deadline = monotonic() + limit
     while monotonic() < deadline:
         last = get_run(cfg, run_id, open_url=open_url, timeout=min(30.0, max(1.0, deadline - monotonic())))
         if last.status in TERMINAL_OK:
@@ -274,9 +293,9 @@ def wait_for_run(
             raise GatewayError("incomplete_run", last.status)
         sleep(cfg.poll_s)
     # Deadline: request stop, then verify resulting state.
-    stop_run(cfg, run_id, open_url=open_url, timeout=min(15.0, cfg.deadline_s))
+    stop_run(cfg, run_id, open_url=open_url, timeout=stop_timeout)
     try:
-        final = get_run(cfg, run_id, open_url=open_url, timeout=min(15.0, cfg.deadline_s))
+        final = get_run(cfg, run_id, open_url=open_url, timeout=stop_timeout)
     except GatewayError:
         raise GatewayError("unknown_run", "stop_unverified") from None
     if final.status in TERMINAL_OK:
@@ -295,6 +314,7 @@ def run_research(
     open_url: HttpOpener | None = None,
     sleep: Callable[[float], None] = time.sleep,
     on_created: Callable[[str], None] | None = None,
+    deadline_s: float | None = None,
 ) -> RunResult:
     run_id = create_run(
         cfg,
@@ -305,4 +325,4 @@ def run_research(
     )
     if on_created is not None:
         on_created(run_id)
-    return wait_for_run(cfg, run_id, open_url=open_url, sleep=sleep)
+    return wait_for_run(cfg, run_id, open_url=open_url, sleep=sleep, deadline_s=deadline_s)

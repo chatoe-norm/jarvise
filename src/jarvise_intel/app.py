@@ -15,14 +15,17 @@ from typing import Any
 from urllib.parse import urlparse
 
 from jarvise_intel.digest import (
-    ACTIVE_ADMISSION_STATUSES,
+    BLOCKING_ADMISSION_STATUSES,
     MAX_ATTEMPTS,
+    TERMINAL_SLOT_STATUSES,
+    ActiveAdmissionError,
     adopt_existing_digest,
     assert_current_slot,
     assert_round_trip,
     assert_smoke_confined,
     clear_active_admission,
     extract_json_object,
+    list_unresolved_slot_records,
     load_active_admission,
     load_slot_record,
     parse_slot,
@@ -40,6 +43,7 @@ from jarvise_intel.gateway import (
     GatewayConfig,
     GatewayError,
     RunResult,
+    create_run,
     finalize_completed,
     get_run,
     run_research,
@@ -133,6 +137,8 @@ def _next_attempt(existing: dict[str, Any] | None) -> tuple[int, str | None]:
         return 0, "running"
     if status == "invalid_result":
         return 0, "invalid_result"
+    if status == "owner_recovery_required":
+        return 0, "owner_recovery_required"
     if status == "create_unconfirmed":
         # Same attempt + same Idempotency-Key; do not mint n+1 (F2).
         attempt = int(existing.get("attempt") or 1)
@@ -179,18 +185,40 @@ def _publish_from_result(
     )
 
 
-def _resume_past_deadline(existing: dict[str, Any], cfg: AdapterConfig) -> bool:
+def _wall_now(cfg: AdapterConfig) -> datetime:
+    """Prefer the injected test clock; production uses UTC wall time."""
+    if cfg.now is not None:
+        moment = cfg.now
+        if moment.tzinfo is None:
+            return moment.replace(tzinfo=UTC)
+        return moment.astimezone(UTC)
+    return datetime.now(UTC)
+
+
+def _parse_started_at(existing: dict[str, Any]) -> datetime | None:
     started = existing.get("started_at")
     if not isinstance(started, str) or not started.strip():
-        return False
+        return None
     try:
         started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
     except ValueError:
-        return False
+        return None
     if started_dt.tzinfo is None:
         started_dt = started_dt.replace(tzinfo=UTC)
-    elapsed = (datetime.now(UTC) - started_dt).total_seconds()
-    return elapsed >= cfg.deadline_s
+    return started_dt
+
+
+def _remaining_deadline_s(existing: dict[str, Any], cfg: AdapterConfig) -> float:
+    """Absolute remaining budget from original started_at (S4). Never resets to full."""
+    started_dt = _parse_started_at(existing)
+    if started_dt is None:
+        return 0.0
+    elapsed = (_wall_now(cfg) - started_dt).total_seconds()
+    return max(0.0, float(cfg.deadline_s) - elapsed)
+
+
+def _resume_past_deadline(existing: dict[str, Any], cfg: AdapterConfig) -> bool:
+    return _remaining_deadline_s(existing, cfg) <= 0.0
 
 
 def _mark_active(
@@ -216,10 +244,30 @@ def _mark_active(
     if error:
         record["error"] = error
     write_slot_record(cfg.state_dir, slot, record)
-    if status in ACTIVE_ADMISSION_STATUSES:
+    if status in BLOCKING_ADMISSION_STATUSES:
         write_active_admission(cfg.state_dir, record)
     else:
         clear_active_admission(cfg.state_dir, slot_label=slot.label)
+
+
+def _clear_matching_terminal_admission(cfg: AdapterConfig, *, slot: Any) -> None:
+    """S2: clear the global marker only when it names this verified terminal slot."""
+    try:
+        active = load_active_admission(cfg.state_dir)
+    except ActiveAdmissionError:
+        return
+    if active is None:
+        return
+    if str(active.get("slot") or "") != slot.label:
+        return
+    clear_active_admission(cfg.state_dir, slot_label=slot.label)
+
+
+def _slot_input_text(slot: Any) -> str:
+    return (
+        f"Produce the news digest JSON for slot {slot.label} "
+        f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
+    )
 
 
 def _handle_resume(
@@ -237,9 +285,10 @@ def _handle_resume(
     attempt = int(existing.get("attempt") or 1)
     idem = existing.get("idempotency_key")
     started_at = existing.get("started_at")
+    remaining = _remaining_deadline_s(existing, cfg)
 
-    past_deadline = _resume_past_deadline(existing, cfg)
-    if past_deadline:
+    if remaining <= 0:
+        # Absolute deadline elapsed: stop-and-verify immediately (S4).
         stop_run(gateway, run_id)
         try:
             current = get_run(gateway, run_id)
@@ -333,46 +382,209 @@ def _handle_resume(
     return 409, {"ok": False, "error": "unknown_run"}
 
 
+def _recover_create_unconfirmed(
+    cfg: AdapterConfig,
+    *,
+    slot: Any,
+    existing: dict[str, Any],
+) -> tuple[int, dict[str, Any]] | None:
+    """S3: rediscover a lost create via the same frozen idempotency key only.
+
+    Works even when the original Bangkok window has ended (other-slot reconcile).
+    Never mints a new attempt/key. Past retention with no recoverable ID → owner recovery.
+    """
+    attempt = int(existing.get("attempt") or 1)
+    idem = str(existing.get("idempotency_key") or "").strip()
+    started_at = str(existing.get("started_at") or "").strip()
+    if not idem or not started_at:
+        _mark_active(
+            cfg,
+            slot=slot,
+            status="owner_recovery_required",
+            attempt=attempt,
+            idem=idem or None,
+            started_at=started_at or None,
+            error="missing_admission_fields",
+        )
+        return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
+
+    run_id = str(existing.get("run_id") or "").strip()
+    remaining = _remaining_deadline_s(existing, cfg)
+    gateway = _gateway(cfg)
+
+    if not run_id:
+        try:
+            instructions = _load_prompt(cfg.prompt_path)
+        except OSError:
+            return 500, {"ok": False, "error": "prompt_unreadable"}
+        try:
+            run_id = create_run(
+                gateway,
+                instructions=instructions,
+                input_text=_slot_input_text(slot),
+                idempotency_key=idem,
+            )
+        except GatewayError as exc:
+            # Transport/provider ambiguity: never invent terminal failure (S4).
+            if remaining <= 0:
+                _mark_active(
+                    cfg,
+                    slot=slot,
+                    status="owner_recovery_required",
+                    attempt=attempt,
+                    idem=idem,
+                    started_at=started_at,
+                    error=exc.category,
+                )
+                return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="create_unconfirmed",
+                attempt=attempt,
+                idem=idem,
+                started_at=started_at,
+                error=exc.category,
+            )
+            return 409, {"ok": False, "error": "admission_busy", "slot": slot.label}
+        _mark_active(
+            cfg,
+            slot=slot,
+            status="running",
+            attempt=attempt,
+            idem=idem,
+            started_at=started_at,
+            run_id=run_id,
+        )
+
+    # Enforce original absolute deadline on the recovered run.
+    resumed = _handle_resume(
+        cfg,
+        slot=slot,
+        existing={
+            **existing,
+            "status": "running",
+            "run_id": run_id,
+            "attempt": attempt,
+            "idempotency_key": idem,
+            "started_at": started_at,
+        },
+    )
+    return resumed
+
+
+def _resolve_active_index(cfg: AdapterConfig) -> dict[str, Any] | None:
+    """Load active marker or rebuild from durable unresolved slots (S5)."""
+    try:
+        active = load_active_admission(cfg.state_dir)
+    except ActiveAdmissionError:
+        raise
+    if active is not None:
+        return active
+    unresolved = list_unresolved_slot_records(cfg.state_dir)
+    if not unresolved:
+        return None
+
+    # Prefer the oldest started_at so a stale unpaid run keeps blocking.
+    def _sort_key(row: dict[str, Any]) -> str:
+        return str(row.get("started_at") or "")
+
+    chosen = sorted(unresolved, key=_sort_key)[0]
+    write_active_admission(cfg.state_dir, chosen)
+    return chosen
+
+
 def _block_other_active_admission(
     cfg: AdapterConfig,
     *,
     slot: Any,
 ) -> tuple[int, dict[str, Any]] | None:
-    """R5: another slot's unpaid/unknown admission blocks every other slot."""
-    active = load_active_admission(cfg.state_dir)
+    """R5/S2/S3/S5: another slot's unpaid/unknown admission blocks every other slot."""
+    try:
+        active = _resolve_active_index(cfg)
+    except ActiveAdmissionError as exc:
+        return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
     if active is None:
         return None
     status = str(active.get("status") or "")
-    if status not in ACTIVE_ADMISSION_STATUSES:
-        clear_active_admission(cfg.state_dir)
-        return None
+    if status in TERMINAL_SLOT_STATUSES:
+        # Stale terminal marker: clear only when slot file agrees.
+        other_label = str(active.get("slot") or "")
+        try:
+            other_slot = parse_slot(other_label, smoke_allowed=True)
+        except ValueError:
+            return 409, {"ok": False, "error": "admission_state_invalid"}
+        other_record = load_slot_record(cfg.state_dir, other_slot)
+        if other_record and str(other_record.get("status") or "") in TERMINAL_SLOT_STATUSES:
+            clear_active_admission(cfg.state_dir, slot_label=other_label)
+            return None
+        return 409, {"ok": False, "error": "admission_state_invalid"}
+    if status not in BLOCKING_ADMISSION_STATUSES:
+        # Do not clear unrecognized statuses without evidence (S5).
+        return 409, {"ok": False, "error": "admission_state_invalid"}
     other = str(active.get("slot") or "")
     if other == slot.label:
         return None
-    # Reconcile the other admission; do not create for this slot while unresolved.
-    other_slot = None
     try:
         other_slot = parse_slot(other, smoke_allowed=True)
     except ValueError:
         return 409, {"ok": False, "error": "admission_busy", "slot": other}
     other_record = load_slot_record(cfg.state_dir, other_slot) or active
-    if str(other_record.get("status") or "") in {"running", "unknown"} and str(
-        other_record.get("run_id") or ""
-    ):
+    other_status = str(other_record.get("status") or "")
+
+    # S2: durable terminal slot with stale marker — clear and continue.
+    if other_status in TERMINAL_SLOT_STATUSES:
+        clear_active_admission(cfg.state_dir, slot_label=other)
+        return None
+
+    if other_status == "owner_recovery_required":
+        return 409, {"ok": False, "error": "owner_recovery_required", "slot": other}
+
+    if other_status == "create_unconfirmed":
+        recovered = _recover_create_unconfirmed(cfg, slot=other_slot, existing=other_record)
+        if recovered is None:
+            # Terminal fail on other → allow this slot if marker cleared.
+            still = _peek_blocking(cfg)
+            if still:
+                return 409, {"ok": False, "error": "admission_busy", "slot": other}
+            return None
+        code, body = recovered
+        if code == 200:
+            # Other completed via reconcile; only proceed if marker gone.
+            still = _peek_blocking(cfg)
+            if still:
+                return 409, {"ok": False, "error": "admission_busy", "slot": other}
+            return None
+        # Still unresolved / owner recovery / busy.
+        return code, body
+
+    if other_status in {"running", "unknown"} and str(other_record.get("run_id") or ""):
         resumed = _handle_resume(cfg, slot=other_slot, existing=other_record)
         if resumed is not None:
-            # Other still unresolved (or completed/invalid for that slot) — block this slot.
-            still = load_active_admission(cfg.state_dir)
-            if still and str(still.get("status") or "") in ACTIVE_ADMISSION_STATUSES:
-                return 409, {"ok": False, "error": "admission_busy", "slot": other}
-            # Cleared by terminal path — allow this slot to continue.
-            return None
-        # Terminal fail cleared via _mark_active failed_terminal — continue.
-        still = load_active_admission(cfg.state_dir)
-        if still and str(still.get("status") or "") in ACTIVE_ADMISSION_STATUSES:
+            still = _peek_blocking(cfg)
+            if still:
+                err = "admission_busy"
+                if str(still.get("status") or "") == "owner_recovery_required":
+                    err = "owner_recovery_required"
+                return 409, {"ok": False, "error": err, "slot": other}
+            if resumed[0] == 200:
+                return None
+            return 409, {"ok": False, "error": "admission_busy", "slot": other}
+        still = _peek_blocking(cfg)
+        if still:
             return 409, {"ok": False, "error": "admission_busy", "slot": other}
         return None
     return 409, {"ok": False, "error": "admission_busy", "slot": other}
+
+
+def _peek_blocking(cfg: AdapterConfig) -> dict[str, Any] | None:
+    try:
+        still = load_active_admission(cfg.state_dir)
+    except ActiveAdmissionError:
+        return {"status": "admission_state_invalid"}
+    if still and str(still.get("status") or "") in BLOCKING_ADMISSION_STATUSES:
+        return still
+    return None
 
 
 def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -392,21 +604,20 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
 
-    existing = load_slot_record(cfg.state_dir, slot)
-    if existing and existing.get("status") == "completed":
-        return 200, {"ok": True, "replay": True, "result": existing}
-    if existing and existing.get("status") == "invalid_result":
-        return 409, {"ok": False, "error": "invalid_result"}
-
     if not try_acquire_inflight(cfg.state_dir):
         return 429, {"ok": False, "error": "inflight_busy"}
 
     try:
         existing = load_slot_record(cfg.state_dir, slot)
         if existing and existing.get("status") == "completed":
+            # S2: completed replay must clear a matching stale active marker under the lock.
+            _clear_matching_terminal_admission(cfg, slot=slot)
             return 200, {"ok": True, "replay": True, "result": existing}
         if existing and existing.get("status") == "invalid_result":
+            _clear_matching_terminal_admission(cfg, slot=slot)
             return 409, {"ok": False, "error": "invalid_result"}
+        if existing and existing.get("status") == "owner_recovery_required":
+            return 409, {"ok": False, "error": "owner_recovery_required"}
 
         # P2-5: adopt a complete file published before the slot record was written.
         try:
@@ -414,10 +625,14 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
         except (ValueError, TypeError) as exc:
             return 409, {"ok": False, "error": str(exc)}
         if adopted is not None:
+            _clear_matching_terminal_admission(cfg, slot=slot)
             return 200, {"ok": True, "replay": True, "result": adopted}
 
-        # R5: another slot's active paid admission blocks this one.
-        blocked = _block_other_active_admission(cfg, slot=slot)
+        # R5/S2/S3/S5: another slot's active paid admission blocks this one.
+        try:
+            blocked = _block_other_active_admission(cfg, slot=slot)
+        except ActiveAdmissionError as exc:
+            return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
         if blocked is not None:
             return blocked
 
@@ -428,13 +643,19 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 return resumed
             existing = load_slot_record(cfg.state_dir, slot)
 
-        # create_unconfirmed for this slot: resume same key without inventing a run_id.
+        # create_unconfirmed for this slot: reuse same key/started_at via fall-through (R4/S4).
         if existing and existing.get("status") == "create_unconfirmed":
-            # Fall through to create with the same attempt/key/started_at.
-            pass
+            remaining_self = _remaining_deadline_s(existing, cfg)
+            if remaining_self <= 0:
+                # Past absolute deadline: rediscover/stop-verify only — never a fresh 600s (S3/S4).
+                recovered = _recover_create_unconfirmed(cfg, slot=slot, existing=existing)
+                if recovered is not None:
+                    return recovered
+                existing = load_slot_record(cfg.state_dir, slot)
 
         attempt, block = _next_attempt(existing)
         if block == "completed":
+            _clear_matching_terminal_admission(cfg, slot=slot)
             return 200, {"ok": True, "replay": True, "result": existing}
         if block:
             return 409, {"ok": False, "error": block}
@@ -448,15 +669,25 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
         # create_unconfirmed reuses the prior key and started_at (R4); otherwise mint {slot}-a{n}.
         prior_key = ""
         prior_started = ""
-        if existing and str(existing.get("status") or "") == "create_unconfirmed":
+        is_replay_unconfirmed = bool(
+            existing is not None and str(existing.get("status") or "") == "create_unconfirmed"
+        )
+        if is_replay_unconfirmed:
+            assert existing is not None
             prior_key = str(existing.get("idempotency_key") or "").strip()
             prior_started = str(existing.get("started_at") or "").strip()
         idem = prior_key or slot.idempotency_key(attempt)
-        input_text = (
-            f"Produce the news digest JSON for slot {slot.label} "
-            f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
-        )
+        input_text = _slot_input_text(slot)
         started_at = prior_started or datetime.now(UTC).isoformat()
+        # Absolute remaining budget for this admission (S4).
+        remaining = (
+            _remaining_deadline_s(
+                {"started_at": started_at},
+                cfg,
+            )
+            if is_replay_unconfirmed or prior_started
+            else float(cfg.deadline_s)
+        )
 
         # R4: persist this admission BEFORE POST, without a prior attempt's run_id.
         _mark_active(
@@ -486,6 +717,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 input_text=input_text,
                 idempotency_key=idem,
                 on_created=_persist_created,
+                deadline_s=remaining,
             )
             record = _publish_from_result(cfg, slot=slot, result=result, attempt=attempt, idem=idem)
             clear_active_admission(cfg.state_dir, slot_label=slot.label)

@@ -1376,3 +1376,315 @@ def test_active_admission_blocks_smoke(tmp_path: Path, monkeypatch: Any) -> None
     assert code == 409
     assert body.get("error") == "admission_busy"
     assert creates["n"] == 0
+
+
+def test_s2_adopt_clears_stale_active_marker(tmp_path: Path, monkeypatch: Any) -> None:
+    """S2: adoption/completed must clear matching active marker so later slots proceed."""
+    import hashlib
+
+    from jarvise_intel.digest import (
+        load_active_admission,
+        render_markdown,
+        write_active_admission,
+        write_provenance,
+        write_slot_record,
+    )
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    digest_dir.mkdir(parents=True, exist_ok=True)
+    slot = parse_slot("2026-11-26T07")
+    md = render_markdown([])
+    data = md.encode("utf-8")
+    (digest_dir / slot.filename).write_bytes(data)
+    write_provenance(state_dir, slot, sha256=hashlib.sha256(data).hexdigest(), byte_length=len(data))
+    # Crash boundary: artifact+provenance exist, marker still running.
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "running",
+            "attempt": 1,
+            "run_id": "stale-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T00:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "running",
+            "attempt": 1,
+            "run_id": "stale-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T00:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create after adopt")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 200
+    assert body.get("result", {}).get("recovered") is True
+    assert load_active_admission(state_dir) is None
+
+    # Later slot must not see admission_busy from the cleared marker.
+    cfg.now = _slot_now("2026-11-26T19")
+    # No unresolved work; 19 may attempt create — stub it.
+    monkeypatch.setattr(
+        "jarvise_intel.app.run_research",
+        lambda *_a, **_k: (_ for _ in ()).throw(GatewayError("provider_error", "x")),
+    )
+    code19, body19 = handle_ingest(cfg, {"slot": "2026-11-26T19"})
+    assert body19.get("error") != "admission_busy"
+    assert code19 in {502, 409, 500}
+
+
+def test_s2_completed_record_clears_marker_on_replay(tmp_path: Path, monkeypatch: Any) -> None:
+    from jarvise_intel.digest import load_active_admission, write_active_admission, write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {"status": "completed", "attempt": 1, "slot": slot.label, "filename": slot.filename},
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "running",
+            "attempt": 1,
+            "run_id": "x",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T00:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, _ = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 200
+    assert load_active_admission(state_dir) is None
+    _ = digest_dir
+
+
+def test_s3_lost_create_cross_window_owner_recovery(tmp_path: Path, monkeypatch: Any) -> None:
+    """S3: 07 create_unconfirmed at 19 must not mint a new run; past deadline → owner recovery."""
+    from jarvise_intel.digest import write_active_admission, write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot07 = parse_slot("2026-11-26T07")
+    started = "2026-11-26T00:00:00+00:00"  # well past 600s by 19:00 Bangkok
+    write_slot_record(
+        state_dir,
+        slot07,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot07.label,
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot07.label,
+        },
+    )
+    creates = {"n": 0}
+
+    def fake_create(*_a: Any, **_k: Any) -> str:
+        creates["n"] += 1
+        raise GatewayError("provider_error", "URLError")
+
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_create)
+    monkeypatch.setattr(
+        "jarvise_intel.app.run_research",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no new research")),
+    )
+    cfg = AdapterConfig()
+    cfg.deadline_s = 600.0
+    cfg.now = _slot_now("2026-11-26T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T19"})
+    assert code == 409
+    assert body.get("error") == "owner_recovery_required"
+    assert creates["n"] == 1  # one rediscovery attempt with frozen key
+    _ = digest_dir
+
+
+def test_s4_expired_create_replay_uses_zero_remaining(tmp_path: Path, monkeypatch: Any) -> None:
+    """S4: expired create_unconfirmed must stop-and-verify, not wait another 600s on that run."""
+    from jarvise_intel.digest import write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T00:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    stops: list[str] = []
+    research_deadlines: list[float | None] = []
+
+    def fake_create(*_a: Any, **_k: Any) -> str:
+        return "recovered-run"
+
+    def fake_stop(_cfg: Any, run_id: str, **_k: Any) -> None:
+        stops.append(run_id)
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        return RunResult(
+            run_id=run_id,
+            status="failed",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "failed"},
+        )
+
+    def fake_run(*_a: Any, **kwargs: Any) -> Any:
+        research_deadlines.append(kwargs.get("deadline_s"))
+        raise GatewayError("provider_error", "blocked_after_verified_fail")
+
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_create)
+    monkeypatch.setattr("jarvise_intel.app.stop_run", fake_stop)
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.deadline_s = 600.0
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    # Recovered expired run must be stop-verified before any new attempt.
+    assert "recovered-run" in stops
+    assert code == 502
+    assert body.get("error") == "provider_error"
+    # A subsequent attempt-2 (new admission) may use a full budget; attempt-1 did not wait 600s.
+    assert all(d is None or d <= 600.0 for d in research_deadlines)
+    _ = digest_dir
+
+
+def test_s4_wait_for_run_zero_deadline_stops_immediately() -> None:
+    cfg = GatewayConfig(
+        base_url="http://hermes:8642",
+        api_key="k",
+        provider="openrouter",
+        model="m",
+        deadline_s=600.0,
+        poll_s=0.01,
+    )
+    stops = {"n": 0}
+
+    def open_url(request: Any, timeout: float) -> Any:
+        method = request.get_method()
+        url = str(getattr(request, "full_url", "") or request.get_full_url())
+        if method == "POST" and url.rstrip("/").endswith("/stop"):
+            stops["n"] += 1
+            return _Resp({"run_id": "r", "status": "running"})
+        return _Resp({"run_id": "r", "status": "running", "output": ""})
+
+    with pytest.raises(GatewayError) as exc:
+        wait_for_run(cfg, "r", open_url=open_url, sleep=lambda _s: None, deadline_s=0.0)
+    assert exc.value.category == "unknown_run"
+    assert stops["n"] == 1
+
+
+def test_s5_malformed_active_blocks_without_second_create(tmp_path: Path, monkeypatch: Any) -> None:
+    """S5: corrupt marker must fail closed; unresolved slot still blocks new paid work."""
+    from jarvise_intel.digest import write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot07 = parse_slot("2026-11-27T07")
+    write_slot_record(
+        state_dir,
+        slot07,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "run-07",
+            "idempotency_key": "2026-11-27T07-a1",
+            "started_at": "2026-11-27T01:00:00+00:00",
+            "slot": slot07.label,
+        },
+    )
+    (state_dir / "active_admission.json").write_text("{not-json", encoding="utf-8")
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create while admission state invalid")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert code == 409
+    assert body.get("error") == "admission_state_invalid"
+    assert creates["n"] == 0
+    _ = digest_dir
+
+
+def test_s5_missing_index_rebuilds_from_unresolved_slot(tmp_path: Path, monkeypatch: Any) -> None:
+    from jarvise_intel.digest import write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot07 = parse_slot("2026-11-27T07")
+    write_slot_record(
+        state_dir,
+        slot07,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "run-07",
+            "idempotency_key": "2026-11-27T07-a1",
+            "started_at": "2026-11-27T01:00:00+00:00",
+            "slot": slot07.label,
+        },
+    )
+    # No active_admission.json — rebuild from slot file.
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("no second run")
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        from jarvise_intel.gateway import RunResult
+
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert code == 409
+    assert body.get("error") in {"admission_busy", "unknown_run"}
+    assert creates["n"] == 0
+    _ = digest_dir

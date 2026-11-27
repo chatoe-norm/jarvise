@@ -101,14 +101,24 @@ def test_structural_fallback_r2_r3(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="quoted_key"):
         mod.strip_and_validate('"platform_toolsets":\n  api_server: [web, terminal]\n  cli: [web]\n')
 
-    # Nested safe api_server must not mask direct unsafe list.
-    with pytest.raises(ValueError, match="unsafe_toolset"):
+    # Nested/extra direct children refused; must not mask managed lists (S1).
+    with pytest.raises(ValueError, match="unsupported_toolset_key|unsafe_toolset"):
         mod.strip_and_validate(
             "platform_toolsets:\n"
             "  api_server: [web, terminal]\n"
             "  cli: [web]\n"
             "  extra:\n"
             "    api_server: [web]\n"
+        )
+
+    # Quoted duplicate managed key at nested indent refused (S1).
+    with pytest.raises(ValueError, match="quoted_key"):
+        mod.strip_and_validate(
+            'platform_toolsets:\n  api_server: [web]\n  "api_server": [web, terminal]\n  cli: [web]\n'
+        )
+    with pytest.raises(ValueError, match="quoted_key"):
+        mod.strip_and_validate(
+            "platform_toolsets:\n  api_server: [web]\n  'api_server': [web, terminal]\n  cli: [web]\n"
         )
 
     # Missing platform_toolsets refused.

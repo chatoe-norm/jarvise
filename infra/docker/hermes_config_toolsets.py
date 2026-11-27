@@ -82,7 +82,8 @@ def _parse_flow_list(raw: str) -> list[str] | None:
 
 def _reject_unsupported_syntax(text: str) -> None:
     """Fail closed on YAML features the structural parser does not understand."""
-    if re.search(r"(?m)^[\"'].*[\"']\s*:", text):
+    # Quoted keys at any indentation (S1: nested "api_server" must not bypass).
+    if re.search(r"(?m)^[ \t]*[\"'][^\"'\n]+[\"'][ \t]*:", text):
         raise ValueError("quoted_key_unsupported")
     if "<<" in text:
         raise ValueError("merge_unsupported")
@@ -93,6 +94,10 @@ def _reject_unsupported_syntax(text: str) -> None:
             raise ValueError("anchor_unsupported")
         if re.search(r"(^|[\s\[\{,])\*[A-Za-z0-9_-]+", stripped):
             raise ValueError("alias_unsupported")
+
+
+_DIRECT_KEY = re.compile(r"^(\s+)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$")
+_DIRECT_BAD_KEY = re.compile(r"^(\s+)([\"'].+)$")
 
 
 def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
@@ -135,17 +140,24 @@ def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
             i += 1
             continue
         indent = len(line) - len(line.lstrip(" "))
-        # Skip nested mappings (indent deeper than direct children).
+        # Nested mappings deeper than direct children are ignored for managed keys
+        # (they cannot replace column-direct api_server/cli).
         if indent > direct_indent:
             i += 1
             continue
         if indent < direct_indent:
             break
-        m = re.match(r"^(\s+)(api_server|cli)\s*:\s*(.*)$", line)
+        # Refuse quoted / explicit unsupported key forms at the managed indent (S1).
+        if _DIRECT_BAD_KEY.match(line):
+            raise ValueError("quoted_key_unsupported")
+        m = _DIRECT_KEY.match(line)
         if not m:
-            i += 1
-            continue
+            raise ValueError("unsupported_platform_toolsets_entry")
         key, rest = m.group(2), m.group(3).strip()
+        if key not in MANAGED_KEYS:
+            # Non-managed direct children (e.g. owner notes) are not silently
+            # treated as toolset overrides — refuse ambiguous siblings.
+            raise ValueError(f"unsupported_toolset_key:{key}")
         if key in key_info:
             raise ValueError(f"duplicate_toolset:{key}")
         flow = _parse_flow_list(rest) if rest else None
@@ -268,11 +280,16 @@ def _structural_strip_and_validate_nocheck(text: str) -> tuple[str, bool]:
             continue
         if indent < direct_indent:
             break
-        m = re.match(r"^(\s+)(api_server|cli)\s*:\s*(.*)$", line)
+        if _DIRECT_BAD_KEY.match(line):
+            raise ValueError("quoted_key_unsupported")
+        m = _DIRECT_KEY.match(line)
         if not m:
-            i += 1
-            continue
+            raise ValueError("unsupported_platform_toolsets_entry")
         key, rest = m.group(2), m.group(3).strip()
+        if key not in MANAGED_KEYS:
+            raise ValueError(f"unsupported_toolset_key:{key}")
+        if key in found:
+            raise ValueError(f"duplicate_toolset:{key}")
         flow = _parse_flow_list(rest) if rest else None
         if flow is not None:
             found[key] = flow
