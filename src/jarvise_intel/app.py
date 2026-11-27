@@ -253,6 +253,28 @@ def request_sha256(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def scope_sha256(*, gateway_url: str, api_key: str) -> str:
+    """Non-secret fingerprint of the upstream idempotency namespace (U1).
+
+    Pinned Hermes scopes reservations by expected API key (+ profile). We store
+    only sha256(api_key) and the gateway base URL — never the raw secret.
+    """
+    payload = json.dumps(
+        {
+            "api_key_sha256": hashlib.sha256(api_key.encode("utf-8")).hexdigest(),
+            "gateway_url": gateway_url.rstrip("/"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _current_scope_hash(cfg: AdapterConfig) -> str:
+    return scope_sha256(gateway_url=cfg.gateway_url, api_key=cfg.api_key)
+
+
 def _mark_active(
     cfg: AdapterConfig,
     *,
@@ -264,6 +286,7 @@ def _mark_active(
     run_id: str = "",
     error: str | None = None,
     request_hash: str | None = None,
+    scope_hash: str | None = None,
     provider: str | None = None,
     model: str | None = None,
 ) -> None:
@@ -280,6 +303,8 @@ def _mark_active(
         record["error"] = error
     if request_hash:
         record["request_sha256"] = request_hash
+    if scope_hash:
+        record["scope_sha256"] = scope_hash
     if provider:
         record["provider"] = provider
     if model:
@@ -439,6 +464,7 @@ def _recover_create_unconfirmed(
     idem = str(existing.get("idempotency_key") or "").strip()
     started_at = str(existing.get("started_at") or "").strip()
     stored_hash = str(existing.get("request_sha256") or "").strip()
+    stored_scope = str(existing.get("scope_sha256") or "").strip()
     if not idem or not started_at:
         _mark_active(
             cfg,
@@ -449,6 +475,7 @@ def _recover_create_unconfirmed(
             started_at=started_at or None,
             error="missing_admission_fields",
             request_hash=stored_hash or None,
+            scope_hash=stored_scope or None,
         )
         return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
 
@@ -456,10 +483,25 @@ def _recover_create_unconfirmed(
     age = _admission_age_s(existing, cfg)
     remaining = _remaining_deadline_s(existing, cfg)
     gateway = _gateway(cfg)
+    current_scope = _current_scope_hash(cfg)
 
     if not run_id:
-        # T1: decide BEFORE POST — expired/no-hash/mismatched identity never create.
-        if age is None or age >= IDEMPOTENCY_SAFE_HORIZON_S or not stored_hash:
+        # T1/U1: decide BEFORE POST — expired/no-hash/scope mismatch never create.
+        if (
+            age is None
+            or age >= IDEMPOTENCY_SAFE_HORIZON_S
+            or not stored_hash
+            or not stored_scope
+            or stored_scope != current_scope
+        ):
+            if age is not None and age >= IDEMPOTENCY_SAFE_HORIZON_S:
+                err = "idempotency_retention_expired"
+            elif not stored_hash:
+                err = "missing_request_identity"
+            elif not stored_scope or stored_scope != current_scope:
+                err = "scope_identity_mismatch"
+            else:
+                err = "missing_request_identity"
             _mark_active(
                 cfg,
                 slot=slot,
@@ -467,10 +509,9 @@ def _recover_create_unconfirmed(
                 attempt=attempt,
                 idem=idem,
                 started_at=started_at,
-                error="idempotency_retention_expired"
-                if (age is not None and age >= IDEMPOTENCY_SAFE_HORIZON_S)
-                else "missing_request_identity",
+                error=err,
                 request_hash=stored_hash or None,
+                scope_hash=stored_scope or None,
             )
             return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
         try:
@@ -494,6 +535,7 @@ def _recover_create_unconfirmed(
                 started_at=started_at,
                 error="request_identity_mismatch",
                 request_hash=stored_hash,
+                scope_hash=stored_scope,
             )
             return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
         try:
@@ -515,6 +557,7 @@ def _recover_create_unconfirmed(
                     started_at=started_at,
                     error=exc.category,
                     request_hash=stored_hash,
+                    scope_hash=stored_scope,
                 )
                 return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
             _mark_active(
@@ -526,6 +569,7 @@ def _recover_create_unconfirmed(
                 started_at=started_at,
                 error=exc.category,
                 request_hash=stored_hash,
+                scope_hash=stored_scope,
                 provider=cfg.provider,
                 model=cfg.model,
             )
@@ -539,6 +583,7 @@ def _recover_create_unconfirmed(
             started_at=started_at,
             run_id=run_id,
             request_hash=stored_hash,
+            scope_hash=stored_scope,
             provider=cfg.provider,
             model=cfg.model,
         )
@@ -622,6 +667,21 @@ def _block_other_active_admission(
         if str(slot_rec.get("status") or "") in TERMINAL_SLOT_STATUSES:
             clear_active_admission(cfg.state_dir, slot_label=slot.label)
             return None
+        same_attempt = str(slot_rec.get("attempt") or "") == str(active.get("attempt") or "")
+        same_key = str(slot_rec.get("idempotency_key") or "") == str(active.get("idempotency_key") or "")
+        marker_status = str(active.get("status") or "")
+        slot_status = str(slot_rec.get("status") or "")
+        slot_run = str(slot_rec.get("run_id") or "").strip()
+        # U3: crash after slot write, before marker — allow create_unconfirmed → running/unknown.
+        if (
+            same_attempt
+            and same_key
+            and marker_status == "create_unconfirmed"
+            and slot_status in {"running", "unknown"}
+            and slot_run
+        ):
+            write_active_admission(cfg.state_dir, slot_rec)
+            return None
         # Identity must agree before any replacement/resume path.
         for field in ("attempt", "idempotency_key", "status"):
             if str(slot_rec.get(field) or "") != str(active.get(field) or ""):
@@ -631,7 +691,6 @@ def _block_other_active_admission(
                     "detail": f"marker_slot_mismatch:{field}",
                 }
         active_run = str(active.get("run_id") or "").strip()
-        slot_run = str(slot_rec.get("run_id") or "").strip()
         if active_run and slot_run and active_run != slot_run:
             return 409, {
                 "ok": False,
@@ -797,6 +856,8 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
         prior_key = ""
         prior_started = ""
         prior_hash = ""
+        prior_scope = ""
+        current_scope = _current_scope_hash(cfg)
         is_replay_unconfirmed = bool(
             existing is not None and str(existing.get("status") or "") == "create_unconfirmed"
         )
@@ -805,8 +866,8 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             prior_key = str(existing.get("idempotency_key") or "").strip()
             prior_started = str(existing.get("started_at") or "").strip()
             prior_hash = str(existing.get("request_sha256") or "").strip()
-            if not prior_hash:
-                # T1: cannot prove frozen request identity — no POST.
+            prior_scope = str(existing.get("scope_sha256") or "").strip()
+            if not prior_hash or not prior_scope:
                 _mark_active(
                     cfg,
                     slot=slot,
@@ -814,7 +875,23 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                     attempt=int(existing.get("attempt") or attempt),
                     idem=prior_key or None,
                     started_at=prior_started or None,
-                    error="missing_request_identity",
+                    error="missing_request_identity" if not prior_hash else "scope_identity_mismatch",
+                    request_hash=prior_hash or None,
+                    scope_hash=prior_scope or None,
+                )
+                return 409, {"ok": False, "error": "owner_recovery_required"}
+            if prior_scope != current_scope:
+                # U1: gateway/auth namespace rotated — never create under new credentials.
+                _mark_active(
+                    cfg,
+                    slot=slot,
+                    status="owner_recovery_required",
+                    attempt=int(existing.get("attempt") or attempt),
+                    idem=prior_key or None,
+                    started_at=prior_started or None,
+                    error="scope_identity_mismatch",
+                    request_hash=prior_hash,
+                    scope_hash=prior_scope,
                 )
                 return 409, {"ok": False, "error": "owner_recovery_required"}
         idem = prior_key or slot.idempotency_key(attempt)
@@ -836,9 +913,11 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 started_at=started_at,
                 error="request_identity_mismatch",
                 request_hash=prior_hash,
+                scope_hash=prior_scope,
             )
             return 409, {"ok": False, "error": "owner_recovery_required"}
         req_hash = prior_hash or computed_hash
+        scope_hash = prior_scope or current_scope
         # Absolute remaining budget for this admission (S4/T3).
         remaining = (
             _remaining_deadline_s(
@@ -849,7 +928,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             else float(cfg.deadline_s)
         )
 
-        # R4/T1: persist this admission BEFORE POST, without a prior attempt's run_id.
+        # R4/T1/U1: persist this admission BEFORE POST, without a prior attempt's run_id.
         _mark_active(
             cfg,
             slot=slot,
@@ -858,6 +937,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             idem=idem,
             started_at=started_at,
             request_hash=req_hash,
+            scope_hash=scope_hash,
             provider=cfg.provider,
             model=cfg.model,
         )
@@ -872,6 +952,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 started_at=started_at,
                 run_id=run_id,
                 request_hash=req_hash,
+                scope_hash=scope_hash,
                 provider=cfg.provider,
                 model=cfg.model,
             )
@@ -902,6 +983,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 this_run_id = str(prior.get("run_id") or "").strip()
             mark_kw: dict[str, Any] = {
                 "request_hash": req_hash,
+                "scope_hash": scope_hash,
                 "provider": cfg.provider,
                 "model": cfg.model,
             }
@@ -998,6 +1080,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 started_at=started_at,
                 error=str(exc),
                 request_hash=req_hash,
+                scope_hash=scope_hash,
                 provider=cfg.provider,
                 model=cfg.model,
             )

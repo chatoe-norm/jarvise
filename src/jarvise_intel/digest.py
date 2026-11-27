@@ -303,6 +303,8 @@ ACTIVE_ADMISSION_STATUSES = frozenset({"running", "unknown", "create_unconfirmed
 # Blocks new paid work; only cleared after verified terminal or owner action.
 BLOCKING_ADMISSION_STATUSES = ACTIVE_ADMISSION_STATUSES | frozenset({"owner_recovery_required"})
 TERMINAL_SLOT_STATUSES = frozenset({"completed", "invalid_result", "failed_terminal"})
+# Explicit supported set for durable slot/marker records (U2). Unknown ≠ terminal.
+SUPPORTED_SLOT_STATUSES = BLOCKING_ADMISSION_STATUSES | TERMINAL_SLOT_STATUSES
 
 
 class ActiveAdmissionError(Exception):
@@ -318,11 +320,14 @@ def _active_admission_path(state_dir: Path) -> Path:
 
 
 def validate_active_admission_record(data: dict[str, Any]) -> dict[str, Any]:
-    """Require a minimal schema before trusting or clearing a marker (S5)."""
-    status = str(data.get("status") or "").strip()
+    """Require a minimal schema before trusting or clearing a marker (S5/U2)."""
+    raw_status = data.get("status")
+    if not isinstance(raw_status, str):
+        raise ActiveAdmissionError("admission_bad_status_type")
+    status = raw_status.strip()
     if not status:
         raise ActiveAdmissionError("admission_missing_status")
-    if status not in BLOCKING_ADMISSION_STATUSES and status not in TERMINAL_SLOT_STATUSES:
+    if status not in SUPPORTED_SLOT_STATUSES:
         raise ActiveAdmissionError(f"admission_unknown_status:{status}")
     slot = str(data.get("slot") or "").strip()
     if not slot:
@@ -333,6 +338,8 @@ def validate_active_admission_record(data: dict[str, Any]) -> dict[str, Any]:
         raise ActiveAdmissionError("admission_bad_attempt") from exc
     if attempt < 1:
         raise ActiveAdmissionError("admission_bad_attempt")
+    out = dict(data)
+    out["status"] = status
     if status in ACTIVE_ADMISSION_STATUSES:
         started = str(data.get("started_at") or "").strip()
         if not started:
@@ -340,7 +347,7 @@ def validate_active_admission_record(data: dict[str, Any]) -> dict[str, Any]:
         key = str(data.get("idempotency_key") or "").strip()
         if not key:
             raise ActiveAdmissionError("admission_missing_idempotency_key")
-    return data
+    return out
 
 
 def load_active_admission(state_dir: Path) -> dict[str, Any] | None:
@@ -362,11 +369,22 @@ def load_active_admission(state_dir: Path) -> dict[str, Any] | None:
 
 
 def _validate_slot_record_payload(data: dict[str, Any], *, path: Path) -> dict[str, Any]:
-    """Validate a durable slot record; raise ActiveAdmissionError on ambiguity (T2)."""
-    status = str(data.get("status") or "").strip()
+    """Validate a durable slot record; raise ActiveAdmissionError on ambiguity (T2/U2).
+
+    Returns a copy with canonical stripped status. Unknown/noncanonical statuses
+    are ambiguous evidence — never treated as terminal or as "no admission".
+    """
+    raw_status = data.get("status")
+    if not isinstance(raw_status, str):
+        raise ActiveAdmissionError(f"slot_bad_status_type:{path.name}")
+    status = raw_status.strip()
     if not status:
         raise ActiveAdmissionError(f"slot_missing_status:{path.name}")
-    if status in ACTIVE_ADMISSION_STATUSES or status == "owner_recovery_required":
+    if status not in SUPPORTED_SLOT_STATUSES:
+        raise ActiveAdmissionError(f"slot_unknown_status:{status}:{path.name}")
+    out = dict(data)
+    out["status"] = status
+    if status in BLOCKING_ADMISSION_STATUSES:
         slot = str(data.get("slot") or "").strip()
         if not slot:
             raise ActiveAdmissionError(f"slot_missing_identity:{path.name}")
@@ -382,14 +400,14 @@ def _validate_slot_record_payload(data: dict[str, Any], *, path: Path) -> dict[s
         started = str(data.get("started_at") or "").strip()
         if status in ACTIVE_ADMISSION_STATUSES and not started:
             raise ActiveAdmissionError(f"slot_missing_started_at:{path.name}")
-    return data
+    return out
 
 
 def list_unresolved_slot_records(state_dir: Path) -> list[dict[str, Any]]:
-    """Scan durable slot files for unresolved paid admissions (S5/T2 rebuild).
+    """Scan durable slot files for unresolved paid admissions (S5/T2/U2 rebuild).
 
-    Unreadable, malformed, or incomplete blocking rows raise — never silently
-    skip into an empty "no admission" result.
+    Unreadable, malformed, unknown-status, or incomplete blocking rows raise —
+    never silently skip into an empty "no admission" result.
     """
     slots_dir = state_dir / "slots"
     if not slots_dir.is_dir():
@@ -406,11 +424,11 @@ def list_unresolved_slot_records(state_dir: Path) -> list[dict[str, Any]]:
             raise ActiveAdmissionError(f"slot_malformed_json:{path.name}") from exc
         if not isinstance(data, dict):
             raise ActiveAdmissionError(f"slot_not_object:{path.name}")
-        _validate_slot_record_payload(data, path=path)
-        status = str(data.get("status") or "")
-        if status not in ACTIVE_ADMISSION_STATUSES and status != "owner_recovery_required":
+        validated = _validate_slot_record_payload(data, path=path)
+        status = str(validated.get("status") or "")
+        if status not in BLOCKING_ADMISSION_STATUSES:
             continue
-        found.append(data)
+        found.append(validated)
     return found
 
 

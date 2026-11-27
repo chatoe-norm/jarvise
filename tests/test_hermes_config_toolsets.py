@@ -131,6 +131,26 @@ def test_structural_fallback_r2_r3(monkeypatch: pytest.MonkeyPatch) -> None:
             ": {api_server: [web, terminal], cli: [web]}\n"
         )
 
+    # Standard / verbatim tags must not override the safe block (U4).
+    with pytest.raises(ValueError, match="tag_unsupported"):
+        mod.strip_and_validate(
+            "platform_toolsets:\n"
+            "  api_server: [web]\n"
+            "  cli: [web]\n"
+            "!!str platform_toolsets:\n"
+            "  api_server: [web, terminal]\n"
+            "  cli: [web]\n"
+        )
+    with pytest.raises(ValueError, match="tag_unsupported"):
+        mod.strip_and_validate(
+            "platform_toolsets:\n"
+            "  api_server: [web]\n"
+            "  cli: [web]\n"
+            "!<tag:yaml.org,2002:str> platform_toolsets:\n"
+            "  api_server: [web, terminal]\n"
+            "  cli: [web]\n"
+        )
+
     # Missing platform_toolsets refused.
     with pytest.raises(ValueError, match="missing_platform_toolsets"):
         mod.strip_and_validate("model:\n  default: x\n")

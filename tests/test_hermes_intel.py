@@ -1536,7 +1536,8 @@ def test_s3_lost_create_cross_window_owner_recovery(tmp_path: Path, monkeypatch:
 
 def test_s4_expired_create_replay_uses_zero_remaining(tmp_path: Path, monkeypatch: Any) -> None:
     """S4: expired create_unconfirmed must stop-and-verify, not wait another 600s on that run."""
-    from jarvise_intel.app import request_sha256
+    from jarvise_intel.app import AdapterConfig as _AC
+    from jarvise_intel.app import request_sha256, scope_sha256
     from jarvise_intel.digest import write_slot_record
     from jarvise_intel.gateway import RunResult
 
@@ -1553,6 +1554,9 @@ def test_s4_expired_create_replay_uses_zero_remaining(tmp_path: Path, monkeypatc
         provider="openrouter",
         model="test-model",
     )
+    # Scope matches AdapterConfig defaults after _cfg_env.
+    probe = _AC()
+    sc_hash = scope_sha256(gateway_url=probe.gateway_url, api_key=probe.api_key)
     write_slot_record(
         state_dir,
         slot,
@@ -1563,6 +1567,7 @@ def test_s4_expired_create_replay_uses_zero_remaining(tmp_path: Path, monkeypatc
             "started_at": "2026-11-26T00:00:00+00:00",
             "slot": slot.label,
             "request_sha256": req_hash,
+            "scope_sha256": sc_hash,
             "provider": "openrouter",
             "model": "test-model",
         },
@@ -1718,7 +1723,8 @@ def test_t1_expired_idempotency_never_posts_even_if_create_would_succeed(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     """T1: three-day-old create_unconfirmed must not POST even when transport returns NEW-PAID-RUN."""
-    from jarvise_intel.app import request_sha256
+    from jarvise_intel.app import AdapterConfig as _AC
+    from jarvise_intel.app import request_sha256, scope_sha256
     from jarvise_intel.digest import load_active_admission, write_active_admission, write_slot_record
 
     digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
@@ -1734,6 +1740,8 @@ def test_t1_expired_idempotency_never_posts_even_if_create_would_succeed(
         provider="openrouter",
         model="test-model",
     )
+    probe = _AC()
+    sc_hash = scope_sha256(gateway_url=probe.gateway_url, api_key=probe.api_key)
     started = "2026-11-23T00:00:00+00:00"
     rec = {
         "status": "create_unconfirmed",
@@ -1742,6 +1750,7 @@ def test_t1_expired_idempotency_never_posts_even_if_create_would_succeed(
         "started_at": started,
         "slot": slot07.label,
         "request_sha256": req_hash,
+        "scope_sha256": sc_hash,
         "provider": "openrouter",
         "model": "test-model",
     }
@@ -1938,3 +1947,206 @@ def test_t3_partial_create_shortens_poll(monkeypatch: Any) -> None:
     # Remaining after 3s create of a 10s budget must be < 10.
     assert poll_windows
     assert poll_windows[0] <= 7.0 + 1e-6
+
+
+def test_u1_api_key_rotation_blocks_create(tmp_path: Path, monkeypatch: Any) -> None:
+    """U1: rotated gateway API key must not create under a new idempotency scope."""
+    from jarvise_intel.app import request_sha256, scope_sha256
+    from jarvise_intel.digest import load_active_admission, write_active_admission, write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    instructions = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    input_text = (
+        f"Produce the news digest JSON for slot {slot.label} "
+        f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
+    )
+    req_hash = request_sha256(
+        instructions=instructions,
+        input_text=input_text,
+        provider="openrouter",
+        model="test-model",
+    )
+    old_scope = scope_sha256(gateway_url="http://hermes:8642", api_key="api-key-12345678")
+    rec = {
+        "status": "create_unconfirmed",
+        "attempt": 1,
+        "idempotency_key": "2026-11-26T07-a1",
+        "started_at": "2026-11-26T05:00:00+00:00",
+        "slot": slot.label,
+        "request_sha256": req_hash,
+        "scope_sha256": old_scope,
+        "provider": "openrouter",
+        "model": "test-model",
+    }
+    write_slot_record(state_dir, slot, rec)
+    write_active_admission(state_dir, rec)
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create after key rotation")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_run)
+    monkeypatch.setenv("JARVISE_HERMES_API_KEY", "rotated-api-key-99999999")
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 409
+    assert body.get("error") == "owner_recovery_required"
+    assert creates["n"] == 0
+    active = load_active_admission(state_dir)
+    assert active is not None
+    assert active.get("status") == "owner_recovery_required"
+    _ = digest_dir
+
+
+def test_u2_unknown_status_blocks_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    (slots / "2026-11-27T07.json").write_text(
+        json.dumps(
+            {
+                "status": "unkn0wn",
+                "attempt": 1,
+                "run_id": "run-07",
+                "idempotency_key": "2026-11-27T07-a1",
+                "started_at": "2026-11-27T01:00:00+00:00",
+                "slot": "2026-11-27T07",
+            }
+        ),
+        encoding="utf-8",
+    )
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert code == 409
+    assert body.get("error") == "admission_state_invalid"
+    assert creates["n"] == 0
+    _ = digest_dir
+
+
+def test_u2_whitespace_status_canonicalizes_and_blocks(tmp_path: Path, monkeypatch: Any) -> None:
+    """Whitespace-suffixed unknown must not be skipped as terminal/absent."""
+    from jarvise_intel.digest import list_unresolved_slot_records
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    (slots / "2026-11-27T07.json").write_text(
+        json.dumps(
+            {
+                "status": "unknown ",
+                "attempt": 1,
+                "run_id": "run-07",
+                "idempotency_key": "2026-11-27T07-a1",
+                "started_at": "2026-11-27T01:00:00+00:00",
+                "slot": "2026-11-27T07",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Canonical strip → valid unresolved row; rebuild must block new work.
+    rows = list_unresolved_slot_records(state_dir)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "unknown"
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        from jarvise_intel.gateway import RunResult
+
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert code == 409
+    assert body.get("error") in {"admission_busy", "unknown_run"}
+    assert creates["n"] == 0
+    _ = digest_dir
+
+
+def test_u3_crash_between_slot_and_marker_recovers_run(tmp_path: Path, monkeypatch: Any) -> None:
+    """U3: running slot + stale create_unconfirmed marker → repair and resume."""
+    from jarvise_intel.digest import load_active_admission, write_active_admission, write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "running",
+            "attempt": 1,
+            "run_id": "accepted-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    gets: list[str] = []
+    creates = {"n": 0}
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        gets.append(run_id)
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 409
+    assert body.get("error") == "unknown_run"
+    assert gets == ["accepted-run"]
+    assert creates["n"] == 0
+    # Marker repaired from authoritative running slot (no longer create_unconfirmed).
+    active = load_active_admission(state_dir)
+    assert active is not None
+    assert active.get("status") == "unknown"
+    assert active.get("run_id") == "accepted-run"
+    _ = digest_dir

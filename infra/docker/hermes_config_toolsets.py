@@ -103,7 +103,13 @@ def _reject_unsupported_syntax(text: str) -> None:
             raise ValueError("explicit_key_unsupported")
         if re.match(r"^[ \t]*:[ \t]", code) or re.match(r"^[ \t]*:$", code):
             raise ValueError("explicit_key_unsupported")
-        if re.search(r"(^|[\s,\[\{])![A-Za-z]", code):
+        # Tags: !!str, !foo, !<tag:yaml.org,...>, and leading ! on a key line (U4).
+        if (
+            re.match(r"^[ \t]*!", code)
+            or "!!" in code
+            or "!<" in code
+            or re.search(r"(^|[\s,\[\{])![A-Za-z_]", code)
+        ):
             raise ValueError("tag_unsupported")
 
 
