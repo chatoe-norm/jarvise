@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -37,6 +38,7 @@ from jarvise_assist.quick_card import (
 )
 from jarvise_assist.quick_execute import BTN_QUICK_BOT_ENTER
 from jarvise_assist.quick_m1a1 import (
+    MSG_REGISTER_FAILED,
     _quoted_markup_for_card,
     _registration_refusal_text,
     handle_quick_trade_callback,
@@ -1256,3 +1258,323 @@ def test_m32_qk_register_stop_far_uses_db_setting(tmp_path: Path, monkeypatch: p
     assert "15%" in direct
     assert "20%" not in direct
     conn.close()
+
+
+# ---------------------------------------------------------------- Round 4
+
+
+def test_r4_l1_validate_args_huge_finite_account_value() -> None:
+    """1e21 still quantizes. 1e22 and 1e25 must refuse, not raise InvalidOperation."""
+    from jarvise_assist.partner_owner_history import validate_args
+
+    now = _now()
+    kept, kept_err = validate_args(
+        side="dep",
+        tran_id="900000000221",
+        amount="10",
+        account_value="1e21",
+        effective_at_ms=now - DAY,
+        now_ms=now,
+    )
+    assert kept_err is None and kept is not None
+    for raw in ("1e22", "1e25"):
+        params, err = validate_args(
+            side="dep",
+            tran_id="900000000222",
+            amount="10",
+            account_value=raw,
+            effective_at_ms=now - DAY,
+            now_ms=now,
+        )
+        assert params is None
+        assert err is not None and err["reason"] == "bad_account_value"
+
+
+def test_r4_l1_prechecks_apply_and_math_huge_account_value(tmp_path: Path) -> None:
+    now = _now()
+    path = _make_db(tmp_path / "huge.db")
+    conn = open_db(path)
+    try:
+        admin, admin_err = ps._owner_admin_row(conn)
+        assert admin_err is None and admin is not None
+        _row, pre = ps._owner_tx_prechecks(conn, amount=D("10"), account_value=D("1e22"), now_ms=now)
+        assert pre is not None and pre["reason"] == "bad_account_value"
+        planned = ps.plan_owner_tx(
+            conn,
+            kind="owner_deposit",
+            amount=D("10"),
+            account_value=D("1e25"),
+            now_ms=now,
+        )
+        assert planned["ok"] is False and planned["reason"] == "bad_account_value"
+        applied = ps.apply_owner_deposit(
+            conn,
+            amount=D("10"),
+            account_value=D("1e22"),
+            now_ms=now,
+            effective_at_ms=now - DAY,
+            note="huge",
+            event_id="pe_owner_tranhuge1",
+        )
+        assert applied["ok"] is False and applied["reason"] == "bad_account_value"
+        math = ps._owner_tx_math(
+            conn,
+            kind="owner_deposit",
+            amount=D("10"),
+            account_value=D("1e25"),
+            admin=admin,
+        )
+        assert math["ok"] is False and math["reason"] == "bad_account_value"
+        n = conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind='owner_deposit'").fetchone()["n"]
+        assert int(n) == 0
+    finally:
+        conn.close()
+
+
+def test_r4_l1_cli_huge_account_value_exits_2(tmp_path: Path) -> None:
+    now = _now()
+    path = _make_db(tmp_path / "huge-cli.db")
+    cli = _invoke(path, *_args("dep", "10", "1e25", now - DAY, tran="900000000225"))
+    blob = cli.output or ""
+    assert cli.exit_code == 2, blob
+    assert "Traceback" not in blob
+    assert _json(cli)["reason"] == "bad_account_value"
+    conn = open_db(path)
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM partner_event WHERE kind='owner_deposit'").fetchone()["n"]
+        assert int(n) == 0
+    finally:
+        conn.close()
+
+
+def test_r4_n1_quick_cancel_algo_steps_stay_out_of_order_ids(tmp_path: Path) -> None:
+    conn = _db(tmp_path, "algo-steps.db")
+    ts = _daytime_ms()
+    intent = insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"cohort": "quick", "symbol": "BTCUSDT"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 60_000,
+    )
+    logged = (
+        ("exit_cancel", "9101"),
+        ("move_stop_cancel", "9102"),
+        ("recover_move_cancel", "9103"),
+    )
+    for step, algo_id in logged:
+        insert_exec_log(
+            conn,
+            intent_id=intent,
+            step=step,
+            endpoint="/fapi/v1/algoOrder",
+            order_or_algo_id=algo_id,
+            http_status=200,
+        )
+    _cids, order_ids, algo_ids = _quick_owned_client_and_order_ids(conn)
+    for _step, algo_id in logged:
+        assert ("BTCUSDT", algo_id) in algo_ids
+        assert ("BTCUSDT", algo_id) not in order_ids
+    conn.close()
+
+
+def _qk_ex_read_failure(
+    conn: Any,
+    cid: str,
+    futures: Any,
+    ts: int,
+) -> tuple[dict[str, Any], list[str], list[Any], list[Any]]:
+    sent: list[str] = []
+    answers: list[Any] = []
+    edits: list[Any] = []
+    out = handle_quick_trade_callback(
+        conn,
+        f"qk:ex:{cid}",
+        futures=futures,
+        send=lambda text, **_k: sent.append(str(text)) or True,
+        answer=lambda text=None, **_k: answers.append(text),
+        edit=lambda *a, **k: edits.append((a, k)) or True,
+        now_ms=ts,
+        message={"message_id": 1, "chat": {"id": 1}},
+    )
+    return out, sent, answers, edits
+
+
+def _assert_qk_ex_read_closed(
+    out: dict[str, Any],
+    sent: list[str],
+    answers: list[Any],
+    edits: list[Any],
+    *,
+    reason: str,
+    caplog: pytest.LogCaptureFixture,
+    secret: str,
+) -> None:
+    from jarvise_assist.execute import _reason_th
+
+    thai = _reason_th(reason)
+    assert out == {"ok": False, "reason": reason}
+    assert thai == f"อ่านบัญชีไม่ได้ ({reason.split(':', 1)[1]})"
+    assert answers == [None]
+    assert any(thai in line for line in sent)
+    blob = json.dumps({"sent": sent, "edits": edits, "answers": answers}, ensure_ascii=False, default=str)
+    assert '"inline_keyboard": []' in blob or '"inline_keyboard":[]' in blob
+    assert thai in blob
+    assert "ลองใหม่" not in blob
+    assert MSG_REGISTER_FAILED not in blob
+    assert secret not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_r4_n2_qk_ex_card_build_failure_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _bot(monkeypatch)
+    _kill_off(monkeypatch)
+    conn = _db(tmp_path, "qk-card.db")
+    ts = _daytime_ms()
+    cid = _insert_quoted_card(conn, now_ms_value=ts)
+
+    def boom(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise RuntimeError("card-secret")
+
+    monkeypatch.setattr("jarvise_assist.quick_m1a1.build_card_at_quoted_stop", boom)
+    with caplog.at_level(logging.WARNING, logger="jarvise_assist.quick_m1a1"):
+        out, sent, answers, edits = _qk_ex_read_failure(
+            conn, cid, _FuturesRead(mark=D("100"), balance=D("10000")), ts
+        )
+    _assert_qk_ex_read_closed(
+        out,
+        sent,
+        answers,
+        edits,
+        reason="fapi_read_failed:card",
+        caplog=caplog,
+        secret="card-secret",
+    )
+    conn.close()
+
+
+class _DemoMarkBoom:
+    def mark_price(self, symbol: str) -> Decimal:
+        raise RuntimeError("mark-secret")
+
+
+def test_r4_n2_qk_ex_demo_mark_failure_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _bot(monkeypatch, "testnet")
+    _kill_off(monkeypatch)
+    conn = _db(tmp_path, "qk-mark.db")
+    ts = _daytime_ms()
+    cid = _insert_quoted_card(conn, now_ms_value=ts)
+    monkeypatch.setattr(
+        "jarvise_assist.execute.build_trade_client",
+        lambda: (_DemoMarkBoom(), None),
+    )
+    with caplog.at_level(logging.WARNING, logger="jarvise_assist.quick_m1a1"):
+        out, sent, answers, edits = _qk_ex_read_failure(
+            conn, cid, _FuturesRead(mark=D("100"), balance=D("10000")), ts
+        )
+    _assert_qk_ex_read_closed(
+        out,
+        sent,
+        answers,
+        edits,
+        reason="fapi_read_failed:mark",
+        caplog=caplog,
+        secret="mark-secret",
+    )
+    conn.close()
+
+
+def test_r4_n3_like_wildcard_owner_id_blocks_on_created(tmp_path: Path) -> None:
+    """id pe_ownerXtran… matches LIKE pe_owner_tran% and is not that prefix."""
+    from jarvise_assist.partner_owner_history import owner_hist_note
+
+    now = _now()
+    t = now - 2 * DAY
+    event_id = "pe_ownerXtranWILDCARD"
+    path = _make_db(tmp_path / "like.db", init_ms=now - 10 * DAY)
+    conn = open_db(path)
+    try:
+        assert not event_id.startswith("pe_owner_tran")
+        like = conn.execute("SELECT ? LIKE 'pe_owner_tran%'", (event_id,)).fetchone()[0]
+        assert int(like) == 1
+        _insert_event_shape(
+            conn,
+            event_id=event_id,
+            kind="owner_deposit",
+            note=owner_hist_note("900000000231"),
+            created_at_ms=now,
+            effective_at_ms=t - DAY,
+        )
+        row = conn.execute("SELECT * FROM partner_event WHERE id=?", (event_id,)).fetchone()
+        assert row["kind"] == "owner_deposit"
+        assert ps.OWNER_HIST_NOTE_MARK in str(row["note"])
+        assert int(row["effective_at_ms"]) < t < int(row["created_at_ms"])
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("kind", ["deposit", "adjust_cost"])
+def test_m52_hist_non_owner_prefixed_id_still_blocks(tmp_path: Path, kind: str) -> None:
+    """Kind outside owner_deposit/owner_redeem stays on created_at_ms."""
+    from jarvise_assist.partner_owner_history import owner_hist_note
+
+    now = _now()
+    t = now - 2 * DAY
+    path = _make_db(tmp_path / f"m52-{kind}.db", init_ms=now - 10 * DAY)
+    conn = open_db(path)
+    try:
+        event_id = f"pe_owner_tran{kind[:8]}"
+        assert event_id.startswith("pe_owner_tran")
+        _insert_event_shape(
+            conn,
+            event_id=event_id,
+            kind=kind,
+            note=owner_hist_note("900000000241"),
+            created_at_ms=now,
+            effective_at_ms=t - DAY,
+        )
+        row = conn.execute("SELECT * FROM partner_event WHERE id=?", (event_id,)).fetchone()
+        assert row["kind"] == kind
+        assert row["kind"] not in ("owner_deposit", "owner_redeem")
+        assert ps.OWNER_HIST_NOTE_MARK in str(row["note"])
+        assert int(row["effective_at_ms"]) < t < int(row["created_at_ms"])
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
+
+
+def test_m53_hist_owner_id_without_prefix_still_blocks(tmp_path: Path) -> None:
+    """An owner row that is not pe_owner_tran… is judged by created_at_ms."""
+    from jarvise_assist.partner_owner_history import owner_hist_note
+
+    now = _now()
+    t = now - 2 * DAY
+    event_id = "pe_not_the_prefix"
+    path = _make_db(tmp_path / "m53.db", init_ms=now - 10 * DAY)
+    conn = open_db(path)
+    try:
+        assert not event_id.startswith("pe_owner_tran")
+        like = conn.execute("SELECT ? LIKE 'pe_owner_tran%'", (event_id,)).fetchone()[0]
+        assert int(like) == 0
+        _insert_event_shape(
+            conn,
+            event_id=event_id,
+            kind="owner_deposit",
+            note=owner_hist_note("900000000251"),
+            created_at_ms=now,
+            effective_at_ms=t - DAY,
+        )
+        row = conn.execute("SELECT * FROM partner_event WHERE id=?", (event_id,)).fetchone()
+        assert row["kind"] == "owner_deposit"
+        assert ps.OWNER_HIST_NOTE_MARK in str(row["note"])
+        assert int(row["effective_at_ms"]) < t < int(row["created_at_ms"])
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
