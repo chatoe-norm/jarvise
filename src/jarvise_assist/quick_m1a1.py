@@ -36,7 +36,6 @@ from jarvise_assist.quick_config import (
     effective_quick_values,
     get_quick_config,
     stop_far_limit,
-    stop_far_pct_text,
 )
 from jarvise_assist.quick_cutoff import cutoff_block_text, in_entry_block
 from jarvise_assist.quick_errors import (
@@ -93,7 +92,27 @@ MSG_ALREADY_REGISTERED = "ลงทะเบียนไปแล้ว — ด�
 MSG_CARD_QUOTE_EXPIRED = "การ์ดหมดอายุ — กด 🔄 อัปเดตราคา ก่อนลงทะเบียน"
 MSG_REGISTER_FAILED = "ลงทะเบียนไม่สำเร็จ — ยังไม่ได้ลงทะเบียน · ดูสถานะในเมนู ⚡ Quick"
 MSG_SIZE_CHANGED = "ขนาดเปลี่ยนจากการ์ด — ยังไม่ได้ลงทะเบียน · กด 🔄 อัปเดตราคา"
-MSG_STOP_FAR = f"stop ห่างเกิน {stop_far_pct_text()}% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+
+
+def msg_stop_far(conn: Any | None = None) -> str:
+    """Stop-far draft hint from the live ``quick_stop_far_pct`` setting (default 20)."""
+    from jarvise_assist.quick_config import stop_far_limit as _limit
+    from jarvise_assist.quick_config import stop_far_pct_text as _pct
+
+    return f"stop ห่างเกิน {_pct(_limit(conn))}% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+
+
+class _MsgStopFar:
+    """Call-time stand-in so ``"20%" in MSG_STOP_FAR`` follows the setting."""
+
+    def __str__(self) -> str:
+        return msg_stop_far()
+
+    def __contains__(self, item: object) -> bool:
+        return str(item) in str(self)
+
+
+MSG_STOP_FAR = _MsgStopFar()
 _DRAFT_NUMERIC_TOKEN = re.compile(r"[0-9][0-9.,]*%?")
 
 
@@ -139,10 +158,14 @@ _QUICK_REG_REFUSAL_MAP = {
 }
 
 
-def _registration_refusal_text(reason: str) -> str:
+def _registration_refusal_text(reason: str, conn: Any | None = None) -> str:
     if reason == "same_side_cap":
         return "ไม่ลงทะเบียน — ฝั่งนี้เปิดอยู่ครบเพดานแล้ว (เพดานฝั่งละ 2) · ปิดหรือให้ทะเบียนหมดอายุก่อน"
     mapped = _QUICK_REG_REFUSAL_MAP.get(str(reason), str(reason))
+    if mapped == "stop_far" or str(reason) == "stop_far":
+        from jarvise_assist.quick_card import stop_far_refusal_text
+
+        return stop_far_refusal_text(conn)
     if mapped in REFUSAL:
         return REFUSAL[mapped]
     if str(reason) in REFUSAL:
@@ -305,17 +328,10 @@ def _quoted_markup_for(
 
 def _quoted_markup_for_card(conn: Any, card_id: str, card: dict[str, Any]) -> dict[str, Any]:
     """Build quoted markup; bot button only when flag on + eligible (D4/universe)."""
-    from jarvise_assist.quick_execute import quick_execute_enabled, symbol_in_quick_exec_universe
+    from jarvise_assist.quick_execute import quick_execute_enabled
 
     size_mode = str(card.get("size_mode") or "risk")
-    show_bot = False
-    if quick_execute_enabled() and size_mode == "risk":
-        if card.get("bot_eligible") is True:
-            show_bot = True
-        else:
-            sym = str(card.get("symbol") or "").upper()
-            if sym and symbol_in_quick_exec_universe(conn, sym):
-                show_bot = True
+    show_bot = bool(quick_execute_enabled() and size_mode == "risk" and card.get("bot_eligible") is True)
     return _quoted_markup_for(card_id, size_mode, show_bot=show_bot)
 
 
@@ -643,10 +659,7 @@ def _handle_qk_ex(
             entry = Decimal(str(row["quote_entry"]))
             stop = Decimal(str(row["quote_stop"]))
             orders = list(futures.all_open_orders())
-            try:
-                positions = list(futures.position_risk(symbol=sym))
-            except TypeError:
-                positions = list(futures.position_risk())
+            positions = list(futures.position_risk())
             tick = Decimal(str(futures.symbol_filters(sym).tick_size))
         except Exception:  # noqa: BLE001
             logger.exception("qk:ex quoted levels unreadable card_id=%s", card_id)
@@ -701,16 +714,29 @@ def _handle_qk_ex(
         sizing_client = trade_ro
     try:
         balance, available = sizing_client.usdt_wallet_and_available()
-        filters = sizing_client.symbol_filters(sym)
         balance = Decimal(str(balance))
         available = Decimal(str(available))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qk:ex balance read failed type=%s", type(exc).__name__)
+        from jarvise_assist.execute import _reason_th
+
+        edit(_decorate_card_text(_reason_th("fapi_read_failed:balance")), {"inline_keyboard": []})
+        answer(None)
+        return {"ok": False, "reason": "fapi_read_failed:balance"}
+    try:
+        filters = sizing_client.symbol_filters(sym)
         step = Decimal(str(filters.step_size))
         min_qty = Decimal(str(filters.min_qty))
         min_notional = Decimal(str(filters.min_notional))
     except Exception:  # noqa: BLE001
-        logger.exception("qk:ex wallet/filters failed")
+        logger.exception("qk:ex filters failed")
         answer(MSG_REGISTER_FAILED)
         return {"ok": False, "reason": "read_failed"}
+    if testnet_levels:
+        from jarvise_assist.sizing import round_level_to_tick
+
+        tick = Decimal(str(filters.tick_size))
+        stop = round_level_to_tick(stop, tick, side=side, kind="stop")
 
     far = stop_far_limit(conn)
     if entry > 0 and abs(stop - entry) / entry > far / Decimal("100"):
@@ -960,7 +986,7 @@ def _handle_qk_register(
             if reason == "same_side_cap":
                 send(same_side_cap_text(side, side_cap_count))
             else:
-                send(_registration_refusal_text(str(reason)))
+                send(_registration_refusal_text(str(reason), conn))
             try:
                 answer(None)
             except Exception:  # noqa: BLE001

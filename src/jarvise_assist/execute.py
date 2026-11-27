@@ -1987,7 +1987,11 @@ def _confirm_guards_entry(
         seen_stop = Decimal(str(preview["seen_stop"]))
         if chase_exceeded(side=side, entry=seen_entry, stop=seen_stop, mark=mark):
             return "chase"
-    balance, available = trade.usdt_wallet_and_available()
+    try:
+        balance, available = trade.usdt_wallet_and_available()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards balance read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:balance"
     filters = trade.symbol_filters(symbol)
     risk_pct = Decimal(str(ensure_settings(conn)["risk_pct"]))
     # Re-size from the live mark; never send more than the preview qty the owner saw.
@@ -2277,7 +2281,11 @@ def _confirm_guards_quick_entry(
     if fee_r > max_fee_r:
         return "fee_r"
 
-    balance, available = trade.usdt_wallet_and_available()
+    try:
+        balance, available = trade.usdt_wallet_and_available()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards balance read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:balance"
     resized = size_signal(
         symbol=symbol,
         side=side,
@@ -3104,7 +3112,7 @@ def run_entry_sequence(
         tp_qty_used: Decimal | None = None
         if is_quick:
             # (a) TP1 share only — never a full-qty TP by default. SL stays on full qty.
-            from jarvise_assist.quick_execute import MSG_QUICK_TP1_OFF
+            from jarvise_assist.quick_execute import MSG_QUICK_NO_TP1, MSG_QUICK_TP1_OFF
             from jarvise_assist.quick_execute import cfg_val as _cfg_val
 
             qcfg_raw = preview.get("cfg")
@@ -3186,7 +3194,7 @@ def run_entry_sequence(
                 tp_note = "\n" + MSG_QUICK_TP1_OFF
                 t1 = target
             else:
-                tp_note = "\nไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"
+                tp_note = "\n" + MSG_QUICK_NO_TP1
                 t1 = target
             target = t1
         else:

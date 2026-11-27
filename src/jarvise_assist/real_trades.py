@@ -958,6 +958,7 @@ def _quick_owned_client_and_order_ids(
             "orphan_cancel",
             "ms",
             "move_stop",
+            "move_stop_place",
         }
     )
     rows = conn.execute(
@@ -972,7 +973,9 @@ def _quick_owned_client_and_order_ids(
             preview = json.loads(str(row["preview_json"] or "{}"))
         except Exception:  # noqa: BLE001
             continue
-        if not isinstance(preview, dict) or preview.get("origin") != "quick":
+        if not isinstance(preview, dict):
+            continue
+        if preview.get("origin") != "quick" and preview.get("cohort") != "quick":
             continue
         sym = str(row["symbol"] or preview.get("symbol") or "").upper()
         if row["client_order_id"]:

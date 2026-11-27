@@ -118,10 +118,32 @@ def _refusal_size_failed() -> str:
     return "❌ คำนวณขนาดไม่ได้ — ตรวจยอดใน Futures"
 
 
-def _refusal_stop_far() -> str:
-    from jarvise_assist.quick_config import stop_far_pct_text
+def stop_far_refusal_text(conn: Any | None = None) -> str:
+    """Stop-far refusal from the live ``quick_stop_far_pct`` setting (default 20)."""
+    from jarvise_assist.quick_config import stop_far_limit, stop_far_pct_text
 
-    return f"❌ stop ห่างเกิน {stop_far_pct_text()}% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+    return f"❌ stop ห่างเกิน {stop_far_pct_text(stop_far_limit(conn))}% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+
+
+def _refusal_stop_far() -> str:
+    return stop_far_refusal_text()
+
+
+class _RefusalMap(dict[str, str]):
+    """``stop_far`` is rendered at lookup time so a settings change is not frozen."""
+
+    def __getitem__(self, key: str) -> str:
+        if key == "stop_far":
+            return stop_far_refusal_text()
+        return dict.__getitem__(self, key)
+
+    def get(self, key: str, default: str | None = None) -> str | None:  # type: ignore[override]
+        if key == "stop_far":
+            return stop_far_refusal_text()
+        return dict.get(self, key, default)
+
+    def values(self) -> Any:  # type: ignore[override]
+        return [self[key] for key in self]
 
 
 def _refusal_quick_cap() -> str:
@@ -154,25 +176,27 @@ def _refusal_cutoff_block() -> str:
     return "❌ หลัง 23:30 ไม่ลงทะเบียน quick ใหม่ · 👉 เริ่มใหม่ได้หลัง 00:00"
 
 
-REFUSAL: dict[str, str] = {
-    "quick_open": _refusal_quick_open(),
-    "main_position": _refusal_main_position(),
-    "in_flight": _refusal_in_flight(),
-    "pending_order": _refusal_pending_order(),
-    "contract": _refusal_contract(),
-    "read_failed": _refusal_read_failed(),
-    "stop_wrong_side": _refusal_stop_wrong_side(),
-    "below_min_notional": _refusal_below_min(),
-    "size_failed": _refusal_size_failed(),
-    "quick_cap": _refusal_quick_cap(),
-    "portfolio_cap": _refusal_portfolio_cap(),
-    "margin_cap": _refusal_margin_cap(),
-    "leverage_cap": _refusal_leverage_cap(),
-    "card_expired": _refusal_card_expired(),
-    "bad_data": _refusal_bad_data(),
-    "stop_far": _refusal_stop_far(),
-    "cutoff_block": _refusal_cutoff_block(),
-}
+REFUSAL = _RefusalMap(
+    {
+        "quick_open": _refusal_quick_open(),
+        "main_position": _refusal_main_position(),
+        "in_flight": _refusal_in_flight(),
+        "pending_order": _refusal_pending_order(),
+        "contract": _refusal_contract(),
+        "read_failed": _refusal_read_failed(),
+        "stop_wrong_side": _refusal_stop_wrong_side(),
+        "below_min_notional": _refusal_below_min(),
+        "size_failed": _refusal_size_failed(),
+        "quick_cap": _refusal_quick_cap(),
+        "portfolio_cap": _refusal_portfolio_cap(),
+        "margin_cap": _refusal_margin_cap(),
+        "leverage_cap": _refusal_leverage_cap(),
+        "card_expired": _refusal_card_expired(),
+        "bad_data": _refusal_bad_data(),
+        "stop_far": _refusal_stop_far(),
+        "cutoff_block": _refusal_cutoff_block(),
+    }
+)
 
 
 def parse_quick_command(text: str, *, stop_far_pct: Decimal | None = None) -> dict[str, Any] | None:
@@ -1105,45 +1129,41 @@ def build_quick_card(
         if not in_uni:
             lines.append(universe_line_for_mode(universe))
         elif size_mode == "risk":
-            bot_eligible = True
             trend = quick_trend_4h(conn, sym, now_ms=now_ms)
             is_counter, _ = quick_side_risk(trend, side_l, _eff)
-            plan = None
-            if is_counter:
-                plan = build_bot_plan(
-                    conn,
-                    symbol=sym,
-                    side=side_l,
-                    entry=mark,
-                    stop=stop_level,
-                    balance=balance,
-                    available=available,
-                    step=step,
-                    tick=tick,
-                    min_qty=Decimal(str(filters.min_qty)),
-                    min_notional=Decimal(str(filters.min_notional)),
-                    now_ms=now_ms,
-                    positions=positions,
-                    orders=orders,
-                )
-                if plan is not None:
-                    fee_bps = Decimal(
-                        str(_cfg.values.get("quick_fee_bps_per_side") or QUICK_FEE_BPS_PER_SIDE)
+            plan = build_bot_plan(
+                conn,
+                symbol=sym,
+                side=side_l,
+                entry=mark,
+                stop=stop_level,
+                balance=balance,
+                available=available,
+                step=step,
+                tick=tick,
+                min_qty=Decimal(str(filters.min_qty)),
+                min_notional=Decimal(str(filters.min_notional)),
+                now_ms=now_ms,
+                positions=positions,
+                orders=orders,
+            )
+            bot_eligible = plan is not None
+            if is_counter and plan is not None:
+                fee_bps = Decimal(str(_cfg.values.get("quick_fee_bps_per_side") or QUICK_FEE_BPS_PER_SIDE))
+                shown_risk = Decimal(str(plan["risk_pct_used"]))
+                bot_qty = Decimal(str(plan["qty"]))
+                bot_fee = (Decimal("2") * fee_bps / Decimal("10000")) * (bot_qty * mark)
+                bot_loss = Decimal(str(plan["loss_at_stop"])) + bot_fee
+                if trend == "unknown":
+                    lines.append(
+                        f"🔴 ไม่ทราบเทรนด์ · บอทใช้ risk {fmt_price(shown_risk)}%"
+                        f" · qty {fmt_qty(bot_qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
                     )
-                    shown_risk = Decimal(str(plan["risk_pct_used"]))
-                    bot_qty = Decimal(str(plan["qty"]))
-                    bot_fee = (Decimal("2") * fee_bps / Decimal("10000")) * (bot_qty * mark)
-                    bot_loss = Decimal(str(plan["loss_at_stop"])) + bot_fee
-                    if trend == "unknown":
-                        lines.append(
-                            f"🔴 ไม่ทราบเทรนด์ · บอทใช้ risk {fmt_price(shown_risk)}%"
-                            f" · qty {fmt_qty(bot_qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
-                        )
-                    else:
-                        lines.append(
-                            f"🔴 สวนเทรนด์ · บอทใช้ risk {fmt_price(shown_risk)}%"
-                            f" · qty {fmt_qty(bot_qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
-                        )
+                else:
+                    lines.append(
+                        f"🔴 สวนเทรนด์ · บอทใช้ risk {fmt_price(shown_risk)}%"
+                        f" · qty {fmt_qty(bot_qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
+                    )
             warn_pct = Decimal(str(_cfg.values["quick_combined_risk_warn_pct"]))
             combined_new = new_risk if plan is None else Decimal(str(plan["loss_at_stop"]))
             combined = combined_same_side_risk_usdt(
@@ -1161,10 +1181,14 @@ def build_quick_card(
                     f" เกินระดับเตือน {fmt_price(warn_pct)}%"
                 )
 
-    lines.append(
-        f"{CARD_TTL_PREFIX} {_hhmmss(card_until)} (หมดแล้วกด 🔄 อัปเดตราคา) · "
-        "บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน 10 นาที"
-    )
+    from jarvise_assist.quick import REG_TTL_MS, _expire_window_phrase
+
+    window = _expire_window_phrase(REG_TTL_MS)
+    if bot_eligible:
+        footer_tail = f"⚡ = บอทส่งคำสั่งหลังยืนยัน · กดลงทะเบียน = เปิดเองใน Binance ภายใน {window}"
+    else:
+        footer_tail = f"บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน {window}"
+    lines.append(f"{CARD_TTL_PREFIX} {_hhmmss(card_until)} (หมดแล้วกด 🔄 อัปเดตราคา) · {footer_tail}")
     lines.append(STOP_INSTRUCTION)
 
     side_code = "l" if side_l == "long" else "s"
@@ -1314,7 +1338,7 @@ def handle_quick_register_callback(
 
             send(same_side_cap_text(side, count_open_same_side(conn, side)))
         else:
-            send(_registration_refusal_text(str(reason)))
+            send(_registration_refusal_text(str(reason), conn))
         return {"ok": False, "reason": reason}
 
     tick = Decimal(str(card.get("tick") or "0.0001"))
