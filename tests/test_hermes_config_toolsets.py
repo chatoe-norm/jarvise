@@ -121,6 +121,16 @@ def test_structural_fallback_r2_r3(monkeypatch: pytest.MonkeyPatch) -> None:
             "platform_toolsets:\n  api_server: [web]\n  'api_server': [web, terminal]\n  cli: [web]\n"
         )
 
+    # Explicit root key after a safe block must not override api_server (T4).
+    with pytest.raises(ValueError, match="explicit_key_unsupported"):
+        mod.strip_and_validate(
+            "platform_toolsets:\n"
+            "  api_server: [web]\n"
+            "  cli: [web]\n"
+            "? platform_toolsets\n"
+            ": {api_server: [web, terminal], cli: [web]}\n"
+        )
+
     # Missing platform_toolsets refused.
     with pytest.raises(ValueError, match="missing_platform_toolsets"):
         mod.strip_and_validate("model:\n  default: x\n")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
@@ -54,6 +55,8 @@ logger = logging.getLogger("jarvise_intel")
 
 MAX_BODY = 4096
 SECRET_RE = re.compile(r"(?i)(authorization|api[_-]?key|token|bearer|password)\s*[:=]\s*\S+")
+# Pinned Hermes RunIdempotencyStore retains terminal keys 24h; stay strictly inside (T1).
+IDEMPOTENCY_SAFE_HORIZON_S = 23 * 3600
 
 
 def redact(text: str) -> str:
@@ -221,6 +224,35 @@ def _resume_past_deadline(existing: dict[str, Any], cfg: AdapterConfig) -> bool:
     return _remaining_deadline_s(existing, cfg) <= 0.0
 
 
+def _admission_age_s(existing: dict[str, Any], cfg: AdapterConfig) -> float | None:
+    started_dt = _parse_started_at(existing)
+    if started_dt is None:
+        return None
+    return max(0.0, (_wall_now(cfg) - started_dt).total_seconds())
+
+
+def request_sha256(
+    *,
+    instructions: str,
+    input_text: str,
+    provider: str,
+    model: str,
+) -> str:
+    """Canonical frozen request identity for safe same-key rediscovery (T1)."""
+    payload = json.dumps(
+        {
+            "instructions": instructions,
+            "input": input_text,
+            "provider": provider,
+            "model": model,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _mark_active(
     cfg: AdapterConfig,
     *,
@@ -231,6 +263,9 @@ def _mark_active(
     started_at: str | None,
     run_id: str = "",
     error: str | None = None,
+    request_hash: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> None:
     record: dict[str, Any] = {
         "status": status,
@@ -243,6 +278,12 @@ def _mark_active(
         record["run_id"] = run_id
     if error:
         record["error"] = error
+    if request_hash:
+        record["request_sha256"] = request_hash
+    if provider:
+        record["provider"] = provider
+    if model:
+        record["model"] = model
     write_slot_record(cfg.state_dir, slot, record)
     if status in BLOCKING_ADMISSION_STATUSES:
         write_active_admission(cfg.state_dir, record)
@@ -388,14 +429,16 @@ def _recover_create_unconfirmed(
     slot: Any,
     existing: dict[str, Any],
 ) -> tuple[int, dict[str, Any]] | None:
-    """S3: rediscover a lost create via the same frozen idempotency key only.
+    """Rediscover a lost create via the same frozen idempotency key only (S3/T1).
 
-    Works even when the original Bangkok window has ended (other-slot reconcile).
-    Never mints a new attempt/key. Past retention with no recoverable ID → owner recovery.
+    Never POSTs outside the verified safe retention horizon. A known run_id
+    stop-and-verifies without creating. Missing/mismatched request identity
+    fails closed to owner_recovery_required.
     """
     attempt = int(existing.get("attempt") or 1)
     idem = str(existing.get("idempotency_key") or "").strip()
     started_at = str(existing.get("started_at") or "").strip()
+    stored_hash = str(existing.get("request_sha256") or "").strip()
     if not idem or not started_at:
         _mark_active(
             cfg,
@@ -405,27 +448,63 @@ def _recover_create_unconfirmed(
             idem=idem or None,
             started_at=started_at or None,
             error="missing_admission_fields",
+            request_hash=stored_hash or None,
         )
         return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
 
     run_id = str(existing.get("run_id") or "").strip()
+    age = _admission_age_s(existing, cfg)
     remaining = _remaining_deadline_s(existing, cfg)
     gateway = _gateway(cfg)
 
     if not run_id:
+        # T1: decide BEFORE POST — expired/no-hash/mismatched identity never create.
+        if age is None or age >= IDEMPOTENCY_SAFE_HORIZON_S or not stored_hash:
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="owner_recovery_required",
+                attempt=attempt,
+                idem=idem,
+                started_at=started_at,
+                error="idempotency_retention_expired"
+                if (age is not None and age >= IDEMPOTENCY_SAFE_HORIZON_S)
+                else "missing_request_identity",
+                request_hash=stored_hash or None,
+            )
+            return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
         try:
             instructions = _load_prompt(cfg.prompt_path)
         except OSError:
             return 500, {"ok": False, "error": "prompt_unreadable"}
+        input_text = _slot_input_text(slot)
+        current_hash = request_sha256(
+            instructions=instructions,
+            input_text=input_text,
+            provider=cfg.provider,
+            model=cfg.model,
+        )
+        if current_hash != stored_hash:
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="owner_recovery_required",
+                attempt=attempt,
+                idem=idem,
+                started_at=started_at,
+                error="request_identity_mismatch",
+                request_hash=stored_hash,
+            )
+            return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
         try:
             run_id = create_run(
                 gateway,
                 instructions=instructions,
-                input_text=_slot_input_text(slot),
+                input_text=input_text,
                 idempotency_key=idem,
             )
         except GatewayError as exc:
-            # Transport/provider ambiguity: never invent terminal failure (S4).
+            # Transport/provider ambiguity: never invent terminal failure.
             if remaining <= 0:
                 _mark_active(
                     cfg,
@@ -435,6 +514,7 @@ def _recover_create_unconfirmed(
                     idem=idem,
                     started_at=started_at,
                     error=exc.category,
+                    request_hash=stored_hash,
                 )
                 return 409, {"ok": False, "error": "owner_recovery_required", "slot": slot.label}
             _mark_active(
@@ -445,6 +525,9 @@ def _recover_create_unconfirmed(
                 idem=idem,
                 started_at=started_at,
                 error=exc.category,
+                request_hash=stored_hash,
+                provider=cfg.provider,
+                model=cfg.model,
             )
             return 409, {"ok": False, "error": "admission_busy", "slot": slot.label}
         _mark_active(
@@ -455,9 +538,12 @@ def _recover_create_unconfirmed(
             idem=idem,
             started_at=started_at,
             run_id=run_id,
+            request_hash=stored_hash,
+            provider=cfg.provider,
+            model=cfg.model,
         )
 
-    # Enforce original absolute deadline on the recovered run.
+    # Enforce original absolute deadline on the recovered run (no new create).
     resumed = _handle_resume(
         cfg,
         slot=slot,
@@ -524,12 +610,43 @@ def _block_other_active_admission(
         return 409, {"ok": False, "error": "admission_state_invalid"}
     other = str(active.get("slot") or "")
     if other == slot.label:
+        # T2: marker for THIS slot — reconcile against durable slot evidence.
+        # Never fall through to mint attempt 1 over a valid unknown attempt 2.
+        try:
+            slot_rec = load_slot_record(cfg.state_dir, slot)
+        except ActiveAdmissionError as exc:
+            return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
+        if slot_rec is None:
+            # Marker exists but slot file absent: keep marker, block new work.
+            return 409, {"ok": False, "error": "admission_state_invalid", "detail": "slot_missing_for_active"}
+        if str(slot_rec.get("status") or "") in TERMINAL_SLOT_STATUSES:
+            clear_active_admission(cfg.state_dir, slot_label=slot.label)
+            return None
+        # Identity must agree before any replacement/resume path.
+        for field in ("attempt", "idempotency_key", "status"):
+            if str(slot_rec.get(field) or "") != str(active.get(field) or ""):
+                return 409, {
+                    "ok": False,
+                    "error": "admission_state_invalid",
+                    "detail": f"marker_slot_mismatch:{field}",
+                }
+        active_run = str(active.get("run_id") or "").strip()
+        slot_run = str(slot_rec.get("run_id") or "").strip()
+        if active_run and slot_run and active_run != slot_run:
+            return 409, {
+                "ok": False,
+                "error": "admission_state_invalid",
+                "detail": "marker_slot_mismatch:run_id",
+            }
         return None
     try:
         other_slot = parse_slot(other, smoke_allowed=True)
     except ValueError:
         return 409, {"ok": False, "error": "admission_busy", "slot": other}
-    other_record = load_slot_record(cfg.state_dir, other_slot) or active
+    try:
+        other_record = load_slot_record(cfg.state_dir, other_slot) or active
+    except ActiveAdmissionError as exc:
+        return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
     other_status = str(other_record.get("status") or "")
 
     # S2: durable terminal slot with stale marker — clear and continue.
@@ -608,7 +725,10 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
         return 429, {"ok": False, "error": "inflight_busy"}
 
     try:
-        existing = load_slot_record(cfg.state_dir, slot)
+        try:
+            existing = load_slot_record(cfg.state_dir, slot)
+        except ActiveAdmissionError as exc:
+            return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
         if existing and existing.get("status") == "completed":
             # S2: completed replay must clear a matching stale active marker under the lock.
             _clear_matching_terminal_admission(cfg, slot=slot)
@@ -628,7 +748,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             _clear_matching_terminal_admission(cfg, slot=slot)
             return 200, {"ok": True, "replay": True, "result": adopted}
 
-        # R5/S2/S3/S5: another slot's active paid admission blocks this one.
+        # R5/S2/S3/S5/T2: another slot's active paid admission blocks this one.
         try:
             blocked = _block_other_active_admission(cfg, slot=slot)
         except ActiveAdmissionError as exc:
@@ -641,17 +761,24 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             resumed = _handle_resume(cfg, slot=slot, existing=existing)
             if resumed is not None:
                 return resumed
-            existing = load_slot_record(cfg.state_dir, slot)
+            try:
+                existing = load_slot_record(cfg.state_dir, slot)
+            except ActiveAdmissionError as exc:
+                return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
 
         # create_unconfirmed for this slot: reuse same key/started_at via fall-through (R4/S4).
         if existing and existing.get("status") == "create_unconfirmed":
             remaining_self = _remaining_deadline_s(existing, cfg)
-            if remaining_self <= 0:
-                # Past absolute deadline: rediscover/stop-verify only — never a fresh 600s (S3/S4).
+            age_self = _admission_age_s(existing, cfg)
+            # Past research deadline OR outside idempotency horizon: recover without minting.
+            if remaining_self <= 0 or (age_self is not None and age_self >= IDEMPOTENCY_SAFE_HORIZON_S):
                 recovered = _recover_create_unconfirmed(cfg, slot=slot, existing=existing)
                 if recovered is not None:
                     return recovered
-                existing = load_slot_record(cfg.state_dir, slot)
+                try:
+                    existing = load_slot_record(cfg.state_dir, slot)
+                except ActiveAdmissionError as exc:
+                    return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
 
         attempt, block = _next_attempt(existing)
         if block == "completed":
@@ -669,6 +796,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
         # create_unconfirmed reuses the prior key and started_at (R4); otherwise mint {slot}-a{n}.
         prior_key = ""
         prior_started = ""
+        prior_hash = ""
         is_replay_unconfirmed = bool(
             existing is not None and str(existing.get("status") or "") == "create_unconfirmed"
         )
@@ -676,10 +804,42 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             assert existing is not None
             prior_key = str(existing.get("idempotency_key") or "").strip()
             prior_started = str(existing.get("started_at") or "").strip()
+            prior_hash = str(existing.get("request_sha256") or "").strip()
+            if not prior_hash:
+                # T1: cannot prove frozen request identity — no POST.
+                _mark_active(
+                    cfg,
+                    slot=slot,
+                    status="owner_recovery_required",
+                    attempt=int(existing.get("attempt") or attempt),
+                    idem=prior_key or None,
+                    started_at=prior_started or None,
+                    error="missing_request_identity",
+                )
+                return 409, {"ok": False, "error": "owner_recovery_required"}
         idem = prior_key or slot.idempotency_key(attempt)
         input_text = _slot_input_text(slot)
-        started_at = prior_started or datetime.now(UTC).isoformat()
-        # Absolute remaining budget for this admission (S4).
+        started_at = prior_started or _wall_now(cfg).isoformat()
+        computed_hash = request_sha256(
+            instructions=instructions,
+            input_text=input_text,
+            provider=cfg.provider,
+            model=cfg.model,
+        )
+        if is_replay_unconfirmed and prior_hash != computed_hash:
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="owner_recovery_required",
+                attempt=attempt,
+                idem=idem,
+                started_at=started_at,
+                error="request_identity_mismatch",
+                request_hash=prior_hash,
+            )
+            return 409, {"ok": False, "error": "owner_recovery_required"}
+        req_hash = prior_hash or computed_hash
+        # Absolute remaining budget for this admission (S4/T3).
         remaining = (
             _remaining_deadline_s(
                 {"started_at": started_at},
@@ -689,7 +849,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             else float(cfg.deadline_s)
         )
 
-        # R4: persist this admission BEFORE POST, without a prior attempt's run_id.
+        # R4/T1: persist this admission BEFORE POST, without a prior attempt's run_id.
         _mark_active(
             cfg,
             slot=slot,
@@ -697,6 +857,9 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             attempt=attempt,
             idem=idem,
             started_at=started_at,
+            request_hash=req_hash,
+            provider=cfg.provider,
+            model=cfg.model,
         )
 
         def _persist_created(run_id: str) -> None:
@@ -708,6 +871,9 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 idem=idem,
                 started_at=started_at,
                 run_id=run_id,
+                request_hash=req_hash,
+                provider=cfg.provider,
+                model=cfg.model,
             )
 
         try:
@@ -724,13 +890,21 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             return 200, {"ok": True, "replay": bool(record.get("replay")), "result": record}
         except GatewayError as exc:
             logger.warning("ingest gateway failure category=%s", exc.category)
-            prior = load_slot_record(cfg.state_dir, slot) or {}
+            try:
+                prior = load_slot_record(cfg.state_dir, slot) or {}
+            except ActiveAdmissionError:
+                prior = {}
             # Only trust a run_id bound to THIS admission (on_created), never a prior attempt.
             this_run_id = ""
             if str(prior.get("idempotency_key") or "") == idem and str(prior.get("attempt") or "") == str(
                 attempt
             ):
                 this_run_id = str(prior.get("run_id") or "").strip()
+            mark_kw: dict[str, Any] = {
+                "request_hash": req_hash,
+                "provider": cfg.provider,
+                "model": cfg.model,
+            }
             if exc.category == "unknown_run":
                 _mark_active(
                     cfg,
@@ -741,6 +915,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                     started_at=str(prior.get("started_at") or started_at),
                     run_id=this_run_id,
                     error=exc.category,
+                    **mark_kw,
                 )
                 return 409, {"ok": False, "error": "unknown_run"}
             if exc.category == "provider_error":
@@ -754,6 +929,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                         started_at=str(prior.get("started_at") or started_at),
                         run_id=this_run_id,
                         error=exc.category,
+                        **mark_kw,
                     )
                     return 409, {"ok": False, "error": "unknown_run"}
                 _mark_active(
@@ -764,6 +940,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                     idem=idem,
                     started_at=started_at,
                     error=exc.category,
+                    **mark_kw,
                 )
                 return 502, {"ok": False, "error": "provider_error"}
             if exc.category == "malformed_response" and not this_run_id:
@@ -775,6 +952,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                     idem=idem,
                     started_at=started_at,
                     error=exc.category,
+                    **mark_kw,
                 )
                 return 502, {"ok": False, "error": exc.category}
             if exc.category in {"incomplete_run", "timeout"}:
@@ -787,6 +965,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                     started_at=started_at,
                     run_id=this_run_id,
                     error=exc.category,
+                    **mark_kw,
                 )
             if exc.category in {"provider_mismatch", "model_mismatch"}:
                 _mark_active(
@@ -798,6 +977,7 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                     started_at=started_at,
                     run_id=this_run_id,
                     error=exc.category,
+                    **mark_kw,
                 )
             code = 401 if exc.category == "auth_error" and exc.status_code == 401 else 502
             if exc.category == "auth_error" and exc.status_code == 403:
@@ -817,6 +997,9 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 idem=idem,
                 started_at=started_at,
                 error=str(exc),
+                request_hash=req_hash,
+                provider=cfg.provider,
+                model=cfg.model,
             )
             return 502, {"ok": False, "error": str(exc)}
         except Exception:  # noqa: BLE001 — fail closed; never leak secrets

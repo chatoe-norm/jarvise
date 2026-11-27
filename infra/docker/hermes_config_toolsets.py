@@ -94,6 +94,17 @@ def _reject_unsupported_syntax(text: str) -> None:
             raise ValueError("anchor_unsupported")
         if re.search(r"(^|[\s\[\{,])\*[A-Za-z0-9_-]+", stripped):
             raise ValueError("alias_unsupported")
+        # Explicit keys (? key / following :) anywhere — including after the
+        # first platform_toolsets block (T4). Tags likewise.
+        code = stripped.rstrip()
+        if not code:
+            continue
+        if re.match(r"^[ \t]*\?", code):
+            raise ValueError("explicit_key_unsupported")
+        if re.match(r"^[ \t]*:[ \t]", code) or re.match(r"^[ \t]*:$", code):
+            raise ValueError("explicit_key_unsupported")
+        if re.search(r"(^|[\s,\[\{])![A-Za-z]", code):
+            raise ValueError("tag_unsupported")
 
 
 _DIRECT_KEY = re.compile(r"^(\s+)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$")

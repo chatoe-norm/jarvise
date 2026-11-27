@@ -361,24 +361,54 @@ def load_active_admission(state_dir: Path) -> dict[str, Any] | None:
     return validate_active_admission_record(data)
 
 
+def _validate_slot_record_payload(data: dict[str, Any], *, path: Path) -> dict[str, Any]:
+    """Validate a durable slot record; raise ActiveAdmissionError on ambiguity (T2)."""
+    status = str(data.get("status") or "").strip()
+    if not status:
+        raise ActiveAdmissionError(f"slot_missing_status:{path.name}")
+    if status in ACTIVE_ADMISSION_STATUSES or status == "owner_recovery_required":
+        slot = str(data.get("slot") or "").strip()
+        if not slot:
+            raise ActiveAdmissionError(f"slot_missing_identity:{path.name}")
+        try:
+            attempt = int(data.get("attempt") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ActiveAdmissionError(f"slot_bad_attempt:{path.name}") from exc
+        if attempt < 1:
+            raise ActiveAdmissionError(f"slot_bad_attempt:{path.name}")
+        key = str(data.get("idempotency_key") or "").strip()
+        if not key:
+            raise ActiveAdmissionError(f"slot_missing_idempotency_key:{path.name}")
+        started = str(data.get("started_at") or "").strip()
+        if status in ACTIVE_ADMISSION_STATUSES and not started:
+            raise ActiveAdmissionError(f"slot_missing_started_at:{path.name}")
+    return data
+
+
 def list_unresolved_slot_records(state_dir: Path) -> list[dict[str, Any]]:
-    """Scan durable slot files for unresolved paid admissions (S5 rebuild)."""
+    """Scan durable slot files for unresolved paid admissions (S5/T2 rebuild).
+
+    Unreadable, malformed, or incomplete blocking rows raise — never silently
+    skip into an empty "no admission" result.
+    """
     slots_dir = state_dir / "slots"
     if not slots_dir.is_dir():
         return []
     found: list[dict[str, Any]] = []
     for path in sorted(slots_dir.glob("*.json")):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ActiveAdmissionError(f"slot_unreadable:{path.name}") from exc
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ActiveAdmissionError(f"slot_malformed_json:{path.name}") from exc
         if not isinstance(data, dict):
-            continue
+            raise ActiveAdmissionError(f"slot_not_object:{path.name}")
+        _validate_slot_record_payload(data, path=path)
         status = str(data.get("status") or "")
         if status not in ACTIVE_ADMISSION_STATUSES and status != "owner_recovery_required":
-            continue
-        slot = str(data.get("slot") or "").strip()
-        if not slot:
             continue
         found.append(data)
     return found
@@ -428,14 +458,25 @@ def clear_active_admission(state_dir: Path, *, slot_label: str | None = None) ->
 
 
 def load_slot_record(state_dir: Path, slot: Slot) -> dict[str, Any] | None:
+    """Return the slot record, None if absent, or raise ActiveAdmissionError (T2).
+
+    Missing file is true absence. Unreadable/malformed/non-object/incomplete
+    blocking rows fail closed — callers must not treat them as "no admission".
+    """
     path = _record_path(state_dir, slot)
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ActiveAdmissionError(f"slot_unreadable:{path.name}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ActiveAdmissionError(f"slot_malformed_json:{path.name}") from exc
+    if not isinstance(data, dict):
+        raise ActiveAdmissionError(f"slot_not_object:{path.name}")
+    return _validate_slot_record_payload(data, path=path)
 
 
 def write_slot_record(state_dir: Path, slot: Slot, record: dict[str, Any]) -> None:

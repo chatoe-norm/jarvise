@@ -76,6 +76,7 @@ def create_run(
     input_text: str,
     idempotency_key: str,
     open_url: HttpOpener | None = None,
+    timeout: float | None = None,
 ) -> str:
     opener = open_url or _default_open
     body = {
@@ -90,8 +91,10 @@ def create_run(
         headers=_auth_headers(cfg.api_key, idempotency_key=idempotency_key),
         method="POST",
     )
+    # Bound create by remaining absolute budget when provided (T3); else cfg cap.
+    create_timeout = min(30.0, cfg.deadline_s) if timeout is None else max(0.1, float(timeout))
     try:
-        with opener(request, min(30.0, cfg.deadline_s)) as resp:
+        with opener(request, create_timeout) as resp:
             status = getattr(resp, "status", 200)
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
@@ -315,14 +318,34 @@ def run_research(
     sleep: Callable[[float], None] = time.sleep,
     on_created: Callable[[str], None] | None = None,
     deadline_s: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> RunResult:
+    """Create then poll under one absolute monotonic budget (T3).
+
+    POST / on_created time is deducted from the remaining poll window. If the
+    budget expires during create, the returned id is persisted via on_created
+    and stop-and-verify runs immediately — never a fresh poll window.
+    """
+    budget = cfg.deadline_s if deadline_s is None else float(deadline_s)
+    started = monotonic()
+    absolute_deadline = started + max(0.0, budget)
+    create_timeout = min(30.0, max(0.1, absolute_deadline - started))
     run_id = create_run(
         cfg,
         instructions=instructions,
         input_text=input_text,
         idempotency_key=idempotency_key,
         open_url=open_url,
+        timeout=create_timeout,
     )
     if on_created is not None:
         on_created(run_id)
-    return wait_for_run(cfg, run_id, open_url=open_url, sleep=sleep, deadline_s=deadline_s)
+    remaining = absolute_deadline - monotonic()
+    return wait_for_run(
+        cfg,
+        run_id,
+        open_url=open_url,
+        sleep=sleep,
+        monotonic=monotonic,
+        deadline_s=remaining,
+    )

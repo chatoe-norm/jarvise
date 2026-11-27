@@ -975,6 +975,7 @@ def test_resume_rejects_missing_runtime_no_publish(tmp_path: Path, monkeypatch: 
             "run_id": "run-resume",
             "idempotency_key": "2026-11-26T07-a1",
             "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
         },
     )
     creates = {"n": 0}
@@ -1020,7 +1021,14 @@ def test_resume_rejects_budget_exhausted(tmp_path: Path, monkeypatch: Any) -> No
     write_slot_record(
         state_dir,
         slot,
-        {"status": "unknown", "attempt": 1, "run_id": "run-b", "idempotency_key": "2026-11-26T07-a1"},
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "run-b",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
+        },
     )
 
     def fake_get(_cfg: Any, run_id: str, **_k: Any) -> RunResult:
@@ -1374,7 +1382,8 @@ def test_active_admission_blocks_smoke(tmp_path: Path, monkeypatch: Any) -> None
     cfg.now = _slot_now("2026-11-26T07")
     code, body = handle_ingest(cfg, {"slot": "smoke-2026-11-26T07"})
     assert code == 409
-    assert body.get("error") == "admission_busy"
+    # Missing frozen request hash → owner recovery; never a second smoke create.
+    assert body.get("error") in {"admission_busy", "owner_recovery_required"}
     assert creates["n"] == 0
 
 
@@ -1521,17 +1530,29 @@ def test_s3_lost_create_cross_window_owner_recovery(tmp_path: Path, monkeypatch:
     code, body = handle_ingest(cfg, {"slot": "2026-11-26T19"})
     assert code == 409
     assert body.get("error") == "owner_recovery_required"
-    assert creates["n"] == 1  # one rediscovery attempt with frozen key
+    assert creates["n"] == 0  # T1: no POST after retention / missing identity
     _ = digest_dir
 
 
 def test_s4_expired_create_replay_uses_zero_remaining(tmp_path: Path, monkeypatch: Any) -> None:
     """S4: expired create_unconfirmed must stop-and-verify, not wait another 600s on that run."""
+    from jarvise_intel.app import request_sha256
     from jarvise_intel.digest import write_slot_record
     from jarvise_intel.gateway import RunResult
 
     digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
     slot = parse_slot("2026-11-26T07")
+    instructions = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    input_text = (
+        f"Produce the news digest JSON for slot {slot.label} "
+        f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
+    )
+    req_hash = request_sha256(
+        instructions=instructions,
+        input_text=input_text,
+        provider="openrouter",
+        model="test-model",
+    )
     write_slot_record(
         state_dir,
         slot,
@@ -1541,6 +1562,9 @@ def test_s4_expired_create_replay_uses_zero_remaining(tmp_path: Path, monkeypatc
             "idempotency_key": "2026-11-26T07-a1",
             "started_at": "2026-11-26T00:00:00+00:00",
             "slot": slot.label,
+            "request_sha256": req_hash,
+            "provider": "openrouter",
+            "model": "test-model",
         },
     )
     stops: list[str] = []
@@ -1688,3 +1712,229 @@ def test_s5_missing_index_rebuilds_from_unresolved_slot(tmp_path: Path, monkeypa
     assert body.get("error") in {"admission_busy", "unknown_run"}
     assert creates["n"] == 0
     _ = digest_dir
+
+
+def test_t1_expired_idempotency_never_posts_even_if_create_would_succeed(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """T1: three-day-old create_unconfirmed must not POST even when transport returns NEW-PAID-RUN."""
+    from jarvise_intel.app import request_sha256
+    from jarvise_intel.digest import load_active_admission, write_active_admission, write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot07 = parse_slot("2026-11-23T07")
+    instructions = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    input_text = (
+        f"Produce the news digest JSON for slot {slot07.label} "
+        f"(Bangkok {slot07.bangkok.isoformat()}, UTC file {slot07.filename})."
+    )
+    req_hash = request_sha256(
+        instructions=instructions,
+        input_text=input_text,
+        provider="openrouter",
+        model="test-model",
+    )
+    started = "2026-11-23T00:00:00+00:00"
+    rec = {
+        "status": "create_unconfirmed",
+        "attempt": 1,
+        "idempotency_key": "2026-11-23T07-a1",
+        "started_at": started,
+        "slot": slot07.label,
+        "request_sha256": req_hash,
+        "provider": "openrouter",
+        "model": "test-model",
+    }
+    write_slot_record(state_dir, slot07, rec)
+    write_active_admission(state_dir, rec)
+    creates = {"n": 0}
+
+    def fake_create(*_a: Any, **_k: Any) -> str:
+        creates["n"] += 1
+        return "NEW-PAID-RUN"
+
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_create)
+    monkeypatch.setattr(
+        "jarvise_intel.app.run_research",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no research")),
+    )
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T19"})
+    assert code == 409
+    assert body.get("error") == "owner_recovery_required"
+    assert creates["n"] == 0
+    active = load_active_admission(state_dir)
+    assert active is not None
+    assert active.get("status") == "owner_recovery_required"
+    _ = digest_dir
+
+
+def test_t2_malformed_slot_blocks_index_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: absent index + malformed slot JSON must fail closed with zero creates."""
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    (slots / "2026-11-27T07.json").write_text("{not-json", encoding="utf-8")
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert code == 409
+    assert body.get("error") == "admission_state_invalid"
+    assert creates["n"] == 0
+    _ = digest_dir
+
+
+def test_t2_valid_marker_corrupt_slot_keeps_attempt2(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: valid unknown attempt-2 marker + damaged slot must not restart at -a1."""
+    from jarvise_intel.digest import load_active_admission, write_active_admission
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    marker = {
+        "status": "unknown",
+        "attempt": 2,
+        "run_id": "run-a2",
+        "idempotency_key": "2026-11-26T07-a2",
+        "started_at": "2026-11-26T05:00:00+00:00",
+        "slot": slot.label,
+    }
+    write_active_admission(state_dir, marker)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    (slots / "2026-11-26T07.json").write_text("{broken", encoding="utf-8")
+    creates = {"n": 0}
+    keys: list[str] = []
+
+    def fake_run(*_a: Any, **kwargs: Any) -> Any:
+        creates["n"] += 1
+        keys.append(str(kwargs.get("idempotency_key")))
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 409
+    assert body.get("error") == "admission_state_invalid"
+    assert creates["n"] == 0
+    assert keys == []
+    still = load_active_admission(state_dir)
+    assert still is not None
+    assert still.get("attempt") == 2
+    assert still.get("status") == "unknown"
+    assert still.get("run_id") == "run-a2"
+    _ = digest_dir
+
+
+def test_t3_create_time_deducted_from_wait(monkeypatch: Any) -> None:
+    """T3: 1s budget + 10s create → first post-id action is stop, not a poll GET."""
+    from jarvise_intel.gateway import GatewayConfig, run_research
+
+    cfg = GatewayConfig(
+        base_url="http://hermes:8642",
+        api_key="k",
+        provider="openrouter",
+        model="m",
+        deadline_s=600.0,
+        poll_s=0.01,
+    )
+    clock = {"t": 0.0}
+    events: list[str] = []
+
+    def mono() -> float:
+        return clock["t"]
+
+    def open_url(request: Any, timeout: float) -> Any:
+        method = request.get_method()
+        url = str(getattr(request, "full_url", "") or request.get_full_url())
+        if method == "POST" and url.rstrip("/").endswith("/v1/runs"):
+            events.append("POST")
+            clock["t"] += 10.0
+            return _Resp({"run_id": "r-x"})
+        if method == "POST" and url.rstrip("/").endswith("/stop"):
+            events.append("STOP")
+            return _Resp({"run_id": "r-x", "status": "running"})
+        events.append("GET")
+        return _Resp({"run_id": "r-x", "status": "running", "output": ""})
+
+    persisted: list[str] = []
+
+    with pytest.raises(GatewayError) as exc:
+        run_research(
+            cfg,
+            instructions="i",
+            input_text="u",
+            idempotency_key="k1",
+            open_url=open_url,
+            sleep=lambda _s: None,
+            on_created=persisted.append,
+            deadline_s=1.0,
+            monotonic=mono,
+        )
+    assert exc.value.category == "unknown_run"
+    assert persisted == ["r-x"]
+    assert events[0] == "POST"
+    assert "STOP" in events
+    # First action after learning the id must be stop (budget already gone), not a poll.
+    after_post = events[1:]
+    assert after_post[0] == "STOP"
+
+
+def test_t3_partial_create_shortens_poll(monkeypatch: Any) -> None:
+    from jarvise_intel.gateway import GatewayConfig, run_research
+
+    cfg = GatewayConfig(
+        base_url="http://hermes:8642",
+        api_key="k",
+        provider="openrouter",
+        model="m",
+        deadline_s=600.0,
+        poll_s=1.0,
+    )
+    clock = {"t": 0.0}
+    poll_windows: list[float] = []
+
+    def mono() -> float:
+        return clock["t"]
+
+    def open_url(request: Any, timeout: float) -> Any:
+        method = request.get_method()
+        url = str(getattr(request, "full_url", "") or request.get_full_url())
+        if method == "POST" and url.rstrip("/").endswith("/v1/runs"):
+            clock["t"] += 3.0
+            return _Resp({"run_id": "r-y"})
+        if method == "POST" and url.rstrip("/").endswith("/stop"):
+            return _Resp({"run_id": "r-y", "status": "completed"})
+        poll_windows.append(timeout)
+        clock["t"] += 1.0
+        return _Resp(
+            {
+                "run_id": "r-y",
+                "status": "completed",
+                "output": '{"items":[]}',
+                "runtime": {"provider": "openrouter", "model": "m"},
+            }
+        )
+
+    result = run_research(
+        cfg,
+        instructions="i",
+        input_text="u",
+        idempotency_key="k2",
+        open_url=open_url,
+        sleep=lambda _s: None,
+        deadline_s=10.0,
+        monotonic=mono,
+    )
+    assert result.run_id == "r-y"
+    # Remaining after 3s create of a 10s budget must be < 10.
+    assert poll_windows
+    assert poll_windows[0] <= 7.0 + 1e-6
