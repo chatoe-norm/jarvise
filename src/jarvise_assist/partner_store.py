@@ -1564,40 +1564,75 @@ def _owner_tx_already_in_ledger(
     return False
 
 
-def _apply_owner_tx(
+def _owner_tx_prechecks(
+    conn: sqlite3.Connection,
+    *,
+    amount: Decimal,
+    account_value: Decimal,
+    now_ms: int,
+) -> tuple[sqlite3.Row | None, dict[str, Any] | None]:
+    """Shared read-only gate for owner tx planning and booking (same order as before)."""
+    refused = owner_amount_refusal(amount)
+    if refused:
+        return None, refused
+    bad = _bad_number(Decimal(account_value))
+    if bad:
+        return None, bad
+    admin, err = _owner_admin_row(conn)
+    if err is not None or admin is None:
+        return None, err if err is not None else {"ok": False, "reason": "no_admin"}
+    if _has_pending_deposit(conn, now_ms):
+        return None, {"ok": False, "reason": "deposit_pending"}
+    verified = verify_ledger(conn)
+    if not verified["ok"]:
+        return None, {"ok": False, "reason": "ledger_unverified"}
+    return admin, None
+
+
+def owner_events_after(conn: sqlite3.Connection, t_ms: int) -> str | None:
+    """Reason when any partner event or confirmed request is later than ``t_ms``, else None.
+
+    Same rule as the live ``p owner`` safety check: booking an older transfer after
+    later ledger activity would price it at the wrong NAV.
+    """
+    late_ev = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM partner_event
+        WHERE created_at_ms > ?
+           OR COALESCE(effective_at_ms, created_at_ms) > ?
+        """,
+        (int(t_ms), int(t_ms)),
+    ).fetchone()
+    if int(late_ev["n"]) != 0:
+        return "events_after_effective"
+    late_req = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM partner_request
+        WHERE status = 'confirmed'
+          AND (
+            created_at_ms > ?
+            OR (decided_at_ms IS NOT NULL AND decided_at_ms > ?)
+            OR (paid_at_ms IS NOT NULL AND paid_at_ms > ?)
+          )
+        """,
+        (int(t_ms), int(t_ms), int(t_ms)),
+    ).fetchone()
+    if int(late_req["n"]) != 0:
+        return "requests_after_effective"
+    return None
+
+
+def _owner_tx_math(
     conn: sqlite3.Connection,
     *,
     kind: str,
     amount: Decimal,
     account_value: Decimal,
-    now_ms: int,
-    effective_at_ms: int | None = None,
-    note: str | None = None,
-    event_id: str | None = None,
+    admin: sqlite3.Row,
 ) -> dict[str, Any]:
-    """Book one owner_redeem or owner_deposit on the admin. No transfer guard."""
-    refused = owner_amount_refusal(amount)
-    if refused:
-        return refused
-    account = Decimal(account_value)
-    bad = _bad_number(account)
-    if bad:
-        return bad
-    admin, err = _owner_admin_row(conn)
-    if err is not None or admin is None:
-        return err if err is not None else {"ok": False, "reason": "no_admin"}
-    if _has_pending_deposit(conn, now_ms):
-        return {"ok": False, "reason": "deposit_pending"}
-    verified = verify_ledger(conn)
-    if not verified["ok"]:
-        return {"ok": False, "reason": "ledger_unverified"}
-    eid = event_id if event_id is not None else _new_event_id()
-    if _owner_tx_already_in_ledger(
-        conn, event_id=eid if event_id is not None else None, kind=kind, note=note
-    ):
-        return {"ok": True, "reason": "already_recorded", "event_ids": [eid], "kind": kind}
+    """Numbers one owner tx books. Read-only; shared by plan_owner_tx and _apply_owner_tx."""
     amount_q = _q_usdt(Decimal(amount))
-    v_raw = _q_usdt(account)
+    v_raw = _q_usdt(Decimal(account_value))
     due = payouts_due_total(conn)
     u_before = total_units(conn)
     admin_units = units_from_e8(int(admin["units_e8"]))
@@ -1630,6 +1665,85 @@ def _apply_owner_tx(
         cash = plan_d.cash
         burned = Decimal("0")
         minted = plan_d.units_issued
+    return {
+        "ok": True,
+        "kind": kind,
+        "amount": amount_q,
+        "account_value": v_raw,
+        "payouts_due": due,
+        "total_units_before": u_before,
+        "admin_units_before": admin_units,
+        "admin_cost_before": admin_cost,
+        "nav_pre": nav_pre,
+        "units_delta": units_delta,
+        "units_after": units_after,
+        "cost_after": cost_after,
+        "cash": cash,
+        "burned_units": burned,
+        "units_issued": minted,
+    }
+
+
+def plan_owner_tx(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    amount: Decimal,
+    account_value: Decimal,
+    now_ms: int,
+) -> dict[str, Any]:
+    """Read-only preview: the same gate and numbers ``apply_owner_*`` would book. No write."""
+    if kind not in ("owner_redeem", "owner_deposit"):
+        return {"ok": False, "reason": "bad_args"}
+    admin, err = _owner_tx_prechecks(conn, amount=amount, account_value=account_value, now_ms=now_ms)
+    if err is not None or admin is None:
+        return err if err is not None else {"ok": False, "reason": "no_admin"}
+    return _owner_tx_math(conn, kind=kind, amount=amount, account_value=account_value, admin=admin)
+
+
+def _apply_owner_tx(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    amount: Decimal,
+    account_value: Decimal,
+    now_ms: int,
+    effective_at_ms: int | None = None,
+    note: str | None = None,
+    event_id: str | None = None,
+    refuse_events_after_ms: int | None = None,
+) -> dict[str, Any]:
+    """Book one owner_redeem or owner_deposit on the admin. No transfer guard.
+
+    ``refuse_events_after_ms`` (historical CLI only): inside this transaction, refuse
+    when any partner event/confirmed request is later than that time.
+    """
+    admin, err = _owner_tx_prechecks(conn, amount=amount, account_value=account_value, now_ms=now_ms)
+    if err is not None or admin is None:
+        return err if err is not None else {"ok": False, "reason": "no_admin"}
+    eid = event_id if event_id is not None else _new_event_id()
+    if _owner_tx_already_in_ledger(
+        conn, event_id=eid if event_id is not None else None, kind=kind, note=note
+    ):
+        return {"ok": True, "reason": "already_recorded", "event_ids": [eid], "kind": kind}
+    if refuse_events_after_ms is not None:
+        late = owner_events_after(conn, int(refuse_events_after_ms))
+        if late is not None:
+            return {"ok": False, "reason": late}
+    math = _owner_tx_math(conn, kind=kind, amount=amount, account_value=account_value, admin=admin)
+    if not math["ok"]:
+        return math
+    v_raw = math["account_value"]
+    due = math["payouts_due"]
+    u_before = math["total_units_before"]
+    admin_cost = math["admin_cost_before"]
+    nav_pre = math["nav_pre"]
+    units_delta = math["units_delta"]
+    units_after = math["units_after"]
+    cost_after = math["cost_after"]
+    cash = math["cash"]
+    burned = math["burned_units"]
+    minted = math["units_issued"]
     admin_id = str(admin["id"])
     eff_ms = int(now_ms) if effective_at_ms is None else int(effective_at_ms)
     _update_partner(conn, admin_id, units=units_after, cost=cost_after, now_ms=now_ms)
@@ -1704,6 +1818,7 @@ def apply_owner_redeem(
     effective_at_ms: int | None = None,
     note: str | None = None,
     event_id: str | None = None,
+    refuse_events_after_ms: int | None = None,
 ) -> dict[str, Any]:
     """Owner withdrawal already out of the wallet. ``account_value`` is the reading after."""
     try:
@@ -1717,6 +1832,7 @@ def apply_owner_redeem(
                 effective_at_ms=effective_at_ms,
                 note=note,
                 event_id=event_id,
+                refuse_events_after_ms=refuse_events_after_ms,
             )
     except _OwnerWriteRefused as exc:
         return exc.payload
@@ -1733,6 +1849,7 @@ def apply_owner_deposit(
     effective_at_ms: int | None = None,
     note: str | None = None,
     event_id: str | None = None,
+    refuse_events_after_ms: int | None = None,
 ) -> dict[str, Any]:
     """Owner deposit already in the wallet. ``account_value`` is the reading after."""
     try:
@@ -1746,6 +1863,7 @@ def apply_owner_deposit(
                 effective_at_ms=effective_at_ms,
                 note=note,
                 event_id=event_id,
+                refuse_events_after_ms=refuse_events_after_ms,
             )
     except _OwnerWriteRefused as exc:
         return exc.payload

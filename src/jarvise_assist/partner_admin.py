@@ -21,6 +21,7 @@ from jarvise_assist import partner_rules
 from jarvise_assist import partner_store as ps
 from jarvise_assist import partner_thb as thb
 from jarvise_assist.futures import build_futures_client
+from jarvise_assist.partner_owner_settings import HOUR_MS, owner_tx_max_age_hours
 from jarvise_assist.partner_value import (
     AccountValue,
     AccountValueError,
@@ -47,9 +48,9 @@ _OWNER_STALE_MSG = "การ์ดหมดอายุแล้ว — พิ�
 _GUARD_OVERRIDE_S = 900
 _GUARD_FUTURE_S = 60
 _GUARD_MARKER = "\n\n⚠️ ตรวจยอดโอน"
-_OWNER_TX_MAX_AGE_MS = 6 * 60 * 60 * 1000
 _OWNER_TX_MAX_INCOME = Decimal("1")
-_OWNER_HIST_HINT = "ใช้เครื่องมือบันทึกย้อนหลัง (historical one-off) แทน"
+_OWNER_HIST_CMD = "jarvise assist partner-record-owner-tx"
+_OWNER_HIST_HINT = f"ใช้คำสั่งบันทึกย้อนหลัง {_OWNER_HIST_CMD} (บน VPS) แทน"
 _OWNER_MULTI_MSG = f"มีเงินโอนอื่นที่ยังไม่บันทึก — {_OWNER_HIST_HINT}"
 _OWNER_OPEN_POS_MSG = f"มีโพซิชันเปิดอยู่ — uPnL อาจเพี้ยน · {_OWNER_HIST_HINT}"
 _OWNER_V_FAIL_MSG = f"อ่านยอดพอร์ตไม่ได้ — {_OWNER_HIST_HINT}"
@@ -913,8 +914,9 @@ def _owner_safety_refuse(
     if int(av.open_positions) > 0:
         return _OWNER_OPEN_POS_MSG
     t_ms = int(finding.time_ms)
-    if int(now_ms) - t_ms > _OWNER_TX_MAX_AGE_MS:
-        return f"เงินโอนเก่าเกิน 6 ชม. — {_OWNER_HIST_HINT}"
+    max_age_h = owner_tx_max_age_hours()
+    if int(now_ms) - t_ms > max_age_h * HOUR_MS:
+        return f"เงินโอนเก่าเกิน {max_age_h} ชม. — {_OWNER_HIST_HINT}"
     late_ev = conn.execute(
         """
         SELECT COUNT(*) AS n FROM partner_event

@@ -201,6 +201,9 @@ services:
       - JOBS_PORT=8090
       - JARVISE_SHADOW_DIGEST_DIR=/digests
       - JARVISE_DB=${JARVISE_DB:-/app/data/analytics/jarvise.db}
+      # Owner p owner dep|wd max transfer age (h, 1..48) and historical CLI lookback (days, 1..365).
+      - JARVISE_OWNER_TX_MAX_AGE_HOURS=${JARVISE_OWNER_TX_MAX_AGE_HOURS:-6}
+      - JARVISE_OWNER_HIST_MAX_LOOKBACK_DAYS=${JARVISE_OWNER_HIST_MAX_LOOKBACK_DAYS:-30}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - BINANCE_TRADE_API_KEY=${BINANCE_TRADE_API_KEY:-}
