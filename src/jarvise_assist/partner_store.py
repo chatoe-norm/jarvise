@@ -1460,9 +1460,9 @@ _OWNER_AMOUNT_DECIMALS_MAX = 6
 
 
 def _owner_decimals(decimals: int | None) -> int:
-    d = OWNER_AMOUNT_DECIMALS if decimals is None else int(decimals)
-    if not 0 <= d <= _OWNER_AMOUNT_DECIMALS_MAX:
-        raise ValueError("owner amount decimals must be within micro storage")
+    d = OWNER_AMOUNT_DECIMALS if decimals is None else decimals
+    if isinstance(d, bool) or not isinstance(d, int) or not 0 <= d <= _OWNER_AMOUNT_DECIMALS_MAX:
+        raise ValueError("owner amount decimals must be an int within micro storage (0..6)")
     return d
 
 
@@ -1492,8 +1492,13 @@ def owner_amount_refusal(amount: Decimal, *, decimals: int | None = None) -> dic
     dec = normalize_owner_amount(Decimal(amount), decimals=d)
     if not dec.is_finite() or dec <= 0:
         return {"ok": False, "reason": "bad_amount"}
-    exp = dec.as_tuple().exponent
-    if isinstance(exp, int) and exp < -d:
+    # Must be exactly representable at d dp within the decimal context; this also
+    # refuses huge values (1E+24, 1E+999999) that would crash _q_usdt/usdt_to_micro.
+    try:
+        q = dec.quantize(Decimal(1).scaleb(-d), rounding=ROUND_DOWN)
+    except InvalidOperation:
+        return {"ok": False, "reason": "bad_amount"}
+    if not q.is_finite() or q != dec:
         return {"ok": False, "reason": "bad_amount"}
     return None
 
