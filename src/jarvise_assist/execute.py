@@ -1975,10 +1975,18 @@ def _confirm_guards_entry(
         return "expired"
     if not analysis_is_fresh(analysis, now_ms=now_ms_value):
         return "stale_analysis"
-    positions = trade.position_risk()
+    try:
+        positions = trade.position_risk()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards positions read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:positions"
     if any(p.symbol == symbol for p in positions):
         return "open_position"
-    mark = trade.mark_price(symbol)
+    try:
+        mark = trade.mark_price(symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards mark read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:mark"
     if chase_exceeded(side=side, entry=entry, stop=stop, mark=mark):
         return "chase"
     # Seen levels are mainnet; demo mark cannot be compared in testnet.
@@ -1992,7 +2000,11 @@ def _confirm_guards_entry(
     except Exception as exc:  # noqa: BLE001
         logger.warning("confirm guards balance read failed type=%s", type(exc).__name__)
         return "fapi_read_failed:balance"
-    filters = trade.symbol_filters(symbol)
+    try:
+        filters = trade.symbol_filters(symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards filters read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:filters"
     risk_pct = Decimal(str(ensure_settings(conn)["risk_pct"]))
     # Re-size from the live mark; never send more than the preview qty the owner saw.
     resized = size_signal(

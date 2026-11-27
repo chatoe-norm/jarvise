@@ -17,6 +17,7 @@ from jarvise_assist.pause import main_week_loss_pause_until
 from jarvise_assist.quick import (
     REG_TTL_MS,
     _cb,
+    _expire_window_phrase,
     _fmt_pct,
     create_quick_registration,
     quick_symbol_busy_toast,
@@ -102,17 +103,6 @@ def msg_stop_far(conn: Any | None = None) -> str:
     return f"stop ห่างเกิน {_pct(_limit(conn))}% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 
 
-class _MsgStopFar:
-    """Call-time stand-in so ``"20%" in MSG_STOP_FAR`` follows the setting."""
-
-    def __str__(self) -> str:
-        return msg_stop_far()
-
-    def __contains__(self, item: object) -> bool:
-        return str(item) in str(self)
-
-
-MSG_STOP_FAR = _MsgStopFar()
 _DRAFT_NUMERIC_TOKEN = re.compile(r"[0-9][0-9.,]*%?")
 
 
@@ -474,6 +464,7 @@ def registration_success_message(
     now_ms: int,
 ) -> str:
     expires = int(now_ms) + REG_TTL_MS
+    window = _expire_window_phrase(REG_TTL_MS)
     side_label = _side_label(side)
     entry_s = _fmt_price_tick(entry, tick)
     stop_s = _fmt_price_tick(stop, tick)
@@ -482,11 +473,11 @@ def registration_success_message(
         [
             (
                 f"✅ ลงทะเบียนไม้ quick {sym} {side_label} แล้ว — "
-                f"เปิดเองใน Binance ภายใน 10 นาที (ถึง {_hhmm(expires)} น.)"
+                f"เปิดเองใน Binance ภายใน {window} (ถึง {_hhmm(expires)} น.)"
             ),
             _mode_tag(),
             f"เข้า {entry_s} · stop {stop_s} · qty {qty_s}",
-            f"⏳ เหลือ 10 นาที (ถึง {_hhmm(expires)} น.) · ดูสถานะใน ⚡ Quick",
+            f"⏳ เหลือ {window} (ถึง {_hhmm(expires)} น.) · ดูสถานะใน ⚡ Quick",
             STOP_INSTRUCTION,
             f"บอทไม่ส่งคำสั่ง · ไม้แรกฝั่ง {side_label} บน {sym} ในช่วงนี้จะนับเป็น quick",
         ]
@@ -720,7 +711,9 @@ def _handle_qk_ex(
         logger.warning("qk:ex balance read failed type=%s", type(exc).__name__)
         from jarvise_assist.execute import _reason_th
 
-        edit(_decorate_card_text(_reason_th("fapi_read_failed:balance")), {"inline_keyboard": []})
+        balance_text = _reason_th("fapi_read_failed:balance")
+        send(balance_text)
+        edit(_decorate_card_text(balance_text), {"inline_keyboard": []})
         answer(None)
         return {"ok": False, "reason": "fapi_read_failed:balance"}
     try:
@@ -730,6 +723,7 @@ def _handle_qk_ex(
         min_notional = Decimal(str(filters.min_notional))
     except Exception:  # noqa: BLE001
         logger.exception("qk:ex filters failed")
+        edit(_decorate_card_text(MSG_REGISTER_FAILED), {"inline_keyboard": []})
         answer(MSG_REGISTER_FAILED)
         return {"ok": False, "reason": "read_failed"}
     if testnet_levels:

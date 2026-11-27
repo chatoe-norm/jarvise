@@ -1602,8 +1602,10 @@ def owner_events_after(conn: sqlite3.Connection, t_ms: int, *, historical: bool 
     later ledger activity would price it at the wrong NAV.
 
     ``historical=True`` (the historical CLI only) judges a row written by that tool
-    by ``effective_at_ms``. Every other row still uses ``created_at_ms``. The default
-    keeps the live check unchanged.
+    by ``effective_at_ms`` when it is an owner deposit or redeem, the effective time
+    is set, the id is ``pe_owner_tran…``, and the note contains the tool marker.
+    Every other row still uses ``created_at_ms``. The default keeps the live check
+    unchanged.
     """
     t = int(t_ms)
     if historical:
@@ -1611,13 +1613,16 @@ def owner_events_after(conn: sqlite3.Connection, t_ms: int, *, historical: bool 
             """
             SELECT COUNT(*) AS n FROM partner_event
             WHERE CASE
-                WHEN COALESCE(note, '') LIKE ?
+                WHEN kind IN ('owner_deposit', 'owner_redeem')
+                 AND effective_at_ms IS NOT NULL
+                 AND id LIKE 'pe_owner_tran%'
+                 AND instr(COALESCE(note, ''), ?) > 0
                 THEN COALESCE(effective_at_ms, created_at_ms) > ?
                 ELSE created_at_ms > ?
                     OR COALESCE(effective_at_ms, created_at_ms) > ?
             END
             """,
-            (f"%{OWNER_HIST_NOTE_MARK}%", t, t, t),
+            (OWNER_HIST_NOTE_MARK, t, t, t),
         ).fetchone()
     else:
         late_ev = conn.execute(

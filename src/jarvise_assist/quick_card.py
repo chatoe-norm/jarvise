@@ -125,27 +125,6 @@ def stop_far_refusal_text(conn: Any | None = None) -> str:
     return f"❌ stop ห่างเกิน {stop_far_pct_text(stop_far_limit(conn))}% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 
 
-def _refusal_stop_far() -> str:
-    return stop_far_refusal_text()
-
-
-class _RefusalMap(dict[str, str]):
-    """``stop_far`` is rendered at lookup time so a settings change is not frozen."""
-
-    def __getitem__(self, key: str) -> str:
-        if key == "stop_far":
-            return stop_far_refusal_text()
-        return dict.__getitem__(self, key)
-
-    def get(self, key: str, default: str | None = None) -> str | None:  # type: ignore[override]
-        if key == "stop_far":
-            return stop_far_refusal_text()
-        return dict.get(self, key, default)
-
-    def values(self) -> Any:  # type: ignore[override]
-        return [self[key] for key in self]
-
-
 def _refusal_quick_cap() -> str:
     return "เกินเพดานความเสี่ยง quick ที่เปิดพร้อมกัน"
 
@@ -176,27 +155,24 @@ def _refusal_cutoff_block() -> str:
     return "❌ หลัง 23:30 ไม่ลงทะเบียน quick ใหม่ · 👉 เริ่มใหม่ได้หลัง 00:00"
 
 
-REFUSAL = _RefusalMap(
-    {
-        "quick_open": _refusal_quick_open(),
-        "main_position": _refusal_main_position(),
-        "in_flight": _refusal_in_flight(),
-        "pending_order": _refusal_pending_order(),
-        "contract": _refusal_contract(),
-        "read_failed": _refusal_read_failed(),
-        "stop_wrong_side": _refusal_stop_wrong_side(),
-        "below_min_notional": _refusal_below_min(),
-        "size_failed": _refusal_size_failed(),
-        "quick_cap": _refusal_quick_cap(),
-        "portfolio_cap": _refusal_portfolio_cap(),
-        "margin_cap": _refusal_margin_cap(),
-        "leverage_cap": _refusal_leverage_cap(),
-        "card_expired": _refusal_card_expired(),
-        "bad_data": _refusal_bad_data(),
-        "stop_far": _refusal_stop_far(),
-        "cutoff_block": _refusal_cutoff_block(),
-    }
-)
+REFUSAL: dict[str, str] = {
+    "quick_open": _refusal_quick_open(),
+    "main_position": _refusal_main_position(),
+    "in_flight": _refusal_in_flight(),
+    "pending_order": _refusal_pending_order(),
+    "contract": _refusal_contract(),
+    "read_failed": _refusal_read_failed(),
+    "stop_wrong_side": _refusal_stop_wrong_side(),
+    "below_min_notional": _refusal_below_min(),
+    "size_failed": _refusal_size_failed(),
+    "quick_cap": _refusal_quick_cap(),
+    "portfolio_cap": _refusal_portfolio_cap(),
+    "margin_cap": _refusal_margin_cap(),
+    "leverage_cap": _refusal_leverage_cap(),
+    "card_expired": _refusal_card_expired(),
+    "bad_data": _refusal_bad_data(),
+    "cutoff_block": _refusal_cutoff_block(),
+}
 
 
 def parse_quick_command(text: str, *, stop_far_pct: Decimal | None = None) -> dict[str, Any] | None:
@@ -316,7 +292,9 @@ def _hhmm(ms: int) -> str:
 _GENERIC_FAIL = "❌ ทำรายการไม่ได้ — ดูสถานะในเมนู ⚡ Quick"
 
 
-def _fail(reason: str, text: str | None = None) -> dict[str, Any]:
+def _fail(reason: str, text: str | None = None, *, conn: Any | None = None) -> dict[str, Any]:
+    if not text and reason == "stop_far":
+        text = stop_far_refusal_text(conn)
     shown = text or REFUSAL.get(reason) or _GENERIC_FAIL
     return {"ok": False, "reason": reason, "text": shown}
 
@@ -715,7 +693,7 @@ def build_quick_card(
         raw_price = Decimal(str(stop))
         if abs(raw_price - mark) / mark > far / Decimal("100"):
             dist_pct = abs(raw_price - mark) / mark * Decimal("100")
-            return _fail("stop_far", quick_errors.e_stop_far(dist_pct, limit=far))
+            return _fail("stop_far", quick_errors.e_stop_far(dist_pct, limit=far), conn=conn)
 
     from jarvise_assist.quick_config import effective_quick_values, get_quick_config
 
