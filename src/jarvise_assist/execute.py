@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import math
@@ -787,6 +788,12 @@ def _kill_blocks() -> bool:
     return bool(kill_switch_state(strict=True)["engaged"])
 
 
+# When True, audit-log write failures warn and continue (Quick post-send path only).
+_BEST_EFFORT_EXEC_LOG: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_best_effort_exec_log", default=False
+)
+
+
 def _log_write(
     conn: Any,
     *,
@@ -798,16 +805,55 @@ def _log_write(
     binance_code: int | None = None,
     order_or_algo_id: str | None = None,
 ) -> None:
-    insert_exec_log(
-        conn,
-        intent_id=intent_id,
-        step=step,
-        endpoint=endpoint,
-        client_order_id=client_order_id,
-        http_status=http_status,
-        binance_code=binance_code,
-        order_or_algo_id=str(order_or_algo_id) if order_or_algo_id is not None else None,
-    )
+    try:
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step=step,
+            endpoint=endpoint,
+            client_order_id=client_order_id,
+            http_status=http_status,
+            binance_code=binance_code,
+            order_or_algo_id=str(order_or_algo_id) if order_or_algo_id is not None else None,
+        )
+    except Exception as exc:  # noqa: BLE001 — Quick post-send: never abort protection for audit
+        if _BEST_EFFORT_EXEC_LOG.get():
+            logger.warning(
+                "exec log write failed step=%s intent=%s type=%s",
+                step,
+                intent_id,
+                type(exc).__name__,
+            )
+            return
+        raise
+
+
+def _log_write_best_effort(
+    conn: Any,
+    *,
+    intent_id: str,
+    step: str,
+    endpoint: str,
+    client_order_id: str | None = None,
+    http_status: int | None = None,
+    binance_code: int | None = None,
+    order_or_algo_id: str | None = None,
+) -> None:
+    """Audit write that never raises (Quick post-send / recovery helpers)."""
+    token = _BEST_EFFORT_EXEC_LOG.set(True)
+    try:
+        _log_write(
+            conn,
+            intent_id=intent_id,
+            step=step,
+            endpoint=endpoint,
+            client_order_id=client_order_id,
+            http_status=http_status,
+            binance_code=binance_code,
+            order_or_algo_id=order_or_algo_id,
+        )
+    finally:
+        _BEST_EFFORT_EXEC_LOG.reset(token)
 
 
 class ExecResult(str):
@@ -2178,7 +2224,10 @@ def _confirm_guards_quick_entry(
     # reference (mainnet or demo mark frozen at confirm-card).
     if quick_chase_exceeded(side=side, entry=entry, stop=stop, mark=mark, chase_r=chase_r):
         return "chase"
-    # Testnet: map mainnet preview levels by % onto the demo mark after chase.
+    filters = trade.symbol_filters(symbol)
+    # Testnet: map mainnet preview levels by % onto the demo mark after chase,
+    # then round stop/target to tick in the SAFE direction BEFORE sizing/budget
+    # so the persisted preview matches what run_entry_sequence will submit.
     if assist_execute_mode() == "testnet":
         t1_prev = Decimal(str(preview.get("t1") or preview.get("target") or entry))
         stop, t1_mapped = _apply_pct_levels(
@@ -2188,6 +2237,8 @@ def _confirm_guards_quick_entry(
             testnet_mark=mark,
             side=side,
         )
+        stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
+        t1_mapped = round_level_to_tick(t1_mapped, filters.tick_size, side=side, kind="target")
         entry = mark
         preview = {
             **preview,
@@ -2197,7 +2248,6 @@ def _confirm_guards_quick_entry(
             "target": str(t1_mapped),
         }
 
-    filters = trade.symbol_filters(symbol)
     if not quick_stop_buffer_ok(
         side=side,
         mark=mark,
@@ -2840,23 +2890,102 @@ def run_entry_sequence(
 
     cid = client_order_id(intent_id, "mkt")
     fill: dict[str, Any] | None = None
+    # Quick: persist attempt evidence BEFORE send. Fail closed if the write fails
+    # (nothing reached the exchange). After send, audit writes are best-effort so
+    # a DB error cannot abort SL placement / leave an unprotected fill.
+    be_token: contextvars.Token[bool] | None = None
+    if is_quick:
+        try:
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="market_attempt",
+                endpoint="/fapi/v1/order",
+                client_order_id=cid,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "quick market_attempt log failed intent=%s — not sending",
+                intent_id,
+            )
+            return _exec_result(MSG_BINANCE_NOT_SENT, status="failed")
+        be_token = _BEST_EFFORT_EXEC_LOG.set(True)
     try:
-        fill = trade.market_order(symbol=symbol, side=open_side, qty=qty, client_id=cid)
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step="market",
-            endpoint="/fapi/v1/order",
-            client_order_id=cid,
-            http_status=200,
-            order_or_algo_id=str(fill.get("orderId") or ""),
-        )
-        outcome = classify_order_body(fill)
-        if outcome == OrderOutcome.NOT_FILLED:
-            return _exec_result("เข้าไม้ไม่สำเร็จ", status="failed")
-        if outcome == OrderOutcome.UNKNOWN:
-            # executedQty 0 / NEW — query before giving up.
-            queried = _query_fill_after_unknown(
+        try:
+            fill = trade.market_order(symbol=symbol, side=open_side, qty=qty, client_id=cid)
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="market",
+                endpoint="/fapi/v1/order",
+                client_order_id=cid,
+                http_status=200,
+                order_or_algo_id=str(fill.get("orderId") or ""),
+            )
+            outcome = classify_order_body(fill)
+            if outcome == OrderOutcome.NOT_FILLED:
+                return _exec_result("เข้าไม้ไม่สำเร็จ", status="failed")
+            if outcome == OrderOutcome.UNKNOWN:
+                # executedQty 0 / NEW — query before giving up.
+                queried = _query_fill_after_unknown(
+                    trade,
+                    symbol=symbol,
+                    client_id=cid,
+                    conn=conn,
+                    intent_id=intent_id,
+                    step="market_query",
+                    sleep=sleep,
+                )
+                if queried.kind == QueryResultKind.FOUND and queried.order is not None:
+                    if classify_order_body(queried.order) == OrderOutcome.FILLED:
+                        fill = queried.order
+                    elif classify_order_body(queried.order) == OrderOutcome.NOT_FILLED:
+                        return _exec_result("เข้าไม้ไม่สำเร็จ", status="failed")
+                    else:
+                        try:
+                            pos_fill = _fill_from_position(trade, symbol=symbol)
+                        except Exception:  # noqa: BLE001
+                            pos_fill = None
+                        if pos_fill is None:
+                            return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+                        # Main: base fill dict. Quick: non-final so recovery re-reads.
+                        fill = {
+                            "executedQty": str(pos_fill[0]),
+                            "avgPrice": str(pos_fill[1]),
+                            "orderId": "",
+                        }
+                        if is_quick:
+                            fill["status"] = "NEW"
+                else:
+                    try:
+                        pos_fill = _fill_from_position(trade, symbol=symbol)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("position read failed after unknown market body")
+                        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+                    if pos_fill is not None:
+                        fill = {
+                            "executedQty": str(pos_fill[0]),
+                            "avgPrice": str(pos_fill[1]),
+                            "orderId": "",
+                        }
+                        if is_quick:
+                            fill["status"] = "NEW"
+                    else:
+                        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+        except Exception as exc:  # noqa: BLE001
+            code = exc.binance_code if isinstance(exc, TradeClientError) else None
+            _log_write(
+                conn,
+                intent_id=intent_id,
+                step="market",
+                endpoint="/fapi/v1/order",
+                client_order_id=cid,
+                http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+                binance_code=code,
+            )
+            if _is_clear_rejection(exc):
+                return _exec_result(f"เข้าไม้ไม่สำเร็จ: {exc}", status="failed")
+            recovered = _query_fill_after_unknown(
                 trade,
                 symbol=symbol,
                 client_id=cid,
@@ -2865,33 +2994,23 @@ def run_entry_sequence(
                 step="market_query",
                 sleep=sleep,
             )
-            if queried.kind == QueryResultKind.FOUND and queried.order is not None:
-                if classify_order_body(queried.order) == OrderOutcome.FILLED:
-                    fill = queried.order
-                elif classify_order_body(queried.order) == OrderOutcome.NOT_FILLED:
+            if recovered.kind == QueryResultKind.FOUND and recovered.order is not None:
+                if classify_order_body(recovered.order) == OrderOutcome.FILLED:
+                    fill = recovered.order
+                elif classify_order_body(recovered.order) == OrderOutcome.NOT_FILLED:
                     return _exec_result("เข้าไม้ไม่สำเร็จ", status="failed")
                 else:
-                    try:
-                        pos_fill = _fill_from_position(trade, symbol=symbol)
-                    except Exception:  # noqa: BLE001
-                        pos_fill = None
-                    if pos_fill is None:
-                        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
-                    # Main: base fill dict. Quick: non-final so recovery re-reads.
-                    fill = {
-                        "executedQty": str(pos_fill[0]),
-                        "avgPrice": str(pos_fill[1]),
-                        "orderId": "",
-                    }
-                    if is_quick:
-                        fill["status"] = "NEW"
+                    fill = None
             else:
+                fill = None
+            if fill is None:
                 try:
                     pos_fill = _fill_from_position(trade, symbol=symbol)
                 except Exception:  # noqa: BLE001
-                    logger.exception("position read failed after unknown market body")
+                    logger.exception("position read failed after unknown market result")
                     return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
                 if pos_fill is not None:
+                    # Query unreadable/not_found but position present → continue to stop.
                     fill = {
                         "executedQty": str(pos_fill[0]),
                         "avgPrice": str(pos_fill[1]),
@@ -2900,102 +3019,27 @@ def run_entry_sequence(
                     if is_quick:
                         fill["status"] = "NEW"
                 else:
+                    # First-burst not_found + flat (or unreadable + flat) → unknown, not failed.
                     return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
-    except Exception as exc:  # noqa: BLE001
-        code = exc.binance_code if isinstance(exc, TradeClientError) else None
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step="market",
-            endpoint="/fapi/v1/order",
-            client_order_id=cid,
-            http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
-            binance_code=code,
-        )
-        if _is_clear_rejection(exc):
-            return _exec_result(f"เข้าไม้ไม่สำเร็จ: {exc}", status="failed")
-        recovered = _query_fill_after_unknown(
-            trade,
-            symbol=symbol,
-            client_id=cid,
-            conn=conn,
-            intent_id=intent_id,
-            step="market_query",
-            sleep=sleep,
-        )
-        if recovered.kind == QueryResultKind.FOUND and recovered.order is not None:
-            if classify_order_body(recovered.order) == OrderOutcome.FILLED:
-                fill = recovered.order
-            elif classify_order_body(recovered.order) == OrderOutcome.NOT_FILLED:
-                return _exec_result("เข้าไม้ไม่สำเร็จ", status="failed")
-            else:
-                fill = None
-        else:
-            fill = None
-        if fill is None:
+
+        assert fill is not None
+        exec_qty = executed_qty(fill)
+        avg = _positive_fill_price(fill)
+        if exec_qty <= 0:
+            return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+
+        # Quick non-terminal partial: protect current position qty; keep unknown for recovery.
+        order_final = _order_is_final(fill)
+        protect_qty = exec_qty
+        if is_quick and not order_final:
             try:
                 pos_fill = _fill_from_position(trade, symbol=symbol)
             except Exception:  # noqa: BLE001
-                logger.exception("position read failed after unknown market result")
-                return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
-            if pos_fill is not None:
-                # Query unreadable/not_found but position present → continue to stop.
-                fill = {
-                    "executedQty": str(pos_fill[0]),
-                    "avgPrice": str(pos_fill[1]),
-                    "orderId": "",
-                }
-                if is_quick:
-                    fill["status"] = "NEW"
-            else:
-                # First-burst not_found + flat (or unreadable + flat) → unknown, not failed.
-                return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
+                pos_fill = None
+            if pos_fill is not None and pos_fill[0] > 0:
+                protect_qty = pos_fill[0]
 
-    assert fill is not None
-    exec_qty = executed_qty(fill)
-    avg = _positive_fill_price(fill)
-    if exec_qty <= 0:
-        return _exec_result(MSG_OUTCOME_UNKNOWN, status="unknown")
-
-    # Quick non-terminal partial: protect current position qty; keep unknown for recovery.
-    order_final = _order_is_final(fill)
-    protect_qty = exec_qty
-    if is_quick and not order_final:
-        try:
-            pos_fill = _fill_from_position(trade, symbol=symbol)
-        except Exception:  # noqa: BLE001
-            pos_fill = None
-        if pos_fill is not None and pos_fill[0] > 0:
-            protect_qty = pos_fill[0]
-
-    vr, keep_tag, stop_err = _place_and_verify_stop(
-        trade,
-        conn=conn,
-        intent_id=intent_id,
-        symbol=symbol,
-        side=side,
-        qty=protect_qty,
-        stop=stop,
-        client_id=client_order_id(intent_id, "sl0"),
-        sleep=sleep,
-        attempt_sl1_on_unknown=True,
-    )
-    if vr == StopVerifyResult.CLOSED_BY_STOP:
-        # Quick: done only with terminal market-order evidence (partial may still grow).
-        if is_quick and not order_final:
-            return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
-        return _exec_result(MSG_ALREADY_CLOSED, status="done")
-    if vr == StopVerifyResult.UNVERIFIABLE:
-        return _exec_result(
-            msg_stop_unverifiable(symbol=symbol, qty=protect_qty, stop=stop),
-            status="unknown",
-        )
-    if vr != StopVerifyResult.VERIFIED:
-        if _position_flat_now(trade, symbol=symbol) is True:
-            if is_quick and not order_final:
-                return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
-            return _exec_result(MSG_ALREADY_CLOSED, status="done")
-        return _emergency_close_reply(
+        vr, keep_tag, stop_err = _place_and_verify_stop(
             trade,
             conn=conn,
             intent_id=intent_id,
@@ -3003,61 +3047,143 @@ def run_entry_sequence(
             side=side,
             qty=protect_qty,
             stop=stop,
-            stop_err=stop_err,
+            client_id=client_order_id(intent_id, "sl0"),
             sleep=sleep,
-            unresolved_as_unknown=is_quick,
-            mkt_client_id=cid if is_quick else None,
-            keep_unknown_if_not_final=is_quick and not order_final,
+            attempt_sl1_on_unknown=True,
         )
-    if _position_flat_now(trade, symbol=symbol) is True:
-        if is_quick and not order_final:
-            return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
-        return _exec_result(MSG_ALREADY_CLOSED, status="done")
-    if keep_tag is not None:
-        _cancel_dup_stops_after_verified(
-            trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=keep_tag
-        )
-    # Quick attribution only after protective SL — never delay main-path stop placement.
-    if is_quick:
-        _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
+        if vr == StopVerifyResult.CLOSED_BY_STOP:
+            # Quick: done only with terminal market-order evidence (partial may still grow).
+            if is_quick and not order_final:
+                return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
+            return _exec_result(MSG_ALREADY_CLOSED, status="done")
+        if vr == StopVerifyResult.UNVERIFIABLE:
+            return _exec_result(
+                msg_stop_unverifiable(symbol=symbol, qty=protect_qty, stop=stop),
+                status="unknown",
+            )
+        if vr != StopVerifyResult.VERIFIED:
+            if _position_flat_now(trade, symbol=symbol) is True:
+                if is_quick and not order_final:
+                    return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
+                return _exec_result(MSG_ALREADY_CLOSED, status="done")
+            return _emergency_close_reply(
+                trade,
+                conn=conn,
+                intent_id=intent_id,
+                symbol=symbol,
+                side=side,
+                qty=protect_qty,
+                stop=stop,
+                stop_err=stop_err,
+                sleep=sleep,
+                unresolved_as_unknown=is_quick,
+                mkt_client_id=cid if is_quick else None,
+                keep_unknown_if_not_final=is_quick and not order_final,
+            )
+        if _position_flat_now(trade, symbol=symbol) is True:
+            if is_quick and not order_final:
+                return _exec_result(MSG_ALREADY_CLOSED, status="unknown")
+            return _exec_result(MSG_ALREADY_CLOSED, status="done")
+        if keep_tag is not None:
+            _cancel_dup_stops_after_verified(
+                trade, conn=conn, intent_id=intent_id, symbol=symbol, keep_tag=keep_tag
+            )
+        # Quick attribution only after protective SL — never delay main-path stop placement.
+        if is_quick:
+            _ensure_mkt_order_id_logged(trade, conn, intent_id=intent_id, symbol=symbol, client_id=cid)
 
-    tp_note = ""
-    tp_qty_used: Decimal | None = None
-    if is_quick:
-        # (a) TP1 share only — never a full-qty TP by default. SL stays on full qty.
-        from jarvise_assist.quick_execute import cfg_val as _cfg_val
+        tp_note = ""
+        tp_qty_used: Decimal | None = None
+        if is_quick:
+            # (a) TP1 share only — never a full-qty TP by default. SL stays on full qty.
+            from jarvise_assist.quick_execute import cfg_val as _cfg_val
 
-        qcfg_raw = preview.get("cfg")
-        qcfg: dict[str, Any] = qcfg_raw if isinstance(qcfg_raw, dict) else {}
-        tp1_raw = _cfg_val(qcfg, "quick_tp1_close_pct", "50")
-        tp1_pct = Decimal(str(tp1_raw))
-        t1 = Decimal(str(preview.get("t1") or target))
-        # Prefer avg for TP1 distance when known; else preview entry.
-        base_px = avg if (avg is not None and avg > 0) else Decimal(str(preview.get("entry") or stop))
-        r_dist = abs(base_px - stop)
-        tp1_r = Decimal(str(_cfg_val(qcfg, "quick_tp1_r", "1")))
-        if side == "long":
-            t1 = base_px + tp1_r * r_dist
+            qcfg_raw = preview.get("cfg")
+            qcfg: dict[str, Any] = qcfg_raw if isinstance(qcfg_raw, dict) else {}
+            tp1_raw = _cfg_val(qcfg, "quick_tp1_close_pct", "50")
+            tp1_pct = Decimal(str(tp1_raw))
+            t1 = Decimal(str(preview.get("t1") or target))
+            # Prefer avg for TP1 distance when known; else preview entry.
+            base_px = avg if (avg is not None and avg > 0) else Decimal(str(preview.get("entry") or stop))
+            r_dist = abs(base_px - stop)
+            tp1_r = Decimal(str(_cfg_val(qcfg, "quick_tp1_r", "1")))
+            if side == "long":
+                t1 = base_px + tp1_r * r_dist
+            else:
+                t1 = base_px - tp1_r * r_dist
+            t1 = round_level_to_tick(t1, filters.tick_size, side=side, kind="target")
+            close_q, _leave, refuse = half_close_legs(
+                protect_qty,
+                step=filters.step_size,
+                min_qty=filters.min_qty,
+                min_notional=filters.min_notional,
+                mark=t1,
+                close_pct=tp1_pct,
+            )
+            if refuse is None and tp1_pct > 0 and close_q > 0:
+                tp_qty_used = close_q
+                tcid = client_order_id(intent_id, "tp")
+                try:
+                    algo_tp = trade.place_algo_stop(
+                        symbol=symbol,
+                        side=close_side,
+                        qty=close_q,
+                        trigger=t1,
+                        order_type="TAKE_PROFIT_MARKET",
+                        client_id=tcid,
+                    )
+                    _log_write(
+                        conn,
+                        intent_id=intent_id,
+                        step="tp",
+                        endpoint="/fapi/v1/algoOrder",
+                        client_order_id=tcid,
+                        http_status=200,
+                        order_or_algo_id=str(algo_tp.get("algoId") or ""),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    code = exc.binance_code if isinstance(exc, TradeClientError) else None
+                    _log_write(
+                        conn,
+                        intent_id=intent_id,
+                        step="tp",
+                        endpoint="/fapi/v1/algoOrder",
+                        client_order_id=tcid,
+                        http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
+                        binance_code=code,
+                    )
+                    if not _is_clear_rejection(exc):
+                        found_tp = _safe_find_algo(trade, symbol=symbol, client_id=tcid)
+                        if found_tp is not None:
+                            _log_write(
+                                conn,
+                                intent_id=intent_id,
+                                step="tp",
+                                endpoint="/fapi/v1/algoOrder",
+                                client_order_id=tcid,
+                                http_status=200,
+                                order_or_algo_id=str(found_tp.get("algoId") or ""),
+                            )
+                        else:
+                            tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
+                    else:
+                        tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
+                    # Intent outcome is not "failed" — SL protects.
+            elif tp1_pct <= 0:
+                tp_note = "\nไม่วาง TP1 — ปิดครึ่ง 0%"
+                t1 = target
+            else:
+                tp_note = "\nไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"
+                t1 = target
+            target = t1
         else:
-            t1 = base_px - tp1_r * r_dist
-        t1 = round_level_to_tick(t1, filters.tick_size, side=side, kind="target")
-        close_q, _leave, refuse = half_close_legs(
-            protect_qty,
-            step=filters.step_size,
-            min_qty=filters.min_qty,
-            min_notional=filters.min_notional,
-            mark=t1,
-            close_pct=tp1_pct,
-        )
-        if refuse is None and tp1_pct > 0 and close_q > 0:
-            tp_qty_used = close_q
             tcid = client_order_id(intent_id, "tp")
             try:
                 algo_tp = trade.place_algo_stop(
                     symbol=symbol,
                     side=close_side,
-                    qty=close_q,
-                    trigger=t1,
+                    qty=exec_qty,
+                    trigger=target,
                     order_type="TAKE_PROFIT_MARKET",
                     client_id=tcid,
                 )
@@ -3083,196 +3209,145 @@ def run_entry_sequence(
                 )
                 if not _is_clear_rejection(exc):
                     found_tp = _safe_find_algo(trade, symbol=symbol, client_id=tcid)
-                    if found_tp is not None:
-                        _log_write(
-                            conn,
-                            intent_id=intent_id,
-                            step="tp",
-                            endpoint="/fapi/v1/algoOrder",
-                            client_order_id=tcid,
-                            http_status=200,
-                            order_or_algo_id=str(found_tp.get("algoId") or ""),
-                        )
-                    else:
-                        tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
+                    if found_tp is None:
+                        tp_note = f"\n{MSG_TP_KEEP}"
                 else:
-                    tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
-                # Intent outcome is not "failed" — SL protects.
-        elif tp1_pct <= 0:
-            tp_note = "\nไม่วาง TP1 — ปิดครึ่ง 0%"
-            t1 = target
-        else:
-            tp_note = "\nไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"
-            t1 = target
-        target = t1
-    else:
-        tcid = client_order_id(intent_id, "tp")
-        try:
-            algo_tp = trade.place_algo_stop(
-                symbol=symbol,
-                side=close_side,
-                qty=exec_qty,
-                trigger=target,
-                order_type="TAKE_PROFIT_MARKET",
-                client_id=tcid,
-            )
-            _log_write(
-                conn,
-                intent_id=intent_id,
-                step="tp",
-                endpoint="/fapi/v1/algoOrder",
-                client_order_id=tcid,
-                http_status=200,
-                order_or_algo_id=str(algo_tp.get("algoId") or ""),
-            )
-        except Exception as exc:  # noqa: BLE001
-            code = exc.binance_code if isinstance(exc, TradeClientError) else None
-            _log_write(
-                conn,
-                intent_id=intent_id,
-                step="tp",
-                endpoint="/fapi/v1/algoOrder",
-                client_order_id=tcid,
-                http_status=exc.http_status if isinstance(exc, TradeClientError) else None,
-                binance_code=code,
-            )
-            if not _is_clear_rejection(exc):
-                found_tp = _safe_find_algo(trade, symbol=symbol, client_id=tcid)
-                if found_tp is None:
                     tp_note = f"\n{MSG_TP_KEEP}"
-            else:
-                tp_note = f"\n{MSG_TP_KEEP}"
 
-    # RESULT can return avgPrice "0.000000". Recover after stop/TP so a slow query
-    # cannot leave the position unprotected.
-    if avg is None:
-        queried = _query_fill_after_unknown(
-            trade,
-            symbol=symbol,
-            client_id=cid,
-            conn=conn,
-            intent_id=intent_id,
-            step="entry_price_query",
-            sleep=sleep,
-        )
-        avg = _positive_fill_price(queried.order if queried.kind == QueryResultKind.FOUND else None)
-        if avg is not None:
-            logger.info("entry fill price source=order_query intent_id=%s", intent_id)
-        else:
-            try:
-                pos_fill = _fill_from_position(trade, symbol=symbol)
-            except Exception:  # noqa: BLE001
-                logger.exception("position read failed while resolving entry price")
-                pos_fill = None
-            if pos_fill is not None and pos_fill[1] > 0:
-                avg = pos_fill[1]
-                logger.info("entry fill price source=position_risk intent_id=%s", intent_id)
-            else:
-                logger.info("entry fill price source=unknown intent_id=%s", intent_id)
-
-    # Live-only: link watch / mark signal taken. Testnet must not touch live watch.
-    # Never write entry=0 when fill price is still unknown.
-    # (b) Quick origin: skip mark_signal_taken and assist_watch_position INSERT.
-    if assist_execute_mode() == "live" and not is_quick:
-        signal_id = preview.get("signal_id")
-        if signal_id:
-            try:
-                mark_signal_taken(conn, str(signal_id))
-            except Exception:  # noqa: BLE001
-                logger.exception("mark_signal_taken failed")
-        if avg is not None and avg > 0:
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO assist_watch_position (
-                        symbol, position_side, side, entry, qty, in_universe,
-                        signal_id, initial_stop, initial_stop_source, entry_time_ms,
-                        no_stop_latched, last_seen_ms, closed_at_ms
-                    ) VALUES (?, 'BOTH', ?, ?, ?, 1, ?, ?, 'signal', ?, 0, ?, NULL)
-                    ON CONFLICT(symbol, position_side) DO UPDATE SET
-                        side=excluded.side,
-                        entry=excluded.entry,
-                        qty=excluded.qty,
-                        signal_id=COALESCE(excluded.signal_id, assist_watch_position.signal_id),
-                        initial_stop=excluded.initial_stop,
-                        initial_stop_source='signal',
-                        entry_time_ms=excluded.entry_time_ms,
-                        no_stop_latched=0,
-                        last_seen_ms=excluded.last_seen_ms,
-                        closed_at_ms=NULL,
-                        atr_at_entry=NULL
-                    """,
-                    (
-                        symbol,
-                        side,
-                        float(avg),
-                        float(exec_qty),
-                        str(signal_id) if signal_id else None,
-                        float(stop),
-                        int(now_ms()),
-                        int(now_ms()),
-                    ),
-                )
-                conn.commit()
-            except Exception:  # noqa: BLE001
-                logger.exception("watch link after entry failed")
-        else:
-            logger.warning(
-                "skip assist_watch_position insert: entry price unknown intent_id=%s",
-                intent_id,
+        # RESULT can return avgPrice "0.000000". Recover after stop/TP so a slow query
+        # cannot leave the position unprotected.
+        if avg is None:
+            queried = _query_fill_after_unknown(
+                trade,
+                symbol=symbol,
+                client_id=cid,
+                conn=conn,
+                intent_id=intent_id,
+                step="entry_price_query",
+                sleep=sleep,
             )
+            avg = _positive_fill_price(queried.order if queried.kind == QueryResultKind.FOUND else None)
+            if avg is not None:
+                logger.info("entry fill price source=order_query intent_id=%s", intent_id)
+            else:
+                try:
+                    pos_fill = _fill_from_position(trade, symbol=symbol)
+                except Exception:  # noqa: BLE001
+                    logger.exception("position read failed while resolving entry price")
+                    pos_fill = None
+                if pos_fill is not None and pos_fill[1] > 0:
+                    avg = pos_fill[1]
+                    logger.info("entry fill price source=position_risk intent_id=%s", intent_id)
+                else:
+                    logger.info("entry fill price source=unknown intent_id=%s", intent_id)
 
-    side_l = "LONG" if side == "long" else "SHORT"
-    stop_s = _fmt_price_tick(stop, filters.tick_size)
-    target_s = _fmt_price_tick(target, filters.tick_size)
-    # (c) Quick-specific Thai success text.
-    if is_quick:
-        # Non-terminal partial (or any non-final status with qty): protected but unknown
-        # so recovery re-reads final fill / full stop coverage. Main path unchanged.
-        done_status = "done" if order_final else "unknown"
-        report_qty = protect_qty
-        lev = int(preview.get("leverage") or leverage)
-        if avg is None or avg <= 0:
-            tp_line = f"TP1 {target_s} × {fmt_qty(tp_qty_used)}" if tp_qty_used is not None else "ไม่มี TP1"
+        # Live-only: link watch / mark signal taken. Testnet must not touch live watch.
+        # Never write entry=0 when fill price is still unknown.
+        # (b) Quick origin: skip mark_signal_taken and assist_watch_position INSERT.
+        if assist_execute_mode() == "live" and not is_quick:
+            signal_id = preview.get("signal_id")
+            if signal_id:
+                try:
+                    mark_signal_taken(conn, str(signal_id))
+                except Exception:  # noqa: BLE001
+                    logger.exception("mark_signal_taken failed")
+            if avg is not None and avg > 0:
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO assist_watch_position (
+                            symbol, position_side, side, entry, qty, in_universe,
+                            signal_id, initial_stop, initial_stop_source, entry_time_ms,
+                            no_stop_latched, last_seen_ms, closed_at_ms
+                        ) VALUES (?, 'BOTH', ?, ?, ?, 1, ?, ?, 'signal', ?, 0, ?, NULL)
+                        ON CONFLICT(symbol, position_side) DO UPDATE SET
+                            side=excluded.side,
+                            entry=excluded.entry,
+                            qty=excluded.qty,
+                            signal_id=COALESCE(excluded.signal_id, assist_watch_position.signal_id),
+                            initial_stop=excluded.initial_stop,
+                            initial_stop_source='signal',
+                            entry_time_ms=excluded.entry_time_ms,
+                            no_stop_latched=0,
+                            last_seen_ms=excluded.last_seen_ms,
+                            closed_at_ms=NULL,
+                            atr_at_entry=NULL
+                        """,
+                        (
+                            symbol,
+                            side,
+                            float(avg),
+                            float(exec_qty),
+                            str(signal_id) if signal_id else None,
+                            float(stop),
+                            int(now_ms()),
+                            int(now_ms()),
+                        ),
+                    )
+                    conn.commit()
+                except Exception:  # noqa: BLE001
+                    logger.exception("watch link after entry failed")
+            else:
+                logger.warning(
+                    "skip assist_watch_position insert: entry price unknown intent_id=%s",
+                    intent_id,
+                )
+
+        side_l = "LONG" if side == "long" else "SHORT"
+        stop_s = _fmt_price_tick(stop, filters.tick_size)
+        target_s = _fmt_price_tick(target, filters.tick_size)
+        # (c) Quick-specific Thai success text.
+        if is_quick:
+            # Non-terminal partial (or any non-final status with qty): protected but unknown
+            # so recovery re-reads final fill / full stop coverage. Main path unchanged.
+            done_status = "done" if order_final else "unknown"
+            report_qty = protect_qty
+            lev = int(preview.get("leverage") or leverage)
+            if avg is None or avg <= 0:
+                tp_line = f"TP1 {target_s} × {fmt_qty(tp_qty_used)}" if tp_qty_used is not None else "ไม่มี TP1"
+                return _exec_result(
+                    f"✅ Quick เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {report_qty}\n"
+                    f"SL {stop_s} · {tp_line} · lev {lev}x{tp_note}",
+                    status=done_status,
+                )
+            loss = abs(avg - stop) * report_qty
+            avg_s = _fmt_price_tick(avg, filters.tick_size)
+            if tp_qty_used is not None:
+                tp_line = f"TP1 {target_s} × {fmt_qty(tp_qty_used)}"
+            else:
+                tp_line = "ไม่มี TP1"
             return _exec_result(
-                f"✅ Quick เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {report_qty}\n"
-                f"SL {stop_s} · {tp_line} · lev {lev}x{tp_note}",
+                (
+                    f"✅ Quick เข้า {symbol} {side_l}\n"
+                    f"fill {avg_s} × {report_qty}\n"
+                    f"SL {stop_s} · {tp_line} · lev {lev}x\n"
+                    f"ถ้าชน stop ≈ {loss.quantize(Decimal('0.01'))} USDT"
+                    f"{tp_note}"
+                ),
                 status=done_status,
             )
-        loss = abs(avg - stop) * report_qty
+        if avg is None or avg <= 0:
+            return _exec_result(
+                f"✅ เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\n"
+                f"stop {stop_s} · TP {target_s}{tp_note}",
+                status="done",
+            )
+        loss = abs(avg - stop) * exec_qty
         avg_s = _fmt_price_tick(avg, filters.tick_size)
-        if tp_qty_used is not None:
-            tp_line = f"TP1 {target_s} × {fmt_qty(tp_qty_used)}"
-        else:
-            tp_line = "ไม่มี TP1"
         return _exec_result(
             (
-                f"✅ Quick เข้า {symbol} {side_l}\n"
-                f"fill {avg_s} × {report_qty}\n"
-                f"SL {stop_s} · {tp_line} · lev {lev}x\n"
+                f"✅ เข้า {symbol} {side_l}\n"
+                f"fill {avg_s} × {exec_qty}\n"
+                f"stop {stop_s} · TP {target_s}\n"
                 f"ถ้าชน stop ≈ {loss.quantize(Decimal('0.01'))} USDT"
                 f"{tp_note}"
             ),
-            status=done_status,
-        )
-    if avg is None or avg <= 0:
-        return _exec_result(
-            f"✅ เข้า {symbol} {side_l}\nfill ราคายังไม่ยืนยัน × {exec_qty}\n"
-            f"stop {stop_s} · TP {target_s}{tp_note}",
             status="done",
         )
-    loss = abs(avg - stop) * exec_qty
-    avg_s = _fmt_price_tick(avg, filters.tick_size)
-    return _exec_result(
-        (
-            f"✅ เข้า {symbol} {side_l}\n"
-            f"fill {avg_s} × {exec_qty}\n"
-            f"stop {stop_s} · TP {target_s}\n"
-            f"ถ้าชน stop ≈ {loss.quantize(Decimal('0.01'))} USDT"
-            f"{tp_note}"
-        ),
-        status="done",
-    )
+
+    finally:
+        if be_token is not None:
+            _BEST_EFFORT_EXEC_LOG.reset(be_token)
 
 
 def _move_stop_buffer_ok(*, side: str, mark: Decimal, new_stop: Decimal, tick: Decimal) -> bool:
@@ -5541,8 +5616,8 @@ def handle_exec_callback(
                     """
                     SELECT 1 FROM assist_exec_log
                     WHERE intent_id=? AND step IN (
-                        'market', 'stop', 'exit_market', 'reduce_market', 'reduce_query',
-                        'move_stop_place', 'tp'
+                        'market', 'market_attempt', 'stop', 'exit_market', 'reduce_market',
+                        'reduce_query', 'move_stop_place', 'tp'
                     )
                     LIMIT 1
                     """,

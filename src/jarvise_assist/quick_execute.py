@@ -573,6 +573,7 @@ def quick_entry_proven_unfilled(conn: Any, intent_id: str) -> bool:
         return False
     market_steps = {
         "market",
+        "market_attempt",
         "market_query",
         "recover_market_query",
         "recovery",
