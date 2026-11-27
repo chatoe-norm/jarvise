@@ -587,6 +587,10 @@ def quick_entry_proven_unfilled(conn: Any, intent_id: str) -> bool:
     ).fetchone()
     if intent is not None and str(intent["status"] or "") in {"unknown", "recovering", "confirmed"}:
         return False
+    # Terminal recovery not_found (deterministic client-id NOT_FOUND × passes
+    # while flat) with no fill-evidence steps → entry never filled; expire.
+    if intent is not None and str(intent["status"] or "") == "not_found":
+        return True
     text = str(intent["result_text"] or "") if intent is not None else ""
     if "เข้าไม้ไม่สำเร็จ" in text or "ยังไม่ได้ส่งคำสั่ง" in text:
         return True

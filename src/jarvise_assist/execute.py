@@ -2195,13 +2195,34 @@ def _confirm_guards_quick_entry(
     if same_side_blocks(conn, side, cap=min(frozen_cap, live_cap)):
         return "same_side_cap"
 
-    positions = trade.position_risk()
+    # Strict reads for Quick: never treat a malformed HTTP-200 payload as "no
+    # orders" / "no position". position_risk already raises on non-list; wrap it
+    # so TradeClientError becomes a refuse reason (not an uncaught handler_error).
+    try:
+        positions = trade.position_risk()
+        if not isinstance(positions, list):
+            return "fapi_read_failed:positions"
+    except Exception:  # noqa: BLE001
+        return "fapi_read_failed:positions"
     if any(str(p.symbol).upper() == symbol.upper() for p in positions):
         return "open_position"
+    # Account-wide scope (same as prior all_open_orders() with no symbol).
+    # strict=True so non-JSON / non-list HTTP-200 cannot collapse to [].
     try:
-        orders = list(trade.all_open_orders())
-    except AttributeError:
-        orders = [*trade.open_orders(), *trade.open_algo_orders()]
+        regular = trade.open_orders(strict=True)
+        algos = trade.open_algo_orders(strict=True)
+    except TypeError:
+        # Test doubles that omit the strict= kwarg.
+        try:
+            regular = trade.open_orders()
+            algos = trade.open_algo_orders()
+        except Exception:  # noqa: BLE001
+            return "fapi_read_failed:orders"
+    except Exception:  # noqa: BLE001
+        return "fapi_read_failed:orders"
+    if not isinstance(regular, list) or not isinstance(algos, list):
+        return "fapi_read_failed:orders"
+    orders = [*regular, *algos]
     if any_non_jv_open_order(orders, symbol):
         return "non_jv_order"
 
