@@ -285,6 +285,55 @@ def test_cli_conflict_exit_3_on_retry_and_after_live_booking(tmp_path: Path) -> 
         conn.close()
     r3 = _invoke(other, *_args("wd", "80", "920", eff + 10))
     assert r3.exit_code == 3 and _json(r3)["reason"] == "conflict"
+    # booked as a withdrawal by note only: the same tranId as a deposit is still a conflict
+    r4 = _invoke(other, *_args("dep", "80", "1000", eff + 10))
+    assert r4.exit_code == 3 and _json(r4)["reason"] == "conflict"
+
+
+def test_apply_store_level_duplicate_maps_to_conflict(tmp_path: Path, monkeypatch: Any) -> None:
+    """Even if the pre-check misses it, the store's own dedupe must surface as conflict, not ok."""
+    from jarvise_assist import partner_owner_history as poh
+
+    now = _now()
+    eff = now - 7 * HOUR
+    path = _make_db(tmp_path / "race.db")
+    assert _invoke(path, *_args("wd", "80", "920", eff), "--apply").exit_code == 0
+    # simulate a race: both read-only pre-checks miss the booking that just landed
+    monkeypatch.setattr(poh, "_already_booked", lambda conn, tran_id: False)
+    monkeypatch.setattr(ps, "owner_events_after", lambda conn, t_ms: None)
+    params, err = poh.validate_args(
+        side="wd", tran_id=TRAN, amount="80", account_value="920", effective_at_ms=eff, now_ms=now
+    )
+    assert err is None and params is not None
+    conn = open_db(path)
+    try:
+        out = poh.apply_owner_tx(conn, params, now_ms=now)
+    finally:
+        conn.close()
+    assert out["ok"] is False and out["reason"] == "conflict"
+    assert len(_owner_rows(path)) == 1
+
+
+def test_confirmed_request_after_transfer_refuses(tmp_path: Path) -> None:
+    now = _now()
+    path = _make_db(tmp_path / "req.db", init_ms=now - 5 * DAY)
+    eff = now - 2 * DAY
+    conn = open_db(path)
+    try:
+        bob = ps.create_partner(conn, name="bob", now_ms=now - 5 * DAY)
+        assert ps.create_request(
+            conn, str(bob["partner_id"]), "deposit", now - 5 * DAY, amount=D("50"), source="admin"
+        )["ok"]
+        # test-only: mark that request confirmed after the transfer time
+        conn.execute("UPDATE partner_request SET status = 'confirmed', decided_at_ms = ?", (now - DAY,))
+        conn.commit()
+        assert ps.owner_events_after(conn, eff) == "requests_after_effective"
+    finally:
+        conn.close()
+    for extra in ((), ("--apply",)):
+        r = _invoke(path, *_args("wd", "80", "920", eff), *extra)
+        assert r.exit_code == 1, r.output
+        assert _json(r)["reason"] == "requests_after_effective"
 
 
 def test_cli_dep_8dp_apply(tmp_path: Path) -> None:

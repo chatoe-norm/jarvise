@@ -152,6 +152,10 @@ def apply_owner_tx(conn: sqlite3.Connection, params: dict[str, Any], *, now_ms: 
     out = _base(params, "apply")
     if _already_booked(conn, params["tran_id"]):
         return _pub({**out, "ok": False, "reason": CONFLICT})
+    # Same order as the dry-run; the store re-checks inside its transaction.
+    late = ps.owner_events_after(conn, params["effective_at_ms"])
+    if late is not None:
+        return _pub({**out, "ok": False, "reason": late})
     fn = ps.apply_owner_deposit if params["side"] == "dep" else ps.apply_owner_redeem
     result = fn(
         conn,
