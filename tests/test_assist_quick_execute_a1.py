@@ -1752,8 +1752,8 @@ def test_fix1_testnet_pct_levels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert guard is None, guard
     updated = get_exec_intent(conn, iid)
     assert updated is not None
-    # stop_pct = (99-100)/100 = -1% → 100.1 * 0.99
-    assert Decimal(str(updated["preview"]["stop"])) == Decimal("99.099")
+    # stop_pct = (99-100)/100 = -1% → 100.1 * 0.99 = 99.099 → long stop floors to tick 0.01
+    assert Decimal(str(updated["preview"]["stop"])) == Decimal("99.09")
     conn.close()
 
 
