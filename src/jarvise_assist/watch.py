@@ -14,6 +14,7 @@ from jarvise_assist.execute import (
     MOVE_STOP_TTL_MS,
     OWNER_CLOSING_ORDER_NOTE,
     PREVIEW_TTL_MS,
+    RECOVER_MAX_AGE_MS,
     _format_owner_order_line,
     _owner_closing_orders,
     assist_cancel_owner_enabled,
@@ -74,6 +75,7 @@ from jarvise_assist.store import (
     find_linkable_signal,
     get_watch_position,
     insert_exec_intent,
+    insert_exec_log,
     insert_watch_advice,
     latest_no_stop_reason,
     list_held_watch_advice,
@@ -1418,6 +1420,156 @@ def _merge_quick_cutoff(payload: dict[str, Any], counts: dict[str, int]) -> None
         payload["quick_cutoff"] = counts
 
 
+# assist_exec_log step marking that intent-scoped jv- leftover cleanup ran.
+# SCHEMA_VERSION 39 — no new table/column; derive pending from closed trades
+# lacking this step.
+QUICK_JV_CLEANUP_STEP = "quick_jv_cleanup"
+
+
+def _pending_exec_linked_quick_cleanup(conn: Any, *, now_ms_value: int) -> list[dict[str, Any]]:
+    """Closed exec-linked Quick trades whose jv- cleanup has not been marked yet.
+
+    Bound by RECOVER_MAX_AGE_MS from closed_at_ms so retries are not unbounded.
+    """
+    rows = conn.execute(
+        """
+        SELECT t.symbol AS symbol,
+               t.closed_at_ms AS closed_at_ms,
+               t.id AS trade_id,
+               r.exec_intent_id AS exec_intent_id,
+               r.id AS registration_id
+        FROM assist_quick_trade t
+        JOIN assist_quick_registration r ON r.id = t.registration_id
+        WHERE t.status = 'closed'
+          AND r.exec_intent_id IS NOT NULL
+          AND TRIM(r.exec_intent_id) != ''
+          AND NOT EXISTS (
+            SELECT 1 FROM assist_exec_log
+            WHERE intent_id = r.exec_intent_id AND step = ?
+          )
+        """,
+        (QUICK_JV_CLEANUP_STEP,),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        closed_raw = row["closed_at_ms"] if hasattr(row, "keys") else row[1]
+        try:
+            closed_at = int(closed_raw) if closed_raw is not None else None
+        except (TypeError, ValueError):
+            closed_at = None
+        if closed_at is None:
+            continue
+        if int(now_ms_value) - closed_at > RECOVER_MAX_AGE_MS:
+            continue
+        eid = str(row["exec_intent_id"] if hasattr(row, "keys") else row[3] or "")
+        if not eid:
+            continue
+        out.append(
+            {
+                "symbol": str(row["symbol"] if hasattr(row, "keys") else row[0] or "").upper(),
+                "side": None,
+                "closed_at_ms": closed_at,
+                "trade_id": str(row["trade_id"] if hasattr(row, "keys") else row[2] or ""),
+                "exec_linked": True,
+                "exec_intent_id": eid,
+                "registration_id": str(row["registration_id"] if hasattr(row, "keys") else row[4] or ""),
+            }
+        )
+    return out
+
+
+def _cleanup_exec_linked_quick_jv(
+    conn: Any,
+    *,
+    positions: list[FuturesPosition],
+    quick_info: dict[str, Any],
+    now_ms: int,
+) -> list[dict[str, str]]:
+    """Cancel leftover jv- orders after an exec-linked Quick close.
+
+    Runs whether JARVISE_ASSIST_CANCEL_OWNER is on or off. Owner orders are
+    untouched. No-op when no registration is exec-linked (flag-off parity).
+
+    Re-reads live positions immediately before cancel (snapshot from before sync
+    can miss a reopen). Cancels only the closed intent's ``jv-<intent>-…`` ids.
+    A later finished intent on the symbol is not a skip: its orders use another
+    prefix. An open position or an in-flight intent still refuses the cancel.
+
+    Retries deferred cleanups: when a Quick trade closed while its entry intent
+    was still in flight/unknown, this pass merges DB-pending closed trades
+    (no ``quick_jv_cleanup`` log step, within RECOVER_MAX_AGE_MS).
+    """
+    del positions  # always re-read live; do not trust the pre-sync snapshot
+    closed = list(quick_info.get("closed") or [])
+    # Merge this-pass closes with pending retries (dedupe by exec_intent_id).
+    seen_intents: set[str] = set()
+    exec_closed: list[dict[str, Any]] = []
+    for r in closed:
+        if not r.get("exec_linked"):
+            continue
+        eid = str(r.get("exec_intent_id") or "")
+        if not eid or eid in seen_intents:
+            continue
+        # Skip if already marked cleaned (this-pass close after a prior retry).
+        if conn.execute(
+            "SELECT 1 FROM assist_exec_log WHERE intent_id=? AND step=? LIMIT 1",
+            (eid, QUICK_JV_CLEANUP_STEP),
+        ).fetchone():
+            continue
+        seen_intents.add(eid)
+        exec_closed.append(r)
+    for r in _pending_exec_linked_quick_cleanup(conn, now_ms_value=int(now_ms)):
+        eid = str(r.get("exec_intent_id") or "")
+        if not eid or eid in seen_intents:
+            continue
+        seen_intents.add(eid)
+        exec_closed.append(r)
+    if not exec_closed:
+        return []
+    if assist_execute_mode() != "live":
+        return []
+    trade, _auth = build_trade_client()
+    if trade is None:
+        return []
+    cancelled: list[dict[str, str]] = []
+    for qrow in exec_closed:
+        qsym = str(qrow.get("symbol") or "").upper()
+        if not qsym:
+            continue
+        intent_id = qrow.get("exec_intent_id")
+        if not intent_id:
+            continue
+        if symbol_has_in_flight_exec(conn, qsym):
+            continue
+        try:
+            live = trade.position_risk()
+        except Exception:  # noqa: BLE001
+            logger.exception("exec-linked quick jv- position re-read failed for %s", qsym)
+            continue
+        if any(str(p.symbol).upper() == qsym for p in live):
+            continue
+        try:
+            ids, cancel_ok = cancel_jv_orders_for_symbol(trade, qsym, intent_id=str(intent_id))
+        except Exception:  # noqa: BLE001
+            logger.exception("exec-linked quick jv- cancel failed for %s", qsym)
+            continue
+        # Only mark complete when every cancel was confirmed; failed attempts retry
+        # on a later pass (bounded by RECOVER_MAX_AGE_MS). Zero ids + ok still marks.
+        if cancel_ok:
+            insert_exec_log(
+                conn,
+                intent_id=str(intent_id),
+                step=QUICK_JV_CLEANUP_STEP,
+                endpoint="local",
+                client_order_id=None,
+                http_status=200,
+                created_at_ms=int(now_ms),
+            )
+        for algo_id in ids:
+            cancelled.append({"symbol": qsym, "algo_id": str(algo_id)})
+    return cancelled
+
+
 def run_assist_watch(
     conn: Any,
     *,
@@ -1501,6 +1653,16 @@ def run_assist_watch(
     except Exception:  # noqa: BLE001 — quick sync must not stop advice, journal, or pauses
         logger.exception("assist quick sync failed")
         quick_sync_ok = False
+    # A1: jv- leftover cleanup for exec-linked Quick closes (independent of CANCEL_OWNER).
+    try:
+        _cleanup_exec_linked_quick_jv(
+            conn,
+            positions=positions,
+            quick_info=quick_info,
+            now_ms=ts,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("exec-linked quick jv- cleanup failed")
     cutoff_after_sync = _emit_quick_cutoff(conn, now_ms=ts, send=send_fn, sync_ok=quick_sync_ok)
     quick = quick_symbols(conn)
 

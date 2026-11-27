@@ -350,9 +350,18 @@ def e_stop_side(side: str, stop: Decimal, mark: Decimal, tick: Decimal) -> str:
     )
 
 
-def e_stop_far(dist_pct: Decimal) -> str:
-    shown = fmt_pct_bounded(dist_pct, limit=Decimal("20"))
-    return f"❌ stop ห่าง {shown}% เกิน 20% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+def _stop_far_text(limit: Decimal | None) -> str:
+    """Display a stop-far percent. Omitted limit keeps the historical 20% sentence."""
+    cap = Decimal("20") if limit is None else Decimal(str(limit))
+    if cap == cap.to_integral_value():
+        return str(int(cap))
+    return f"{cap:.10f}".rstrip("0").rstrip(".")
+
+
+def e_stop_far(dist_pct: Decimal, *, limit: Decimal | None = None) -> str:
+    cap = Decimal("20") if limit is None else Decimal(str(limit))
+    shown = fmt_pct_bounded(dist_pct, limit=cap)
+    return f"❌ stop ห่าง {shown}% เกิน {_stop_far_text(limit)}% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 
 
 def e_quick_open_reg(sym: str, until_hhmm: str) -> str:
@@ -384,9 +393,10 @@ def e_parse_symbol(tok: str) -> str:
     return f'❌ ไม่รู้จักเหรียญ "{shown}"'
 
 
-def e_parse_stop(tok: str) -> str:
+def e_parse_stop(tok: str, *, limit: Decimal | None = None) -> str:
     shown = _truncate_token(tok)
-    return f'❌ stop "{shown}" ไม่ถูกต้อง — ใส่ราคา (เช่น 62000) หรือ % ที่มากกว่า 0 และน้อยกว่า 20 (เช่น 0.4%)'
+    lim = _stop_far_text(limit)
+    return f'❌ stop "{shown}" ไม่ถูกต้อง — ใส่ราคา (เช่น 62000) หรือ % ที่มากกว่า 0 และน้อยกว่า {lim} (เช่น 0.4%)'
 
 
 def e_draft_stop_token(tok: str) -> str:
@@ -394,8 +404,8 @@ def e_draft_stop_token(tok: str) -> str:
     return f'❌ "{shown}" ไม่ใช่ราคาหรือ % — {STOP_STEP_HINT}'
 
 
-def e_draft_stop_pct_range(pct_s: str) -> str:
-    return f"❌ stop {pct_s}% ต้องมากกว่า 0 และน้อยกว่า 20%"
+def e_draft_stop_pct_range(pct_s: str, *, limit: Decimal | None = None) -> str:
+    return f"❌ stop {pct_s}% ต้องมากกว่า 0 และน้อยกว่า {_stop_far_text(limit)}%"
 
 
 def e_cutoff_block(*, minutes: int) -> str:
