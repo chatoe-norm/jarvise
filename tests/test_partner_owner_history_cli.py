@@ -300,7 +300,7 @@ def test_apply_store_level_duplicate_maps_to_conflict(tmp_path: Path, monkeypatc
     assert _invoke(path, *_args("wd", "80", "920", eff), "--apply").exit_code == 0
     # simulate a race: both read-only pre-checks miss the booking that just landed
     monkeypatch.setattr(poh, "_already_booked", lambda conn, tran_id: False)
-    monkeypatch.setattr(ps, "owner_events_after", lambda conn, t_ms: None)
+    monkeypatch.setattr(ps, "owner_events_after", lambda conn, t_ms, **_k: None)
     params, err = poh.validate_args(
         side="wd", tran_id=TRAN, amount="80", account_value="920", effective_at_ms=eff, now_ms=now
     )
@@ -513,9 +513,9 @@ def test_apply_rechecks_late_ledger_inside_store_transaction(tmp_path: Path, mon
     real = ps.owner_events_after
     calls: list[int] = []
 
-    def first_miss(conn: Any, t_ms: int) -> str | None:
+    def first_miss(conn: Any, t_ms: int, **kwargs: Any) -> str | None:
         calls.append(int(t_ms))
-        return None if len(calls) == 1 else real(conn, t_ms)
+        return None if len(calls) == 1 else real(conn, t_ms, **kwargs)
 
     monkeypatch.setattr(ps, "owner_events_after", first_miss)
     params, err = poh.validate_args(

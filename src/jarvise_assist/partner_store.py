@@ -107,6 +107,10 @@ def _q_usdt(value: Decimal) -> Decimal:
     return Decimal(value).quantize(USDT_QUANT, rounding=ROUND_DOWN)
 
 
+# Substring of notes written by ``assist partner-record-owner-tx``. Live ``p owner`` notes do not contain it.
+OWNER_HIST_NOTE_MARK = "partner-record-owner-tx (historical)"
+
+
 def name_key(name: str) -> str:
     """NFKC, trimmed, case-folded identity of a partner name."""
     return unicodedata.normalize("NFKC", str(name)).strip().casefold()
@@ -1578,6 +1582,8 @@ def _owner_tx_prechecks(
     bad = _bad_number(Decimal(account_value))
     if bad:
         return None, bad
+    if _q_usdt(Decimal(account_value)) <= 0:
+        return None, {"ok": False, "reason": "bad_account_value"}
     admin, err = _owner_admin_row(conn)
     if err is not None or admin is None:
         return None, err if err is not None else {"ok": False, "reason": "no_admin"}
@@ -1589,20 +1595,39 @@ def _owner_tx_prechecks(
     return admin, None
 
 
-def owner_events_after(conn: sqlite3.Connection, t_ms: int) -> str | None:
+def owner_events_after(conn: sqlite3.Connection, t_ms: int, *, historical: bool = False) -> str | None:
     """Reason when any partner event or confirmed request is later than ``t_ms``, else None.
 
     Same rule as the live ``p owner`` safety check: booking an older transfer after
     later ledger activity would price it at the wrong NAV.
+
+    ``historical=True`` (the historical CLI only) judges a row written by that tool
+    by ``effective_at_ms``. Every other row still uses ``created_at_ms``. The default
+    keeps the live check unchanged.
     """
-    late_ev = conn.execute(
-        """
-        SELECT COUNT(*) AS n FROM partner_event
-        WHERE created_at_ms > ?
-           OR COALESCE(effective_at_ms, created_at_ms) > ?
-        """,
-        (int(t_ms), int(t_ms)),
-    ).fetchone()
+    t = int(t_ms)
+    if historical:
+        late_ev = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM partner_event
+            WHERE CASE
+                WHEN COALESCE(note, '') LIKE ?
+                THEN COALESCE(effective_at_ms, created_at_ms) > ?
+                ELSE created_at_ms > ?
+                    OR COALESCE(effective_at_ms, created_at_ms) > ?
+            END
+            """,
+            (f"%{OWNER_HIST_NOTE_MARK}%", t, t, t),
+        ).fetchone()
+    else:
+        late_ev = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM partner_event
+            WHERE created_at_ms > ?
+               OR COALESCE(effective_at_ms, created_at_ms) > ?
+            """,
+            (t, t),
+        ).fetchone()
     if int(late_ev["n"]) != 0:
         return "events_after_effective"
     late_req = conn.execute(
@@ -1727,7 +1752,7 @@ def _apply_owner_tx(
     ):
         return {"ok": True, "reason": "already_recorded", "event_ids": [eid], "kind": kind}
     if refuse_events_after_ms is not None:
-        late = owner_events_after(conn, int(refuse_events_after_ms))
+        late = owner_events_after(conn, int(refuse_events_after_ms), historical=True)
         if late is not None:
             return {"ok": False, "reason": late}
     math = _owner_tx_math(conn, kind=kind, amount=amount, account_value=account_value, admin=admin)

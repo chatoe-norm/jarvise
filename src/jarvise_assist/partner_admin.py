@@ -917,29 +917,11 @@ def _owner_safety_refuse(
     max_age_h = owner_tx_max_age_hours()
     if int(now_ms) - t_ms > max_age_h * HOUR_MS:
         return f"เงินโอนเก่าเกิน {max_age_h} ชม. — {_OWNER_HIST_HINT}"
-    late_ev = conn.execute(
-        """
-        SELECT COUNT(*) AS n FROM partner_event
-        WHERE created_at_ms > ?
-           OR COALESCE(effective_at_ms, created_at_ms) > ?
-        """,
-        (t_ms, t_ms),
-    ).fetchone()
-    if int(late_ev["n"]) != 0:
+    # Live check: default owner_events_after (created_at_ms), not the historical effective-time rule.
+    late = ps.owner_events_after(conn, t_ms)
+    if late == "events_after_effective":
         return f"มีรายการ partner หลังเงินโอนแล้ว — {_OWNER_HIST_HINT}"
-    late_req = conn.execute(
-        """
-        SELECT COUNT(*) AS n FROM partner_request
-        WHERE status = 'confirmed'
-          AND (
-            created_at_ms > ?
-            OR (decided_at_ms IS NOT NULL AND decided_at_ms > ?)
-            OR (paid_at_ms IS NOT NULL AND paid_at_ms > ?)
-          )
-        """,
-        (t_ms, t_ms, t_ms),
-    ).fetchone()
-    if int(late_req["n"]) != 0:
+    if late == "requests_after_effective":
         return f"มีคำขอที่ยืนยันหลังเงินโอนแล้ว — {_OWNER_HIST_HINT}"
     try:
         rows = fetch_all_income(client, start_ms=t_ms + 1, end_ms=int(now_ms))
