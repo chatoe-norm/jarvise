@@ -115,6 +115,29 @@ def _reject_unsupported_syntax(text: str) -> None:
 
 _DIRECT_KEY = re.compile(r"^(\s+)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$")
 _DIRECT_BAD_KEY = re.compile(r"^(\s+)([\"'].+)$")
+# YAML block scalars (| / > with optional chomping) are not mappings or lists (V3).
+_BLOCK_SCALAR_VALUE = re.compile(r"^[|>][+-]?(?:\s.*)?$")
+
+
+def _platform_toolsets_root_rest(line: str) -> str:
+    """Return the value text after ``platform_toolsets:`` on the root line."""
+    match = re.match(r"^platform_toolsets\s*:(.*)$", line.rstrip("\r\n"))
+    if match is None:
+        return ""
+    return match.group(1).strip()
+
+
+def _reject_non_mapping_platform_root(line: str) -> None:
+    """Root value must be an empty block-mapping introducer (V3)."""
+    rest = _platform_toolsets_root_rest(line)
+    if rest:
+        raise ValueError("platform_toolsets_not_mapping")
+
+
+def _reject_block_scalar_toolset(key: str, rest: str) -> None:
+    """Managed children must be flow or dash lists, never block scalars (V3)."""
+    if rest and _BLOCK_SCALAR_VALUE.match(rest):
+        raise ValueError(f"toolset_not_list:{key}")
 
 
 def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
@@ -128,6 +151,7 @@ def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
     if len(starts) > 1:
         raise ValueError("duplicate_platform_toolsets")
     start = starts[0]
+    _reject_non_mapping_platform_root(lines[start])
 
     end = len(lines)
     for j in range(start + 1, len(lines)):
@@ -177,6 +201,7 @@ def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
             raise ValueError(f"unsupported_toolset_key:{key}")
         if key in key_info:
             raise ValueError(f"duplicate_toolset:{key}")
+        _reject_block_scalar_toolset(key, rest)
         flow = _parse_flow_list(rest) if rest else None
         if flow is not None:
             key_info[key] = {
@@ -267,6 +292,7 @@ def _structural_strip_and_validate_nocheck(text: str) -> tuple[str, bool]:
     if not starts:
         raise ValueError("missing_platform_toolsets")
     start = starts[0]
+    _reject_non_mapping_platform_root(lines[start])
     end = len(lines)
     for j in range(start + 1, len(lines)):
         if (
@@ -307,6 +333,7 @@ def _structural_strip_and_validate_nocheck(text: str) -> tuple[str, bool]:
             raise ValueError(f"unsupported_toolset_key:{key}")
         if key in found:
             raise ValueError(f"duplicate_toolset:{key}")
+        _reject_block_scalar_toolset(key, rest)
         flow = _parse_flow_list(rest) if rest else None
         if flow is not None:
             found[key] = flow

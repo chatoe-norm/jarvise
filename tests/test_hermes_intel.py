@@ -2150,3 +2150,393 @@ def test_u3_crash_between_slot_and_marker_recovers_run(tmp_path: Path, monkeypat
     assert active.get("status") == "unknown"
     assert active.get("run_id") == "accepted-run"
     _ = digest_dir
+
+
+def test_v1_second_unresolved_blocks_create_after_first_terminal(tmp_path: Path, monkeypatch: Any) -> None:
+    """V1: reconciling oldest A must not create while B remains unresolved."""
+    from jarvise_intel.digest import (
+        list_unresolved_slot_records,
+        load_slot_record,
+        write_slot_record,
+    )
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot_a = parse_slot("2026-11-26T19")
+    slot_b = parse_slot("2026-11-27T07")
+    write_slot_record(
+        state_dir,
+        slot_a,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "run-a",
+            "idempotency_key": "2026-11-26T19-a1",
+            "started_at": "2026-11-26T12:00:00+00:00",
+            "slot": slot_a.label,
+        },
+    )
+    write_slot_record(
+        state_dir,
+        slot_b,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "run-b",
+            "idempotency_key": "2026-11-27T07-a1",
+            "started_at": "2026-11-27T01:00:00+00:00",
+            "slot": slot_b.label,
+        },
+    )
+    creates = {"n": 0}
+    gets: list[str] = []
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        gets.append(run_id)
+        # A terminals so reconstruction advances; B stays running/unresolved.
+        status = "failed" if run_id == "run-a" else "running"
+        return RunResult(
+            run_id=run_id,
+            status=status,
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": status},
+        )
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create while B unresolved")
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_run)
+    cfg = AdapterConfig()
+    cfg.deadline_s = 600.0
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert creates["n"] == 0
+    assert code == 409
+    assert body.get("error") in {"admission_busy", "unknown_run"}
+    # A reconciled to terminal; B remains durable and unresolved.
+    rec_a = load_slot_record(state_dir, slot_a)
+    assert rec_a is not None
+    assert rec_a.get("status") == "failed_terminal"
+    unresolved = list_unresolved_slot_records(state_dir)
+    assert any(str(r.get("slot")) == slot_b.label for r in unresolved)
+    assert "run-a" in gets
+    assert "run-b" in gets
+    _ = digest_dir
+
+
+def test_v1_terminals_plus_later_unknown_block_create(tmp_path: Path, monkeypatch: Any) -> None:
+    """V1: multiple terminal rows plus one later unknown must not mint new work."""
+    from jarvise_intel.digest import list_unresolved_slot_records, write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    for label, status, started in (
+        ("2026-11-25T07", "completed", "2026-11-25T01:00:00+00:00"),
+        ("2026-11-25T19", "failed_terminal", "2026-11-25T12:00:00+00:00"),
+        ("2026-11-26T07", "invalid_result", "2026-11-26T01:00:00+00:00"),
+    ):
+        slot = parse_slot(label)
+        write_slot_record(
+            state_dir,
+            slot,
+            {
+                "status": status,
+                "attempt": 1,
+                "run_id": f"run-{label}",
+                "idempotency_key": f"{label}-a1",
+                "started_at": started,
+                "slot": label,
+            },
+        )
+    unknown = parse_slot("2026-11-27T07")
+    write_slot_record(
+        state_dir,
+        unknown,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "run-later",
+            "idempotency_key": "2026-11-27T07-a1",
+            "started_at": "2026-11-27T01:00:00+00:00",
+            "slot": unknown.label,
+        },
+    )
+    assert len(list_unresolved_slot_records(state_dir)) == 1
+    creates = {"n": 0}
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert creates["n"] == 0
+    assert code == 409
+    assert body.get("error") in {"admission_busy", "unknown_run"}
+    _ = digest_dir
+
+
+def test_v2_running_marker_unknown_slot_enforces_deadline(tmp_path: Path, monkeypatch: Any) -> None:
+    """V2: running marker + unknown slot must resume/stop the known run, not mismatch."""
+    from jarvise_intel.digest import write_active_admission, write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    # Mid-window now is 05:00Z; started_at well before deadline_s=600.
+    started = "2026-11-26T00:00:00+00:00"
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "accepted-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot.label,
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "running",
+            "attempt": 1,
+            "run_id": "accepted-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot.label,
+        },
+    )
+    stops: list[str] = []
+    gets: list[str] = []
+    creates = {"n": 0}
+
+    def fake_stop(_cfg: Any, run_id: str, **_k: Any) -> None:
+        stops.append(run_id)
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        gets.append(run_id)
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.stop_run", fake_stop)
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.deadline_s = 600.0
+    # Wall clock far past started_at + 600s.
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert body.get("error") != "admission_state_invalid"
+    assert "marker_slot_mismatch" not in str(body.get("detail") or "")
+    assert creates["n"] == 0
+    assert stops == ["accepted-run"]
+    assert gets == ["accepted-run"]
+    assert code == 409
+    assert body.get("error") == "unknown_run"
+    _ = digest_dir
+
+
+def test_v2_crash_during_marker_write_then_deadline_stop(tmp_path: Path, monkeypatch: Any) -> None:
+    """V2: crash between unknown slot write and marker update; restart past deadline."""
+    from jarvise_intel.digest import load_active_admission, write_active_admission, write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    started = "2026-11-26T04:50:00+00:00"
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "running",
+            "attempt": 1,
+            "run_id": "accepted-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot.label,
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "running",
+            "attempt": 1,
+            "run_id": "accepted-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot.label,
+        },
+    )
+    crash = {"armed": True}
+    real_write = write_active_admission
+
+    def crashing_write(state: Any, record: dict[str, Any]) -> None:
+        # First resume writes unknown slot then marker — abort the marker write.
+        if crash["armed"] and str(record.get("status") or "") == "unknown":
+            crash["armed"] = False
+            raise OSError("simulated crash before marker")
+        real_write(state, record)
+
+    monkeypatch.setattr("jarvise_intel.app.write_active_admission", crashing_write)
+
+    def fake_get_running(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get_running)
+    monkeypatch.setattr(
+        "jarvise_intel.app.run_research",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no create")),
+    )
+    cfg = AdapterConfig()
+    cfg.deadline_s = 600.0
+    # Still inside the research window so resume takes the non-deadline GET path.
+    cfg.now = datetime.fromisoformat("2026-11-26T04:55:00+00:00")
+    try:
+        handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    except OSError:
+        pass
+    # Slot advanced to unknown; marker still running.
+    from jarvise_intel.digest import load_slot_record
+
+    slot_rec = load_slot_record(state_dir, slot)
+    assert slot_rec is not None
+    assert slot_rec.get("status") == "unknown"
+    active = load_active_admission(state_dir)
+    assert active is not None
+    assert active.get("status") == "running"
+
+    stops: list[str] = []
+    creates = {"n": 0}
+
+    def fake_stop(_cfg: Any, run_id: str, **_k: Any) -> None:
+        stops.append(run_id)
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.write_active_admission", real_write)
+    monkeypatch.setattr("jarvise_intel.app.stop_run", fake_stop)
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg2 = AdapterConfig()
+    cfg2.deadline_s = 600.0
+    # 04:50Z + 600s = 05:00Z; mid-window now is 05:00Z Bangkok noon — use later.
+    cfg2.now = datetime.fromisoformat("2026-11-26T05:10:00+00:00")
+    code, body = handle_ingest(cfg2, {"slot": "2026-11-26T07"})
+    assert creates["n"] == 0
+    assert stops == ["accepted-run"]
+    assert code == 409
+    assert body.get("error") == "unknown_run"
+    assert "marker_slot_mismatch" not in str(body.get("detail") or "")
+    _ = digest_dir
+
+
+def test_v2_create_unconfirmed_marker_unknown_slot_resumes(tmp_path: Path, monkeypatch: Any) -> None:
+    """V2: create_unconfirmed marker + unknown slot GETs the stored run, no create."""
+    from jarvise_intel.digest import load_active_admission, write_active_admission, write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "accepted-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    gets: list[str] = []
+    creates = {"n": 0}
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        gets.append(run_id)
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 409
+    assert body.get("error") == "unknown_run"
+    assert gets == ["accepted-run"]
+    assert creates["n"] == 0
+    active = load_active_admission(state_dir)
+    assert active is not None
+    assert active.get("status") == "unknown"
+    assert active.get("run_id") == "accepted-run"
+    _ = digest_dir

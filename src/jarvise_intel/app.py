@@ -625,6 +625,94 @@ def _resolve_active_index(cfg: AdapterConfig) -> dict[str, Any] | None:
     return chosen
 
 
+# Same verified admission may advance create_unconfirmed → running → unknown (V2).
+_ADMISSION_FORWARD_RANK: dict[str, int] = {
+    "create_unconfirmed": 0,
+    "running": 1,
+    "unknown": 2,
+}
+
+
+def _try_forward_admission_repair(
+    cfg: AdapterConfig,
+    *,
+    slot: Any,
+    active: dict[str, Any],
+    slot_rec: dict[str, Any],
+) -> bool:
+    """Align marker and slot on a forward crash boundary. True when repaired (V2/U3)."""
+    same_attempt = str(slot_rec.get("attempt") or "") == str(active.get("attempt") or "")
+    same_key = str(slot_rec.get("idempotency_key") or "") == str(active.get("idempotency_key") or "")
+    if not (same_attempt and same_key):
+        return False
+    marker_status = str(active.get("status") or "")
+    slot_status = str(slot_rec.get("status") or "")
+    marker_rank = _ADMISSION_FORWARD_RANK.get(marker_status)
+    slot_rank = _ADMISSION_FORWARD_RANK.get(slot_status)
+    if marker_rank is None or slot_rank is None or marker_rank == slot_rank:
+        return False
+    active_run = str(active.get("run_id") or "").strip()
+    slot_run = str(slot_rec.get("run_id") or "").strip()
+    if active_run and slot_run and active_run != slot_run:
+        return False
+    # Further side must carry the run id once past create_unconfirmed.
+    further = slot_rec if slot_rank > marker_rank else active
+    further_status = str(further.get("status") or "")
+    further_run = str(further.get("run_id") or "").strip()
+    if further_status in {"running", "unknown"} and not further_run:
+        return False
+    if slot_rank > marker_rank:
+        write_active_admission(cfg.state_dir, slot_rec)
+    else:
+        write_slot_record(cfg.state_dir, slot, active)
+        write_active_admission(cfg.state_dir, active)
+    return True
+
+
+def _other_unresolved_admissions(
+    cfg: AdapterConfig,
+    *,
+    slot_label: str,
+) -> list[dict[str, Any]]:
+    """Durable blocking admissions for slots other than the request (V1)."""
+    return [
+        row for row in list_unresolved_slot_records(cfg.state_dir) if str(row.get("slot") or "") != slot_label
+    ]
+
+
+def _block_until_no_other_unresolved(
+    cfg: AdapterConfig,
+    *,
+    slot: Any,
+) -> tuple[int, dict[str, Any]] | None:
+    """Reconcile every other unresolved admission before allowing create (V1).
+
+    Clearing one marker is not system-wide clearance. Re-index the oldest
+    remaining other row until none remain, or fail closed if the set stalls.
+    """
+    prev_count: int | None = None
+    while True:
+        try:
+            blocked = _block_other_active_admission(cfg, slot=slot)
+        except ActiveAdmissionError as exc:
+            return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
+        if blocked is not None:
+            return blocked
+        others = _other_unresolved_admissions(cfg, slot_label=slot.label)
+        if not others:
+            return None
+        count = len(others)
+        if prev_count is not None and count >= prev_count:
+            return 409, {
+                "ok": False,
+                "error": "admission_state_invalid",
+                "detail": "unresolved_not_shrinking",
+            }
+        prev_count = count
+        oldest = sorted(others, key=lambda row: str(row.get("started_at") or ""))[0]
+        write_active_admission(cfg.state_dir, oldest)
+
+
 def _block_other_active_admission(
     cfg: AdapterConfig,
     *,
@@ -667,20 +755,9 @@ def _block_other_active_admission(
         if str(slot_rec.get("status") or "") in TERMINAL_SLOT_STATUSES:
             clear_active_admission(cfg.state_dir, slot_label=slot.label)
             return None
-        same_attempt = str(slot_rec.get("attempt") or "") == str(active.get("attempt") or "")
-        same_key = str(slot_rec.get("idempotency_key") or "") == str(active.get("idempotency_key") or "")
-        marker_status = str(active.get("status") or "")
-        slot_status = str(slot_rec.get("status") or "")
         slot_run = str(slot_rec.get("run_id") or "").strip()
-        # U3: crash after slot write, before marker — allow create_unconfirmed → running/unknown.
-        if (
-            same_attempt
-            and same_key
-            and marker_status == "create_unconfirmed"
-            and slot_status in {"running", "unknown"}
-            and slot_run
-        ):
-            write_active_admission(cfg.state_dir, slot_rec)
+        # V2/U3: same admission may be one step ahead after a crash between writes.
+        if _try_forward_admission_repair(cfg, slot=slot, active=active, slot_rec=slot_rec):
             return None
         # Identity must agree before any replacement/resume path.
         for field in ("attempt", "idempotency_key", "status"):
@@ -807,9 +884,9 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             _clear_matching_terminal_admission(cfg, slot=slot)
             return 200, {"ok": True, "replay": True, "result": adopted}
 
-        # R5/S2/S3/S5/T2: another slot's active paid admission blocks this one.
+        # R5/S2/S3/S5/T2/V1: every other unresolved durable admission must clear first.
         try:
-            blocked = _block_other_active_admission(cfg, slot=slot)
+            blocked = _block_until_no_other_unresolved(cfg, slot=slot)
         except ActiveAdmissionError as exc:
             return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
         if blocked is not None:

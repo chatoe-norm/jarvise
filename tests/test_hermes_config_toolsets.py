@@ -186,3 +186,17 @@ def test_structural_fallback_r2_r3(monkeypatch: pytest.MonkeyPatch) -> None:
     assert mchanged is True
     assert "owner_key: preserved" in mout
     assert "skills" not in [ln.strip() for ln in mout.splitlines() if "skills" in ln and "entries" not in ln]
+
+    # V3: root block scalars must not certify as a mapping.
+    with pytest.raises(ValueError, match="platform_toolsets_not_mapping"):
+        mod.strip_and_validate("platform_toolsets: |\n  api_server: [web]\n  cli: [web]\n")
+    with pytest.raises(ValueError, match="platform_toolsets_not_mapping"):
+        mod.strip_and_validate("platform_toolsets: >\n  api_server: [web]\n  cli: [web]\n")
+    with pytest.raises(ValueError, match="platform_toolsets_not_mapping"):
+        mod.strip_and_validate("platform_toolsets: |-\n  api_server: [web]\n  cli: [web]\n")
+
+    # V3: managed-child block scalars are not lists.
+    with pytest.raises(ValueError, match="toolset_not_list:api_server"):
+        mod.strip_and_validate("platform_toolsets:\n  api_server: |\n    - web\n  cli: [web]\n")
+    with pytest.raises(ValueError, match="toolset_not_list:cli"):
+        mod.strip_and_validate("platform_toolsets:\n  api_server: [web]\n  cli: >\n    - web\n")
