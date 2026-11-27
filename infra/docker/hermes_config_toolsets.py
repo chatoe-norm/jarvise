@@ -115,8 +115,20 @@ def _reject_unsupported_syntax(text: str) -> None:
 
 _DIRECT_KEY = re.compile(r"^(\s+)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$")
 _DIRECT_BAD_KEY = re.compile(r"^(\s+)([\"'].+)$")
-# YAML block scalars (| / > with optional chomping) are not mappings or lists (V3).
-_BLOCK_SCALAR_VALUE = re.compile(r"^[|>][+-]?(?:\s.*)?$")
+
+
+def _strip_unquoted_inline_comment(text: str) -> str:
+    """Drop an unquoted trailing ``#...`` comment from a value fragment (W3)."""
+    in_single = False
+    in_double = False
+    for i, ch in enumerate(text):
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "#" and not in_single and not in_double:
+            return text[:i].rstrip()
+    return text.rstrip()
 
 
 def _platform_toolsets_root_rest(line: str) -> str:
@@ -128,16 +140,28 @@ def _platform_toolsets_root_rest(line: str) -> str:
 
 
 def _reject_non_mapping_platform_root(line: str) -> None:
-    """Root value must be an empty block-mapping introducer (V3)."""
-    rest = _platform_toolsets_root_rest(line)
+    """Root value must be an empty block-mapping introducer (V3/W3).
+
+    Comment-only text after the colon is allowed; any real scalar is not.
+    """
+    rest = _strip_unquoted_inline_comment(_platform_toolsets_root_rest(line)).strip()
     if rest:
         raise ValueError("platform_toolsets_not_mapping")
 
 
-def _reject_block_scalar_toolset(key: str, rest: str) -> None:
-    """Managed children must be flow or dash lists, never block scalars (V3)."""
-    if rest and _BLOCK_SCALAR_VALUE.match(rest):
-        raise ValueError(f"toolset_not_list:{key}")
+def _managed_child_flow_or_block(key: str, rest: str) -> list[str] | None:
+    """Whitelist managed-child values: flow list or empty block-list introducer (W2).
+
+    Returns the flow-list items, or None when dash items must follow.
+    Every other nonempty value (``|2``, ``>2-``, plain scalars, …) fails closed.
+    """
+    cleaned = _strip_unquoted_inline_comment(rest).strip()
+    if not cleaned:
+        return None
+    flow = _parse_flow_list(cleaned)
+    if flow is not None:
+        return flow
+    raise ValueError(f"toolset_not_list:{key}")
 
 
 def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
@@ -201,8 +225,7 @@ def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
             raise ValueError(f"unsupported_toolset_key:{key}")
         if key in key_info:
             raise ValueError(f"duplicate_toolset:{key}")
-        _reject_block_scalar_toolset(key, rest)
-        flow = _parse_flow_list(rest) if rest else None
+        flow = _managed_child_flow_or_block(key, rest)
         if flow is not None:
             key_info[key] = {
                 "mode": "flow",
@@ -333,8 +356,7 @@ def _structural_strip_and_validate_nocheck(text: str) -> tuple[str, bool]:
             raise ValueError(f"unsupported_toolset_key:{key}")
         if key in found:
             raise ValueError(f"duplicate_toolset:{key}")
-        _reject_block_scalar_toolset(key, rest)
-        flow = _parse_flow_list(rest) if rest else None
+        flow = _managed_child_flow_or_block(key, rest)
         if flow is not None:
             found[key] = flow
             i += 1

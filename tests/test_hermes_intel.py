@@ -2540,3 +2540,187 @@ def test_v2_create_unconfirmed_marker_unknown_slot_resumes(tmp_path: Path, monke
     assert active.get("status") == "unknown"
     assert active.get("run_id") == "accepted-run"
     _ = digest_dir
+
+
+def test_w1_marker_ahead_reloads_and_resumes(tmp_path: Path, monkeypatch: Any) -> None:
+    """W1: after repairing marker-ahead unknown onto create_unconfirmed, GET the run — no create."""
+    from jarvise_intel.app import request_sha256, scope_sha256
+    from jarvise_intel.digest import (
+        load_active_admission,
+        load_slot_record,
+        write_active_admission,
+        write_slot_record,
+    )
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    instructions = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    input_text = (
+        f"Produce the news digest JSON for slot {slot.label} "
+        f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
+    )
+    req_hash = request_sha256(
+        instructions=instructions,
+        input_text=input_text,
+        provider="openrouter",
+        model="test-model",
+    )
+    probe = AdapterConfig()
+    sc_hash = scope_sha256(gateway_url=probe.gateway_url, api_key=probe.api_key)
+    # Mid-window now is 05:00Z; started 60s earlier so create_unconfirmed is still live.
+    started = "2026-11-26T04:59:00+00:00"
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot.label,
+            "request_sha256": req_hash,
+            "scope_sha256": sc_hash,
+            "provider": "openrouter",
+            "model": "test-model",
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "accepted-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot.label,
+            "request_sha256": req_hash,
+            "scope_sha256": sc_hash,
+            "provider": "openrouter",
+            "model": "test-model",
+        },
+    )
+    gets: list[str] = []
+    creates = {"n": 0}
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        gets.append(run_id)
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create after marker-ahead repair")
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_run)
+    cfg = AdapterConfig()
+    cfg.deadline_s = 600.0
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert creates["n"] == 0
+    assert gets == ["accepted-run"]
+    assert code == 409
+    assert body.get("error") == "unknown_run"
+    slot_rec = load_slot_record(state_dir, slot)
+    assert slot_rec is not None
+    assert slot_rec.get("status") == "unknown"
+    assert slot_rec.get("run_id") == "accepted-run"
+    active = load_active_admission(state_dir)
+    assert active is not None
+    assert active.get("run_id") == "accepted-run"
+    _ = digest_dir
+
+
+def test_w1_marker_ahead_get_failure_keeps_run_id(tmp_path: Path, monkeypatch: Any) -> None:
+    """W1: transport failure after repair must not mint create_unconfirmed without the run id."""
+    from jarvise_intel.app import request_sha256, scope_sha256
+    from jarvise_intel.digest import (
+        load_active_admission,
+        load_slot_record,
+        write_active_admission,
+        write_slot_record,
+    )
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    instructions = (tmp_path / "prompt.md").read_text(encoding="utf-8")
+    input_text = (
+        f"Produce the news digest JSON for slot {slot.label} "
+        f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
+    )
+    req_hash = request_sha256(
+        instructions=instructions,
+        input_text=input_text,
+        provider="openrouter",
+        model="test-model",
+    )
+    probe = AdapterConfig()
+    sc_hash = scope_sha256(gateway_url=probe.gateway_url, api_key=probe.api_key)
+    started = "2026-11-26T04:59:00+00:00"
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot.label,
+            "request_sha256": req_hash,
+            "scope_sha256": sc_hash,
+            "provider": "openrouter",
+            "model": "test-model",
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "accepted-run",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": started,
+            "slot": slot.label,
+            "request_sha256": req_hash,
+            "scope_sha256": sc_hash,
+        },
+    )
+    gets: list[str] = []
+    creates = {"n": 0}
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        gets.append(run_id)
+        raise GatewayError("provider_error", "URLError")
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_run)
+    cfg = AdapterConfig()
+    cfg.deadline_s = 600.0
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert creates["n"] == 0
+    assert gets == ["accepted-run"]
+    assert code == 409
+    assert body.get("error") == "unknown_run"
+    slot_rec = load_slot_record(state_dir, slot)
+    assert slot_rec is not None
+    assert slot_rec.get("status") == "unknown"
+    assert slot_rec.get("run_id") == "accepted-run"
+    active = load_active_admission(state_dir)
+    assert active is not None
+    assert active.get("status") == "unknown"
+    assert active.get("run_id") == "accepted-run"
+    _ = digest_dir

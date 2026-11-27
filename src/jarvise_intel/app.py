@@ -892,6 +892,12 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
         if blocked is not None:
             return blocked
 
+        # W1: repair may rewrite this slot (marker ahead); never dispatch a stale cache.
+        try:
+            existing = load_slot_record(cfg.state_dir, slot)
+        except ActiveAdmissionError as exc:
+            return 409, {"ok": False, "error": "admission_state_invalid", "detail": exc.reason}
+
         # Resume an in-flight run after restart (no second create while unknown/running).
         if existing and existing.get("status") in {"running", "unknown"}:
             resumed = _handle_resume(cfg, slot=slot, existing=existing)

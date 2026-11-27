@@ -200,3 +200,22 @@ def test_structural_fallback_r2_r3(monkeypatch: pytest.MonkeyPatch) -> None:
         mod.strip_and_validate("platform_toolsets:\n  api_server: |\n    - web\n  cli: [web]\n")
     with pytest.raises(ValueError, match="toolset_not_list:cli"):
         mod.strip_and_validate("platform_toolsets:\n  api_server: [web]\n  cli: >\n    - web\n")
+
+    # W2: explicit indentation / chomp orders must not certify as lists.
+    for indicator in ("|2", "|-2", "|2-", ">2", ">2-"):
+        with pytest.raises(ValueError, match="toolset_not_list:api_server"):
+            mod.strip_and_validate(
+                f"platform_toolsets:\n  api_server: {indicator}\n    - web\n  cli: [web]\n"
+            )
+        with pytest.raises(ValueError, match="toolset_not_list:cli"):
+            mod.strip_and_validate(
+                f"platform_toolsets:\n  api_server: [web]\n  cli: {indicator}\n    - web\n"
+            )
+
+    # W3: comment-only root introducer remains a valid empty mapping.
+    commented = "platform_toolsets: # research only\n  api_server: [web]\n  cli: [web]\n"
+    cout, cchanged = mod.strip_and_validate(commented)
+    assert cchanged is False
+    assert cout == commented
+    with pytest.raises(ValueError, match="platform_toolsets_not_mapping"):
+        mod.strip_and_validate("platform_toolsets: | # bad\n  api_server: [web]\n  cli: [web]\n")
