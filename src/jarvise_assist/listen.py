@@ -173,7 +173,7 @@ def process_update(
             qk_parts = data.split(":")
             qk_op = qk_parts[1] if len(qk_parts) > 1 else ""
             client: Any = None
-            if qk_op in {"sl", "rf", "rg", "cs", "ea"}:
+            if qk_op in {"sl", "rf", "rg", "cs", "ea", "ex"}:
                 client = futures if futures is not None else build_futures_client()
             ea_lookup = None
             if qk_op == "ea":

@@ -12,7 +12,12 @@ from typing import Any
 
 from jarvise_assist import ASSIST_SYMBOLS
 from jarvise_assist.exit_log import exit_source_for_close, lookup_atr_at_entry
-from jarvise_assist.futures import FAPI_HISTORY_WINDOW_MS, BinanceFuturesClient
+from jarvise_assist.futures import (
+    ALL_ORDERS_PATH,
+    FAPI_HISTORY_WINDOW_MS,
+    USER_TRADES_PATH,
+    BinanceFuturesClient,
+)
 from jarvise_assist.quick_tags import quick_income_predicate
 from jarvise_assist.sizing import round_level_to_tick
 from jarvise_assist.store import now_ms
@@ -132,14 +137,153 @@ def classify_exit_kind(order: dict[str, Any]) -> tuple[str, str | None]:
     return "unknown", None
 
 
+class HistoryPageUnreadable(RuntimeError):
+    """allOrders or userTrades page was not a JSON list."""
+
+
+def _history_page(
+    client: Any,
+    public_page: Callable[[], list[dict[str, Any]]],
+    *,
+    strict: bool,
+    path: str,
+    params: dict[str, Any],
+    provider: str,
+) -> list[dict[str, Any]]:
+    """One history page.
+
+    ``strict=False`` calls the public client method. ``BinanceFuturesClient``
+    still collapses a non-list HTTP 200 to ``[]`` on that path, so main callers
+    stay unchanged. ``strict=True`` reads the raw body via ``_signed_get``
+    (futures.py is not edited) and raises when it is not a list. A client
+    without ``_signed_get`` falls back to the public method and still raises
+    if that method returns a non-list.
+    """
+    if not strict:
+        return public_page()
+    signed = getattr(client, "_signed_get", None)
+    if not callable(signed):
+        page = public_page()
+        if not isinstance(page, list):
+            raise HistoryPageUnreadable(provider)
+        return page
+    payload = signed(path, params, provider=provider)
+    if not isinstance(payload, list):
+        raise HistoryPageUnreadable(provider)
+    return list(payload)
+
+
+def _user_trades_params(
+    symbol: str,
+    *,
+    start_ms: int | None,
+    end_ms: int | None,
+    from_id: int | None,
+    limit: int,
+) -> dict[str, Any]:
+    """Same query as ``BinanceFuturesClient.user_trades``. No non-list collapse."""
+    if from_id is not None and (start_ms is not None or end_ms is not None):
+        raise ValueError("fromId cannot be sent with startTime or endTime")
+    params: dict[str, Any] = {"symbol": symbol.upper(), "limit": int(limit)}
+    if from_id is not None:
+        params["fromId"] = int(from_id)
+        return params
+    if start_ms is None or end_ms is None:
+        raise ValueError("startTime and endTime are required without fromId")
+    params["startTime"] = int(start_ms)
+    params["endTime"] = int(end_ms)
+    return params
+
+
+def _all_orders_params(
+    symbol: str,
+    *,
+    start_ms: int | None,
+    end_ms: int | None,
+    order_id: int | None,
+    limit: int,
+) -> dict[str, Any]:
+    """Same query as ``BinanceFuturesClient.all_orders``. No non-list collapse."""
+    if order_id is not None and (start_ms is not None or end_ms is not None):
+        raise ValueError("orderId cannot be sent with startTime or endTime")
+    params: dict[str, Any] = {"symbol": symbol.upper(), "limit": int(limit)}
+    if order_id is not None:
+        params["orderId"] = int(order_id)
+        return params
+    if start_ms is None or end_ms is None:
+        raise ValueError("startTime and endTime are required without orderId")
+    params["startTime"] = int(start_ms)
+    params["endTime"] = int(end_ms)
+    return params
+
+
+def _read_user_trades_page(
+    client: BinanceFuturesClient,
+    symbol: str,
+    *,
+    start_ms: int | None,
+    end_ms: int | None,
+    from_id: int | None,
+    limit: int,
+    strict: bool,
+) -> list[dict[str, Any]]:
+    def public() -> list[dict[str, Any]]:
+        if from_id is None:
+            return client.user_trades(symbol, start_ms=start_ms, end_ms=end_ms, limit=limit)
+        return client.user_trades(symbol, from_id=from_id, limit=limit)
+
+    if not strict:
+        return public()
+    return _history_page(
+        client,
+        public,
+        strict=True,
+        path=USER_TRADES_PATH,
+        params=_user_trades_params(symbol, start_ms=start_ms, end_ms=end_ms, from_id=from_id, limit=limit),
+        provider="binance_fapi_user_trades",
+    )
+
+
+def _read_all_orders_page(
+    client: BinanceFuturesClient,
+    symbol: str,
+    *,
+    start_ms: int | None,
+    end_ms: int | None,
+    order_id: int | None,
+    limit: int,
+    strict: bool,
+) -> list[dict[str, Any]]:
+    def public() -> list[dict[str, Any]]:
+        if order_id is None:
+            return client.all_orders(symbol, start_ms=start_ms, end_ms=end_ms, limit=limit)
+        return client.all_orders(symbol, order_id=order_id, limit=limit)
+
+    if not strict:
+        return public()
+    return _history_page(
+        client,
+        public,
+        strict=True,
+        path=ALL_ORDERS_PATH,
+        params=_all_orders_params(symbol, start_ms=start_ms, end_ms=end_ms, order_id=order_id, limit=limit),
+        provider="binance_fapi_all_orders",
+    )
+
+
 def fetch_all_user_trades(
     client: BinanceFuturesClient,
     symbol: str,
     *,
     start_ms: int,
     end_ms: int,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
-    """Walk [start, end) in 7-day windows. Page by fromId alone after the first page."""
+    """Walk [start, end) in 7-day windows. Page by fromId alone after the first page.
+
+    ``strict=False`` (default) is the main-path read. ``strict=True`` raises
+    ``HistoryPageUnreadable`` when any page body is not a list.
+    """
     rows: list[dict[str, Any]] = []
     seen: set[int] = set()
     for win_start, win_end in time_windows(start_ms, end_ms):
@@ -147,14 +291,25 @@ def fetch_all_user_trades(
         from_id: int | None = None
         while True:
             if from_id is None:
-                page = client.user_trades(
+                page = _read_user_trades_page(
+                    client,
                     symbol,
                     start_ms=win_start,
                     end_ms=inclusive_end,
+                    from_id=None,
                     limit=1000,
+                    strict=strict,
                 )
             else:
-                page = client.user_trades(symbol, from_id=from_id, limit=1000)
+                page = _read_user_trades_page(
+                    client,
+                    symbol,
+                    start_ms=None,
+                    end_ms=None,
+                    from_id=from_id,
+                    limit=1000,
+                    strict=strict,
+                )
             if not page:
                 break
             past_window = False
@@ -184,8 +339,13 @@ def fetch_all_orders(
     *,
     start_ms: int,
     end_ms: int,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
-    """Walk [start, end) in 7-day windows. Page by orderId alone after the first page."""
+    """Walk [start, end) in 7-day windows. Page by orderId alone after the first page.
+
+    ``strict=False`` (default) is the main-path read. ``strict=True`` raises
+    ``HistoryPageUnreadable`` when any page body is not a list.
+    """
     rows: list[dict[str, Any]] = []
     seen: set[int] = set()
     for win_start, win_end in time_windows(start_ms, end_ms):
@@ -193,14 +353,25 @@ def fetch_all_orders(
         order_id: int | None = None
         while True:
             if order_id is None:
-                page = client.all_orders(
+                page = _read_all_orders_page(
+                    client,
                     symbol,
                     start_ms=win_start,
                     end_ms=inclusive_end,
+                    order_id=None,
                     limit=1000,
+                    strict=strict,
                 )
             else:
-                page = client.all_orders(symbol, order_id=order_id, limit=1000)
+                page = _read_all_orders_page(
+                    client,
+                    symbol,
+                    start_ms=None,
+                    end_ms=None,
+                    order_id=order_id,
+                    limit=1000,
+                    strict=strict,
+                )
             if not page:
                 break
             past_window = False
@@ -766,6 +937,57 @@ def _logged_client_ids(conn: Any) -> set[str]:
     return {str(row[0]) for row in cur.fetchall() if row[0]}
 
 
+def _quick_owned_client_and_order_ids(
+    conn: Any,
+) -> tuple[set[str], set[tuple[str, str]], set[tuple[str, str]]]:
+    """Quick-owned ids scoped by symbol; trade order ids kept separate from algo ids.
+
+    Returns ``(cids, order_ids, algo_ids)`` where the id sets are ``(symbol, id)``.
+    Mixing algoIds into trade orderId exclusion hid unrelated owner fills that
+    shared a numeric id on another symbol.
+    """
+    cids: set[str] = set()
+    order_ids: set[tuple[str, str]] = set()
+    algo_ids: set[tuple[str, str]] = set()
+    _ALGO_STEPS = frozenset(
+        {
+            "stop",
+            "tp",
+            "recover_slr",
+            "dup_stop_cancel",
+            "orphan_cancel",
+            "ms",
+            "move_stop",
+        }
+    )
+    rows = conn.execute(
+        """
+        SELECT l.client_order_id, l.order_or_algo_id, l.step, i.preview_json, i.symbol
+        FROM assist_exec_log l
+        JOIN assist_exec_intent i ON i.id = l.intent_id
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            preview = json.loads(str(row["preview_json"] or "{}"))
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(preview, dict) or preview.get("origin") != "quick":
+            continue
+        sym = str(row["symbol"] or preview.get("symbol") or "").upper()
+        if row["client_order_id"]:
+            cids.add(str(row["client_order_id"]))
+        oid = str(row["order_or_algo_id"] or "")
+        if not oid or not sym:
+            continue
+        step = str(row["step"] or "")
+        if step in _ALGO_STEPS or step.endswith("_algo"):
+            algo_ids.add((sym, oid))
+        else:
+            order_ids.add((sym, oid))
+    return cids, order_ids, algo_ids
+
+
 def _unmatched_reason(*, cid: str, logged: set[str]) -> str:
     """Why a traded order matched no in-window entry.
 
@@ -802,6 +1024,7 @@ def build_real_rows(
     market_logs = _log_market_by_client(conn)
     move_stop_by_cid = _move_stop_intent_by_client(conn)
     logged_cids = _logged_client_ids(conn)
+    quick_cids, quick_order_ids, _quick_algo_ids = _quick_owned_client_and_order_ids(conn)
     income_cache = _complete_income_cache(conn, start)
     frozen_missing = _frozen_missing_income(conn, start, end)
     rows_out: list[dict[str, Any]] = []
@@ -866,10 +1089,14 @@ def build_real_rows(
             entry_time = min(int(f.get("time") or 0) for f in fills)
             if log is None:
                 continue
-            mkt_entry_order_ids.add(oid)
             intent_id = str(log["intent_id"])
             meta = _intent_preview(conn, intent_id)
             preview = meta.get("preview") or {}
+            # Bot Quick never becomes assist_real_trade / day-loss R / main journal.
+            # Skip here; quick_owned_* also blocks the unmatched loop for SL/TP/cls.
+            if isinstance(preview, dict) and preview.get("origin") == "quick":
+                continue
+            mkt_entry_order_ids.add(oid)
             side = str(meta.get("side") or preview.get("side") or "").lower()
             if side in {"buy", "sell"}:
                 side = "long" if side == "buy" else "short"
@@ -1222,6 +1449,12 @@ def build_real_rows(
             side = "buy" if side_raw == "BUY" else "sell"
             entry_time = min(int(f.get("time") or 0) for f in fills)
             cid = str(order.get("clientOrderId") or "")
+            # Exclude Quick-owned trade orders/fills (symbol-scoped; never match algo ids).
+            if (symbol, oid) in quick_order_ids or (cid and cid in quick_cids):
+                continue
+            fill_cids = {str(f.get("clientOrderId") or "") for f in fills}
+            if fill_cids & quick_cids:
+                continue
             reason = _unmatched_reason(cid=cid, logged=logged_cids)
             rows_out.append(
                 {

@@ -27,7 +27,12 @@ from jarvise_assist.quick_errors import (
     e_setting_risk_over_cap,
 )
 from jarvise_assist.quick_tags import quick_symbols
-from jarvise_assist.real_trades import _fee_usdt_and_other, fetch_all_user_trades, fetch_income_range
+from jarvise_assist.real_trades import (
+    _fee_usdt_and_other,
+    fetch_all_orders,
+    fetch_all_user_trades,
+    fetch_income_range,
+)
 from jarvise_assist.sizing import portfolio_risk_cap_pct
 from jarvise_assist.store import ensure_settings, list_explore_symbols
 
@@ -38,6 +43,10 @@ SendFn = Callable[..., Any]
 
 REG_TTL_MS = 10 * 60_000
 REG_EXPIRE_GRACE_MS = 2 * 60_000
+# Same bound as execute.RECOVER_MAX_AGE_MS (2h). Unresolved exec-linked
+# registrations stay open for fill reconciliation even when the position is
+# already flat (emergency-close fills often lack clientOrderId).
+UNRESOLVED_EXEC_KEEP_MS = 2 * 60 * 60_000
 QUICK_SAMPLE_TARGET = 25
 
 QUICK_USAGE = "พิมพ์: q BTC long 67000 (stop เป็นราคา) หรือ q BTC short 0.4% (stop ห่างจากราคา %)"
@@ -154,6 +163,7 @@ def create_quick_registration(
     now_ms: int,
     live_positions: Sequence[FuturesPosition] | None = None,
     commit: bool = True,
+    exec_intent_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Create an open registration. Returns (id, None) or (None, reason_code)."""
     sym = str(symbol).upper()
@@ -210,10 +220,22 @@ def create_quick_registration(
         """
         INSERT INTO assist_quick_registration (
             id, symbol, side, planned_entry, planned_stop, qty,
-            created_at_ms, expires_at_ms, status, trade_id, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, ?)
+            created_at_ms, expires_at_ms, status, trade_id, updated_at_ms,
+            exec_intent_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?)
         """,
-        (rid, sym, side_l, entry, stop, float(qty), int(now_ms), expires, int(now_ms)),
+        (
+            rid,
+            sym,
+            side_l,
+            entry,
+            stop,
+            float(qty),
+            int(now_ms),
+            expires,
+            int(now_ms),
+            str(exec_intent_id) if exec_intent_id else None,
+        ),
     )
     if commit:
         conn.commit()
@@ -415,13 +437,182 @@ def sync_quick_trades(
         side = str(reg["side"])
         created = int(reg["created_at_ms"])
         expires = int(reg["expires_at_ms"])
-        fills = fetch_all_user_trades(client, sym, start_ms=created, end_ms=int(now_ms) + 1)
-        # First fill after created decides: wrong side → expire; opening → tag or grace.
-        after = [f for f in fills if int(f.get("time") or 0) >= created]
-        after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
+        exec_intent_id = None
+        try:
+            raw_eid = reg["exec_intent_id"] if "exec_intent_id" in reg.keys() else None
+            exec_intent_id = str(raw_eid) if raw_eid else None
+        except Exception:  # noqa: BLE001
+            exec_intent_id = None
+
+        # Exec-linked: tag by bot market orderId only (never time-match).
+        bot_order_id: str | None = None
+        bot_client_id: str | None = None
+        if exec_intent_id:
+            # Same formula as execute.client_order_id — avoid importing execute (cycle).
+            short = str(exec_intent_id).replace("aei_", "")[:12]
+            bot_client_id = f"jv-{short}-mkt"[:36]
+            log = conn.execute(
+                """
+                SELECT order_or_algo_id, client_order_id, step FROM assist_exec_log
+                WHERE intent_id=? AND step IN (
+                    'market', 'market_query', 'recover_market_query',
+                    'recovery', 'entry_price_query', 'mkt_order_resolve'
+                )
+                ORDER BY created_at_ms DESC
+                """,
+                (exec_intent_id,),
+            ).fetchall()
+            for row in log:
+                oid = str(row["order_or_algo_id"] or "") or None
+                if oid:
+                    bot_order_id = oid
+                    break
+                cid = str(row["client_order_id"] or "")
+                if cid:
+                    bot_client_id = cid
+
+        # Broaden fetch window for exec-linked (fill may precede created_at on clock skew).
+        fetch_start = created - (3_600_000 if exec_intent_id else 0)
+        # Every exec-linked registration can expire as no-fill once flat and past
+        # grace. A non-list userTrades body must not look like no fills, including
+        # when the market orderId is already logged. Record-only regs stay non-strict.
+        exec_linked = bool(exec_intent_id)
+        try:
+            fills = fetch_all_user_trades(
+                client,
+                sym,
+                start_ms=fetch_start,
+                end_ms=int(now_ms) + 1,
+                strict=exec_linked,
+            )
+        except Exception:  # noqa: BLE001 — unreadable history keeps this registration
+            if not exec_linked:
+                raise
+            logger.warning("quick sync userTrades unreadable intent=%s", exec_intent_id)
+            continue
+
+        if exec_intent_id:
+            # Resolve order id via fill clientOrderId when log only has the deterministic cid.
+            if not bot_order_id and bot_client_id:
+                for f in fills:
+                    if str(f.get("clientOrderId") or "") == bot_client_id:
+                        bot_order_id = str(f.get("orderId") or "") or None
+                        if bot_order_id:
+                            break
+            if bot_order_id:
+                after = [f for f in fills if str(f.get("orderId") or "") == bot_order_id]
+            elif bot_client_id:
+                after = [f for f in fills if str(f.get("clientOrderId") or "") == bot_client_id]
+            else:
+                # Unresolved — wait; do not time-tag. Expiry grace still applies below.
+                after = []
+            after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
+        else:
+            # First fill after created decides: wrong side → expire; opening → tag or grace.
+            after = [f for f in fills if int(f.get("time") or 0) >= created]
+            after.sort(key=lambda r: (int(r.get("time") or 0), int(r.get("id") or 0)))
 
         if not after:
-            if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
+            # Exec-linked with no bot orderId yet: keep for reconciliation up to
+            # UNRESOLVED_EXEC_KEEP_MS from created_at. Flat is not no-fill evidence
+            # (emergency-close fills often lack clientOrderId until resolve).
+            if exec_intent_id and not bot_order_id:
+                if int(now_ms) <= created + UNRESOLVED_EXEC_KEEP_MS:
+                    continue
+                # Past keep window: read-only resolve of jv-<short>-mkt via
+                # allOrders (production BinanceFuturesClient has no
+                # query_order_by_client_id), then still-open check. Expire
+                # only when resolve finds nothing AND flat. A read failure,
+                # including a non-list allOrders body, keeps the registration
+                # open for the next pass.
+                if bot_client_id:
+                    try:
+                        orders = fetch_all_orders(
+                            client,
+                            sym,
+                            start_ms=fetch_start,
+                            end_ms=int(now_ms) + 1,
+                            strict=True,
+                        )
+                        for order in orders:
+                            if str(order.get("clientOrderId") or "") != bot_client_id:
+                                continue
+                            oid = str(order.get("orderId") or "") or None
+                            if oid:
+                                bot_order_id = oid
+                                after = [f for f in fills if str(f.get("orderId") or "") == bot_order_id]
+                                after.sort(
+                                    key=lambda r: (
+                                        int(r.get("time") or 0),
+                                        int(r.get("id") or 0),
+                                    )
+                                )
+                                break
+                    except Exception:  # noqa: BLE001
+                        logger.warning("quick sync mkt order resolve failed intent=%s", exec_intent_id)
+                        continue
+                if after:
+                    pass  # fall through to tagging with resolved orderId
+                else:
+                    still_open = False
+                    try:
+                        pos_fn = getattr(client, "position_risk", None)
+                        if callable(pos_fn):
+                            try:
+                                live = pos_fn(symbol=sym)
+                            except TypeError:
+                                live = pos_fn()
+                            still_open = any(
+                                str(getattr(p, "symbol", "") or "").upper() == sym for p in (live or [])
+                            )
+                        else:
+                            # No position reader → keep (fail closed for attribution).
+                            still_open = True
+                    except Exception:  # noqa: BLE001
+                        still_open = True
+                    if still_open:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE assist_quick_registration
+                        SET status='expired', updated_at_ms=?
+                        WHERE id=?
+                        """,
+                        (int(now_ms), rid),
+                    )
+                    conn.commit()
+                    info["expired"] += 1
+                    _send_reg_expire_notice(
+                        send,
+                        sym=sym,
+                        side=side,
+                        kind="no_fill",
+                        window_ms=UNRESOLVED_EXEC_KEEP_MS,
+                    )
+                    continue
+            elif int(now_ms) <= expires + REG_EXPIRE_GRACE_MS:
+                continue
+            elif exec_intent_id:
+                # Have orderId but no matching fills yet, past grace: keep while open.
+                still_open = False
+                try:
+                    pos_fn = getattr(client, "position_risk", None)
+                    if callable(pos_fn):
+                        try:
+                            live = pos_fn(symbol=sym)
+                        except TypeError:
+                            live = pos_fn()
+                        still_open = any(
+                            str(getattr(p, "symbol", "") or "").upper() == sym for p in (live or [])
+                        )
+                    else:
+                        # No position reader → keep (fail closed for attribution).
+                        still_open = True
+                except Exception:  # noqa: BLE001
+                    # Unreadable position → do not expire (fail closed for attribution).
+                    still_open = True
+                if still_open:
+                    continue
                 conn.execute(
                     """
                     UPDATE assist_quick_registration
@@ -437,8 +628,28 @@ def sync_quick_trades(
                     sym=sym,
                     side=side,
                     kind="no_fill",
+                    window_ms=int(expires) - int(created),
                 )
-            continue
+                continue
+            else:
+                conn.execute(
+                    """
+                    UPDATE assist_quick_registration
+                    SET status='expired', updated_at_ms=?
+                    WHERE id=?
+                    """,
+                    (int(now_ms), rid),
+                )
+                conn.commit()
+                info["expired"] += 1
+                _send_reg_expire_notice(
+                    send,
+                    sym=sym,
+                    side=side,
+                    kind="no_fill",
+                    window_ms=int(expires) - int(created),
+                )
+                continue
 
         first = after[0]
         first_side = str(first.get("side") or "").upper()
@@ -458,7 +669,8 @@ def sync_quick_trades(
             _send_reg_expire_notice(send, sym=sym, side=side, kind="wrong_side", opposite=opp)
             continue
 
-        if first_time > expires:
+        # Time-window late_fill only for record-only (non-exec) registrations.
+        if not exec_intent_id and first_time > expires:
             if int(now_ms) > expires + REG_EXPIRE_GRACE_MS:
                 conn.execute(
                     """
@@ -503,7 +715,9 @@ def sync_quick_trades(
         conn.commit()
         tagged_trade_ids.add(trade_id)
         info["tagged"] += 1
-        _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
+        # Suppress tag notice for exec-linked (its copy would be false).
+        if not exec_intent_id:
+            _send_tag_notice(conn, send, registration_id=rid, client=client, now_ms=now_ms)
         if str(rebuilt.get("status")) == "closed":
             raw_closed = rebuilt.get("closed_at_ms")
             try:
@@ -518,6 +732,9 @@ def sync_quick_trades(
                     "side": side,
                     "closed_at_ms": closed_at,
                     "trade_id": trade_id,
+                    "exec_linked": bool(exec_intent_id),
+                    "exec_intent_id": exec_intent_id,
+                    "registration_id": rid,
                 }
             )
             _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
@@ -568,17 +785,43 @@ def sync_quick_trades(
                 closed_at = None
             if closed_at is not None and closed_at <= 0:
                 closed_at = None
+            reg_row = conn.execute(
+                "SELECT exec_intent_id FROM assist_quick_registration WHERE id=?",
+                (str(trade["registration_id"]),),
+            ).fetchone()
+            eid = str(reg_row["exec_intent_id"]) if reg_row and reg_row["exec_intent_id"] else None
+            exec_linked = bool(eid)
             info["closed"].append(
                 {
                     "symbol": sym,
                     "side": side,
                     "closed_at_ms": closed_at,
                     "trade_id": trade_id,
+                    "exec_linked": exec_linked,
+                    "exec_intent_id": eid,
+                    "registration_id": str(trade["registration_id"]),
                 }
             )
             _send_close_notice(conn, send, trade_id=trade_id, client=client, payload=rebuilt, now_ms=now_ms)
 
     return {k: v for k, v in info.items() if v}
+
+
+def _expire_window_phrase(window_ms: int) -> str:
+    """Registration window as whole minutes, or hours when it lands on an hour."""
+    minute_ms = 60_000
+    whole_min = int(
+        (Decimal(int(window_ms)) / Decimal(minute_ms)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    if whole_min < 0:
+        whole_min = 0
+    # 60 minutes in an hour — clock unit, same factor as UNRESOLVED_EXEC_KEEP_MS, not a policy.
+    hours, mins = divmod(whole_min, 60)
+    if hours and mins:
+        return f"{hours} ชม. {mins} นาที"
+    if hours:
+        return f"{hours} ชม."
+    return f"{mins} นาที"
 
 
 def _send_reg_expire_notice(
@@ -588,13 +831,15 @@ def _send_reg_expire_notice(
     side: str,
     kind: str,
     opposite: str | None = None,
+    window_ms: int | None = None,
 ) -> None:
     from jarvise_assist.quick_card import quick_mode_tag
 
     label = _side_menu_label(side)
     try:
         if kind == "no_fill":
-            text = f"⌛ ลงทะเบียน quick {sym} {label} หมดเวลา — ไม่พบไม้ภายใน 10 นาที (ไม่นับเป็น quick)"
+            span = _expire_window_phrase(REG_TTL_MS if window_ms is None else int(window_ms))
+            text = f"⌛ ลงทะเบียน quick {sym} {label} หมดเวลา — ไม่พบไม้ภายใน {span} (ไม่นับเป็น quick)"
         elif kind == "wrong_side" and opposite:
             text = (
                 f"⌛ ลงทะเบียน quick {sym} {label} ถูกยกเลิก — ไม้แรกเป็นฝั่ง {opposite} จึงนับเป็นไม้ปกติ (ระบบหลักเฝ้าให้)"
