@@ -1420,26 +1420,6 @@ def _merge_quick_cutoff(payload: dict[str, Any], counts: dict[str, int]) -> None
         payload["quick_cutoff"] = counts
 
 
-def _intent_finished_after(conn: Any, symbol: str, *, after_ms: int, exclude_intent_id: str | None) -> bool:
-    """True when another intent on the symbol was created after ``after_ms`` and finished."""
-    rows = conn.execute(
-        """
-        SELECT id, status, created_at_ms FROM assist_exec_intent
-        WHERE upper(symbol)=?
-          AND status IN (
-              'done', 'failed', 'expired', 'cancelled', 'declined', 'not_found', 'stale'
-          )
-        """,
-        (str(symbol).upper(),),
-    ).fetchall()
-    for row in rows:
-        if exclude_intent_id is not None and str(row["id"]) == str(exclude_intent_id):
-            continue
-        if int(row["created_at_ms"] or 0) > int(after_ms):
-            return True
-    return False
-
-
 # assist_exec_log step marking that intent-scoped jv- leftover cleanup ran.
 # SCHEMA_VERSION 39 — no new table/column; derive pending from closed trades
 # lacking this step.
@@ -1512,6 +1492,8 @@ def _cleanup_exec_linked_quick_jv(
 
     Re-reads live positions immediately before cancel (snapshot from before sync
     can miss a reopen). Cancels only the closed intent's ``jv-<intent>-…`` ids.
+    A later finished intent on the symbol is not a skip: its orders use another
+    prefix. An open position or an in-flight intent still refuses the cancel.
 
     Retries deferred cleanups: when a Quick trade closed while its entry intent
     was still in flight/unknown, this pass merges DB-pending closed trades
@@ -1557,12 +1539,7 @@ def _cleanup_exec_linked_quick_jv(
         intent_id = qrow.get("exec_intent_id")
         if not intent_id:
             continue
-        closed_at = qrow.get("closed_at_ms")
         if symbol_has_in_flight_exec(conn, qsym):
-            continue
-        if closed_at is not None and _intent_finished_after(
-            conn, qsym, after_ms=int(closed_at), exclude_intent_id=str(intent_id)
-        ):
             continue
         try:
             live = trade.position_risk()

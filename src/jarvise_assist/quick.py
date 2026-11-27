@@ -473,7 +473,22 @@ def sync_quick_trades(
 
         # Broaden fetch window for exec-linked (fill may precede created_at on clock skew).
         fetch_start = created - (3_600_000 if exec_intent_id else 0)
-        fills = fetch_all_user_trades(client, sym, start_ms=fetch_start, end_ms=int(now_ms) + 1)
+        # Unresolved exec (no logged market orderId) can expire as no-fill after
+        # the keep window. A non-list userTrades body must not look like no fills.
+        unresolved_exec = bool(exec_intent_id) and not bot_order_id
+        try:
+            fills = fetch_all_user_trades(
+                client,
+                sym,
+                start_ms=fetch_start,
+                end_ms=int(now_ms) + 1,
+                strict=unresolved_exec,
+            )
+        except Exception:  # noqa: BLE001 — unreadable history keeps this registration
+            if not unresolved_exec:
+                raise
+            logger.warning("quick sync userTrades unreadable intent=%s", exec_intent_id)
+            continue
 
         if exec_intent_id:
             # Resolve order id via fill clientOrderId when log only has the deterministic cid.
@@ -506,11 +521,18 @@ def sync_quick_trades(
                 # Past keep window: read-only resolve of jv-<short>-mkt via
                 # allOrders (production BinanceFuturesClient has no
                 # query_order_by_client_id), then still-open check. Expire
-                # only when resolve finds nothing AND flat. A read failure
-                # keeps the registration open for the next pass.
+                # only when resolve finds nothing AND flat. A read failure,
+                # including a non-list allOrders body, keeps the registration
+                # open for the next pass.
                 if bot_client_id:
                     try:
-                        orders = fetch_all_orders(client, sym, start_ms=fetch_start, end_ms=int(now_ms) + 1)
+                        orders = fetch_all_orders(
+                            client,
+                            sym,
+                            start_ms=fetch_start,
+                            end_ms=int(now_ms) + 1,
+                            strict=True,
+                        )
                         for order in orders:
                             if str(order.get("clientOrderId") or "") != bot_client_id:
                                 continue
