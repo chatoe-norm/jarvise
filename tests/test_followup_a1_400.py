@@ -109,6 +109,17 @@ class _NthFiltersBoom(_FuturesRead):
         return super().symbol_filters(symbol)
 
 
+class _SecondPositionBoom(RecordingTrade):
+    """First position_risk succeeds. A later call raises."""
+
+    def position_risk(self, symbol: str | None = None) -> list[Any]:
+        seen = sum(1 for name, _payload in self.calls if name == "position_risk")
+        if seen >= 1:
+            self.calls.append(("position_risk", {"symbol": symbol}))
+            raise RuntimeError("positions down")
+        return super().position_risk(symbol)
+
+
 class _StepBoom(RecordingTrade):
     def __init__(self, *, step: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -495,8 +506,6 @@ def test_r2_qk_ex_balance_failure_sends_and_strips(tmp_path: Path, monkeypatch: 
 
 
 def test_r2_qk_ex_filters_failure_strips_keyboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from jarvise_assist.quick_m1a1 import MSG_REGISTER_FAILED
-
     _bot(monkeypatch)
     _kill_off(monkeypatch)
     conn = _db(tmp_path, "qkfilt.db")
@@ -515,10 +524,12 @@ def test_r2_qk_ex_filters_failure_strips_keyboard(tmp_path: Path, monkeypatch: p
         now_ms=ts,
         message={"message_id": 1, "chat": {"id": 1}},
     )
-    assert out.get("reason") == "read_failed", out
-    assert MSG_REGISTER_FAILED in answers
+    assert out.get("reason") == "fapi_read_failed:filters", out
+    assert any("อ่านบัญชีไม่ได้ (filters)" in line for line in sent)
+    assert answers == [None]
     blob = json.dumps({"sent": sent, "edits": edits, "answers": answers}, ensure_ascii=False, default=str)
     assert '"inline_keyboard": []' in blob or '"inline_keyboard":[]' in blob
+    assert "อ่านบัญชีไม่ได้ (filters)" in blob
     assert "ลองใหม่" not in blob
     conn.close()
 
@@ -595,8 +606,26 @@ def test_r2_main_confirm_success_path_is_not_a_read_failure(
     iid = _main_entry_intent(conn, ts, qty="0.1")
     intent = get_exec_intent(conn, iid)
     assert intent is not None
-    guard = _confirm_guards_entry(conn, intent, RecordingTrade(mark=D("100")), now_ms_value=ts)
-    assert guard is None or not str(guard).startswith("fapi_read_failed")
+    trade = RecordingTrade(mark=D("100"))
+    guard = _confirm_guards_entry(conn, intent, trade, now_ms_value=ts)
+    assert guard is None
+    conn.close()
+
+
+def test_r3_confirm_reuses_positions_already_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.execute import _confirm_guards_entry
+
+    _bot(monkeypatch)
+    _kill_off(monkeypatch)
+    conn = _db(tmp_path, "guard-reuse.db")
+    ts = _daytime_ms()
+    iid = _main_entry_intent(conn, ts, qty="0.1")
+    intent = get_exec_intent(conn, iid)
+    assert intent is not None
+    trade = _SecondPositionBoom(mark=D("100"))
+    guard = _confirm_guards_entry(conn, intent, trade, now_ms_value=ts)
+    assert guard is None
+    assert sum(1 for name, _payload in trade.calls if name == "position_risk") == 1
     conn.close()
 
 

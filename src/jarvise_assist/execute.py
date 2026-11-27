@@ -1480,11 +1480,17 @@ def _existing_ideas_from_trade(
     balance: Decimal,
     risk_pct: Decimal,
     now_ms_value: int,
+    positions: list[FuturesPosition] | None = None,
 ) -> list[ExistingIdea]:
-    """Reuse signals.build_existing_ideas with trade-account positions/orders."""
+    """Reuse signals.build_existing_ideas with trade-account positions/orders.
+
+    ``positions`` skips a second ``position_risk`` when the caller already read them.
+    Other callers keep the old read.
+    """
     from jarvise_assist.signals import build_existing_ideas
 
-    positions = trade.position_risk()
+    if positions is None:
+        positions = trade.position_risk()
     try:
         orders = trade.all_open_orders()
     except Exception:  # noqa: BLE001
@@ -2059,6 +2065,7 @@ def _confirm_guards_entry(
         balance=balance,
         risk_pct=risk_pct,
         now_ms_value=now_ms_value,
+        positions=positions,
     )
     cand = SignalCandidate(sized=sized, confidence=1.0, symbol_rank=0)
     admitted, rejected = admit_signals(

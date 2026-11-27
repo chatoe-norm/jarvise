@@ -721,11 +721,15 @@ def _handle_qk_ex(
         step = Decimal(str(filters.step_size))
         min_qty = Decimal(str(filters.min_qty))
         min_notional = Decimal(str(filters.min_notional))
-    except Exception:  # noqa: BLE001
-        logger.exception("qk:ex filters failed")
-        edit(_decorate_card_text(MSG_REGISTER_FAILED), {"inline_keyboard": []})
-        answer(MSG_REGISTER_FAILED)
-        return {"ok": False, "reason": "read_failed"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qk:ex filters read failed type=%s", type(exc).__name__)
+        from jarvise_assist.execute import _reason_th
+
+        text = _reason_th("fapi_read_failed:filters")
+        send(text)
+        edit(_decorate_card_text(text), {"inline_keyboard": []})
+        answer(None)
+        return {"ok": False, "reason": "fapi_read_failed:filters"}
     if testnet_levels:
         from jarvise_assist.sizing import round_level_to_tick
 

@@ -1617,7 +1617,7 @@ def owner_events_after(conn: sqlite3.Connection, t_ms: int, *, historical: bool 
                  AND effective_at_ms IS NOT NULL
                  AND id LIKE 'pe_owner_tran%'
                  AND instr(COALESCE(note, ''), ?) > 0
-                THEN COALESCE(effective_at_ms, created_at_ms) > ?
+                THEN effective_at_ms > ?
                 ELSE created_at_ms > ?
                     OR COALESCE(effective_at_ms, created_at_ms) > ?
             END
