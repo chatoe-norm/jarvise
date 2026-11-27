@@ -950,6 +950,101 @@ def assist_partner_record_owner_deposit_20261123(
     _echo(payload, 0 if payload.get("ok") else 1)
 
 
+@assist_app.command("partner-record-owner-tx")
+def assist_partner_record_owner_tx(
+    db: Annotated[Path, typer.Option("--db", help="SQLite file. Required; no default and no env fallback.")],
+    kind: Annotated[str, typer.Option("--kind", help="dep (owner deposit) or wd (owner withdrawal).")],
+    tran_id: Annotated[str, typer.Option("--tran-id", help="Binance transfer tranId / withdraw id.")],
+    amount: Annotated[str, typer.Option("--amount", help="USDT amount as Binance shows it (8 dp ok).")],
+    account_value: Annotated[
+        str,
+        typer.Option(
+            "--account-value", help="Pool value V (USDT) right after the transfer, as p owner shows."
+        ),
+    ],
+    effective_at_ms: Annotated[int, typer.Option("--effective-at-ms", help="Transfer time (epoch ms).")],
+    do_apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Write the owner_deposit/owner_redeem. Default is dry-run."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the preview or result as JSON.")] = False,
+) -> None:
+    """Record a past owner dep/wd the live ``p owner`` cannot book. Dry-run unless ``--apply``.
+
+    Exit 0 ok, 1 refused, 2 bad input / db / schema, 3 conflict (tranId already booked).
+    """
+    import sqlite3
+    import time
+
+    from jarvise_assist.partner_owner_history import apply_owner_tx, preview_owner_tx, validate_args
+    from jarvise_ingest.db import SCHEMA_VERSION, open_db
+    from jarvise_ingest.universe_cli import connect_readonly
+
+    mode = "apply" if do_apply else "dry-run"
+
+    def _echo(payload: dict[str, Any], code: int) -> None:
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False))
+        elif payload.get("ok"):
+            typer.echo(str(payload.get("reason") or "ok"))
+            for key, value in (payload.get("plan") or payload.get("result") or {}).items():
+                typer.echo(f"  {key}: {value}")
+        else:
+            typer.echo(str(payload.get("reason") or "refused"), err=True)
+        raise typer.Exit(code=code)
+
+    def _code(payload: dict[str, Any]) -> int:
+        if payload.get("ok"):
+            return 0
+        return 3 if payload.get("reason") == "conflict" else 1
+
+    now_ms = int(time.time() * 1000)
+    params, err = validate_args(
+        side=str(kind).strip().lower(),
+        tran_id=str(tran_id).strip(),
+        amount=amount,
+        account_value=account_value,
+        effective_at_ms=int(effective_at_ms),
+        now_ms=now_ms,
+    )
+    if err is not None or params is None:
+        _echo({**(err or {"ok": False, "reason": "bad_args"}), "mode": mode}, 2)
+        return
+    if not db.is_file():
+        typer.echo("analytics db missing", err=True)
+        raise typer.Exit(code=2)
+    probe = connect_readonly(db)
+    try:
+        user_version = int(probe.execute("PRAGMA user_version").fetchone()[0] or 0)
+    finally:
+        probe.close()
+    if user_version != SCHEMA_VERSION:
+        typer.echo(f"schema mismatch: user_version={user_version} expected={SCHEMA_VERSION}", err=True)
+        raise typer.Exit(code=2)
+
+    if not do_apply:
+        conn = connect_readonly(db)
+        conn.row_factory = sqlite3.Row
+        try:
+            payload = preview_owner_tx(conn, params, now_ms=now_ms)
+        finally:
+            conn.close()
+        _echo(payload, _code(payload))
+        return
+
+    try:
+        conn = open_db(db)
+        try:
+            payload = apply_owner_tx(conn, params, now_ms=now_ms)
+        except sqlite3.Error:
+            payload = {"ok": False, "reason": "db_error", "mode": "apply"}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        payload = {"ok": False, "reason": "db_error", "mode": "apply"}
+    _echo(payload, _code(payload))
+
+
 report_app = typer.Typer(help="Read-only owner reports. No orders.")
 app.add_typer(report_app, name="report")
 
