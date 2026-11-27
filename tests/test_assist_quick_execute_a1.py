@@ -111,10 +111,12 @@ class RecordingTrade:
         self.calls.append(("all_open_orders", {}))
         return list(self._orders)
 
-    def open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+    def open_orders(self, symbol: str | None = None, *, strict: bool = False) -> list[dict[str, Any]]:
+        _ = strict
         return [o for o in self._orders if o.get("symbol") == symbol or symbol is None]
 
     def open_algo_orders(self, symbol: str | None = None, *, strict: bool = False) -> list[dict[str, Any]]:
+        _ = strict
         return [o for o in self._orders if (symbol is None or o.get("symbol") == symbol) and o.get("algoId")]
 
     def assert_trade_key_safe(self) -> dict[str, Any]:
