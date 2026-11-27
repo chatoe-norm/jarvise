@@ -1087,3 +1087,172 @@ def test_r2_hist_owner_null_effective_blocks_on_created(tmp_path: Path) -> None:
         assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
     finally:
         conn.close()
+
+
+def test_m12_preview_second_backdated_uses_historical(tmp_path: Path) -> None:
+    """Dry-run of a later backdated transfer must not see the first row's wall clock."""
+    from jarvise_assist.partner_owner_history import preview_owner_tx, validate_args
+
+    now = _now()
+    t1 = now - 3 * DAY
+    t2 = now - 2 * DAY
+    path = _make_db(tmp_path / "m12.db", init_ms=now - 10 * DAY)
+    first = _invoke(path, *_args("dep", "100", "1100", t1, tran="900000000111"), "--apply")
+    assert first.exit_code == 0, first.output
+    params, err = validate_args(
+        side="wd",
+        tran_id="900000000112",
+        amount="50",
+        account_value="1050",
+        effective_at_ms=t2,
+        now_ms=now,
+    )
+    assert err is None and params is not None
+    conn = open_db(path)
+    try:
+        row = conn.execute(
+            "SELECT created_at_ms, effective_at_ms, note FROM partner_event WHERE kind='owner_deposit'"
+        ).fetchone()
+        assert row is not None
+        assert int(row["effective_at_ms"]) < t2 < int(row["created_at_ms"])
+        assert ps.OWNER_HIST_NOTE_MARK in str(row["note"])
+        # Live rule sees the wall-clock insert. The dry-run must not.
+        assert ps.owner_events_after(conn, t2) == "events_after_effective"
+        preview = preview_owner_tx(conn, params, now_ms=now)
+    finally:
+        conn.close()
+    assert preview["ok"] is True, preview
+    assert preview["reason"] == "would_record"
+    dry = _invoke(path, *_args("wd", "50", "1050", t2, tran="900000000112"))
+    assert dry.exit_code == 0, dry.output
+    assert _json(dry)["reason"] == "would_record"
+
+
+def test_m17_hist_unmarked_created_after_blocks(tmp_path: Path) -> None:
+    """An unmarked row booked later still blocks, even when its effective time is earlier."""
+    now = _now()
+    t = now - 2 * DAY
+    path = _make_db(tmp_path / "m17.db", init_ms=now - 10 * DAY)
+    conn = open_db(path)
+    try:
+        _insert_event_shape(
+            conn,
+            event_id="pe_deposit_later",
+            kind="deposit",
+            note="partner deposit booked later",
+            created_at_ms=now,
+            effective_at_ms=t - DAY,
+        )
+        row = conn.execute("SELECT * FROM partner_event WHERE id='pe_deposit_later'").fetchone()
+        assert ps.OWNER_HIST_NOTE_MARK not in str(row["note"])
+        assert int(row["effective_at_ms"]) < t < int(row["created_at_ms"])
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
+
+
+def test_m18_hist_unmarked_effective_after_blocks(tmp_path: Path) -> None:
+    """An unmarked row whose effective time is later blocks even if it was inserted earlier."""
+    now = _now()
+    t = now - 2 * DAY
+    path = _make_db(tmp_path / "m18.db", init_ms=now - 10 * DAY)
+    conn = open_db(path)
+    try:
+        _insert_event_shape(
+            conn,
+            event_id="pe_deposit_effective_later",
+            kind="deposit",
+            note="partner deposit effective later",
+            created_at_ms=t - DAY,
+            effective_at_ms=t + HOUR,
+        )
+        row = conn.execute("SELECT * FROM partner_event WHERE id='pe_deposit_effective_later'").fetchone()
+        assert row is not None
+        assert ps.OWNER_HIST_NOTE_MARK not in str(row["note"])
+        assert int(row["created_at_ms"]) < t < int(row["effective_at_ms"])
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
+
+
+def test_m20_hist_unmarked_owner_row_still_blocks(tmp_path: Path) -> None:
+    """A live p-owner row (no historical marker) is not judged by its earlier effective time."""
+    now = _now()
+    t = now - 2 * DAY
+    tran = "900000000120"
+    path = _make_db(tmp_path / "m20.db", init_ms=now - 10 * DAY)
+    conn = open_db(path)
+    try:
+        note = pa._owner_note(tran)
+        eid = pa._owner_event_id(tran)
+        assert ps.OWNER_HIST_NOTE_MARK not in note
+        assert eid.startswith("pe_owner_tran")
+        _insert_event_shape(
+            conn,
+            event_id=eid,
+            kind="owner_deposit",
+            note=note,
+            created_at_ms=now,
+            effective_at_ms=t - DAY,
+        )
+        row = conn.execute("SELECT * FROM partner_event WHERE id=?", (eid,)).fetchone()
+        assert row["kind"] == "owner_deposit"
+        assert int(row["effective_at_ms"]) < t < int(row["created_at_ms"])
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
+
+
+def test_m29_with_trend_card_omits_counter_bot_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _bot(monkeypatch)
+    conn = _db(tmp_path, "m29.db")
+    ts = _daytime_ms()
+    bar = expected_analysis_bar_ms(ts)
+    _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.8, invalidation=99.0, ts=bar)
+    card = build_quick_card(
+        conn,
+        _FuturesRead(mark=D("100"), balance=D("10000")),
+        symbol="BTCUSDT",
+        side="long",
+        stop=D("99"),
+        now_ms=ts,
+    )
+    assert card["ok"] is True
+    assert card["bot_eligible"] is True
+    text = str(card["text"])
+    assert "🔴 สวนเทรนด์ · บอทใช้ risk" not in text
+    assert "🔴 ไม่ทราบเทรนด์" not in text
+    conn.close()
+
+
+def test_m32_qk_register_stop_far_uses_db_setting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.quick_config import set_quick_config
+
+    _kill_off(monkeypatch)
+    conn = _db(tmp_path, "m32.db")
+    ts = _daytime_ms()
+    set_quick_config(conn, "quick_stop_far_pct", "15", source="test", now_ms=ts)
+    cid = _insert_quoted_card(conn, now_ms_value=ts)
+
+    def _refuse(*_a: Any, **_k: Any) -> tuple[None, str]:
+        return None, "stop_far"
+
+    monkeypatch.setattr("jarvise_assist.quick_m1a1.create_quick_registration_from_card", _refuse)
+    sent: list[str] = []
+    out = handle_quick_trade_callback(
+        conn,
+        f"qk:rg:{cid}",
+        futures=_FuturesRead(mark=D("100"), balance=D("10000")),
+        send=lambda text, **_k: sent.append(str(text)) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *_a, **_k: True,
+        now_ms=ts,
+        message={"message_id": 1, "chat": {"id": 1}},
+    )
+    assert out.get("reason") == "stop_far", out
+    assert any("15%" in line for line in sent)
+    assert all("20%" not in line for line in sent)
+    direct = _registration_refusal_text("stop_far", conn)
+    assert "15%" in direct
+    assert "20%" not in direct
+    conn.close()
