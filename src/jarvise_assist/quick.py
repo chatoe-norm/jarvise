@@ -604,6 +604,9 @@ def sync_quick_trades(
                         still_open = any(
                             str(getattr(p, "symbol", "") or "").upper() == sym for p in (live or [])
                         )
+                    else:
+                        # No position reader → keep (fail closed for attribution).
+                        still_open = True
                 except Exception:  # noqa: BLE001
                     # Unreadable position → do not expire (fail closed for attribution).
                     still_open = True

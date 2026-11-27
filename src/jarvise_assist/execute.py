@@ -828,34 +828,6 @@ def _log_write(
         raise
 
 
-def _log_write_best_effort(
-    conn: Any,
-    *,
-    intent_id: str,
-    step: str,
-    endpoint: str,
-    client_order_id: str | None = None,
-    http_status: int | None = None,
-    binance_code: int | None = None,
-    order_or_algo_id: str | None = None,
-) -> None:
-    """Audit write that never raises (Quick post-send / recovery helpers)."""
-    token = _BEST_EFFORT_EXEC_LOG.set(True)
-    try:
-        _log_write(
-            conn,
-            intent_id=intent_id,
-            step=step,
-            endpoint=endpoint,
-            client_order_id=client_order_id,
-            http_status=http_status,
-            binance_code=binance_code,
-            order_or_algo_id=order_or_algo_id,
-        )
-    finally:
-        _BEST_EFFORT_EXEC_LOG.reset(token)
-
-
 class ExecResult(str):
     """Thai reply that also carries the intent status for finish_exec_intent."""
 

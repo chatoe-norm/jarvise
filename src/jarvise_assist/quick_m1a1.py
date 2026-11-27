@@ -598,11 +598,13 @@ def _handle_qk_ex(
         send(REFUSAL.get(busy, REFUSAL.get("read_failed", "ไม่พร้อม")))
         return {"ok": False, "reason": busy}
 
-    if same_side_blocks(conn, side):
-        from jarvise_assist.quick_cap import count_open_same_side, same_side_cap_text
+    side_cap = int(values["quick_same_side_cap"])
+    if same_side_blocks(conn, side, cap=side_cap):
+        from jarvise_assist.quick_cap import count_open_same_side
+        from jarvise_assist.quick_execute import quick_same_side_cap_text
 
         answer(None)
-        send(same_side_cap_text(side, count_open_same_side(conn, side)))
+        send(quick_same_side_cap_text(side, count_open_same_side(conn, side), side_cap))
         return {"ok": False, "reason": "same_side_cap"}
 
     try:

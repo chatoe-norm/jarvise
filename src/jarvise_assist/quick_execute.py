@@ -54,6 +54,7 @@ _BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 BTN_QUICK_BOT_ENTER = "⚡ ให้บอทเข้าไม้"
 MSG_CFG_CHANGED = "ค่าตั้งเปลี่ยน — กด 🔄 อัปเดตราคา"
 MSG_QUICK_NO_TP1 = "ไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"
+MSG_QUICK_TP1_OFF = "ไม่วาง TP1 — ตั้งปิดที่ TP1 ไว้ 0%, SL คุมเต็มจำนวน"
 MSG_QUICK_HALF_NOTE = "หลังปิดครึ่งด้วยมือ คำสั่ง TP ของบอทอาจปิดส่วนที่เหลือที่ TP1 ได้"
 
 # Keys frozen into preview.cfg and re-checked for stricter drift at confirm.
@@ -652,6 +653,8 @@ def format_quick_confirm_text(
     tp_qty = plan.get("tp_half_qty")
     if tp_qty is not None:
         lines.append(f"TP1 {_fmt_price_tick(t1, tick)} × {fmt_qty(Decimal(str(tp_qty)))}")
+    elif plan.get("tp_refuse") == "tp1pct_0":
+        lines.append(MSG_QUICK_TP1_OFF)
     else:
         lines.append(MSG_QUICK_NO_TP1)
     lines.append(f"leverage {lev}x isolated · ถ้าชน stop ≈ {fmt_price(loss)} USDT (รวมค่าธรรมเนียม)")
@@ -664,13 +667,20 @@ def format_quick_confirm_text(
             lines.append(f"🔴 สวนเทรนด์ · บอทใช้ risk {fmt_price(risk)}%")
     if plan.get("combined_warn"):
         lines.append("⚠ ความเสี่ยงทางเดียวกัน (หลัก+quick) เกินระดับเตือน")
-    lines.append(MSG_QUICK_HALF_NOTE)
+    if tp_qty is not None:
+        lines.append(MSG_QUICK_HALF_NOTE)
     lines.append(f"ยืนยันภายใน {int(ttl_s)} วินาที")
     return "\n".join(lines)
 
 
 def pause_blocks_bot(conn: Any, *, now_ms: int) -> bool:
     return is_paused(ensure_settings(conn), now_ms=now_ms)
+
+
+def quick_same_side_cap_text(side: str, count: int, cap: int) -> str:
+    """Bot path (qk:ex) refusal with the configured ``quick_same_side_cap``."""
+    label = "LONG" if str(side).lower() == "long" else "SHORT"
+    return f"ไม่เข้าไม้ — ฝั่ง {label} เปิดอยู่แล้ว {int(count)} ไม้ (เพดานฝั่งละ {int(cap)}) · ปิดหรือให้ทะเบียนหมดอายุก่อน"
 
 
 def same_side_blocks(conn: Any, side: str, *, cap: int | None = None) -> bool:
