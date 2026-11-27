@@ -34,6 +34,7 @@ from jarvise_assist.quick_card import (
     handle_quick_register_callback,
     handle_quick_text,
     parse_quick_command,
+    stop_far_refusal_text,
 )
 from jarvise_assist.quick_errors import (
     e_confirm_stale,
@@ -908,7 +909,8 @@ def test_fail_never_returns_raw_reason() -> None:
     assert "zzz" not in leaked["text"]
     assert leaked["text"] == "❌ ทำรายการไม่ได้ — ดูสถานะในเมนู ⚡ Quick"
     assert REFUSAL["size_failed"] == "❌ คำนวณขนาดไม่ได้ — ตรวจยอดใน Futures"
-    assert REFUSAL["stop_far"].startswith("❌ stop ห่างเกิน 20%")
+    assert "stop_far" not in REFUSAL
+    assert stop_far_refusal_text().startswith("❌ stop ห่างเกิน 20%")
     for value in REFUSAL.values():
         assert "ลองใหม่" not in value
 

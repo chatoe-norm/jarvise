@@ -36,11 +36,16 @@ from jarvise_assist.quick import (
     create_quick_registration,
     sync_quick_trades,
 )
-from jarvise_assist.quick_card import REFUSAL, build_quick_card, handle_quick_text, parse_quick_command
+from jarvise_assist.quick_card import (
+    build_quick_card,
+    handle_quick_text,
+    parse_quick_command,
+    stop_far_refusal_text,
+)
 from jarvise_assist.quick_config import get_quick_config, set_quick_config
 from jarvise_assist.quick_errors import e_draft_stop_pct_range, e_parse_stop, e_stop_far
 from jarvise_assist.quick_execute import MSG_QUICK_TP1_OFF, build_bot_plan, cfg_became_stricter
-from jarvise_assist.quick_m1a1 import MSG_STOP_FAR, handle_quick_draft_text, handle_quick_trade_callback
+from jarvise_assist.quick_m1a1 import handle_quick_draft_text, handle_quick_trade_callback, msg_stop_far
 from jarvise_assist.real_trades import _quick_owned_client_and_order_ids
 from jarvise_assist.sizing import size_signal
 from jarvise_assist.store import claim_exec_intent, get_exec_intent, insert_exec_intent, insert_exec_log
@@ -428,9 +433,17 @@ def test_r12_confirm_read_fails_closed(
     conn.close()
 
 
-def test_r12_stop_far_default_text_unchanged() -> None:
-    assert REFUSAL["stop_far"].startswith("❌ stop ห่างเกิน 20%")
-    assert "20%" in MSG_STOP_FAR
+def test_r12_stop_far_default_text_unchanged(tmp_path: Path) -> None:
+    conn = _db(tmp_path, "far-default.db")
+    ts = _daytime_ms()
+    assert stop_far_refusal_text(conn).startswith("❌ stop ห่างเกิน 20%")
+    assert "20%" in msg_stop_far(conn)
+    set_quick_config(conn, "quick_stop_far_pct", "15", source="test", now_ms=ts)
+    assert "15%" in stop_far_refusal_text(conn)
+    assert "15%" in msg_stop_far(conn)
+    assert "20%" not in stop_far_refusal_text(conn)
+    assert "20%" not in msg_stop_far(conn)
+    conn.close()
     assert "เกิน 20%" in e_stop_far(Decimal("25"))
     assert "น้อยกว่า 20" in e_parse_stop("25%")
     assert "น้อยกว่า 20%" in e_draft_stop_pct_range("25.00")

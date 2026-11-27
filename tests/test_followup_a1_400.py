@@ -28,20 +28,30 @@ from jarvise_assist import partner_store as ps
 from jarvise_assist.partner_audit import Finding
 from jarvise_assist.partner_value import AccountValue
 from jarvise_assist.quick import REG_TTL_MS, _expire_window_phrase
-from jarvise_assist.quick_card import CARD_TTL_PREFIX, REFUSAL, build_quick_card
+from jarvise_assist.quick_card import (
+    CARD_TTL_PREFIX,
+    REFUSAL,
+    _fail,
+    build_quick_card,
+    stop_far_refusal_text,
+)
 from jarvise_assist.quick_execute import BTN_QUICK_BOT_ENTER
-from jarvise_assist.quick_m1a1 import MSG_STOP_FAR, _quoted_markup_for_card, handle_quick_trade_callback
+from jarvise_assist.quick_m1a1 import (
+    _quoted_markup_for_card,
+    _registration_refusal_text,
+    handle_quick_trade_callback,
+    msg_stop_far,
+    registration_success_message,
+)
 from jarvise_assist.real_trades import _quick_owned_client_and_order_ids
 from jarvise_assist.sizing import expected_analysis_bar_ms
 from jarvise_assist.store import get_exec_intent, insert_exec_intent, insert_exec_log
 from jarvise_ingest.db import open_db
 
 D = Decimal
-ROOT = Path(__file__).resolve().parents[1]
 runner = CliRunner()
 RECORD_TAIL = "บอทไม่ส่งคำสั่ง — กดลงทะเบียน แล้วเปิดเองใน Binance ภายใน "
 BOT_TAIL = "⚡ = บอทส่งคำสั่งหลังยืนยัน · กดลงทะเบียน = เปิดเองใน Binance ภายใน "
-NO_TP1 = "ไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"
 
 
 def _footer(text: str) -> str:
@@ -83,6 +93,44 @@ class _SecondWalletBoom(_FuturesRead):
         if self._wallet_n >= 2:
             raise RuntimeError("balance down")
         return self.balance, self.available
+
+
+class _NthFiltersBoom(_FuturesRead):
+    """Card build may read filters once. The qk:ex read is the later call."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._filters_n = 0
+
+    def symbol_filters(self, symbol: str) -> Any:
+        self._filters_n += 1
+        if self._filters_n >= 2:
+            raise RuntimeError("filters down")
+        return super().symbol_filters(symbol)
+
+
+class _StepBoom(RecordingTrade):
+    def __init__(self, *, step: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._step = step
+
+    def position_risk(self, symbol: str | None = None) -> list[Any]:
+        if self._step == "positions":
+            self.calls.append(("position_risk", {"symbol": symbol}))
+            raise RuntimeError("positions down")
+        return super().position_risk(symbol)
+
+    def mark_price(self, symbol: str) -> Decimal:
+        if self._step == "mark":
+            self.calls.append(("mark_price", {"symbol": symbol}))
+            raise RuntimeError("mark down")
+        return super().mark_price(symbol)
+
+    def symbol_filters(self, symbol: str) -> Any:
+        if self._step == "filters":
+            self.calls.append(("symbol_filters", {"symbol": symbol}))
+            raise RuntimeError("filters down")
+        return super().symbol_filters(symbol)
 
 
 def _ey(
@@ -182,10 +230,36 @@ def test_a1_record_only_footer_stays_when_button_hidden(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_a1_dust_tp_note_uses_shared_constant() -> None:
-    src = (ROOT / "src" / "jarvise_assist" / "execute.py").read_text(encoding="utf-8")
-    assert NO_TP1 not in src
-    assert "MSG_QUICK_NO_TP1" in src
+def test_a1_dust_tp_result_uses_shared_constant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.test_assist_quick_execute_a1 import _quick_preview
+
+    from jarvise_assist.execute import run_entry_sequence
+    from jarvise_assist.quick_execute import MSG_QUICK_NO_TP1
+    from jarvise_assist.store import claim_exec_intent
+
+    _bot(monkeypatch)
+    conn = _db(tmp_path, "dust-tp.db")
+    ts = _daytime_ms()
+    iid = insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="BTCUSDT",
+        side="long",
+        preview=_quick_preview(qty="0.05", tp1pct="50"),
+        created_at_ms=ts,
+        expires_at_ms=ts + 60_000,
+    )
+    claim_exec_intent(conn, iid)
+    text = run_entry_sequence(
+        conn,
+        iid,
+        trade=RecordingTrade(mark=D("100"), fill_qty=D("0.05"), fill_avg=D("100")),
+        origin="quick",
+        sleep=lambda _s: None,
+    )
+    assert MSG_QUICK_NO_TP1 in text
+    assert "ลองใหม่" not in text
+    conn.close()
 
 
 def test_a1_testnet_qk_ex_rounds_stop_to_demo_tick(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -394,6 +468,158 @@ def test_a1_qk_ex_balance_read_strips_card(tmp_path: Path, monkeypatch: pytest.M
     conn.close()
 
 
+def test_r2_qk_ex_balance_failure_sends_and_strips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _bot(monkeypatch)
+    _kill_off(monkeypatch)
+    conn = _db(tmp_path, "qkbal-send.db")
+    ts = _daytime_ms()
+    cid = _insert_quoted_card(conn, now_ms_value=ts)
+    sent: list[str] = []
+    edits: list[Any] = []
+    out = handle_quick_trade_callback(
+        conn,
+        f"qk:ex:{cid}",
+        futures=_SecondWalletBoom(mark=D("100"), balance=D("10000")),
+        send=lambda text, **_k: sent.append(str(text)) or True,
+        answer=lambda *_a, **_k: None,
+        edit=lambda *a, **k: edits.append((a, k)) or True,
+        now_ms=ts,
+        message={"message_id": 1, "chat": {"id": 1}},
+    )
+    assert out.get("reason") == "fapi_read_failed:balance", out
+    assert any("อ่านบัญชีไม่ได้ (balance)" in line for line in sent)
+    blob = json.dumps({"sent": sent, "edits": edits}, ensure_ascii=False, default=str)
+    assert '"inline_keyboard": []' in blob or '"inline_keyboard":[]' in blob
+    assert "ลองใหม่" not in blob
+    conn.close()
+
+
+def test_r2_qk_ex_filters_failure_strips_keyboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvise_assist.quick_m1a1 import MSG_REGISTER_FAILED
+
+    _bot(monkeypatch)
+    _kill_off(monkeypatch)
+    conn = _db(tmp_path, "qkfilt.db")
+    ts = _daytime_ms()
+    cid = _insert_quoted_card(conn, now_ms_value=ts)
+    answers: list[Any] = []
+    edits: list[Any] = []
+    sent: list[str] = []
+    out = handle_quick_trade_callback(
+        conn,
+        f"qk:ex:{cid}",
+        futures=_NthFiltersBoom(mark=D("100"), balance=D("10000")),
+        send=lambda text, **_k: sent.append(str(text)) or True,
+        answer=lambda text=None, **_k: answers.append(text),
+        edit=lambda *a, **k: edits.append((a, k)) or True,
+        now_ms=ts,
+        message={"message_id": 1, "chat": {"id": 1}},
+    )
+    assert out.get("reason") == "read_failed", out
+    assert MSG_REGISTER_FAILED in answers
+    blob = json.dumps({"sent": sent, "edits": edits, "answers": answers}, ensure_ascii=False, default=str)
+    assert '"inline_keyboard": []' in blob or '"inline_keyboard":[]' in blob
+    assert "ลองใหม่" not in blob
+    conn.close()
+
+
+def _main_entry_intent(conn: Any, ts: int, *, qty: str = "0.01") -> str:
+    bar = expected_analysis_bar_ms(ts)
+    _seed_analysis(conn, symbol="BTCUSDT", action="long", confidence=0.8, invalidation=99.0, ts=bar)
+    return insert_exec_intent(
+        conn,
+        kind="entry",
+        symbol="BTCUSDT",
+        side="long",
+        preview={
+            "qty": qty,
+            "entry": "100",
+            "stop": "99",
+            "target": "102",
+            "leverage": 2,
+            "seen_entry": "100",
+            "seen_stop": "99",
+        },
+        created_at_ms=ts,
+        expires_at_ms=ts + 60_000,
+    )
+
+
+@pytest.mark.parametrize("step", ["positions", "mark", "filters"])
+def test_r2_main_confirm_read_failures_strip_keyboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    from jarvise_assist.execute import _reason_th, handle_exec_callback
+
+    _bot(monkeypatch)
+    _kill_off(monkeypatch)
+    conn = _db(tmp_path, f"guard-{step}.db")
+    ts = _daytime_ms()
+    iid = _main_entry_intent(conn, ts)
+    sent: list[str] = []
+    edits: list[dict[str, Any]] = []
+
+    def edit(mid: int, text: str, reply_markup: dict[str, Any] | None = None) -> bool:
+        edits.append({"mid": mid, "text": text, "markup": reply_markup})
+        return True
+
+    out = handle_exec_callback(
+        conn,
+        f"ey:{iid}",
+        send=lambda text, **_k: sent.append(str(text)) or True,
+        answer=lambda *_a, **_k: None,
+        edit=edit,
+        trade=_StepBoom(step=step, mark=D("100")),
+        now_ms_value=ts,
+        message={"message_id": 77},
+    )
+    reason = f"fapi_read_failed:{step}"
+    thai = _reason_th(reason)
+    assert out.get("reason") == reason, out
+    assert thai == f"อ่านบัญชีไม่ได้ ({step})"
+    assert "ลองใหม่" not in thai
+    assert any(thai in line for line in sent)
+    assert any(item["markup"] == {"inline_keyboard": []} and thai in item["text"] for item in edits)
+    conn.close()
+
+
+def test_r2_main_confirm_success_path_is_not_a_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jarvise_assist.execute import _confirm_guards_entry
+
+    _bot(monkeypatch)
+    _kill_off(monkeypatch)
+    conn = _db(tmp_path, "guard-ok.db")
+    ts = _daytime_ms()
+    iid = _main_entry_intent(conn, ts, qty="0.1")
+    intent = get_exec_intent(conn, iid)
+    assert intent is not None
+    guard = _confirm_guards_entry(conn, intent, RecordingTrade(mark=D("100")), now_ms_value=ts)
+    assert guard is None or not str(guard).startswith("fapi_read_failed")
+    conn.close()
+
+
+def test_r2_registration_success_window_follows_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs = {
+        "sym": "BTCUSDT",
+        "side": "long",
+        "entry": D("100"),
+        "stop": D("90"),
+        "qty": D("0.01"),
+        "tick": D("0.1"),
+        "now_ms": _daytime_ms(),
+    }
+    default = registration_success_message(**kwargs)
+    assert "ภายใน 10 นาที" in default
+    assert "เหลือ 10 นาที" in default
+    monkeypatch.setattr("jarvise_assist.quick_m1a1.REG_TTL_MS", 15 * 60_000)
+    changed = registration_success_message(**kwargs)
+    assert "ภายใน 15 นาที" in changed
+    assert "เหลือ 15 นาที" in changed
+    assert "10 นาที" not in changed
+
+
 def test_a1_quick_cohort_menu_ids_are_owned(tmp_path: Path) -> None:
     conn = _db(tmp_path, "ids.db")
     ts = _daytime_ms()
@@ -484,26 +710,27 @@ def test_a1_lightning_hidden_when_bot_plan_missing(tmp_path: Path, monkeypatch: 
     conn.close()
 
 
-def test_a1_stop_far_constants_follow_call_time_setting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from jarvise_assist.quick_card import stop_far_refusal_text
+def test_r2_stop_far_text_reads_db_setting(tmp_path: Path) -> None:
+    import jarvise_assist.quick_m1a1 as quick_m1a1
     from jarvise_assist.quick_config import set_quick_config
-    from jarvise_assist.quick_m1a1 import msg_stop_far
 
     conn = _db(tmp_path, "far.db")
-    set_quick_config(conn, "quick_stop_far_pct", "12", source="test", now_ms=_daytime_ms())
-    assert "12%" in stop_far_refusal_text(conn)
-    assert "12%" in msg_stop_far(conn)
-    assert "20%" not in stop_far_refusal_text(conn)
+    ts = _daytime_ms()
+    assert stop_far_refusal_text(conn).startswith("❌ stop ห่างเกิน 20%")
+    assert "20%" in msg_stop_far(conn)
+    assert type(REFUSAL) is dict
+    assert "stop_far" not in REFUSAL
+    assert not hasattr(quick_m1a1, "MSG_STOP_FAR")
+    set_quick_config(conn, "quick_stop_far_pct", "15", source="test", now_ms=ts)
+    refusal = stop_far_refusal_text(conn)
+    draft = msg_stop_far(conn)
+    looked_up = _fail("stop_far", conn=conn)["text"]
+    registered = _registration_refusal_text("stop_far", conn)
+    for text in (refusal, draft, looked_up, registered):
+        assert "15%" in text
+        assert "20%" not in text
+    assert "ลองใหม่" not in refusal
     conn.close()
-
-    monkeypatch.setattr(
-        "jarvise_assist.quick_config.stop_far_limit",
-        lambda conn=None: D("12"),
-    )
-    assert "12%" in REFUSAL["stop_far"]
-    assert "12%" in MSG_STOP_FAR
 
 
 # ---------------------------------------------------------------- B
@@ -697,3 +924,137 @@ def test_b_live_safety_uses_shared_owner_events_after(
     assert late is not None and "มีรายการ partner หลังเงินโอนแล้ว" in late
     assert req is not None and "มีคำขอที่ยืนยันหลังเงินโอนแล้ว" in req
     assert seen == [False, False]
+
+
+def _insert_event_shape(
+    conn: Any,
+    *,
+    event_id: str,
+    kind: str,
+    note: str,
+    created_at_ms: int,
+    effective_at_ms: int | None,
+) -> None:
+    """Append one event. partner_event is append-only, so tests cannot UPDATE it."""
+    base = conn.execute("SELECT * FROM partner_event ORDER BY created_at_ms LIMIT 1").fetchone()
+    conn.execute(
+        """
+        INSERT INTO partner_event (
+            id, partner_id, kind, request_id, related_event_id,
+            account_value_micro, total_units_before_e8, nav,
+            units_delta_e8, cost_delta_micro, cash_micro, fee_micro,
+            units_after_e8, cost_after_micro, actor, note, created_at_ms,
+            effective_at_ms, origin, payouts_due_micro
+        ) VALUES (
+            ?, ?, ?, NULL, NULL,
+            ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?
+        )
+        """,
+        (
+            event_id,
+            base["partner_id"],
+            kind,
+            base["account_value_micro"],
+            base["total_units_before_e8"],
+            base["nav"],
+            base["units_delta_e8"],
+            base["cost_delta_micro"],
+            base["cash_micro"],
+            base["fee_micro"],
+            base["units_after_e8"],
+            base["cost_after_micro"],
+            base["actor"],
+            note,
+            int(created_at_ms),
+            None if effective_at_ms is None else int(effective_at_ms),
+            base["origin"],
+            base["payouts_due_micro"],
+        ),
+    )
+    conn.commit()
+
+
+def test_r2_hist_marker_non_owner_still_blocks(tmp_path: Path) -> None:
+    """A p-cost note with the historical marker is not judged by effective time."""
+    now = _now()
+    t = now - 2 * DAY
+    path = _make_db(tmp_path / "cost-mark.db", init_ms=now - 10 * DAY)
+    conn = open_db(path)
+    try:
+        admin_id = str(conn.execute("SELECT id FROM partner WHERE is_admin=1").fetchone()["id"])
+        booked = ps.apply_adjust_cost(
+            conn,
+            admin_id,
+            D("900"),
+            f"p cost {ps.OWNER_HIST_NOTE_MARK}",
+            D("1000"),
+            now,
+        )
+        assert booked["ok"] is True, booked
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
+
+    spoof = _make_db(tmp_path / "cost-spoof.db", init_ms=now - 10 * DAY)
+    conn = open_db(spoof)
+    try:
+        _insert_event_shape(
+            conn,
+            event_id="pe_cost_marker",
+            kind="adjust_cost",
+            note=f"p cost {ps.OWNER_HIST_NOTE_MARK}",
+            created_at_ms=now,
+            effective_at_ms=t - DAY,
+        )
+        row = conn.execute("SELECT * FROM partner_event WHERE id='pe_cost_marker'").fetchone()
+        assert row["kind"] == "adjust_cost"
+        assert int(row["effective_at_ms"]) < t < int(row["created_at_ms"])
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
+
+
+def test_r2_hist_owner_null_effective_blocks_on_created(tmp_path: Path) -> None:
+    from jarvise_assist.partner_owner_history import owner_hist_note
+
+    now = _now()
+    t = now - DAY
+    tran = "900000000099"
+    path = _make_db(tmp_path / "owner-null.db", init_ms=now - 10 * DAY)
+    conn = open_db(path)
+    try:
+        eid = pa._owner_event_id(tran)
+        booked = ps.apply_owner_deposit(
+            conn,
+            amount=D("10"),
+            account_value=D("1010"),
+            now_ms=now,
+            effective_at_ms=now - 3 * DAY,
+            note=owner_hist_note(tran),
+            event_id=eid,
+            refuse_events_after_ms=now - 3 * DAY,
+        )
+        assert booked["ok"] is True, booked
+        # The booked row's effective time is before t, so it is not the block.
+        assert ps.owner_events_after(conn, t, historical=True) is None
+        null_id = pa._owner_event_id("900000000098")
+        _insert_event_shape(
+            conn,
+            event_id=null_id,
+            kind="owner_deposit",
+            note=owner_hist_note("900000000098"),
+            created_at_ms=now,
+            effective_at_ms=None,
+        )
+        row = conn.execute("SELECT * FROM partner_event WHERE id=?", (null_id,)).fetchone()
+        assert row["kind"] == "owner_deposit"
+        assert str(row["id"]).startswith("pe_owner_tran")
+        assert row["effective_at_ms"] is None
+        assert ps.OWNER_HIST_NOTE_MARK in str(row["note"])
+        assert int(row["created_at_ms"]) > t
+        assert ps.owner_events_after(conn, t, historical=True) == "events_after_effective"
+    finally:
+        conn.close()
