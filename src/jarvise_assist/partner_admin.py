@@ -1004,7 +1004,12 @@ def _handle_owner_tx(
     finding = matches[0]
     fp = str(finding.fingerprint or "")
     tid = fp.rsplit(":", 1)[-1]
-    if ps.usdt_to_micro(Decimal(finding.amount)) > _OWNER_MAX_MICRO:
+    # Same normalize + check as confirm/booking so preview cannot pass what confirm refuses.
+    amount_q = ps.normalize_owner_amount(Decimal(finding.amount))
+    if ps.owner_amount_refusal(amount_q) is not None:
+        send(thai_reason("bad_amount"))
+        return {"ok": False, "reason": "bad_amount"}
+    if ps.usdt_to_micro(amount_q) > _OWNER_MAX_MICRO:
         send(_OWNER_AMOUNT_MAX_MSG)
         return {"ok": False, "reason": "amount_too_large"}
     if _owner_already_recorded(conn, side=side, tran_id=tid):
@@ -1036,7 +1041,6 @@ def _handle_owner_tx(
         return {"ok": False, "reason": "no_admin"}
     admin_units = ps.units_from_e8(int(admin["units_e8"]))
     admin_cost = ps.usdt_from_micro(int(admin["cost_micro"]))
-    amount_q = Decimal(finding.amount)
     if side == "dep":
         nav_pre = pl.nav(av.value - amount_q - due, u_before)
         if isinstance(nav_pre, pl.Refusal):
@@ -2108,7 +2112,11 @@ def handle_partner_callback(
                 _restore()
                 _answer("ไม่พบเงินโอนที่ยังไม่บันทึก")
                 return {"ok": False, "reason": "no_match"}
-            amount = Decimal(finding.amount)
+            amount = ps.normalize_owner_amount(Decimal(finding.amount))
+            if ps.owner_amount_refusal(amount) is not None:
+                _restore()
+                _answer(thai_reason("bad_amount"))
+                return {"ok": False, "reason": "bad_amount"}
             if ps.usdt_to_micro(amount) != preview_micro:
                 _restore()
                 _answer("จำนวนไม่ตรงกับที่ตรวจแล้ว — พิมพ์คำสั่งใหม่")

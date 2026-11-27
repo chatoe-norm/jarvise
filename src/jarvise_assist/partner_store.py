@@ -17,7 +17,7 @@ import secrets
 import sqlite3
 import unicodedata
 import uuid
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 
 from jarvise_assist import partner_fx as fx
@@ -1452,14 +1452,53 @@ def mark_paid(conn: sqlite3.Connection, request_id: str, now_ms: int) -> dict[st
         return {"ok": True}
 
 
-def _owner_amount_refusal(amount: Decimal) -> dict[str, Any] | None:
+# Owner dep/wd amounts are booked in micro-USDT (6 dp). Binance transfer rows carry
+# trailing zeros past that (e.g. '80.00000000'). Adjustable; default 6; must stay
+# within micro storage (0..6).
+OWNER_AMOUNT_DECIMALS = 6
+_OWNER_AMOUNT_DECIMALS_MAX = 6
+
+
+def _owner_decimals(decimals: int | None) -> int:
+    d = OWNER_AMOUNT_DECIMALS if decimals is None else int(decimals)
+    if not 0 <= d <= _OWNER_AMOUNT_DECIMALS_MAX:
+        raise ValueError("owner amount decimals must be within micro storage")
+    return d
+
+
+def normalize_owner_amount(amount: Decimal, *, decimals: int | None = None) -> Decimal:
+    """Drop trailing zero digits past ``decimals`` dp; keep real sub-unit digits.
+
+    '80.00000000' -> '80.000000'. '80.0000001' is returned unchanged so the
+    refusal check still says bad_amount (never rounds money away).
+    """
+    d = _owner_decimals(decimals)
     dec = Decimal(amount)
+    if not dec.is_finite():
+        return dec
+    exp = dec.as_tuple().exponent
+    if not isinstance(exp, int) or exp >= -d:
+        return dec
+    try:
+        q = dec.quantize(Decimal(1).scaleb(-d), rounding=ROUND_DOWN)
+    except InvalidOperation:
+        return dec
+    return q if q == dec else dec
+
+
+def owner_amount_refusal(amount: Decimal, *, decimals: int | None = None) -> dict[str, Any] | None:
+    """Same check for owner preview and confirm (after normalize_owner_amount)."""
+    d = _owner_decimals(decimals)
+    dec = normalize_owner_amount(Decimal(amount), decimals=d)
     if not dec.is_finite() or dec <= 0:
         return {"ok": False, "reason": "bad_amount"}
     exp = dec.as_tuple().exponent
-    if isinstance(exp, int) and exp < -6:
+    if isinstance(exp, int) and exp < -d:
         return {"ok": False, "reason": "bad_amount"}
     return None
+
+
+_owner_amount_refusal = owner_amount_refusal
 
 
 def _owner_admin_row(conn: sqlite3.Connection) -> tuple[sqlite3.Row | None, dict[str, Any] | None]:
@@ -1532,7 +1571,7 @@ def _apply_owner_tx(
     event_id: str | None = None,
 ) -> dict[str, Any]:
     """Book one owner_redeem or owner_deposit on the admin. No transfer guard."""
-    refused = _owner_amount_refusal(amount)
+    refused = owner_amount_refusal(amount)
     if refused:
         return refused
     account = Decimal(account_value)
