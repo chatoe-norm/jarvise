@@ -2211,25 +2211,39 @@ def _confirm_guards_quick_entry(
     if frozen_cfg.get("lev_used") is not None:
         lev_cap = min(lev_cap, int(frozen_cfg["lev_used"]))
 
-    mark = trade.mark_price(symbol)
+    try:
+        mark = Decimal(str(trade.mark_price(symbol)))
+    except Exception:  # noqa: BLE001
+        logger.warning("quick confirm mark read failed")
+        return "fapi_read_failed:mark"
+    if not mark.is_finite() or mark <= 0:
+        return "fapi_read_failed:mark"
     # Chase against frozen preview levels BEFORE testnet remaps entry→mark
     # (mapping would make chase always zero). Preview entry is the quote-time
     # reference (mainnet or demo mark frozen at confirm-card).
     if quick_chase_exceeded(side=side, entry=entry, stop=stop, mark=mark, chase_r=chase_r):
         return "chase"
-    filters = trade.symbol_filters(symbol)
+    try:
+        filters = trade.symbol_filters(symbol)
+    except Exception:  # noqa: BLE001
+        logger.warning("quick confirm filters read failed")
+        return "fapi_read_failed:filters"
     # Testnet: map mainnet preview levels by % onto the demo mark after chase,
     # then round stop/target to tick in the SAFE direction BEFORE sizing/budget
     # so the persisted preview matches what run_entry_sequence will submit.
+    # A preview that already carries testnet_levels was remapped at qk:ex.
     if assist_execute_mode() == "testnet":
         t1_prev = Decimal(str(preview.get("t1") or preview.get("target") or entry))
-        stop, t1_mapped = _apply_pct_levels(
-            mainnet_entry=entry,
-            mainnet_stop=stop,
-            mainnet_target=t1_prev,
-            testnet_mark=mark,
-            side=side,
-        )
+        if not preview.get("testnet_levels"):
+            stop, t1_mapped = _apply_pct_levels(
+                mainnet_entry=entry,
+                mainnet_stop=stop,
+                mainnet_target=t1_prev,
+                testnet_mark=mark,
+                side=side,
+            )
+        else:
+            t1_mapped = t1_prev
         stop = round_level_to_tick(stop, filters.tick_size, side=side, kind="stop")
         t1_mapped = round_level_to_tick(t1_mapped, filters.tick_size, side=side, kind="target")
         entry = mark
@@ -2326,6 +2340,7 @@ def _confirm_guards_quick_entry(
         budget_usdt=budget if budget > 0 else resized.budget_usdt,
     )
     cand = SignalCandidate(sized=sized, confidence=1.0, symbol_rank=0)
+    # intentional, owner decision — balance-based leverage, lev_cap enforced separately
     admitted, dropped = assign_shared_leverage([cand], available_balance=available, max_leverage=leverage)
     if dropped or not admitted:
         return "margin_cap"
@@ -3089,6 +3104,7 @@ def run_entry_sequence(
         tp_qty_used: Decimal | None = None
         if is_quick:
             # (a) TP1 share only — never a full-qty TP by default. SL stays on full qty.
+            from jarvise_assist.quick_execute import MSG_QUICK_TP1_OFF
             from jarvise_assist.quick_execute import cfg_val as _cfg_val
 
             qcfg_raw = preview.get("cfg")
@@ -3114,8 +3130,8 @@ def run_entry_sequence(
                 close_pct=tp1_pct,
             )
             if refuse is None and tp1_pct > 0 and close_q > 0:
-                tp_qty_used = close_q
                 tcid = client_order_id(intent_id, "tp")
+                placed = False
                 try:
                     algo_tp = trade.place_algo_stop(
                         symbol=symbol,
@@ -3125,6 +3141,7 @@ def run_entry_sequence(
                         order_type="TAKE_PROFIT_MARKET",
                         client_id=tcid,
                     )
+                    placed = True
                     _log_write(
                         conn,
                         intent_id=intent_id,
@@ -3148,6 +3165,7 @@ def run_entry_sequence(
                     if not _is_clear_rejection(exc):
                         found_tp = _safe_find_algo(trade, symbol=symbol, client_id=tcid)
                         if found_tp is not None:
+                            placed = True
                             _log_write(
                                 conn,
                                 intent_id=intent_id,
@@ -3162,8 +3180,10 @@ def run_entry_sequence(
                     else:
                         tp_note = "\n⚠️ วาง TP1 ไม่ได้ — มี SL คุมเต็มจำนวน"
                     # Intent outcome is not "failed" — SL protects.
+                if placed:
+                    tp_qty_used = close_q
             elif tp1_pct <= 0:
-                tp_note = "\nไม่วาง TP1 — ปิดครึ่ง 0%"
+                tp_note = "\n" + MSG_QUICK_TP1_OFF
                 t1 = target
             else:
                 tp_note = "\nไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"

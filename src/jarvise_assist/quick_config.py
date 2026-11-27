@@ -426,6 +426,21 @@ def canonical_string(key: str, value: Any) -> str:
     return _fmt_num(Decimal(str(value)))
 
 
+def stop_far_limit(conn: Any | None = None) -> Decimal:
+    """Configured max stop distance in percent. Registry default when ``conn`` is None."""
+    default = Decimal(str(_BY_KEY["quick_stop_far_pct"].default))
+    if conn is None:
+        return default
+    raw = get_quick_config(conn).values.get("quick_stop_far_pct", default)
+    return Decimal(str(raw))
+
+
+def stop_far_pct_text(limit: Decimal | None = None) -> str:
+    """Integral percents render as ``20``, matching the registry display."""
+    value = stop_far_limit() if limit is None else Decimal(str(limit))
+    return canonical_string("quick_stop_far_pct", value)
+
+
 def _parse_hhmm(raw: str) -> str | None:
     s = raw.strip()
     m = _HHMM_RE.fullmatch(s)

@@ -23,6 +23,7 @@ from jarvise_assist.quick_config import (
     UNIVERSE_ORDER,
     effective_quick_values,
     get_quick_config,
+    stop_far_limit,
 )
 from jarvise_assist.quick_cutoff import in_entry_block
 from jarvise_assist.quick_regime import quick_side_risk, quick_trend_4h
@@ -76,6 +77,7 @@ _SNAPSHOT_KEYS: tuple[str, ...] = (
     "quick_max_leverage",
     "quick_same_side_cap",
     "quick_fee_bps_per_side",
+    "quick_stop_far_pct",
 )
 
 
@@ -197,6 +199,11 @@ def cfg_became_stricter(frozen: dict[str, Any], live: dict[str, Any]) -> bool:
         return True
     if "quick_fee_bps_per_side" in frozen and _dec(live["quick_fee_bps_per_side"]) > _dec(
         frozen["quick_fee_bps_per_side"]
+    ):
+        return True
+    # Lower max stop distance refuses stops the frozen card allowed.
+    if "quick_stop_far_pct" in frozen and _dec(live["quick_stop_far_pct"]) < _dec(
+        frozen["quick_stop_far_pct"]
     ):
         return True
     # Night window: any newly blocked minute is stricter (coverage, not just width).
@@ -407,6 +414,9 @@ def build_bot_plan(
     explore_conn: Any | None = None,
 ) -> dict[str, Any] | None:
     """Size a Quick bot entry from live config. None when size fails."""
+    far = stop_far_limit(conn)
+    if entry > 0 and abs(entry - stop) / entry > far / Decimal("100"):
+        return None
     cfg_view = get_quick_config(conn)
     values = cfg_view.values
     eff = effective_quick_values(cfg_view)
@@ -450,6 +460,7 @@ def build_bot_plan(
         sized = replace(sized, leverage=leverage)
 
     # Margin: #392 0.95-available + open-fee buffer at clamped leverage.
+    # intentional, owner decision — balance-based leverage, lev_cap enforced separately
     cand = SignalCandidate(sized=sized, confidence=1.0, symbol_rank=0)
     admitted, dropped = assign_shared_leverage([cand], available_balance=available, max_leverage=leverage)
     if dropped or not admitted:

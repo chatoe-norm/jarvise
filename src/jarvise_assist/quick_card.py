@@ -119,7 +119,9 @@ def _refusal_size_failed() -> str:
 
 
 def _refusal_stop_far() -> str:
-    return "❌ stop ห่างเกิน 20% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+    from jarvise_assist.quick_config import stop_far_pct_text
+
+    return f"❌ stop ห่างเกิน {stop_far_pct_text()}% · ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 
 
 def _refusal_quick_cap() -> str:
@@ -173,7 +175,7 @@ REFUSAL: dict[str, str] = {
 }
 
 
-def parse_quick_command(text: str) -> dict[str, Any] | None:
+def parse_quick_command(text: str, *, stop_far_pct: Decimal | None = None) -> dict[str, Any] | None:
     """Parse ``q <SYMBOL> <long|short> <stop>``. None when not a quick command."""
     if not re.match(r"^\s*q(?:uick)?\s+\S", text or "", re.I):
         return None
@@ -209,7 +211,10 @@ def parse_quick_command(text: str) -> dict[str, Any] | None:
             pct = Decimal(stop_raw[:-1])
         except Exception:  # noqa: BLE001
             return stop_err
-        if not pct.is_finite() or pct <= 0 or pct >= 20:
+        from jarvise_assist.quick_config import stop_far_limit
+
+        far = stop_far_limit() if stop_far_pct is None else Decimal(str(stop_far_pct))
+        if not pct.is_finite() or pct <= 0 or pct >= far:
             return stop_err
         return {"symbol": symbol, "side": side, "stop_pct": pct}
     try:
@@ -680,10 +685,13 @@ def build_quick_card(
     ):
         return _fail("stop_wrong_side", quick_errors.e_stop_side(side_l, stop_level, mark, tick))
     if enforce_stop_far and stop_pct is None and stop is not None and mark > 0:
+        from jarvise_assist.quick_config import stop_far_limit
+
+        far = stop_far_limit(conn)
         raw_price = Decimal(str(stop))
-        if abs(raw_price - mark) / mark > Decimal("0.20"):
+        if abs(raw_price - mark) / mark > far / Decimal("100"):
             dist_pct = abs(raw_price - mark) / mark * Decimal("100")
-            return _fail("stop_far", quick_errors.e_stop_far(dist_pct))
+            return _fail("stop_far", quick_errors.e_stop_far(dist_pct, limit=far))
 
     from jarvise_assist.quick_config import effective_quick_values, get_quick_config
 
@@ -1083,6 +1091,7 @@ def build_quick_card(
 
     bot_eligible = False
     from jarvise_assist.quick_execute import (
+        build_bot_plan,
         combined_same_side_risk_usdt,
         quick_execute_enabled,
         symbol_in_quick_exec_universe,
@@ -1098,37 +1107,49 @@ def build_quick_card(
         elif size_mode == "risk":
             bot_eligible = True
             trend = quick_trend_4h(conn, sym, now_ms=now_ms)
-            is_counter, bot_risk = quick_side_risk(trend, side_l, _eff)
+            is_counter, _ = quick_side_risk(trend, side_l, _eff)
+            plan = None
             if is_counter:
-                fee_bps = Decimal(str(_cfg.values.get("quick_fee_bps_per_side") or QUICK_FEE_BPS_PER_SIDE))
-                bot_sized = size_signal(
+                plan = build_bot_plan(
+                    conn,
                     symbol=sym,
                     side=side_l,
                     entry=mark,
                     stop=stop_level,
                     balance=balance,
-                    risk_pct=bot_risk,
-                    step_size=step,
-                    fee_bps_per_side=fee_bps,
+                    available=available,
+                    step=step,
+                    tick=tick,
+                    min_qty=Decimal(str(filters.min_qty)),
+                    min_notional=Decimal(str(filters.min_notional)),
+                    now_ms=now_ms,
+                    positions=positions,
+                    orders=orders,
                 )
-                if bot_sized is not None:
-                    bot_fee = (Decimal("2") * fee_bps / Decimal("10000")) * bot_sized.notional
-                    bot_loss = bot_sized.loss_at_stop + bot_fee
+                if plan is not None:
+                    fee_bps = Decimal(
+                        str(_cfg.values.get("quick_fee_bps_per_side") or QUICK_FEE_BPS_PER_SIDE)
+                    )
+                    shown_risk = Decimal(str(plan["risk_pct_used"]))
+                    bot_qty = Decimal(str(plan["qty"]))
+                    bot_fee = (Decimal("2") * fee_bps / Decimal("10000")) * (bot_qty * mark)
+                    bot_loss = Decimal(str(plan["loss_at_stop"])) + bot_fee
                     if trend == "unknown":
                         lines.append(
-                            f"🔴 ไม่ทราบเทรนด์ · บอทใช้ risk {fmt_price(bot_risk)}%"
-                            f" · qty {fmt_qty(bot_sized.qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
+                            f"🔴 ไม่ทราบเทรนด์ · บอทใช้ risk {fmt_price(shown_risk)}%"
+                            f" · qty {fmt_qty(bot_qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
                         )
                     else:
                         lines.append(
-                            f"🔴 สวนเทรนด์ · บอทใช้ risk {fmt_price(bot_risk)}%"
-                            f" · qty {fmt_qty(bot_sized.qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
+                            f"🔴 สวนเทรนด์ · บอทใช้ risk {fmt_price(shown_risk)}%"
+                            f" · qty {fmt_qty(bot_qty)} · ถ้าชน stop ≈ {_fmt_usdt(bot_loss)} USDT"
                         )
             warn_pct = Decimal(str(_cfg.values["quick_combined_risk_warn_pct"]))
+            combined_new = new_risk if plan is None else Decimal(str(plan["loss_at_stop"]))
             combined = combined_same_side_risk_usdt(
                 conn,
                 side=side_l,
-                new_risk=new_risk,
+                new_risk=combined_new,
                 positions=positions,
                 orders=orders,
                 balance=balance,
@@ -1183,9 +1204,11 @@ def handle_quick_text(
     send: SendFn,
     now_ms: int,
 ) -> dict[str, Any] | None:
+    from jarvise_assist.quick_config import stop_far_limit
     from jarvise_assist.quick_m1a1 import create_card_from_typed_command
 
-    parsed = parse_quick_command(text)
+    far = stop_far_limit(conn)
+    parsed = parse_quick_command(text, stop_far_pct=far)
     if parsed is None:
         return None
     if parsed.get("error") == "usage":
@@ -1197,7 +1220,7 @@ def handle_quick_text(
         elif field == "symbol":
             detail = quick_errors.e_parse_symbol(token)
         elif field == "stop":
-            detail = quick_errors.e_parse_stop(token)
+            detail = quick_errors.e_parse_stop(token, limit=far)
         else:
             detail = quick_errors.e_parse_count(count)
         send(f"{detail}\n{QUICK_USAGE}")

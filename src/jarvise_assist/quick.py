@@ -587,6 +587,7 @@ def sync_quick_trades(
                         sym=sym,
                         side=side,
                         kind="no_fill",
+                        window_ms=UNRESOLVED_EXEC_KEEP_MS,
                     )
                     continue
             elif int(now_ms) <= expires + REG_EXPIRE_GRACE_MS:
@@ -627,6 +628,7 @@ def sync_quick_trades(
                     sym=sym,
                     side=side,
                     kind="no_fill",
+                    window_ms=int(expires) - int(created),
                 )
                 continue
             else:
@@ -645,6 +647,7 @@ def sync_quick_trades(
                     sym=sym,
                     side=side,
                     kind="no_fill",
+                    window_ms=int(expires) - int(created),
                 )
                 continue
 
@@ -804,6 +807,23 @@ def sync_quick_trades(
     return {k: v for k, v in info.items() if v}
 
 
+def _expire_window_phrase(window_ms: int) -> str:
+    """Registration window as whole minutes, or hours when it lands on an hour."""
+    minute_ms = 60_000
+    whole_min = int(
+        (Decimal(int(window_ms)) / Decimal(minute_ms)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    if whole_min < 0:
+        whole_min = 0
+    # 60 minutes in an hour — clock unit, same factor as UNRESOLVED_EXEC_KEEP_MS, not a policy.
+    hours, mins = divmod(whole_min, 60)
+    if hours and mins:
+        return f"{hours} ชม. {mins} นาที"
+    if hours:
+        return f"{hours} ชม."
+    return f"{mins} นาที"
+
+
 def _send_reg_expire_notice(
     send: SendFn,
     *,
@@ -811,13 +831,15 @@ def _send_reg_expire_notice(
     side: str,
     kind: str,
     opposite: str | None = None,
+    window_ms: int | None = None,
 ) -> None:
     from jarvise_assist.quick_card import quick_mode_tag
 
     label = _side_menu_label(side)
     try:
         if kind == "no_fill":
-            text = f"⌛ ลงทะเบียน quick {sym} {label} หมดเวลา — ไม่พบไม้ภายใน 10 นาที (ไม่นับเป็น quick)"
+            span = _expire_window_phrase(REG_TTL_MS if window_ms is None else int(window_ms))
+            text = f"⌛ ลงทะเบียน quick {sym} {label} หมดเวลา — ไม่พบไม้ภายใน {span} (ไม่นับเป็น quick)"
         elif kind == "wrong_side" and opposite:
             text = (
                 f"⌛ ลงทะเบียน quick {sym} {label} ถูกยกเลิก — ไม้แรกเป็นฝั่ง {opposite} จึงนับเป็นไม้ปกติ (ระบบหลักเฝ้าให้)"

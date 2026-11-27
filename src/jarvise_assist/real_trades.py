@@ -985,42 +985,6 @@ def _quick_owned_client_and_order_ids(
             algo_ids.add((sym, oid))
         else:
             order_ids.add((sym, oid))
-    # Exec-linked registrations whose market fill may only live on the registration.
-    try:
-        regs = conn.execute(
-            """
-            SELECT exec_intent_id FROM assist_quick_registration
-            WHERE exec_intent_id IS NOT NULL
-            """
-        ).fetchall()
-    except Exception:  # noqa: BLE001
-        regs = []
-    for reg in regs:
-        eid = str(reg["exec_intent_id"] or "")
-        if not eid:
-            continue
-        meta = _intent_preview(conn, eid)
-        preview = meta.get("preview") or {}
-        if not isinstance(preview, dict) or preview.get("origin") != "quick":
-            continue
-        sym = str(meta.get("symbol") or preview.get("symbol") or "").upper()
-        for log in conn.execute(
-            """
-            SELECT client_order_id, order_or_algo_id, step FROM assist_exec_log
-            WHERE intent_id=?
-            """,
-            (eid,),
-        ).fetchall():
-            if log["client_order_id"]:
-                cids.add(str(log["client_order_id"]))
-            oid = str(log["order_or_algo_id"] or "")
-            if not oid or not sym:
-                continue
-            step = str(log["step"] or "")
-            if step in _ALGO_STEPS or step.endswith("_algo"):
-                algo_ids.add((sym, oid))
-            else:
-                order_ids.add((sym, oid))
     return cids, order_ids, algo_ids
 
 

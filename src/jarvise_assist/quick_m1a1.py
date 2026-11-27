@@ -35,6 +35,8 @@ from jarvise_assist.quick_config import (
     canonical_string,
     effective_quick_values,
     get_quick_config,
+    stop_far_limit,
+    stop_far_pct_text,
 )
 from jarvise_assist.quick_cutoff import cutoff_block_text, in_entry_block
 from jarvise_assist.quick_errors import (
@@ -91,7 +93,7 @@ MSG_ALREADY_REGISTERED = "ลงทะเบียนไปแล้ว — ด�
 MSG_CARD_QUOTE_EXPIRED = "การ์ดหมดอายุ — กด 🔄 อัปเดตราคา ก่อนลงทะเบียน"
 MSG_REGISTER_FAILED = "ลงทะเบียนไม่สำเร็จ — ยังไม่ได้ลงทะเบียน · ดูสถานะในเมนู ⚡ Quick"
 MSG_SIZE_CHANGED = "ขนาดเปลี่ยนจากการ์ด — ยังไม่ได้ลงทะเบียน · กด 🔄 อัปเดตราคา"
-MSG_STOP_FAR = "stop ห่างเกิน 20% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
+MSG_STOP_FAR = f"stop ห่างเกิน {stop_far_pct_text()}% — ถ้าหมายถึงเปอร์เซ็นต์ให้ใส่ % (เช่น 0.5%)"
 _DRAFT_NUMERIC_TOKEN = re.compile(r"[0-9][0-9.,]*%?")
 
 
@@ -526,10 +528,12 @@ def _handle_qk_ex(
     from jarvise_assist.quick_execute import (
         any_non_jv_open_order,
         build_bot_plan,
+        check_quick_and_portfolio_caps,
         format_quick_confirm_text,
         in_quick_bot_night,
         pause_blocks_bot,
         quick_execute_enabled,
+        quick_stop_buffer_ok,
         same_side_blocks,
         symbol_busy_for_bot,
         symbol_in_quick_exec_universe,
@@ -614,35 +618,57 @@ def _handle_qk_ex(
         answer(MSG_REGISTER_FAILED)
         return {"ok": False, "reason": "read_failed"}
 
-    if not card.get("ok"):
-        send(str(card.get("text") or REFUSAL.get("read_failed", "")))
+    card_text = str(card.get("text") or REFUSAL.get("read_failed", ""))
+    quoted_ok = bool(card.get("ok"))
+    # Record-only quick_cap uses full risk. The bot plan is counter-trend sized,
+    # so re-check that cap on the plan instead of refusing the card text.
+    if not quoted_ok and card.get("reason") != "quick_cap":
+        send(card_text)
         answer(None)
         return {"ok": False, "reason": card.get("reason")}
 
-    orders = list(card.get("orders") or [])
-    if not orders and futures is not None:
+    if quoted_ok:
+        orders = list(card.get("orders") or [])
+        if not orders and futures is not None:
+            try:
+                orders = list(futures.all_open_orders())
+            except Exception:  # noqa: BLE001
+                orders = []
+        positions = list(card.get("positions") or [])
+        entry = Decimal(str(card["entry"]))
+        stop = Decimal(str(card["stop"]))
+        tick = Decimal(str(card.get("tick") or "0.0001"))
+    else:
         try:
+            entry = Decimal(str(row["quote_entry"]))
+            stop = Decimal(str(row["quote_stop"]))
             orders = list(futures.all_open_orders())
+            try:
+                positions = list(futures.position_risk(symbol=sym))
+            except TypeError:
+                positions = list(futures.position_risk())
+            tick = Decimal(str(futures.symbol_filters(sym).tick_size))
         except Exception:  # noqa: BLE001
-            orders = []
+            logger.exception("qk:ex quoted levels unreadable card_id=%s", card_id)
+            send(card_text)
+            answer(None)
+            return {"ok": False, "reason": card.get("reason")}
+
     if any_non_jv_open_order(orders, sym):
         answer(None)
         send("มีออเดอร์ที่ไม่ใช่ jv- บนสัญลักษณ์นี้ (รวม reduce-only) — ยกเลิกก่อน")
         return {"ok": False, "reason": "non_jv_order"}
 
-    positions = list(card.get("positions") or [])
     for pos in positions:
         if str(getattr(pos, "symbol", "") or "").upper() == sym:
             answer(None)
             send(REFUSAL.get("main_position", "ถือ position อยู่แล้ว"))
             return {"ok": False, "reason": "open_position"}
 
-    entry = Decimal(str(card["entry"]))
-    stop = Decimal(str(card["stop"]))
-    tick = Decimal(str(card.get("tick") or "0.0001"))
     testnet_levels = False
+    sizing_client = futures
     # Testnet: freeze demo mark into the preview so confirm chase is demo-to-demo
-    # (card futures is mainnet read; trade client is demo).
+    # (card futures is mainnet read; trade client is demo). Size from that same book.
     if assist_execute_mode() == "testnet":
         from jarvise_assist.execute import _apply_pct_levels, build_trade_client
 
@@ -672,9 +698,10 @@ def _handle_qk_ex(
         )
         entry = demo_mark
         testnet_levels = True
+        sizing_client = trade_ro
     try:
-        balance, available = futures.usdt_wallet_and_available()
-        filters = futures.symbol_filters(sym)
+        balance, available = sizing_client.usdt_wallet_and_available()
+        filters = sizing_client.symbol_filters(sym)
         balance = Decimal(str(balance))
         available = Decimal(str(available))
         step = Decimal(str(filters.step_size))
@@ -684,6 +711,13 @@ def _handle_qk_ex(
         logger.exception("qk:ex wallet/filters failed")
         answer(MSG_REGISTER_FAILED)
         return {"ok": False, "reason": "read_failed"}
+
+    far = stop_far_limit(conn)
+    if entry > 0 and abs(stop - entry) / entry > far / Decimal("100"):
+        dist_pct = abs(stop - entry) / entry * Decimal("100")
+        answer(None)
+        send(e_stop_far(dist_pct, limit=far))
+        return {"ok": False, "reason": "stop_far"}
 
     plan = build_bot_plan(
         conn,
@@ -705,6 +739,49 @@ def _handle_qk_ex(
         answer(None)
         send("คำนวณขนาดบอทไม่ได้ — กด 🔄 อัปเดตราคา")
         return {"ok": False, "reason": "size_failed"}
+
+    from jarvise_assist.execute import _reason_th
+    from jarvise_assist.sizing import round_trip_fee_rate
+
+    plan_stop = Decimal(str(plan["stop"]))
+    buf_pct = Decimal(str(values["quick_stop_buffer_pct"]))
+    buf_ticks = int(values["quick_stop_buffer_ticks"])
+    if not quick_stop_buffer_ok(
+        side=side,
+        mark=entry,
+        stop=plan_stop,
+        tick=tick,
+        buffer_pct=buf_pct,
+        buffer_ticks=buf_ticks,
+    ):
+        answer(None)
+        send(_reason_th("stop_buffer"))
+        return {"ok": False, "reason": "stop_buffer"}
+    fee_bps = Decimal(str(values["quick_fee_bps_per_side"]))
+    max_fee_r = Decimal(str(values["quick_max_fee_r"]))
+    r_dist = abs(entry - plan_stop)
+    if r_dist <= 0:
+        answer(None)
+        send(_reason_th("stop_wrong_side"))
+        return {"ok": False, "reason": "stop_wrong_side"}
+    fee_r = (round_trip_fee_rate(fee_bps) * entry) / r_dist
+    if fee_r > max_fee_r:
+        answer(None)
+        send(_reason_th("fee_r"))
+        return {"ok": False, "reason": "fee_r"}
+    cap_hit = check_quick_and_portfolio_caps(
+        conn,
+        balance=balance,
+        new_risk=Decimal(str(plan["loss_at_stop"])),
+        positions=positions,
+        orders=orders,
+        now_ms=now_ms,
+        cap_pct=Decimal(str(values["quick_risk_cap_pct"])),
+    )
+    if cap_hit:
+        answer(None)
+        send(_reason_th(cap_hit))
+        return {"ok": False, "reason": cap_hit}
 
     ttl_s = int(values["quick_confirm_ttl_s"])
     preview = {
@@ -1679,12 +1756,13 @@ def handle_quick_draft_text(
                 pct = Decimal(pct_m.group(1))
             except Exception:  # noqa: BLE001
                 return None
-            if pct <= 0 or pct >= 20:
+            far_limit = stop_far_limit(conn)
+            if pct <= 0 or pct >= far_limit:
                 side = str(draft["side"])
                 sym0 = str(draft.get("symbol") or sym)
                 hint = "\n".join(
                     [
-                        e_draft_stop_pct_range(fmt_pct_bounded(pct)),
+                        e_draft_stop_pct_range(fmt_pct_bounded(pct), limit=far_limit),
                         f"⚡ Quick · {sym0} · {_side_label(side)} — {STOP_STEP_HINT}",
                         _mode_tag(),
                     ]
@@ -1753,6 +1831,7 @@ def handle_quick_draft_text(
             send(cutoff_block_text(now_ms), reply_markup=_stop_step_markup_for(conn, card_id))
             return {"handled": True, "rejected": True}
         far_pct: Decimal | None = None
+        far_limit = stop_far_limit(conn)
         if futures is not None:
             try:
                 mark = Decimal(str(futures.mark_price(sym)))
@@ -1762,12 +1841,12 @@ def handle_quick_draft_text(
                         dist_pct = ratio * Decimal("100")
                     except Overflow:
                         ratio = dist_pct = Decimal("Infinity")
-                    if ratio > Decimal("0.2") and not token.endswith("%"):
+                    if ratio > far_limit / Decimal("100") and not token.endswith("%"):
                         far_pct = dist_pct
             except Exception:  # noqa: BLE001
                 pass
         if far_pct is not None:
-            send(e_stop_far(far_pct))
+            send(e_stop_far(far_pct, limit=far_limit))
             return {"handled": True, "rejected": True}
         cur = conn.execute(
             """
