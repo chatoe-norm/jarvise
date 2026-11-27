@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Validate and strip managed platform_toolsets for Hermes Stage A (F4).
+"""Validate and strip managed platform_toolsets for Hermes Stage A (R2/R3).
 
 Prefers ``yaml.safe_load`` when PyYAML is installed (CI / local tests).
-The pinned Hermes image may lack PyYAML; then a structural subset parser
-handles only ``platform_toolsets.api_server`` / ``cli`` (block and flow
-lists). It does **not** refuse merely because an unrelated nested
-``skills:`` key exists, and it does not use the old text-regex security check.
+Without PyYAML (pinned Hermes image), a fail-closed structural parser
+handles only column-0 ``platform_toolsets`` with direct ``api_server`` /
+``cli`` children. Quoted keys, merges, anchors/aliases, and missing
+managed keys refuse start. Nested ``api_server`` under another key cannot
+mask the direct unsafe list.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,27 +39,34 @@ def _as_list(value: Any) -> list[Any] | None:
     return None
 
 
-def _strip_validate_mapping(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    platform = data.get("platform_toolsets")
-    if platform is None:
-        return data, False
-    if not isinstance(platform, dict):
-        raise ValueError("platform_toolsets_not_mapping")
-
+def _require_toolsets(platform: dict[str, Any]) -> tuple[dict[str, list[Any]], bool]:
+    """Return cleaned managed lists and whether skills was stripped."""
     changed = False
+    cleaned_map: dict[str, list[Any]] = {}
     for key in MANAGED_KEYS:
-        raw = platform.get(key)
-        items = _as_list(raw)
+        if key not in platform:
+            raise ValueError(f"missing_toolset:{key}")
+        items = _as_list(platform.get(key))
         if items is None:
             raise ValueError(f"toolset_not_list:{key}")
         cleaned = [x for x in items if x != "skills"]
         if cleaned != items:
             changed = True
-            platform[key] = cleaned
-            items = cleaned
-        names = {str(x) for x in items}
+        names = {str(x) for x in cleaned}
         if names != ALLOWED_TOOLSETS:
             raise ValueError(f"unsafe_toolset:{key}:{sorted(names)}")
+        cleaned_map[key] = cleaned
+        platform[key] = cleaned
+    return cleaned_map, changed
+
+
+def _strip_validate_mapping(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    platform = data.get("platform_toolsets")
+    if platform is None:
+        raise ValueError("missing_platform_toolsets")
+    if not isinstance(platform, dict):
+        raise ValueError("platform_toolsets_not_mapping")
+    _cleaned, changed = _require_toolsets(platform)
     return data, changed
 
 
@@ -70,17 +80,32 @@ def _parse_flow_list(raw: str) -> list[str] | None:
     return [part.strip().strip("'\"") for part in body.split(",") if part.strip()]
 
 
+def _reject_unsupported_syntax(text: str) -> None:
+    """Fail closed on YAML features the structural parser does not understand."""
+    if re.search(r"(?m)^[\"'].*[\"']\s*:", text):
+        raise ValueError("quoted_key_unsupported")
+    if "<<" in text:
+        raise ValueError("merge_unsupported")
+    # Anchors / aliases (not inside comments).
+    for line in text.splitlines():
+        stripped = line.split("#", 1)[0]
+        if re.search(r"(^|[\s\[\{,])&[A-Za-z0-9_-]+", stripped):
+            raise ValueError("anchor_unsupported")
+        if re.search(r"(^|[\s\[\{,])\*[A-Za-z0-9_-]+", stripped):
+            raise ValueError("alias_unsupported")
+
+
 def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
-    """Minimal structural pass when PyYAML is unavailable (Hermes image)."""
+    """Fail-closed structural pass when PyYAML is unavailable (Hermes image)."""
+    _reject_unsupported_syntax(text)
     lines = text.splitlines(keepends=True)
-    # Locate platform_toolsets block (indent 0).
-    start = -1
-    for i, line in enumerate(lines):
-        if re.match(r"^platform_toolsets\s*:", line):
-            start = i
-            break
-    if start < 0:
-        return text, False
+
+    starts = [i for i, line in enumerate(lines) if re.match(r"^platform_toolsets\s*:", line)]
+    if not starts:
+        raise ValueError("missing_platform_toolsets")
+    if len(starts) > 1:
+        raise ValueError("duplicate_platform_toolsets")
+    start = starts[0]
 
     end = len(lines)
     for j in range(start + 1, len(lines)):
@@ -92,22 +117,48 @@ def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
             end = j
             break
 
-    # Collect managed keys inside the block.
+    # First non-comment child indent under platform_toolsets defines the direct level.
+    direct_indent: int | None = None
+    for j in range(start + 1, end):
+        if not lines[j].strip() or lines[j].lstrip().startswith("#"):
+            continue
+        direct_indent = len(lines[j]) - len(lines[j].lstrip(" "))
+        break
+    if direct_indent is None:
+        raise ValueError("empty_platform_toolsets")
+
     key_info: dict[str, dict[str, Any]] = {}
     i = start + 1
     while i < end:
         line = lines[i]
+        if not line.strip() or line.lstrip().startswith("#"):
+            i += 1
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        # Skip nested mappings (indent deeper than direct children).
+        if indent > direct_indent:
+            i += 1
+            continue
+        if indent < direct_indent:
+            break
         m = re.match(r"^(\s+)(api_server|cli)\s*:\s*(.*)$", line)
         if not m:
             i += 1
             continue
-        indent, key, rest = m.group(1), m.group(2), m.group(3).strip()
+        key, rest = m.group(2), m.group(3).strip()
+        if key in key_info:
+            raise ValueError(f"duplicate_toolset:{key}")
         flow = _parse_flow_list(rest) if rest else None
         if flow is not None:
-            key_info[key] = {"mode": "flow", "index": i, "indent": indent, "items": flow}
+            key_info[key] = {
+                "mode": "flow",
+                "index": i,
+                "indent": m.group(1),
+                "items": flow,
+                "item_indexes": [],
+            }
             i += 1
             continue
-        # Block list: following lines at greater indent starting with "- "
         items: list[str] = []
         item_indexes: list[int] = []
         k = i + 1
@@ -117,7 +168,7 @@ def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
                 k += 1
                 continue
             im = re.match(r"^(\s+)-\s+(\S+)\s*(#.*)?$", item_line)
-            if not im or len(im.group(1)) <= len(indent):
+            if not im or len(im.group(1)) <= indent:
                 break
             items.append(im.group(2))
             item_indexes.append(k)
@@ -125,7 +176,7 @@ def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
         key_info[key] = {
             "mode": "block",
             "index": i,
-            "indent": indent,
+            "indent": m.group(1),
             "items": items,
             "item_indexes": item_indexes,
         }
@@ -145,25 +196,111 @@ def _structural_strip_and_validate(text: str) -> tuple[str, bool]:
     if not any(key_info[k]["changed"] for k in MANAGED_KEYS):
         return text, False
 
-    # Rewrite changed keys only.
-    out_lines = list(lines)
-    # Process from bottom so indexes stay valid.
-    for key in reversed(MANAGED_KEYS):
+    # Collect deletion/rewrite ops by descending source offsets (R3).
+    ops: list[tuple[int, str, dict[str, Any]]] = []
+    for key in MANAGED_KEYS:
         info = key_info[key]
         if not info["changed"]:
             continue
+        ops.append((info["index"], key, info))
+    ops.sort(key=lambda t: t[0], reverse=True)
+
+    out_lines = list(lines)
+    for _idx, _key, info in ops:
         cleaned: list[str] = info["cleaned"]
         if info["mode"] == "flow":
             rendered = ", ".join(cleaned)
-            out_lines[info["index"]] = f"{info['indent']}{key}: [{rendered}]\n"
+            out_lines[info["index"]] = f"{info['indent']}{_key}: [{rendered}]\n"
         else:
-            # Drop skills item lines; keep web.
             drop = {
-                idx for idx, val in zip(info["item_indexes"], info["items"], strict=True) if val == "skills"
+                line_i
+                for line_i, val in zip(info["item_indexes"], info["items"], strict=True)
+                if val == "skills"
             }
-            for idx in sorted(drop, reverse=True):
-                del out_lines[idx]
-    return "".join(out_lines), True
+            for line_i in sorted(drop, reverse=True):
+                del out_lines[line_i]
+
+    out = "".join(out_lines)
+    # Re-validate before returning (refuse to write a broken rewrite).
+    again, changed_again = _structural_strip_and_validate_nocheck(out)
+    if changed_again:
+        raise ValueError("rewrite_still_dirty")
+    # Ensure both keys are still exactly {web}.
+    _ = again
+    return out, True
+
+
+def _structural_strip_and_validate_nocheck(text: str) -> tuple[str, bool]:
+    """Second-pass validate that does not rewrite (detect residual skills)."""
+    _reject_unsupported_syntax(text)
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if re.match(r"^platform_toolsets\s*:", line)]
+    if not starts:
+        raise ValueError("missing_platform_toolsets")
+    start = starts[0]
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if (
+            lines[j].strip()
+            and not lines[j].startswith((" ", "\t"))
+            and not lines[j].lstrip().startswith("#")
+        ):
+            end = j
+            break
+    direct_indent: int | None = None
+    for j in range(start + 1, end):
+        if not lines[j].strip() or lines[j].lstrip().startswith("#"):
+            continue
+        direct_indent = len(lines[j]) - len(lines[j].lstrip(" "))
+        break
+    if direct_indent is None:
+        raise ValueError("empty_platform_toolsets")
+    found: dict[str, list[str]] = {}
+    i = start + 1
+    while i < end:
+        line = lines[i]
+        if not line.strip() or line.lstrip().startswith("#"):
+            i += 1
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent > direct_indent:
+            i += 1
+            continue
+        if indent < direct_indent:
+            break
+        m = re.match(r"^(\s+)(api_server|cli)\s*:\s*(.*)$", line)
+        if not m:
+            i += 1
+            continue
+        key, rest = m.group(2), m.group(3).strip()
+        flow = _parse_flow_list(rest) if rest else None
+        if flow is not None:
+            found[key] = flow
+            i += 1
+            continue
+        items = []
+        k = i + 1
+        while k < end:
+            item_line = lines[k]
+            if not item_line.strip() or item_line.lstrip().startswith("#"):
+                k += 1
+                continue
+            im = re.match(r"^(\s+)-\s+(\S+)\s*(#.*)?$", item_line)
+            if not im or len(im.group(1)) <= indent:
+                break
+            items.append(im.group(2))
+            k += 1
+        found[key] = items
+        i = k
+    for key in MANAGED_KEYS:
+        if key not in found:
+            raise ValueError(f"missing_toolset:{key}")
+        names = {str(x) for x in found[key] if x != "skills"}
+        if "skills" in found[key]:
+            return text, True
+        if names != ALLOWED_TOOLSETS:
+            raise ValueError(f"unsafe_toolset:{key}:{sorted(names)}")
+    return text, False
 
 
 def strip_and_validate(text: str) -> tuple[str, bool]:
@@ -182,6 +319,11 @@ def strip_and_validate(text: str) -> tuple[str, bool]:
         if not changed:
             return text, False
         out = yaml.safe_dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        # Confirm dump still validates.
+        reloaded = yaml.safe_load(out)
+        if not isinstance(reloaded, dict):
+            raise ValueError("rewrite_invalid")
+        _strip_validate_mapping(reloaded)
         return out, True
     return _structural_strip_and_validate(text)
 
@@ -196,7 +338,24 @@ def process_path(path: Path, *, write: bool = True) -> int:
         print(f"[hermes-config] refuse: {exc}", file=sys.stderr)
         return 1
     if changed and write:
-        path.write_text(out, encoding="utf-8")
+        # Atomic replace after re-validation already done in strip_and_validate.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".hermes-config-",
+            suffix=".yaml",
+            dir=str(path.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(out)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
         print("[hermes-config] stripped skills from platform_toolsets")
     return 0
 
@@ -218,8 +377,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.config:
         path = Path(args.config)
     else:
-        import os
-
         path = Path(os.environ.get("HERMES_HOME", "/opt/data")) / "config.yaml"
     return process_path(path, write=not args.check)
 

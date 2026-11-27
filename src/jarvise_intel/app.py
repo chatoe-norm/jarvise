@@ -15,12 +15,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 from jarvise_intel.digest import (
+    ACTIVE_ADMISSION_STATUSES,
     MAX_ATTEMPTS,
     adopt_existing_digest,
     assert_current_slot,
     assert_round_trip,
     assert_smoke_confined,
+    clear_active_admission,
     extract_json_object,
+    load_active_admission,
     load_slot_record,
     parse_slot,
     publish_digest,
@@ -28,6 +31,7 @@ from jarvise_intel.digest import (
     render_markdown,
     try_acquire_inflight,
     validate_items,
+    write_active_admission,
     write_slot_record,
 )
 from jarvise_intel.gateway import (
@@ -189,6 +193,35 @@ def _resume_past_deadline(existing: dict[str, Any], cfg: AdapterConfig) -> bool:
     return elapsed >= cfg.deadline_s
 
 
+def _mark_active(
+    cfg: AdapterConfig,
+    *,
+    slot: Any,
+    status: str,
+    attempt: int,
+    idem: str | None,
+    started_at: str | None,
+    run_id: str = "",
+    error: str | None = None,
+) -> None:
+    record: dict[str, Any] = {
+        "status": status,
+        "slot": slot.label,
+        "attempt": attempt,
+        "idempotency_key": idem,
+        "started_at": started_at,
+    }
+    if run_id:
+        record["run_id"] = run_id
+    if error:
+        record["error"] = error
+    write_slot_record(cfg.state_dir, slot, record)
+    if status in ACTIVE_ADMISSION_STATUSES:
+        write_active_admission(cfg.state_dir, record)
+    else:
+        clear_active_admission(cfg.state_dir, slot_label=slot.label)
+
+
 def _handle_resume(
     cfg: AdapterConfig,
     *,
@@ -198,10 +231,12 @@ def _handle_resume(
     """Resume running/unknown. Returns response or None to fall through after terminal fail."""
     run_id = str(existing.get("run_id") or "").strip()
     if not run_id:
+        # create_unconfirmed / unknown without id: keep blocking; do not invent a prior id.
         return 409, {"ok": False, "error": "unknown_run"}
     gateway = _gateway(cfg)
     attempt = int(existing.get("attempt") or 1)
     idem = existing.get("idempotency_key")
+    started_at = existing.get("started_at")
 
     past_deadline = _resume_past_deadline(existing, cfg)
     if past_deadline:
@@ -209,30 +244,30 @@ def _handle_resume(
         try:
             current = get_run(gateway, run_id)
         except GatewayError as exc:
-            write_slot_record(
-                cfg.state_dir,
-                slot,
-                {
-                    **existing,
-                    "status": "unknown",
-                    "run_id": run_id,
-                    "error": exc.category,
-                },
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="unknown",
+                attempt=attempt,
+                idem=str(idem) if idem else None,
+                started_at=str(started_at) if started_at else None,
+                run_id=run_id,
+                error=exc.category,
             )
             return 409, {"ok": False, "error": "unknown_run"}
     else:
         try:
             current = get_run(gateway, run_id)
         except GatewayError as exc:
-            write_slot_record(
-                cfg.state_dir,
-                slot,
-                {
-                    **existing,
-                    "status": "unknown",
-                    "run_id": run_id,
-                    "error": exc.category,
-                },
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="unknown",
+                attempt=attempt,
+                idem=str(idem) if idem else None,
+                started_at=str(started_at) if started_at else None,
+                run_id=run_id,
+                error=exc.category,
             )
             return 409, {"ok": False, "error": "unknown_run"}
 
@@ -240,16 +275,15 @@ def _handle_resume(
         try:
             finalized = finalize_completed(gateway, current)
         except GatewayError as exc:
-            write_slot_record(
-                cfg.state_dir,
-                slot,
-                {
-                    "status": "invalid_result",
-                    "attempt": attempt,
-                    "run_id": run_id,
-                    "idempotency_key": idem,
-                    "error": exc.category,
-                },
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="invalid_result",
+                attempt=attempt,
+                idem=str(idem) if idem else None,
+                started_at=str(started_at) if started_at else None,
+                run_id=run_id,
+                error=exc.category,
             )
             return 502, {"ok": False, "error": exc.category}
         try:
@@ -260,40 +294,85 @@ def _handle_resume(
                 attempt=attempt,
                 idem=str(idem) if idem else None,
             )
+            clear_active_admission(cfg.state_dir, slot_label=slot.label)
             return 200, {"ok": True, "replay": bool(record.get("replay")), "result": record}
         except (ValueError, FileExistsError) as exc:
-            write_slot_record(
-                cfg.state_dir,
-                slot,
-                {
-                    "status": "invalid_result",
-                    "attempt": attempt,
-                    "run_id": run_id,
-                    "idempotency_key": idem,
-                    "error": str(exc),
-                },
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="invalid_result",
+                attempt=attempt,
+                idem=str(idem) if idem else None,
+                started_at=str(started_at) if started_at else None,
+                run_id=run_id,
+                error=str(exc),
             )
             return 502, {"ok": False, "error": str(exc)}
 
     if current.status in TERMINAL_FAIL:
-        write_slot_record(
-            cfg.state_dir,
-            slot,
-            {
-                "status": "failed_terminal",
-                "attempt": attempt,
-                "run_id": run_id,
-                "idempotency_key": idem,
-            },
+        _mark_active(
+            cfg,
+            slot=slot,
+            status="failed_terminal",
+            attempt=attempt,
+            idem=str(idem) if idem else None,
+            started_at=str(started_at) if started_at else None,
+            run_id=run_id,
         )
         return None  # fall through to _next_attempt
 
-    write_slot_record(
-        cfg.state_dir,
-        slot,
-        {**existing, "status": "unknown", "run_id": run_id},
+    _mark_active(
+        cfg,
+        slot=slot,
+        status="unknown",
+        attempt=attempt,
+        idem=str(idem) if idem else None,
+        started_at=str(started_at) if started_at else None,
+        run_id=run_id,
     )
     return 409, {"ok": False, "error": "unknown_run"}
+
+
+def _block_other_active_admission(
+    cfg: AdapterConfig,
+    *,
+    slot: Any,
+) -> tuple[int, dict[str, Any]] | None:
+    """R5: another slot's unpaid/unknown admission blocks every other slot."""
+    active = load_active_admission(cfg.state_dir)
+    if active is None:
+        return None
+    status = str(active.get("status") or "")
+    if status not in ACTIVE_ADMISSION_STATUSES:
+        clear_active_admission(cfg.state_dir)
+        return None
+    other = str(active.get("slot") or "")
+    if other == slot.label:
+        return None
+    # Reconcile the other admission; do not create for this slot while unresolved.
+    other_slot = None
+    try:
+        other_slot = parse_slot(other, smoke_allowed=True)
+    except ValueError:
+        return 409, {"ok": False, "error": "admission_busy", "slot": other}
+    other_record = load_slot_record(cfg.state_dir, other_slot) or active
+    if str(other_record.get("status") or "") in {"running", "unknown"} and str(
+        other_record.get("run_id") or ""
+    ):
+        resumed = _handle_resume(cfg, slot=other_slot, existing=other_record)
+        if resumed is not None:
+            # Other still unresolved (or completed/invalid for that slot) — block this slot.
+            still = load_active_admission(cfg.state_dir)
+            if still and str(still.get("status") or "") in ACTIVE_ADMISSION_STATUSES:
+                return 409, {"ok": False, "error": "admission_busy", "slot": other}
+            # Cleared by terminal path — allow this slot to continue.
+            return None
+        # Terminal fail cleared via _mark_active failed_terminal — continue.
+        still = load_active_admission(cfg.state_dir)
+        if still and str(still.get("status") or "") in ACTIVE_ADMISSION_STATUSES:
+            return 409, {"ok": False, "error": "admission_busy", "slot": other}
+        return None
+    return 409, {"ok": False, "error": "admission_busy", "slot": other}
 
 
 def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -337,12 +416,22 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
         if adopted is not None:
             return 200, {"ok": True, "replay": True, "result": adopted}
 
+        # R5: another slot's active paid admission blocks this one.
+        blocked = _block_other_active_admission(cfg, slot=slot)
+        if blocked is not None:
+            return blocked
+
         # Resume an in-flight run after restart (no second create while unknown/running).
         if existing and existing.get("status") in {"running", "unknown"}:
             resumed = _handle_resume(cfg, slot=slot, existing=existing)
             if resumed is not None:
                 return resumed
             existing = load_slot_record(cfg.state_dir, slot)
+
+        # create_unconfirmed for this slot: resume same key without inventing a run_id.
+        if existing and existing.get("status") == "create_unconfirmed":
+            # Fall through to create with the same attempt/key/started_at.
+            pass
 
         attempt, block = _next_attempt(existing)
         if block == "completed":
@@ -356,28 +445,38 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             return 500, {"ok": False, "error": "prompt_unreadable"}
 
         gateway = _gateway(cfg)
-        # create_unconfirmed reuses the prior key (F2); otherwise mint {slot}-a{n}.
+        # create_unconfirmed reuses the prior key and started_at (R4); otherwise mint {slot}-a{n}.
         prior_key = ""
+        prior_started = ""
         if existing and str(existing.get("status") or "") == "create_unconfirmed":
             prior_key = str(existing.get("idempotency_key") or "").strip()
+            prior_started = str(existing.get("started_at") or "").strip()
         idem = prior_key or slot.idempotency_key(attempt)
         input_text = (
             f"Produce the news digest JSON for slot {slot.label} "
             f"(Bangkok {slot.bangkok.isoformat()}, UTC file {slot.filename})."
         )
-        started_at = datetime.now(UTC).isoformat()
+        started_at = prior_started or datetime.now(UTC).isoformat()
+
+        # R4: persist this admission BEFORE POST, without a prior attempt's run_id.
+        _mark_active(
+            cfg,
+            slot=slot,
+            status="create_unconfirmed",
+            attempt=attempt,
+            idem=idem,
+            started_at=started_at,
+        )
 
         def _persist_created(run_id: str) -> None:
-            write_slot_record(
-                cfg.state_dir,
-                slot,
-                {
-                    "status": "running",
-                    "attempt": attempt,
-                    "run_id": run_id,
-                    "idempotency_key": idem,
-                    "started_at": started_at,
-                },
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="running",
+                attempt=attempt,
+                idem=idem,
+                started_at=started_at,
+                run_id=run_id,
             )
 
         try:
@@ -388,89 +487,85 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
                 idempotency_key=idem,
                 on_created=_persist_created,
             )
-            # run_research already called finalize_completed via wait_for_run.
             record = _publish_from_result(cfg, slot=slot, result=result, attempt=attempt, idem=idem)
+            clear_active_admission(cfg.state_dir, slot_label=slot.label)
             return 200, {"ok": True, "replay": bool(record.get("replay")), "result": record}
         except GatewayError as exc:
             logger.warning("ingest gateway failure category=%s", exc.category)
             prior = load_slot_record(cfg.state_dir, slot) or {}
-            run_id = str(prior.get("run_id") or "")
+            # Only trust a run_id bound to THIS admission (on_created), never a prior attempt.
+            this_run_id = ""
+            if str(prior.get("idempotency_key") or "") == idem and str(prior.get("attempt") or "") == str(
+                attempt
+            ):
+                this_run_id = str(prior.get("run_id") or "").strip()
             if exc.category == "unknown_run":
-                write_slot_record(
-                    cfg.state_dir,
-                    slot,
-                    {
-                        "status": "unknown",
-                        "attempt": attempt,
-                        "run_id": run_id,
-                        "idempotency_key": idem,
-                        "started_at": prior.get("started_at") or started_at,
-                        "error": exc.category,
-                    },
+                _mark_active(
+                    cfg,
+                    slot=slot,
+                    status="unknown",
+                    attempt=attempt,
+                    idem=idem,
+                    started_at=str(prior.get("started_at") or started_at),
+                    run_id=this_run_id,
+                    error=exc.category,
                 )
                 return 409, {"ok": False, "error": "unknown_run"}
             if exc.category == "provider_error":
-                # Transport/HTTP failure does not prove the run is terminal (F2).
-                if run_id:
-                    write_slot_record(
-                        cfg.state_dir,
-                        slot,
-                        {
-                            "status": "unknown",
-                            "attempt": attempt,
-                            "run_id": run_id,
-                            "idempotency_key": idem,
-                            "started_at": prior.get("started_at") or started_at,
-                            "error": exc.category,
-                        },
+                if this_run_id:
+                    _mark_active(
+                        cfg,
+                        slot=slot,
+                        status="unknown",
+                        attempt=attempt,
+                        idem=idem,
+                        started_at=str(prior.get("started_at") or started_at),
+                        run_id=this_run_id,
+                        error=exc.category,
                     )
                     return 409, {"ok": False, "error": "unknown_run"}
-                write_slot_record(
-                    cfg.state_dir,
-                    slot,
-                    {
-                        "status": "create_unconfirmed",
-                        "attempt": attempt,
-                        "idempotency_key": idem,
-                        "error": exc.category,
-                    },
+                _mark_active(
+                    cfg,
+                    slot=slot,
+                    status="create_unconfirmed",
+                    attempt=attempt,
+                    idem=idem,
+                    started_at=started_at,
+                    error=exc.category,
                 )
                 return 502, {"ok": False, "error": "provider_error"}
-            if exc.category == "malformed_response" and not run_id:
-                write_slot_record(
-                    cfg.state_dir,
-                    slot,
-                    {
-                        "status": "create_unconfirmed",
-                        "attempt": attempt,
-                        "idempotency_key": idem,
-                        "error": exc.category,
-                    },
+            if exc.category == "malformed_response" and not this_run_id:
+                _mark_active(
+                    cfg,
+                    slot=slot,
+                    status="create_unconfirmed",
+                    attempt=attempt,
+                    idem=idem,
+                    started_at=started_at,
+                    error=exc.category,
                 )
                 return 502, {"ok": False, "error": exc.category}
             if exc.category in {"incomplete_run", "timeout"}:
-                write_slot_record(
-                    cfg.state_dir,
-                    slot,
-                    {
-                        "status": "failed_terminal",
-                        "attempt": attempt,
-                        "run_id": run_id,
-                        "idempotency_key": idem,
-                        "error": exc.category,
-                    },
+                _mark_active(
+                    cfg,
+                    slot=slot,
+                    status="failed_terminal",
+                    attempt=attempt,
+                    idem=idem,
+                    started_at=started_at,
+                    run_id=this_run_id,
+                    error=exc.category,
                 )
             if exc.category in {"provider_mismatch", "model_mismatch"}:
-                write_slot_record(
-                    cfg.state_dir,
-                    slot,
-                    {
-                        "status": "invalid_result",
-                        "attempt": attempt,
-                        "run_id": run_id,
-                        "idempotency_key": idem,
-                        "error": exc.category,
-                    },
+                _mark_active(
+                    cfg,
+                    slot=slot,
+                    status="invalid_result",
+                    attempt=attempt,
+                    idem=idem,
+                    started_at=started_at,
+                    run_id=this_run_id,
+                    error=exc.category,
                 )
             code = 401 if exc.category == "auth_error" and exc.status_code == 401 else 502
             if exc.category == "auth_error" and exc.status_code == 403:
@@ -482,15 +577,14 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             return 409, {"ok": False, "error": "filename_conflict"}
         except ValueError as exc:
             logger.warning("ingest validation failure type=%s", type(exc).__name__)
-            write_slot_record(
-                cfg.state_dir,
-                slot,
-                {
-                    "status": "failed_terminal",
-                    "attempt": attempt,
-                    "idempotency_key": idem,
-                    "error": str(exc),
-                },
+            _mark_active(
+                cfg,
+                slot=slot,
+                status="failed_terminal",
+                attempt=attempt,
+                idem=idem,
+                started_at=started_at,
+                error=str(exc),
             )
             return 502, {"ok": False, "error": str(exc)}
         except Exception:  # noqa: BLE001 — fail closed; never leak secrets

@@ -230,10 +230,10 @@ def render_markdown(items: list[DigestItem], *, no_news: bool = False) -> str:
 
 
 def assert_round_trip(items: list[DigestItem], markdown: str) -> None:
-    """Require parse_digest_text to recover the validated title/day/URL set."""
-    from jarvise_context.news_sources import parse_digest_text
+    """Require the stdlib digest parser to recover the validated title/day/URL set."""
+    from jarvise_intel.digest_parse import parse_digest_items
 
-    parsed = parse_digest_text(markdown)
+    parsed = parse_digest_items(markdown)
     if len(parsed) != len(items):
         raise ValueError("round_trip_count")
     for expected, got in zip(items, parsed, strict=True):
@@ -242,8 +242,7 @@ def assert_round_trip(items: list[DigestItem], markdown: str) -> None:
         if got.get("url") != expected.url:
             raise ValueError("round_trip_url")
         day_got = str(got.get("day") or got.get("date") or "")
-        if day_got and day_got != expected.day:
-            # parse_digest_text may omit day; when present it must match.
+        if day_got != expected.day:
             raise ValueError("round_trip_day")
 
 
@@ -298,6 +297,60 @@ def _provenance_path(state_dir: Path, slot: Slot) -> Path:
 
 def _inflight_lock_path(state_dir: Path) -> Path:
     return state_dir / "locks" / "inflight.lock"
+
+
+ACTIVE_ADMISSION_STATUSES = frozenset({"running", "unknown", "create_unconfirmed"})
+
+
+def _active_admission_path(state_dir: Path) -> Path:
+    return state_dir / "active_admission.json"
+
+
+def load_active_admission(state_dir: Path) -> dict[str, Any] | None:
+    path = _active_admission_path(state_dir)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_active_admission(state_dir: Path, record: dict[str, Any]) -> None:
+    path = _active_admission_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".active_admission.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def clear_active_admission(state_dir: Path, *, slot_label: str | None = None) -> None:
+    """Clear the adapter-wide admission when it matches *slot_label* (or always if None)."""
+    current = load_active_admission(state_dir)
+    if current is None:
+        return
+    if slot_label is not None and str(current.get("slot") or "") != slot_label:
+        return
+    path = _active_admission_path(state_dir)
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def load_slot_record(state_dir: Path, slot: Slot) -> dict[str, Any] | None:
@@ -464,10 +517,10 @@ def adopt_existing_digest(
     text = data.decode("utf-8")
     if FOOTER not in text:
         raise ValueError("recovery_footer_missing")
-    from jarvise_context.news_sources import parse_digest_text
+    from jarvise_intel.digest_parse import parse_digest_items
 
     if "No confirmed watchlist coverage" not in text:
-        parsed = parse_digest_text(text)
+        parsed = parse_digest_items(text)
         if not parsed:
             raise ValueError("recovery_unparseable")
     record = {

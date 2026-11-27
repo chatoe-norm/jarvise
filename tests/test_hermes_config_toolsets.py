@@ -1,4 +1,4 @@
-"""Unit tests for infra/docker/hermes_config_toolsets.py (F4)."""
+"""Unit tests for infra/docker/hermes_config_toolsets.py (F4 / R2 / R3)."""
 
 from __future__ import annotations
 
@@ -31,11 +31,8 @@ def test_block_list_strips_skills_and_validates(tmp_path: Path) -> None:
     )
     out, changed = mod.strip_and_validate(text)
     assert changed is True
-    assert "skills" not in out or "skill" not in [  # noqa: SIM114 — clarity
-        line.strip() for line in out.splitlines() if line.strip().startswith("- ")
-    ]
     assert "keep-me" in out
-    # Idempotent second pass leaves bytes stable when already valid.
+    assert "- skills" not in out
     out2, changed2 = mod.strip_and_validate(out)
     assert changed2 is False
     assert out2 == out
@@ -94,18 +91,58 @@ def test_process_path_writes_and_check(tmp_path: Path) -> None:
     assert bad.read_text(encoding="utf-8").startswith("platform_toolsets:")
 
 
-def test_structural_fallback_without_pyyaml(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hermes image may lack PyYAML — structural parser still validates/strips."""
+def test_structural_fallback_r2_r3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Production path without PyYAML: fail closed + descending edits (R2/R3)."""
     mod = _load()
     monkeypatch.setattr(mod, "_HAS_YAML", False)
     monkeypatch.setattr(mod, "yaml", None)
+
+    # Quoted root key refused.
+    with pytest.raises(ValueError, match="quoted_key"):
+        mod.strip_and_validate('"platform_toolsets":\n  api_server: [web, terminal]\n  cli: [web]\n')
+
+    # Nested safe api_server must not mask direct unsafe list.
+    with pytest.raises(ValueError, match="unsafe_toolset"):
+        mod.strip_and_validate(
+            "platform_toolsets:\n"
+            "  api_server: [web, terminal]\n"
+            "  cli: [web]\n"
+            "  extra:\n"
+            "    api_server: [web]\n"
+        )
+
+    # Missing platform_toolsets refused.
+    with pytest.raises(ValueError, match="missing_platform_toolsets"):
+        mod.strip_and_validate("model:\n  default: x\n")
+
+    # Merge refused.
+    with pytest.raises(ValueError, match="merge_unsupported"):
+        mod.strip_and_validate("platform_toolsets:\n  <<: {x: 1}\n  api_server: [web]\n  cli: [web]\n")
+    # Alias refused (no anchor defined in this snippet).
+    with pytest.raises(ValueError, match="alias_unsupported"):
+        mod.strip_and_validate("platform_toolsets:\n  api_server: *d\n  cli: [web]\n")
+
+    # cli before api_server: strip both skills, keep model (R3).
     text = (
-        "plugins:\n  entries:\n    x:\n      skills:\n        a: 1\n"
-        "platform_toolsets:\n  api_server: [web, skills]\n  cli: [web]\n"
+        "platform_toolsets:\n"
+        "  cli:\n    - web\n    - skills\n"
+        "  api_server:\n    - web\n    - skills\n"
+        "model: {default: keep-me}\n"
     )
     out, changed = mod.strip_and_validate(text)
     assert changed is True
-    assert "skills:" in out  # nested mapping preserved
-    assert "[web]" in out or "- web" in out
-    with pytest.raises(ValueError, match="unsafe_toolset"):
-        mod.strip_and_validate("platform_toolsets:\n  api_server: [web, file]\n  cli: [web]\n")
+    assert "keep-me" in out
+    assert "skills" not in [ln.strip() for ln in out.splitlines() if ln.strip().startswith("- ")]
+    assert "- web" in out or "[web]" in out
+
+    # Mixed flow + block.
+    mixed = (
+        "platform_toolsets:\n"
+        "  api_server: [web, skills]\n"
+        "  cli:\n    - web\n    - skills\n"
+        "owner_key: preserved\n"
+    )
+    mout, mchanged = mod.strip_and_validate(mixed)
+    assert mchanged is True
+    assert "owner_key: preserved" in mout
+    assert "skills" not in [ln.strip() for ln in mout.splitlines() if "skills" in ln and "entries" not in ln]

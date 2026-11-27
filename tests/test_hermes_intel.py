@@ -1191,3 +1191,188 @@ def test_smoke_rejects_substring_pilot_path(tmp_path: Path) -> None:
     # Final component is not pilot-digests even though the marker appears earlier.
     with pytest.raises(ValueError, match="smoke_not_pilot_dir"):
         assert_smoke_confined(slot, tmp_path / "pilot-digests-backup" / "canonical")
+
+
+def test_shared_parser_matches_parse_digest_text_fields() -> None:
+    """R1: stdlib parser title/url/comment match downstream parse_digest_text."""
+    from jarvise_context.news_sources import parse_digest_text
+    from jarvise_intel.digest_parse import parse_digest_items
+
+    md = (
+        "# Digest\n\n"
+        "1. **Fed holds rates** — 2026-11-26\n"
+        "   https://federalreserve.gov/a\n"
+        "   Primary statement.\n\n"
+        "Not a trade signal. Research context only.\n"
+    )
+    shared = parse_digest_items(md)
+    themed = parse_digest_text(md)
+    assert len(shared) == len(themed) == 1
+    assert shared[0]["title"] == themed[0]["title"]
+    assert shared[0]["url"] == themed[0]["url"]
+    assert shared[0]["comment"] == themed[0]["comment"]
+    assert shared[0].get("day") == "2026-11-26"
+    assert "theme" in themed[0]
+
+
+def test_lost_create_attempt2_does_not_reuse_attempt1_run_id(tmp_path: Path, monkeypatch: Any) -> None:
+    """R4: lost attempt-2 create must not bind old-run-1 or mint -a3."""
+    from jarvise_intel.digest import write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "failed_terminal",
+            "attempt": 1,
+            "run_id": "old-run-1",
+            "idempotency_key": "2026-11-26T07-a1",
+        },
+    )
+    keys: list[str] = []
+    gets: list[str] = []
+    phase = {"n": 0}
+
+    def fake_run(*_a: Any, **kwargs: Any) -> Any:
+        keys.append(str(kwargs.get("idempotency_key")))
+        phase["n"] += 1
+        # Lose create response before on_created — no run_id bound for this attempt.
+        raise GatewayError("provider_error", "URLError")
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        gets.append(run_id)
+        from jarvise_intel.gateway import RunResult
+
+        return RunResult(
+            run_id=run_id,
+            status="failed",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "failed"},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code1, _ = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code1 == 502
+    assert keys[0].endswith("-a2")
+    from jarvise_intel.digest import load_slot_record
+
+    rec = load_slot_record(state_dir, slot)
+    assert rec is not None
+    assert rec.get("status") == "create_unconfirmed"
+    assert rec.get("attempt") == 2
+    assert not rec.get("run_id")
+    assert rec.get("idempotency_key", "").endswith("-a2")
+
+    # Replay same key; still no GET of old-run-1 for recovery of this admission.
+    code2, _ = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code2 == 502
+    assert keys[1] == keys[0]
+    assert "old-run-1" not in gets
+    assert len(keys) == 2
+
+
+def test_active_admission_blocks_other_slot(tmp_path: Path, monkeypatch: Any) -> None:
+    """R5: unresolved 07 admission blocks 19 create."""
+    from jarvise_intel.digest import write_active_admission, write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot07 = parse_slot("2026-11-27T07")
+    write_slot_record(
+        state_dir,
+        slot07,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "run-07",
+            "idempotency_key": "2026-11-27T07-a1",
+            "started_at": "2026-11-27T01:00:00+00:00",
+            "slot": slot07.label,
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "unknown",
+            "attempt": 1,
+            "run_id": "run-07",
+            "idempotency_key": "2026-11-27T07-a1",
+            "started_at": "2026-11-27T01:00:00+00:00",
+            "slot": slot07.label,
+        },
+    )
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create for other slot")
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> Any:
+        from jarvise_intel.gateway import RunResult
+
+        return RunResult(
+            run_id=run_id,
+            status="running",
+            output="",
+            usage={},
+            runtime={},
+            raw={"status": "running"},
+        )
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert code == 409
+    assert body.get("error") == "admission_busy"
+    assert creates["n"] == 0
+
+
+def test_active_admission_blocks_smoke(tmp_path: Path, monkeypatch: Any) -> None:
+    from jarvise_intel.digest import write_active_admission, write_slot_record
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("JARVISE_HERMES_SMOKE", "1")
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    write_active_admission(
+        state_dir,
+        {
+            "status": "create_unconfirmed",
+            "attempt": 1,
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
+        },
+    )
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("no smoke create while admission active")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    cfg = AdapterConfig()
+    cfg.smoke = True
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "smoke-2026-11-26T07"})
+    assert code == 409
+    assert body.get("error") == "admission_busy"
+    assert creates["n"] == 0
