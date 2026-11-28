@@ -1,8 +1,8 @@
 """Generic historical owner deposit/withdraw record (``assist partner-record-owner-tx``).
 
 For an owner transfer the live ``p owner dep|wd`` path can no longer book (older than
-the live max age, another transfer pending, ...). No Binance, no Telegram, no HTTP:
-the owner supplies the pool value right after the transfer.
+the live max age, another transfer pending, ...). No Binance, no Telegram, no HTTP.
+``--account-value`` is V as ``p owner`` shows it (wallet + uPnL), BEFORE ค้างจ่าย (payouts due).
 
 Books through the same store functions, event id and amount rule as the live
 confirm (``ps.apply_owner_deposit`` / ``ps.apply_owner_redeem``), so ledger
@@ -24,7 +24,7 @@ CONFLICT: Final = "conflict"
 
 
 def owner_hist_note(tran_id: str) -> str:
-    return f"owner tx via assist partner-record-owner-tx (historical); Binance TRANSFER tranId {tran_id}"
+    return f"owner tx via assist {ps.OWNER_HIST_NOTE_MARK}; Binance TRANSFER tranId {tran_id}"
 
 
 def _pub(value: Any) -> Any:
@@ -70,7 +70,8 @@ def validate_args(
     if ps.usdt_to_micro(amount_n) > pa._OWNER_MAX_MICRO:
         return None, {"ok": False, "reason": "amount_too_large"}
     av = _parse_decimal(account_value)
-    if av is None or av <= 0:
+    q_av = ps._q_usdt_finite(av) if av is not None else None
+    if av is None or av <= 0 or q_av is None or q_av <= 0:
         return None, {"ok": False, "reason": "bad_account_value"}
     eff = int(effective_at_ms)
     if eff > int(now_ms):
@@ -132,7 +133,7 @@ def preview_owner_tx(conn: sqlite3.Connection, params: dict[str, Any], *, now_ms
     out = _base(params, "dry-run")
     if _already_booked(conn, params["tran_id"]):
         return _pub({**out, "ok": False, "reason": CONFLICT})
-    late = ps.owner_events_after(conn, params["effective_at_ms"])
+    late = ps.owner_events_after(conn, params["effective_at_ms"], historical=True)
     if late is not None:
         return _pub({**out, "ok": False, "reason": late})
     plan = ps.plan_owner_tx(
@@ -153,7 +154,7 @@ def apply_owner_tx(conn: sqlite3.Connection, params: dict[str, Any], *, now_ms: 
     if _already_booked(conn, params["tran_id"]):
         return _pub({**out, "ok": False, "reason": CONFLICT})
     # Same order as the dry-run; the store re-checks inside its transaction.
-    late = ps.owner_events_after(conn, params["effective_at_ms"])
+    late = ps.owner_events_after(conn, params["effective_at_ms"], historical=True)
     if late is not None:
         return _pub({**out, "ok": False, "reason": late})
     fn = ps.apply_owner_deposit if params["side"] == "dep" else ps.apply_owner_redeem

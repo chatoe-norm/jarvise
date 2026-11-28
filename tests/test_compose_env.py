@@ -39,6 +39,52 @@ def test_jobs_receives_every_env_var_the_assist_reads() -> None:
     assert not missing, f"jobs service is missing {missing}"
     assert jobs.get("JARVISE_ASSIST_REDUCE") == "${JARVISE_ASSIST_REDUCE:-off}"
     assert jobs.get("JARVISE_ASSIST_CANCEL_OWNER") == "${JARVISE_ASSIST_CANCEL_OWNER:-off}"
+    # bounded_int_env reads os.environ.get(name); the name is often a constant, not a literal.
+    read |= _bounded_int_env_names(ROOT / "src" / "jarvise_assist")
+    missing_bounded = sorted(read - set(jobs))
+    assert not missing_bounded, f"jobs service is missing {missing_bounded}"
+
+
+def _bounded_int_env_names(root: Path) -> set[str]:
+    """Env names passed to bounded_int_env, including identifiers bound to string constants."""
+    names: set[str] = set()
+    call = re.compile(r"""bounded_int_env\(\s*(?:["']([A-Z][A-Z0-9_]*)["']|([A-Z][A-Z0-9_]*))""")
+    const = re.compile(
+        r"""^([A-Z][A-Z0-9_]*)\s*(?::[^=]+)?=\s*["']([A-Z][A-Z0-9_]*)["']""",
+        re.M,
+    )
+    for path in root.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        bound = dict(const.findall(text))
+        for literal, ident in call.findall(text):
+            if literal:
+                names.add(literal)
+            elif ident in bound:
+                names.add(bound[ident])
+    return names
+
+
+def test_jobs_forwards_owner_tx_bounds() -> None:
+    """Owner hist/live age settings are forwarded with the code defaults."""
+    from jarvise_assist.partner_owner_settings import (
+        OWNER_HIST_MAX_LOOKBACK_DAYS_DEFAULT,
+        OWNER_HIST_MAX_LOOKBACK_DAYS_ENV,
+        OWNER_TX_MAX_AGE_HOURS_DEFAULT,
+        OWNER_TX_MAX_AGE_HOURS_ENV,
+    )
+
+    found = _bounded_int_env_names(ROOT / "src" / "jarvise_assist")
+    assert OWNER_TX_MAX_AGE_HOURS_ENV in found
+    assert OWNER_HIST_MAX_LOOKBACK_DAYS_ENV in found
+    jobs = _service_env((ROOT / "docker-compose.yml").read_text(encoding="utf-8"), "jobs")
+    assert jobs[OWNER_TX_MAX_AGE_HOURS_ENV] == (
+        f"${{{OWNER_TX_MAX_AGE_HOURS_ENV}:-{OWNER_TX_MAX_AGE_HOURS_DEFAULT}}}"
+    )
+    assert jobs[OWNER_HIST_MAX_LOOKBACK_DAYS_ENV] == (
+        f"${{{OWNER_HIST_MAX_LOOKBACK_DAYS_ENV}:-{OWNER_HIST_MAX_LOOKBACK_DAYS_DEFAULT}}}"
+    )
+    assert OWNER_TX_MAX_AGE_HOURS_DEFAULT == 6
+    assert OWNER_HIST_MAX_LOOKBACK_DAYS_DEFAULT == 30
 
 
 def test_assist_trade_key_env_is_jobs_only() -> None:

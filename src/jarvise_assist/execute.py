@@ -1480,11 +1480,17 @@ def _existing_ideas_from_trade(
     balance: Decimal,
     risk_pct: Decimal,
     now_ms_value: int,
+    positions: list[FuturesPosition] | None = None,
 ) -> list[ExistingIdea]:
-    """Reuse signals.build_existing_ideas with trade-account positions/orders."""
+    """Reuse signals.build_existing_ideas with trade-account positions/orders.
+
+    ``positions`` skips a second ``position_risk`` when the caller already read them.
+    Other callers keep the old read.
+    """
     from jarvise_assist.signals import build_existing_ideas
 
-    positions = trade.position_risk()
+    if positions is None:
+        positions = trade.position_risk()
     try:
         orders = trade.all_open_orders()
     except Exception:  # noqa: BLE001
@@ -1975,10 +1981,18 @@ def _confirm_guards_entry(
         return "expired"
     if not analysis_is_fresh(analysis, now_ms=now_ms_value):
         return "stale_analysis"
-    positions = trade.position_risk()
+    try:
+        positions = trade.position_risk()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards positions read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:positions"
     if any(p.symbol == symbol for p in positions):
         return "open_position"
-    mark = trade.mark_price(symbol)
+    try:
+        mark = trade.mark_price(symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards mark read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:mark"
     if chase_exceeded(side=side, entry=entry, stop=stop, mark=mark):
         return "chase"
     # Seen levels are mainnet; demo mark cannot be compared in testnet.
@@ -1987,8 +2001,16 @@ def _confirm_guards_entry(
         seen_stop = Decimal(str(preview["seen_stop"]))
         if chase_exceeded(side=side, entry=seen_entry, stop=seen_stop, mark=mark):
             return "chase"
-    balance, available = trade.usdt_wallet_and_available()
-    filters = trade.symbol_filters(symbol)
+    try:
+        balance, available = trade.usdt_wallet_and_available()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards balance read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:balance"
+    try:
+        filters = trade.symbol_filters(symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards filters read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:filters"
     risk_pct = Decimal(str(ensure_settings(conn)["risk_pct"]))
     # Re-size from the live mark; never send more than the preview qty the owner saw.
     resized = size_signal(
@@ -2043,6 +2065,7 @@ def _confirm_guards_entry(
         balance=balance,
         risk_pct=risk_pct,
         now_ms_value=now_ms_value,
+        positions=positions,
     )
     cand = SignalCandidate(sized=sized, confidence=1.0, symbol_rank=0)
     admitted, rejected = admit_signals(
@@ -2277,7 +2300,11 @@ def _confirm_guards_quick_entry(
     if fee_r > max_fee_r:
         return "fee_r"
 
-    balance, available = trade.usdt_wallet_and_available()
+    try:
+        balance, available = trade.usdt_wallet_and_available()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("confirm guards balance read failed type=%s", type(exc).__name__)
+        return "fapi_read_failed:balance"
     resized = size_signal(
         symbol=symbol,
         side=side,
@@ -3104,7 +3131,7 @@ def run_entry_sequence(
         tp_qty_used: Decimal | None = None
         if is_quick:
             # (a) TP1 share only — never a full-qty TP by default. SL stays on full qty.
-            from jarvise_assist.quick_execute import MSG_QUICK_TP1_OFF
+            from jarvise_assist.quick_execute import MSG_QUICK_NO_TP1, MSG_QUICK_TP1_OFF
             from jarvise_assist.quick_execute import cfg_val as _cfg_val
 
             qcfg_raw = preview.get("cfg")
@@ -3186,7 +3213,7 @@ def run_entry_sequence(
                 tp_note = "\n" + MSG_QUICK_TP1_OFF
                 t1 = target
             else:
-                tp_note = "\nไม่วาง TP1 — ไม้ครึ่งต่ำกว่า minQty/minNotional, SL คุมเต็มจำนวน"
+                tp_note = "\n" + MSG_QUICK_NO_TP1
                 t1 = target
             target = t1
         else:

@@ -107,6 +107,22 @@ def _q_usdt(value: Decimal) -> Decimal:
     return Decimal(value).quantize(USDT_QUANT, rounding=ROUND_DOWN)
 
 
+def _q_usdt_finite(value: Decimal) -> Decimal | None:
+    """USDT quantization, or None when the coefficient does not fit the context.
+
+    Mirrors ``owner_amount_refusal``: a finite value such as ``1e25`` raises
+    ``InvalidOperation`` inside ``quantize`` instead of returning a number.
+    """
+    try:
+        return _q_usdt(Decimal(value))
+    except InvalidOperation:
+        return None
+
+
+# Substring of notes written by ``assist partner-record-owner-tx``. Live ``p owner`` notes do not contain it.
+OWNER_HIST_NOTE_MARK = "partner-record-owner-tx (historical)"
+
+
 def name_key(name: str) -> str:
     """NFKC, trimmed, case-folded identity of a partner name."""
     return unicodedata.normalize("NFKC", str(name)).strip().casefold()
@@ -1578,6 +1594,9 @@ def _owner_tx_prechecks(
     bad = _bad_number(Decimal(account_value))
     if bad:
         return None, bad
+    q_av = _q_usdt_finite(Decimal(account_value))
+    if q_av is None or q_av <= 0:
+        return None, {"ok": False, "reason": "bad_account_value"}
     admin, err = _owner_admin_row(conn)
     if err is not None or admin is None:
         return None, err if err is not None else {"ok": False, "reason": "no_admin"}
@@ -1589,20 +1608,44 @@ def _owner_tx_prechecks(
     return admin, None
 
 
-def owner_events_after(conn: sqlite3.Connection, t_ms: int) -> str | None:
+def owner_events_after(conn: sqlite3.Connection, t_ms: int, *, historical: bool = False) -> str | None:
     """Reason when any partner event or confirmed request is later than ``t_ms``, else None.
 
     Same rule as the live ``p owner`` safety check: booking an older transfer after
     later ledger activity would price it at the wrong NAV.
+
+    ``historical=True`` (the historical CLI only) judges a row written by that tool
+    by ``effective_at_ms`` when it is an owner deposit or redeem, the effective time
+    is set, the id is ``pe_owner_tran…``, and the note contains the tool marker.
+    Every other row still uses ``created_at_ms``. The default keeps the live check
+    unchanged.
     """
-    late_ev = conn.execute(
-        """
-        SELECT COUNT(*) AS n FROM partner_event
-        WHERE created_at_ms > ?
-           OR COALESCE(effective_at_ms, created_at_ms) > ?
-        """,
-        (int(t_ms), int(t_ms)),
-    ).fetchone()
+    t = int(t_ms)
+    if historical:
+        late_ev = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM partner_event
+            WHERE CASE
+                WHEN kind IN ('owner_deposit', 'owner_redeem')
+                 AND effective_at_ms IS NOT NULL
+                 AND substr(id, 1, length('pe_owner_tran')) = 'pe_owner_tran'
+                 AND instr(COALESCE(note, ''), ?) > 0
+                THEN effective_at_ms > ?
+                ELSE created_at_ms > ?
+                    OR COALESCE(effective_at_ms, created_at_ms) > ?
+            END
+            """,
+            (OWNER_HIST_NOTE_MARK, t, t, t),
+        ).fetchone()
+    else:
+        late_ev = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM partner_event
+            WHERE created_at_ms > ?
+               OR COALESCE(effective_at_ms, created_at_ms) > ?
+            """,
+            (t, t),
+        ).fetchone()
     if int(late_ev["n"]) != 0:
         return "events_after_effective"
     late_req = conn.execute(
@@ -1632,7 +1675,9 @@ def _owner_tx_math(
 ) -> dict[str, Any]:
     """Numbers one owner tx books. Read-only; shared by plan_owner_tx and _apply_owner_tx."""
     amount_q = _q_usdt(Decimal(amount))
-    v_raw = _q_usdt(Decimal(account_value))
+    v_raw = _q_usdt_finite(Decimal(account_value))
+    if v_raw is None:
+        return {"ok": False, "reason": "bad_account_value"}
     due = payouts_due_total(conn)
     u_before = total_units(conn)
     admin_units = units_from_e8(int(admin["units_e8"]))
@@ -1727,7 +1772,7 @@ def _apply_owner_tx(
     ):
         return {"ok": True, "reason": "already_recorded", "event_ids": [eid], "kind": kind}
     if refuse_events_after_ms is not None:
-        late = owner_events_after(conn, int(refuse_events_after_ms))
+        late = owner_events_after(conn, int(refuse_events_after_ms), historical=True)
         if late is not None:
             return {"ok": False, "reason": late}
     math = _owner_tx_math(conn, kind=kind, amount=amount, account_value=account_value, admin=admin)

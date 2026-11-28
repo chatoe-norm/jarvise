@@ -959,7 +959,8 @@ def assist_partner_record_owner_tx(
     account_value: Annotated[
         str,
         typer.Option(
-            "--account-value", help="Pool value V (USDT) right after the transfer, as p owner shows."
+            "--account-value",
+            help="V as `p owner` shows it (wallet + uPnL), BEFORE ค้างจ่าย (payouts due).",
         ),
     ],
     effective_at_ms: Annotated[int, typer.Option("--effective-at-ms", help="Transfer time (epoch ms).")],
@@ -996,7 +997,12 @@ def assist_partner_record_owner_tx(
     def _code(payload: dict[str, Any]) -> int:
         if payload.get("ok"):
             return 0
-        return 3 if payload.get("reason") == "conflict" else 1
+        reason = payload.get("reason")
+        if reason == "conflict":
+            return 3
+        if reason == "db_error":
+            return 2
+        return 1
 
     now_ms = int(time.time() * 1000)
     params, err = validate_args(
@@ -1013,22 +1019,29 @@ def assist_partner_record_owner_tx(
     if not db.is_file():
         typer.echo("analytics db missing", err=True)
         raise typer.Exit(code=2)
-    probe = connect_readonly(db)
     try:
-        user_version = int(probe.execute("PRAGMA user_version").fetchone()[0] or 0)
-    finally:
-        probe.close()
+        probe = connect_readonly(db)
+        try:
+            user_version = int(probe.execute("PRAGMA user_version").fetchone()[0] or 0)
+        finally:
+            probe.close()
+    except sqlite3.Error:
+        _echo({"ok": False, "reason": "db_error", "mode": mode}, 2)
+        return
     if user_version != SCHEMA_VERSION:
         typer.echo(f"schema mismatch: user_version={user_version} expected={SCHEMA_VERSION}", err=True)
         raise typer.Exit(code=2)
 
     if not do_apply:
-        conn = connect_readonly(db)
-        conn.row_factory = sqlite3.Row
         try:
-            payload = preview_owner_tx(conn, params, now_ms=now_ms)
-        finally:
-            conn.close()
+            conn = connect_readonly(db)
+            conn.row_factory = sqlite3.Row
+            try:
+                payload = preview_owner_tx(conn, params, now_ms=now_ms)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            payload = {"ok": False, "reason": "db_error", "mode": mode}
         _echo(payload, _code(payload))
         return
 
