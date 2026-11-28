@@ -88,12 +88,18 @@ def test_policy_dns_rebinding_denied() -> None:
     ok, reason = allow_https_url("https://evil.example/", resolve=resolve)
     assert ok is False
     assert reason == "blocked_dns"
-    assert allow_connect_target("evil.example", 443, resolve=resolve)[0] is False
-    assert allow_connect_target("evil.example", 80, resolve=lambda h: ["8.8.8.8"])[0] is False
+    policy = {"allow_suffixes": ["evil.example"], "deny_hosts": [], "deny_suffixes": []}
+    assert allow_connect_target("evil.example", 443, resolve=resolve, policy=policy)[0] is False
+    assert allow_connect_target("evil.example", 80, resolve=lambda h: ["8.8.8.8"], policy=policy)[0] is False
 
 
 def test_policy_ipv6_unique_local_denied() -> None:
-    ok, reason, addrs = allow_connect_target("evil6.example", 443, resolve=lambda _h: ["fc00::1"])
+    ok, reason, addrs = allow_connect_target(
+        "evil6.example",
+        443,
+        resolve=lambda _h: ["fc00::1"],
+        policy={"allow_suffixes": ["evil6.example"], "deny_hosts": [], "deny_suffixes": []},
+    )
     assert ok is False
     assert reason == "blocked_dns"
     assert addrs == []
@@ -112,6 +118,309 @@ def test_policy_allows_public_https() -> None:
     ok, reason = allow_https_url("https://nvidia.com/news", resolve=_public_resolve)
     assert ok is True
     assert reason == "ok"
+
+
+def test_connect_allowlist_allows_configured_host() -> None:
+    ok, reason, addrs = allow_connect_target(
+        "www.nvidia.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert ok is True
+    assert reason == "ok"
+    assert addrs == ["8.8.8.8"]
+    upper, upper_reason, _ = allow_connect_target(
+        "NVIDIA.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert upper is True
+    assert upper_reason == "ok"
+    blocked, why, blocked_addrs = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=lambda _h: ["169.254.169.254"],
+        policy_path=SOURCE_POLICY,
+    )
+    assert blocked is False
+    assert why == "blocked_dns"
+    assert blocked_addrs == []
+    assert (
+        allow_connect_target(
+            "nvidia.com",
+            80,
+            resolve=_public_resolve,
+            policy_path=SOURCE_POLICY,
+        )[1]
+        == "port_not_443"
+    )
+
+
+def test_connect_allowlist_denies_other_public_host() -> None:
+    ok, reason, addrs = allow_connect_target(
+        "example.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert ok is False
+    assert reason == "connect_not_allowlisted"
+    assert addrs == []
+    sibling, sibling_reason, _ = allow_connect_target(
+        "notnvidia.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert sibling is False
+    assert sibling_reason == "connect_not_allowlisted"
+    literal, literal_reason, _ = allow_connect_target(
+        "8.8.8.8",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert literal is False
+    assert literal_reason == "connect_not_allowlisted"
+    denied, denied_reason, _ = allow_connect_target(
+        "a.tinyurl.com",
+        443,
+        resolve=_public_resolve,
+        policy={
+            "allow_suffixes": ["tinyurl.com"],
+            "deny_hosts": [],
+            "deny_suffixes": ["tinyurl.com"],
+        },
+    )
+    assert denied is False
+    assert denied_reason == "denied_suffix"
+
+
+def test_connect_allowlist_deny_hosts_and_no_dns_on_deny() -> None:
+    lookups = {"n": 0}
+
+    def resolve(_host: str) -> list[str]:
+        lookups["n"] += 1
+        return ["8.8.8.8"]
+
+    denied, reason, addrs = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=resolve,
+        policy={
+            "allow_suffixes": ["nvidia.com"],
+            "deny_hosts": ["nvidia.com"],
+            "deny_suffixes": [],
+        },
+    )
+    assert denied is False
+    assert reason == "denied_host"
+    assert addrs == []
+    assert lookups["n"] == 0
+
+    other, other_reason, _ = allow_connect_target(
+        "example.com",
+        443,
+        resolve=resolve,
+        policy={"allow_suffixes": ["nvidia.com"], "deny_hosts": [], "deny_suffixes": []},
+    )
+    assert other is False
+    assert other_reason == "connect_not_allowlisted"
+    assert lookups["n"] == 0
+
+    closed, closed_reason, _ = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=resolve,
+        policy_path=Path("/nonexistent/connect-allowlist.json"),
+    )
+    assert closed is False
+    assert closed_reason == "connect_allowlist_closed"
+    assert lookups["n"] == 0
+
+
+def test_suffix_list_strips_trailing_dots_and_rejects_non_strings() -> None:
+    lookups = {"n": 0}
+
+    def resolve(_host: str) -> list[str]:
+        lookups["n"] += 1
+        return ["8.8.8.8"]
+
+    for host in ("nvidia.com", "nvidia.com."):
+        denied, reason, addrs = allow_connect_target(
+            host,
+            443,
+            resolve=resolve,
+            policy={
+                "allow_suffixes": ["nvidia.com"],
+                "deny_hosts": ["nvidia.com."],
+                "deny_suffixes": [],
+            },
+        )
+        assert denied is False
+        assert reason == "denied_host"
+        assert addrs == []
+    assert lookups["n"] == 0
+
+    suffix_denied, suffix_reason, suffix_addrs = allow_connect_target(
+        "a.tinyurl.com",
+        443,
+        resolve=resolve,
+        policy={
+            "allow_suffixes": ["tinyurl.com"],
+            "deny_hosts": [],
+            "deny_suffixes": ["tinyurl.com."],
+        },
+    )
+    assert suffix_denied is False
+    assert suffix_reason == "denied_suffix"
+    assert suffix_addrs == []
+    assert lookups["n"] == 0
+
+    # Dots-only and blank items are skipped, so they are not a wildcard deny or allow.
+    allowed, allow_reason, allow_addrs = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=resolve,
+        policy={
+            "allow_suffixes": ["nvidia.com.", ".", ""],
+            "deny_hosts": ["."],
+            "deny_suffixes": ["."],
+        },
+    )
+    assert allowed is True
+    assert allow_reason == "ok"
+    assert allow_addrs == ["8.8.8.8"]
+    assert lookups["n"] == 1
+    other, other_reason, other_addrs = allow_connect_target(
+        "example.com",
+        443,
+        resolve=resolve,
+        policy={
+            "allow_suffixes": ["nvidia.com.", ".", ""],
+            "deny_hosts": ["."],
+            "deny_suffixes": ["."],
+        },
+    )
+    assert other is False
+    assert other_reason == "connect_not_allowlisted"
+    assert other_addrs == []
+    assert lookups["n"] == 1
+
+    closed_policies: tuple[dict[str, object], ...] = (
+        {"allow_suffixes": ["nvidia.com", 1], "deny_hosts": [], "deny_suffixes": []},
+        {"allow_suffixes": ["nvidia.com"], "deny_hosts": [1], "deny_suffixes": []},
+        {"allow_suffixes": ["nvidia.com"], "deny_hosts": [], "deny_suffixes": [None]},
+    )
+    for policy in closed_policies:
+        closed, why, got = allow_connect_target("nvidia.com", 443, resolve=resolve, policy=policy)
+        assert closed is False
+        assert why == "connect_allowlist_closed"
+        assert got == []
+    assert lookups["n"] == 1
+
+
+def test_connect_allowlist_rejects_malformed_hosts_without_dns() -> None:
+    lookups = {"n": 0}
+
+    def resolve(_host: str) -> list[str]:
+        lookups["n"] += 1
+        return ["8.8.8.8"]
+
+    policy = {"allow_suffixes": ["nvidia.com"], "deny_hosts": [], "deny_suffixes": []}
+    cases = (
+        (".nvidia.com", "hostname_not_dns"),
+        ("foo..nvidia.com", "hostname_not_dns"),
+        ("evil;.nvidia.com", "bad_host"),
+        ("evil%2f.nvidia.com", "bad_host"),
+        (r"evil\\.nvidia.com", "bad_host"),
+    )
+    for host, expected in cases:
+        ok, reason, addrs = allow_connect_target(host, 443, resolve=resolve, policy=policy)
+        assert ok is False, host
+        assert reason == expected, (host, reason)
+        assert addrs == []
+    assert lookups["n"] == 0
+
+
+def test_default_connect_allowlist_allows_openrouter_not_digest_source() -> None:
+    ok, reason, addrs = allow_connect_target("openrouter.ai", 443, resolve=_public_resolve)
+    assert ok is True
+    assert reason == "ok"
+    assert addrs == ["8.8.8.8"]
+    src_ok, src_reason = allow_source_url("https://openrouter.ai/models", policy_path=SOURCE_POLICY)
+    assert src_ok is False
+    assert src_reason == "unknown_source"
+
+
+def test_connect_allowlist_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = tmp_path / "missing.json"
+    ok, reason, addrs = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=missing,
+    )
+    assert ok is False
+    assert reason == "connect_allowlist_closed"
+    assert addrs == []
+
+    empty = tmp_path / "empty.json"
+    empty.write_text("{}", encoding="utf-8")
+    blank = tmp_path / "blank.json"
+    blank.write_text('{"allow_suffixes": []}', encoding="utf-8")
+    broken = tmp_path / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    array = tmp_path / "array.json"
+    array.write_text("[]", encoding="utf-8")
+    for path in (empty, blank, broken, array):
+        closed, why, _ = allow_connect_target(
+            "nvidia.com",
+            443,
+            resolve=_public_resolve,
+            policy_path=path,
+        )
+        assert closed is False
+        assert why == "connect_allowlist_closed"
+
+    monkeypatch.setenv("JARVISE_HERMES_CONNECT_ALLOWLIST", str(missing))
+    from_env, env_reason, _ = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=_public_resolve,
+    )
+    assert from_env is False
+    assert env_reason == "connect_allowlist_closed"
+
+    monkeypatch.setenv("JARVISE_HERMES_CONNECT_ALLOWLIST", "  ")
+    empty_env, empty_reason, _ = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=_public_resolve,
+    )
+    assert empty_env is False
+    assert empty_reason == "connect_allowlist_closed"
+
+    monkeypatch.delenv("JARVISE_HERMES_CONNECT_ALLOWLIST", raising=False)
+    monkeypatch.chdir(tmp_path)
+    default_missing, default_reason, _ = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=_public_resolve,
+    )
+    assert default_missing is False
+    assert default_reason == "connect_allowlist_closed"
+
+    monkeypatch.chdir(ROOT)
+    default_ok, default_ok_reason, _ = allow_connect_target(
+        "reuters.com",
+        443,
+        resolve=_public_resolve,
+    )
+    assert default_ok is True
+    assert default_ok_reason == "ok"
 
 
 def test_connect_validated_uses_first_lookup_not_rebinding() -> None:
@@ -1841,6 +2150,79 @@ def test_t2_valid_marker_corrupt_slot_keeps_attempt2(tmp_path: Path, monkeypatch
     assert still.get("status") == "unknown"
     assert still.get("run_id") == "run-a2"
     _ = digest_dir
+
+
+def test_t2_invalid_utf8_slot_blocks_list(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: invalid UTF-8 slot bytes fail closed as slot_unreadable on the index scan."""
+    from jarvise_intel.digest import ActiveAdmissionError, list_unresolved_slot_records
+
+    _digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    name = "2026-11-27T07.json"
+    (slots / name).write_bytes(b"\xff\xfe{")
+    with pytest.raises(ActiveAdmissionError, match=r"^slot_unreadable:") as exc:
+        list_unresolved_slot_records(state_dir)
+    assert str(exc.value).startswith("slot_unreadable:")
+    assert name in str(exc.value)
+    assert isinstance(exc.value.__cause__, UnicodeError)
+
+
+def test_t2_invalid_utf8_slot_blocks_load(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: the same invalid UTF-8 slot file fails closed on a direct slot load."""
+    from jarvise_intel.digest import ActiveAdmissionError, load_slot_record
+
+    _digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    name = "2026-11-27T07.json"
+    (slots / name).write_bytes(b"\xff\xfe{")
+    slot = parse_slot("2026-11-27T07")
+    with pytest.raises(ActiveAdmissionError, match=r"^slot_unreadable:") as exc:
+        load_slot_record(state_dir, slot)
+    assert str(exc.value).startswith("slot_unreadable:")
+    assert name in str(exc.value)
+    assert isinstance(exc.value.__cause__, UnicodeError)
+
+
+def test_t2_invalid_utf8_slot_blocks_index_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: absent index + invalid UTF-8 slot must fail closed with zero creates."""
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    (slots / "2026-11-27T07.json").write_bytes(b"\xff\xfe{")
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    def fake_create(*_a: Any, **_k: Any) -> str:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_create)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert code == 409
+    assert body.get("error") == "admission_state_invalid"
+    assert creates["n"] == 0
+    _ = digest_dir
+
+
+def test_t2_invalid_utf8_admission_marker_unreadable(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: invalid UTF-8 active-admission marker fails closed as admission_unreadable."""
+    from jarvise_intel.digest import ActiveAdmissionError, load_active_admission
+
+    _digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "active_admission.json").write_bytes(b"\xff\xfe{")
+    with pytest.raises(ActiveAdmissionError, match=r"^admission_unreadable$") as exc:
+        load_active_admission(state_dir)
+    assert str(exc.value) == "admission_unreadable"
+    assert isinstance(exc.value.__cause__, UnicodeError)
 
 
 def test_t3_create_time_deducted_from_wait(monkeypatch: Any) -> None:

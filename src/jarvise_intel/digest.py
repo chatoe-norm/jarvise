@@ -357,7 +357,7 @@ def load_active_admission(state_dir: Path) -> dict[str, Any] | None:
         return None
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise ActiveAdmissionError("admission_unreadable") from exc
     try:
         data = json.loads(raw)
@@ -416,7 +416,7 @@ def list_unresolved_slot_records(state_dir: Path) -> list[dict[str, Any]]:
     for path in sorted(slots_dir.glob("*.json")):
         try:
             raw = path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise ActiveAdmissionError(f"slot_unreadable:{path.name}") from exc
         try:
             data = json.loads(raw)
@@ -486,7 +486,7 @@ def load_slot_record(state_dir: Path, slot: Slot) -> dict[str, Any] | None:
         return None
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise ActiveAdmissionError(f"slot_unreadable:{path.name}") from exc
     try:
         data = json.loads(raw)

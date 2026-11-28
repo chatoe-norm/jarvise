@@ -170,6 +170,43 @@ def test_ci_builds_hermes_images() -> None:
     assert "Dockerfile.hermes-egress" in text
 
 
+def test_hermes_openrouter_key_is_not_the_shared_host_key() -> None:
+    text = COMPOSE.read_text(encoding="utf-8")
+    hermes = _service_block(text, "hermes")
+    jobs = _service_block(text, "jobs")
+    openclaw = _service_block(text, "openclaw")
+    assert "OPENROUTER_API_KEY=${JARVISE_HERMES_OPENROUTER_KEY:-}" in hermes
+    assert "${OPENROUTER_API_KEY" not in hermes
+    assert "OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}" not in hermes
+    assert "API_SERVER_KEY=${JARVISE_HERMES_API_KEY:-}" in hermes
+    assert "OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}" in jobs
+    assert "OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}" in openclaw
+    egress = _service_block(text, "hermes-egress")
+    assert (
+        "JARVISE_HERMES_CONNECT_ALLOWLIST=${JARVISE_HERMES_CONNECT_ALLOWLIST-/config/hermes/connect-allowlist.json}"
+        in egress
+    )
+    assert "${JARVISE_HERMES_CONNECT_ALLOWLIST:-" not in egress
+    assert "./config/hermes:/config/hermes:ro" in egress
+    allow = ROOT / "config" / "hermes" / "connect-allowlist.json"
+    assert allow.is_file()
+    connect_doc = json.loads(allow.read_text(encoding="utf-8"))
+    assert "openrouter.ai" in connect_doc["allow_suffixes"]
+    source_doc = json.loads((ROOT / "config" / "hermes" / "source-policy.json").read_text(encoding="utf-8"))
+    assert "openrouter.ai" not in source_doc["allow_suffixes"]
+    env_ex = (ROOT / ".env.example").read_text(encoding="utf-8")
+    match = re.search(r"^JARVISE_HERMES_OPENROUTER_KEY=(.*)$", env_ex, re.M)
+    assert match is not None
+    assert match.group(1).strip() == ""
+    assert "JARVISE_HERMES_OPENCLAW_BACKUP_RETENTION_DAYS=30" in env_ex
+    doc = (ROOT / "docs" / "ops" / "hermes-stage-a.md").read_text(encoding="utf-8")
+    assert "JARVISE_HERMES_OPENROUTER_KEY" in doc
+    assert "JARVISE_HERMES_OPENCLAW_BACKUP_RETENTION_DAYS" in doc
+    assert "default **30**" in doc
+    assert "stop OpenClaw with its 90s grace" not in doc
+    assert "Chana" in doc
+
+
 def test_hermes_workflow_inactive_fixed_body() -> None:
     path = WORKFLOWS / "jarvise-hermes-ingest.json"
     workflow = json.loads(path.read_text(encoding="utf-8"))

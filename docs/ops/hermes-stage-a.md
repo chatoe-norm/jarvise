@@ -17,7 +17,7 @@ Status: **implementation only**. Production OpenClaw remains the digest producer
 | MCP mode | `hermes mcp-serve --tools-only` (no conversation bridge, no `messages_send`, no `permissions_*`) |
 | HTTP `/v1/runs` toolsets | `web` only (`skills` removed — `skill_manage` is a persistent write path). MCP may still list `skill_view` / `skills_list`. |
 
-`HERMES_PROVIDER` and `HERMES_MODEL` have no silent default. Empty values make `/ingest` return `503 provider_unconfigured`. `fallback_providers: []` in the template. Do not use `openrouter/openrouter/auto`. Hermes reuses the shared `OPENROUTER_API_KEY` with jobs (same provider budget).
+`HERMES_PROVIDER` and `HERMES_MODEL` have no silent default. Empty values make `/ingest` return `503 provider_unconfigured`. `fallback_providers: []` in the template. Do not use `openrouter/openrouter/auto`. Hermes takes its provider credential from the host variable `JARVISE_HERMES_OPENROUTER_KEY`, which compose injects as `OPENROUTER_API_KEY` inside the `hermes` container only. Jobs and OpenClaw keep the shared `OPENROUTER_API_KEY`. The Hermes key does not fall back to that shared key, and it is not `JARVISE_HERMES_API_KEY` (the adapter↔gateway password). The owner caps the Hermes key on the OpenRouter account (intended cap $50). That cap is not a Jarvise runtime constant.
 
 **Config seeding:** a missing `data/hermes/gateway/config.yaml` is copied from `config/hermes/config.yaml.template`. An existing file is validated by `infra/docker/hermes_config_toolsets.py`: strip only an exact list item `skills` under `platform_toolsets.api_server` / `cli`, then require each set to be exactly `{web}`. Prefers `yaml.safe_load` when PyYAML is present (CI); the pinned Hermes image has no PyYAML, so a structural subset parser handles block/flow lists for those two keys only — it does **not** refuse merely because an unrelated nested `skills:` key exists, and it is not the old text-regex check. Unsafe toolsets (`terminal`, `file`, `skill_manage`, …) refuse start without rewriting. When already valid, the file bytes are left unchanged so model/provider/credential keys are stable.
 
@@ -46,6 +46,7 @@ Status: **implementation only**. Production OpenClaw remains the digest producer
 - Titles/comments/URLs reject control characters and line separators; URLs must be printable ASCII `[\x21-\x7e]+` and pass the allowlist on the exact rendered string. Titles may not contain `**`. Comments may not start with `http(s)://` or the research footer.
 - Adapter source validation is **syntax + allowlist only** (no DNS). Authority may not contain `\`, `%`, or `;`; hostname must match a strict DNS-label grammar before suffix matching (blocks `evil.com\.nvidia.com`-style parser differentials). DNS/IP checks stay on the CONNECT proxy. Experiment (2026-11-27): `getaddrinfo` from an adapter container on an `internal: true` network failed with `gaierror` for `federalreserve.gov`.
 - `config/hermes/source-policy.json` denies shorteners and IP-literal hosts. The allowlist includes watchlist publishers **and** secondary outlets (`reuters.com`, `cnbc.com`, …) plus `google.com` (includes user-content subdomains) by owner policy. Other hosts → `unknown_source` and the **whole slot** is rejected (dropping unknown items is a later owner decision, not Stage A default).
+- CONNECT uses a separate file, `config/hermes/connect-allowlist.json`, so provider endpoints can be allowed without adding them as digest citation sources. The default includes the source-policy suffixes plus `openrouter.ai`. `JARVISE_HERMES_CONNECT_ALLOWLIST` is unset-only in compose (`${JARVISE_HERMES_CONNECT_ALLOWLIST-/config/hermes/connect-allowlist.json}`): an explicitly empty host value is passed through and denies every CONNECT. `hermes-egress` mounts `./config/hermes` read-only so a custom file under that directory can be selected. A host is allowed only when it equals an `allow_suffixes` entry or is a subdomain of one (`www.nvidia.com` matches `nvidia.com`; `notnvidia.com` does not). `deny_hosts` and `deny_suffixes` still deny. Hostname grammar is checked and the allowlist is applied before DNS. Port must stay 443, and private, loopback, link-local, and metadata addresses stay blocked. A missing, empty, unreadable, or non-object file denies every CONNECT (`connect_allowlist_closed`). There is no fail-open default.
 - After render, `parse_digest_text` must recover the same item count, title, and URL.
 
 ## Runtime identity (R8)
@@ -56,7 +57,7 @@ Completed runs without `runtime.provider` and `runtime.model` fail closed (`prov
 
 | Capability | Stage A |
 | --- | --- |
-| Public HTTPS web research via CONNECT proxy | Yes (Hermes → `hermes-egress`) |
+| Public HTTPS web research via CONNECT proxy | Yes, port 443 and `allow_suffixes` only (Hermes → `hermes-egress`) |
 | Digest Markdown write | Adapter only (`hermes-ingest` → `pilot-digests`) |
 | Canonical `data/openclaw/workspace-ingest/digests` | Still OpenClaw; Hermes has no mount |
 | Messaging / Telegram / Discord | Disabled |
@@ -84,7 +85,7 @@ bash scripts/hermes-isolation-check.sh
 # or: JARVISE_HERMES_ISO=1 pytest tests/test_hermes_isolation.py -q
 ```
 
-The script cold-starts a throwaway compose project, waits for in-container `http://127.0.0.1:8642/health`, restarts, checks account and gateway-worker UID `10000`, runs `hermes mcp-serve --tools-only` initialize + `tools/list` (fails on forbidden names **or** missing `web_search` / `web_extract`), asserts neither `hermes` nor `hermes-ingest` can open public TCP directly, denies CONNECT to `127.0.0.1` / RFC1918 / link-local metadata, and requires a public CONNECT through the proxy to return HTTP **200** (502 is not success). Config grep for `skills` is not proof of the HTTP `/v1/runs` toolset; that runtime query remains an unrun gap. Remaining nits (documented, not refactored here): egress per-read header timeout is not a total CONNECT ceiling; `printf '%q'` in the `su` fallback is not POSIX.
+The script cold-starts a throwaway compose project, waits for in-container `http://127.0.0.1:8642/health`, restarts, checks account and gateway-worker UID `10000`, runs `hermes mcp-serve --tools-only` initialize + `tools/list` (fails on forbidden names **or** missing `web_search` / `web_extract`), asserts neither `hermes` nor `hermes-ingest` can open public TCP directly, denies CONNECT to `127.0.0.1` / RFC1918 / link-local metadata and to a public host outside the allowlist (`example.com`), and requires CONNECT to an allowlisted host (`nvidia.com:443`) through the proxy to return HTTP **200** (502 is not success). Config grep for `skills` is not proof of the HTTP `/v1/runs` toolset; that runtime query remains an unrun gap. Remaining nits (documented, not refactored here): egress per-read header timeout is not a total CONNECT ceiling; `printf '%q'` in the `su` fallback is not POSIX.
 
 CI builds `Dockerfile.hermes-ingest` and `Dockerfile.hermes-egress` in addition to worker/web. Worker/web builds alone are **not** proof of Hermes. Plugin restore compares the **installed** tree hash to the read-only vendor (not a writable stamp).
 
@@ -101,13 +102,18 @@ Stage A does **not** query production. Canonical cutover stays blocked until a l
 
 1. `wdpy` until CI/Deploy idle. Confirm Claude Stage B approval on the revised SHA.
 2. Refresh runtime SHA, health, free RAM, workflow IDs, universe (`jarvise universe show --json`), and shadow gate.
-3. Owner sets `JARVISE_HERMES_API_KEY`, `JARVISE_HERMES_INGEST_TOKEN`, `HERMES_PROVIDER`, `HERMES_MODEL` in VPS `.env` (agents report set/EMPTY only).
+3. Owner sets `JARVISE_HERMES_API_KEY`, `JARVISE_HERMES_INGEST_TOKEN`, `JARVISE_HERMES_OPENROUTER_KEY`, `HERMES_PROVIDER`, and `HERMES_MODEL` in VPS `.env` (agents report set/EMPTY only). `JARVISE_HERMES_OPENROUTER_KEY` is the separate Hermes OpenRouter key. It does not fall back to `OPENROUTER_API_KEY`.
 4. Start opt-in stack from merged code: `docker compose --profile hermes up -d` (with prod overlay on VPS).
 5. Produce one pilot digest under `data/hermes/pilot-digests` only. Validate auth, timeout, tools, redeploy ownership.
 6. Quiesce only `jrvsNewsIngest0719`. Render/import Hermes workflow with `render-n8n-hermes-ingest.sh`; keep inactive until the writer is ready.
 7. Single writer: point adapter at the canonical digest directory, activate Hermes schedule, test one new slot without overwriting history.
-8. Observe two normal 07:00/19:00 runs plus reaction/RAG. Then stop OpenClaw with its 90s grace; move it to a rollback-only profile in a reviewed change.
-9. Set `JARVISE_DIGEST_PRODUCER=hermes` only after Hermes is the sole canonical producer.
+8. Observe two normal 07:00/19:00 runs plus reaction/RAG. OpenClaw stays running in its current compose service through this step. Retirement waits until every item below is done, and until Chana has given an explicit OK:
+   - the shadow study is closed, or the owner has documented a deviation
+   - a non-digest OpenClaw function inventory is written
+   - parity checks have passed
+   - an OpenClaw backup is retained for `JARVISE_HERMES_OPENCLAW_BACKUP_RETENTION_DAYS` (default **30** days; cutover procedure only, not read by the running stack). The nightly job `infra/backup/backup.sh` prunes dated backups under `backups/` after `JARVISE_BACKUP_KEEP` (default **14** days). Archive the pre-cutover OpenClaw backup outside `backups/`, or raise `JARVISE_BACKUP_KEEP` to at least the cutover retention days. Otherwise the 14-day prune deletes the 30-day backup.
+   - rollback has been rehearsed
+9. Set `JARVISE_DIGEST_PRODUCER=hermes` only after step 8 is complete, including Chana's explicit OK, and a later reviewed change has made Hermes the sole canonical producer. While OpenClaw is still a producer, leave this flag unset.
 
 ## Rollback
 
@@ -117,14 +123,14 @@ Order:
 
 1. Disable only the Hermes ingest workflow; wait/cancel in-flight adapter work.
 2. Stop `hermes-ingest` so it cannot publish later.
-3. Restore the pinned OpenClaw workflow/publication state; start OpenClaw.
+3. Restore the pinned OpenClaw workflow/publication state. Step 8 leaves OpenClaw running, so a rollback before a later retirement confirms that OpenClaw is still up and restores its publication state. Start OpenClaw only if a later reviewed change had stopped it.
 4. Verify OpenClaw is the sole canonical producer; re-enable `jrvsNewsIngest0719`.
 5. Keep already-published valid Hermes files immutable; mark the producer boundary in metadata.
 6. Keep trading/safety jobs running. Never `compose down -v`, never prune volumes, never restore the trading ledger for this rollback.
 
 ## Owner gates before any pilot (still open)
 
-- [ ] Three Hermes secrets set (API key, ingest token, provider model pin)
+- [ ] Hermes owner secrets set (`JARVISE_HERMES_API_KEY`, `JARVISE_HERMES_INGEST_TOKEN`, `JARVISE_HERMES_OPENROUTER_KEY`) plus `HERMES_PROVIDER` and `HERMES_MODEL`
 - [ ] Free RAM confirmed beside still-running 4 GiB OpenClaw
 - [ ] Shadow window status decided
 - [ ] Claude Stage B approval on the PR
