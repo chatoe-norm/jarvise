@@ -420,6 +420,10 @@ services:
     environment:
       - HERMES_EGRESS_HOST=0.0.0.0
       - HERMES_EGRESS_PORT=8899
+      # Domain allowlist. Missing or empty file denies every CONNECT (no fail-open).
+      - JARVISE_HERMES_CONNECT_ALLOWLIST=${JARVISE_HERMES_CONNECT_ALLOWLIST:-/config/hermes/source-policy.json}
+    volumes:
+      - ./config/hermes/source-policy.json:/config/hermes/source-policy.json:ro
     healthcheck:
       test:
         [
@@ -458,7 +462,8 @@ services:
       - API_SERVER_ENABLED=true
       - API_SERVER_HOST=0.0.0.0
       - API_SERVER_KEY=${JARVISE_HERMES_API_KEY:-}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # In-container name stays OPENROUTER_API_KEY. Host source is the separate Hermes key only.
+      - OPENROUTER_API_KEY=${JARVISE_HERMES_OPENROUTER_KEY:-}
       - HERMES_PROVIDER=${HERMES_PROVIDER:-}
       - HERMES_MODEL=${HERMES_MODEL:-}
       - HERMES_HOME=/opt/data

@@ -114,6 +114,152 @@ def test_policy_allows_public_https() -> None:
     assert reason == "ok"
 
 
+def test_connect_allowlist_allows_configured_host() -> None:
+    ok, reason, addrs = allow_connect_target(
+        "www.nvidia.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert ok is True
+    assert reason == "ok"
+    assert addrs == ["8.8.8.8"]
+    upper, upper_reason, _ = allow_connect_target(
+        "NVIDIA.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert upper is True
+    assert upper_reason == "ok"
+    blocked, why, blocked_addrs = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=lambda _h: ["169.254.169.254"],
+        policy_path=SOURCE_POLICY,
+    )
+    assert blocked is False
+    assert why == "blocked_dns"
+    assert blocked_addrs == []
+    assert (
+        allow_connect_target(
+            "nvidia.com",
+            80,
+            resolve=_public_resolve,
+            policy_path=SOURCE_POLICY,
+        )[1]
+        == "port_not_443"
+    )
+
+
+def test_connect_allowlist_denies_other_public_host() -> None:
+    ok, reason, addrs = allow_connect_target(
+        "example.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert ok is False
+    assert reason == "connect_not_allowlisted"
+    assert addrs == []
+    sibling, sibling_reason, _ = allow_connect_target(
+        "notnvidia.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert sibling is False
+    assert sibling_reason == "connect_not_allowlisted"
+    literal, literal_reason, _ = allow_connect_target(
+        "8.8.8.8",
+        443,
+        resolve=_public_resolve,
+        policy_path=SOURCE_POLICY,
+    )
+    assert literal is False
+    assert literal_reason == "connect_not_allowlisted"
+    denied, denied_reason, _ = allow_connect_target(
+        "a.tinyurl.com",
+        443,
+        resolve=_public_resolve,
+        policy={
+            "allow_suffixes": ["tinyurl.com"],
+            "deny_hosts": [],
+            "deny_suffixes": ["tinyurl.com"],
+        },
+    )
+    assert denied is False
+    assert denied_reason == "denied_suffix"
+
+
+def test_connect_allowlist_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = tmp_path / "missing.json"
+    ok, reason, addrs = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=_public_resolve,
+        policy_path=missing,
+    )
+    assert ok is False
+    assert reason == "connect_allowlist_closed"
+    assert addrs == []
+
+    empty = tmp_path / "empty.json"
+    empty.write_text("{}", encoding="utf-8")
+    blank = tmp_path / "blank.json"
+    blank.write_text('{"allow_suffixes": []}', encoding="utf-8")
+    broken = tmp_path / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    array = tmp_path / "array.json"
+    array.write_text("[]", encoding="utf-8")
+    for path in (empty, blank, broken, array):
+        closed, why, _ = allow_connect_target(
+            "nvidia.com",
+            443,
+            resolve=_public_resolve,
+            policy_path=path,
+        )
+        assert closed is False
+        assert why == "connect_allowlist_closed"
+
+    monkeypatch.setenv("JARVISE_HERMES_CONNECT_ALLOWLIST", str(missing))
+    from_env, env_reason, _ = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=_public_resolve,
+    )
+    assert from_env is False
+    assert env_reason == "connect_allowlist_closed"
+
+    monkeypatch.setenv("JARVISE_HERMES_CONNECT_ALLOWLIST", "  ")
+    empty_env, empty_reason, _ = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=_public_resolve,
+    )
+    assert empty_env is False
+    assert empty_reason == "connect_allowlist_closed"
+
+    monkeypatch.delenv("JARVISE_HERMES_CONNECT_ALLOWLIST", raising=False)
+    monkeypatch.chdir(tmp_path)
+    default_missing, default_reason, _ = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=_public_resolve,
+    )
+    assert default_missing is False
+    assert default_reason == "connect_allowlist_closed"
+
+    monkeypatch.chdir(ROOT)
+    default_ok, default_ok_reason, _ = allow_connect_target(
+        "reuters.com",
+        443,
+        resolve=_public_resolve,
+    )
+    assert default_ok is True
+    assert default_ok_reason == "ok"
+
+
 def test_connect_validated_uses_first_lookup_not_rebinding() -> None:
     """R2: first resolve 8.8.8.8; a later resolve must not be consulted for connect."""
     lookups = {"n": 0}

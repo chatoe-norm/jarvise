@@ -27,7 +27,7 @@ JARVISE_HERMES_API_KEY=iso-api-key-0123456789abcdef
 JARVISE_HERMES_INGEST_TOKEN=iso-ingest-token-0123456789
 HERMES_PROVIDER=openrouter
 HERMES_MODEL=anthropic/claude-sonnet-5.5
-OPENROUTER_API_KEY=
+JARVISE_HERMES_OPENROUTER_KEY=
 JARVISE_UID=1000
 JARVISE_GID=1000
 EOF
@@ -229,7 +229,7 @@ if docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml
 fi
 echo "[iso] hermes public bypass blocked OK"
 
-echo "[iso] proxy denies private/metadata CONNECT; public HTTPS must be HTTP 200"
+echo "[iso] proxy denies private/metadata and non-allowlisted CONNECT; allowlisted HTTPS must be HTTP 200"
 docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
   exec -T hermes python - <<'PY'
 import socket
@@ -249,10 +249,16 @@ for target in ("127.0.0.1:443", "10.0.0.1:443", "169.254.169.254:443"):
         print("FAIL private", target, priv[:80], file=sys.stderr)
         sys.exit(1)
 
-# Public target must succeed (HTTP 200). 502 is not success (F7).
-pub = connect_req("example.com:443")
+# Public host outside the allowlist must be denied.
+denied = connect_req("example.com:443")
+if b"403" not in denied and b"Forbidden" not in denied:
+    print("FAIL non-allowlisted", denied[:80], file=sys.stderr)
+    sys.exit(1)
+
+# Allowlisted public target must succeed (HTTP 200). 502 is not success (F7).
+pub = connect_req("nvidia.com:443")
 if b"200" not in pub:
-    print("FAIL public not 200", pub[:120], file=sys.stderr)
+    print("FAIL allowlisted not 200", pub[:120], file=sys.stderr)
     sys.exit(1)
 print("proxy behavioural checks OK")
 PY

@@ -1,12 +1,18 @@
-"""Public-HTTPS-only allow policy for Hermes tool egress and digest sources."""
+"""Public-HTTPS-only allow policy for Hermes tool egress and digest sources.
+
+CONNECT targets must match ``allow_suffixes`` in ``JARVISE_HERMES_CONNECT_ALLOWLIST``.
+When that variable is unset, the file is ``config/hermes/source-policy.json``.
+A missing, empty, or unreadable allowlist denies every CONNECT.
+"""
 
 from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,6 +25,8 @@ BLOCKED_HOST_IPS = frozenset(
 
 Resolver = Callable[[str], list[str]]
 DEFAULT_SOURCE_POLICY = Path("config/hermes/source-policy.json")
+# Unset uses DEFAULT_SOURCE_POLICY. An empty value, or a missing/empty file, denies CONNECT.
+CONNECT_ALLOWLIST_ENV = "JARVISE_HERMES_CONNECT_ALLOWLIST"
 # Printable ASCII only — the exact string that will be rendered into Markdown.
 SOURCE_URL_RE = re.compile(r"^[\x21-\x7e]+$")
 # Strict DNS hostname: lowercase labels, no empty labels, at least two labels (F3).
@@ -158,13 +166,92 @@ def allow_https_url(
     return True, "ok"
 
 
+def _suffix_list(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    out: list[str] = []
+    for item in value:
+        text = str(item).strip().lower().lstrip(".")
+        if text:
+            out.append(text)
+    return out
+
+
+def _connect_allowlist_path() -> Path | None:
+    raw = os.environ.get(CONNECT_ALLOWLIST_ENV)
+    if raw is None:
+        return DEFAULT_SOURCE_POLICY
+    text = raw.strip()
+    if not text:
+        return None
+    return Path(text)
+
+
+def load_connect_allowlist(
+    path: Path | None = None,
+    *,
+    policy: Mapping[str, object] | None = None,
+) -> dict[str, list[str]] | None:
+    """CONNECT domain rules, or None when the allowlist must fail closed.
+
+    An explicit ``policy`` skips the file. Otherwise ``path`` wins, then
+    ``JARVISE_HERMES_CONNECT_ALLOWLIST``, then ``DEFAULT_SOURCE_POLICY``.
+    Missing, unreadable, non-object, or empty ``allow_suffixes`` returns None.
+    """
+    if policy is not None:
+        data: object = policy
+    else:
+        target = path if path is not None else _connect_allowlist_path()
+        if target is None or not target.is_file():
+            return None
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+    if not isinstance(data, dict):
+        return None
+    allow = _suffix_list(data.get("allow_suffixes"))
+    if not allow:
+        return None
+    if data.get("deny_hosts") is not None and _suffix_list(data.get("deny_hosts")) is None:
+        return None
+    if data.get("deny_suffixes") is not None and _suffix_list(data.get("deny_suffixes")) is None:
+        return None
+    return {
+        "allow_suffixes": allow,
+        "deny_hosts": _suffix_list(data.get("deny_hosts")) or [],
+        "deny_suffixes": _suffix_list(data.get("deny_suffixes")) or [],
+    }
+
+
+def _connect_host_allowed(host: str, rules: dict[str, list[str]]) -> tuple[bool, str]:
+    host_norm = host.lower().strip().strip("[]").rstrip(".")
+    if not host_norm:
+        return False, "bad_host"
+    if host_norm in rules["deny_hosts"]:
+        return False, "denied_host"
+    for suffix in rules["deny_suffixes"]:
+        if host_norm == suffix or host_norm.endswith("." + suffix):
+            return False, "denied_suffix"
+    for suffix in rules["allow_suffixes"]:
+        if host_norm == suffix or host_norm.endswith("." + suffix):
+            return True, "ok"
+    return False, "connect_not_allowlisted"
+
+
 def allow_connect_target(
     host: str,
     port: int,
     *,
     resolve: Resolver | None = None,
+    policy: Mapping[str, object] | None = None,
+    policy_path: Path | None = None,
 ) -> tuple[bool, str, list[str]]:
-    """CONNECT proxy gate. Returns (ok, reason, validated_addrs)."""
+    """CONNECT proxy gate. Returns (ok, reason, validated_addrs).
+
+    Port 443 and the private/metadata IP blocks run first. The hostname must
+    then match the domain allowlist. A missing or empty allowlist denies.
+    """
     if port != 443:
         return False, "port_not_443", []
     if not host or "/" in host or "@" in host:
@@ -172,6 +259,12 @@ def allow_connect_target(
     addrs, reason = validate_host_addrs(host, resolve=resolve)
     if not addrs:
         return False, reason, []
+    rules = load_connect_allowlist(policy_path, policy=policy)
+    if rules is None:
+        return False, "connect_allowlist_closed", []
+    ok, why = _connect_host_allowed(host, rules)
+    if not ok:
+        return False, why, []
     return True, "ok", addrs
 
 
