@@ -961,6 +961,7 @@ def _quick_owned_client_and_order_ids(
             "move_stop_place",
             "move_stop_cancel",
             "exit_cancel",
+            "exit_cancel_owner_algo",
             "recover_move_cancel",
         }
     )
