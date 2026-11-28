@@ -157,7 +157,7 @@ def get_run(
     usage_raw = payload.get("usage")
     runtime_raw = payload.get("runtime")
     usage: dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
-    runtime: dict[str, Any] = runtime_raw if isinstance(runtime_raw, dict) else {}
+    runtime: dict[str, Any] = _runtime_from_payload(payload, runtime_raw)
     return RunResult(
         run_id=str(payload.get("run_id") or run_id),
         status=status,
@@ -208,6 +208,36 @@ def stop_run(
         runtime={},
         raw=payload,
     )
+
+
+def _runtime_from_payload(payload: dict[str, Any], runtime_raw: Any) -> dict[str, Any]:
+    """Read actual identity from a live Hermes run body.
+
+    v0.23.4 ``raw_request`` completions leave ``runtime.provider`` and
+    ``runtime.model`` empty and put the executed model on the run object.
+    Copy that model. Copy ``requested.provider`` only when the route says the
+    raw request was used unchanged and its model equals that executed model.
+    Never fill either field from process environment.
+    """
+    runtime: dict[str, Any] = dict(runtime_raw) if isinstance(runtime_raw, dict) else {}
+    if not str(runtime.get("model") or "").strip():
+        top_model = payload.get("model")
+        if isinstance(top_model, str) and top_model.strip():
+            runtime["model"] = top_model.strip()
+    if not str(runtime.get("provider") or "").strip():
+        requested = runtime.get("requested")
+        route = str(runtime.get("route_source") or "").strip()
+        model = str(runtime.get("model") or "").strip()
+        if (
+            route == "raw_request"
+            and isinstance(requested, dict)
+            and model
+            and str(requested.get("model") or "").strip() == model
+        ):
+            provider = str(requested.get("provider") or "").strip()
+            if provider:
+                runtime["provider"] = provider
+    return runtime
 
 
 def normalize_runtime_identity(provider: str, model: str) -> tuple[str, str]:

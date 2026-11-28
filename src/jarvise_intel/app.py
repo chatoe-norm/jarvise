@@ -870,6 +870,12 @@ def handle_ingest(cfg: AdapterConfig, body: dict[str, Any]) -> tuple[int, dict[s
             _clear_matching_terminal_admission(cfg, slot=slot)
             return 200, {"ok": True, "replay": True, "result": existing}
         if existing and existing.get("status") == "invalid_result":
+            # Re-read the same completed run after an identity parse fix. Never create.
+            run_id = str(existing.get("run_id") or "").strip()
+            if run_id:
+                reread = _handle_resume(cfg, slot=slot, existing=existing)
+                if reread is not None:
+                    return reread
             _clear_matching_terminal_admission(cfg, slot=slot)
             return 409, {"ok": False, "error": "invalid_result"}
         if existing and existing.get("status") == "owner_recovery_required":

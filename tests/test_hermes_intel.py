@@ -865,6 +865,60 @@ def test_runtime_identity_exact_and_fixture() -> None:
     assert subst.value.category == "model_mismatch"
 
 
+def test_get_run_raw_request_uses_top_level_model() -> None:
+    """Live v0.23.4 leaves runtime identity empty and puts the model on the run."""
+    from jarvise_intel.gateway import finalize_completed, get_run
+
+    cfg = GatewayConfig(
+        base_url="http://hermes:8642",
+        api_key="k",
+        provider="openrouter",
+        model="google/gemini-3.8-flash",
+    )
+    body = {
+        "object": "hermes.run",
+        "model": "google/gemini-3.8-flash",
+        "run_id": "run-live",
+        "status": "completed",
+        "output": '{"no_news": true, "items": []}',
+        "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        "runtime": {
+            "provider": "",
+            "model": "",
+            "route_source": "raw_request",
+            "requested": {"provider": "openrouter", "model": "google/gemini-3.8-flash"},
+        },
+    }
+
+    def open_get(request: Any, timeout: float) -> Any:
+        _ = timeout
+        assert request.get_method() == "GET"
+        return _Resp(body)
+
+    parsed = get_run(cfg, "run-live", open_url=open_get)
+    assert parsed.runtime["provider"] == "openrouter"
+    assert parsed.runtime["model"] == "google/gemini-3.8-flash"
+    finalize_completed(cfg, parsed)
+
+    mismatch = dict(body)
+    mismatch["model"] = "other/model"
+    mismatch["runtime"] = {
+        "provider": "",
+        "model": "",
+        "route_source": "raw_request",
+        "requested": {"provider": "openrouter", "model": "google/gemini-3.8-flash"},
+    }
+
+    def open_mismatch(request: Any, timeout: float) -> Any:
+        _ = (request, timeout)
+        return _Resp(mismatch)
+
+    bad = get_run(cfg, "run-live", open_url=open_mismatch)
+    with pytest.raises(GatewayError) as exc:
+        finalize_completed(cfg, bad)
+    assert exc.value.category == "provider_mismatch"
+
+
 def test_handle_ingest_success_and_replay(tmp_path: Path, monkeypatch: Any) -> None:
     prompt = tmp_path / "prompt.md"
     prompt.write_text("fixed prompt", encoding="utf-8")
@@ -1315,10 +1369,70 @@ def test_resume_rejects_missing_runtime_no_publish(tmp_path: Path, monkeypatch: 
     assert body["error"] == "provider_mismatch"
     assert not list(digest_dir.glob("*.md"))
     assert creates["n"] == 0
-    # Second call blocked as invalid_result — no paid replacement.
+    # Second call re-reads the same run and still refuses an empty identity. No create.
     code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
-    assert code2 == 409
-    assert body2["error"] == "invalid_result"
+    assert code2 == 502
+    assert body2["error"] == "provider_mismatch"
+    assert not list(digest_dir.glob("*.md"))
+    assert creates["n"] == 0
+
+
+def test_invalid_result_reread_publishes_same_run(tmp_path: Path, monkeypatch: Any) -> None:
+    """A stored invalid_result is re-read. A now-valid identity publishes with no create."""
+    from jarvise_intel.digest import write_slot_record
+    from jarvise_intel.gateway import RunResult
+
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slot = parse_slot("2026-11-26T07")
+    write_slot_record(
+        state_dir,
+        slot,
+        {
+            "status": "invalid_result",
+            "attempt": 1,
+            "run_id": "run-same",
+            "idempotency_key": "2026-11-26T07-a1",
+            "started_at": "2026-11-26T05:00:00+00:00",
+            "slot": slot.label,
+            "error": "provider_mismatch",
+        },
+    )
+    creates = {"n": 0}
+
+    def fake_get(_cfg: Any, run_id: str, **_k: Any) -> RunResult:
+        assert run_id == "run-same"
+        return RunResult(
+            run_id=run_id,
+            status="completed",
+            output=json.dumps({"no_news": True, "items": []}),
+            usage={"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+            runtime={
+                "provider": "openrouter",
+                "model": "test-model",
+                "requested": {"provider": "openrouter", "model": "test-model"},
+            },
+            raw={"status": "completed"},
+        )
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.get_run", fake_get)
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_run)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-26T07")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code == 200
+    assert body.get("ok") is True
+    assert creates["n"] == 0
+    assert list(digest_dir.glob("*.md"))
+    code2, body2 = handle_ingest(cfg, {"slot": "2026-11-26T07"})
+    assert code2 == 200
+    assert body2.get("replay") is True
+    assert creates["n"] == 0
+    _ = state_dir
 
 
 def test_resume_rejects_budget_exhausted(tmp_path: Path, monkeypatch: Any) -> None:
