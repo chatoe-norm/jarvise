@@ -4,7 +4,11 @@
 #
 # Usage: infra/backup/backup.sh [--dest DIR] [--keep N] [--no-offbox]
 # Env (from /opt/jarvise/.env when present):
-#   JARVISE_BACKUP_DEST   rsync target for off-box copy (e.g. user@host:/backups/jarvise or /mnt/usb/jarvise)
+#   JARVISE_BACKUP_DEST   off-box mirror. The copy is `rsync -a --delete` of backups/
+#                         onto this path, so anything at the destination that is not
+#                         in backups/ is deleted. Store a cutover or OpenClaw archive
+#                         outside backups/ and outside this mirror. Raising
+#                         JARVISE_BACKUP_KEEP does not protect a copy inside the mirror.
 #   JARVISE_BACKUP_KEEP   local days to keep (default 14)
 set -euo pipefail
 

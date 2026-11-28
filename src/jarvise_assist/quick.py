@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 from collections.abc import Callable, Sequence
@@ -42,6 +43,9 @@ _BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 SendFn = Callable[..., Any]
 
 REG_TTL_MS = 10 * 60_000
+# Positive integer milliseconds. Blank, non-integer, and non-positive values
+# fall back to REG_TTL_MS (10 minutes). Read at call time via reg_ttl_ms().
+REG_TTL_MS_ENV = "JARVISE_QUICK_REG_TTL_MS"
 REG_EXPIRE_GRACE_MS = 2 * 60_000
 # Same bound as execute.RECOVER_MAX_AGE_MS (2h). Unresolved exec-linked
 # registrations stay open for fill reconciliation even when the position is
@@ -66,6 +70,27 @@ MSG_QUICK_CONFIRM_STALE = e_confirm_stale()
 MSG_QUICK_SETTING_HINT_RISK = "พิมพ์ค่าเอง: q risk 0.6"
 MSG_QUICK_SETTING_HINT_CAP = "พิมพ์ค่าเอง: q cap 1.2"
 MSG_QUICK_SYMBOL_BUSY = "มีไม้ quick ของ {base} เปิดอยู่"
+
+
+def reg_ttl_ms() -> int:
+    """Registration window in milliseconds, read at call time.
+
+    ``JARVISE_QUICK_REG_TTL_MS`` overrides the module default ``REG_TTL_MS``
+    (10 minutes, ``10 * 60_000``) when the value is a positive integer.
+    A blank, non-integer, or non-positive value is rejected and the default
+    is used. Monkeypatch ``REG_TTL_MS`` to change that default without an
+    env override. Callers must use this function, not a name imported once.
+    """
+    # Literal key so tests/test_compose_env.py sees it. REG_TTL_MS_ENV is the same string.
+    raw = (os.environ.get("JARVISE_QUICK_REG_TTL_MS") or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return int(REG_TTL_MS)
 
 
 def _cb(data: str) -> str:
@@ -215,7 +240,7 @@ def create_quick_registration(
                 return None, "live_position"
 
     rid = f"aqr_{uuid.uuid4().hex[:16]}"
-    expires = int(now_ms) + REG_TTL_MS
+    expires = int(now_ms) + reg_ttl_ms()
     conn.execute(
         """
         INSERT INTO assist_quick_registration (
@@ -838,7 +863,7 @@ def _send_reg_expire_notice(
     label = _side_menu_label(side)
     try:
         if kind == "no_fill":
-            span = _expire_window_phrase(REG_TTL_MS if window_ms is None else int(window_ms))
+            span = _expire_window_phrase(reg_ttl_ms() if window_ms is None else int(window_ms))
             text = f"⌛ ลงทะเบียน quick {sym} {label} หมดเวลา — ไม่พบไม้ภายใน {span} (ไม่นับเป็น quick)"
         elif kind == "wrong_side" and opposite:
             text = (

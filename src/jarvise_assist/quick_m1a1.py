@@ -15,12 +15,12 @@ from jarvise_assist.explore import normalize_explore_symbol
 from jarvise_assist.messages import STOP_INSTRUCTION, _fmt_price_tick, fmt_price, fmt_qty
 from jarvise_assist.pause import main_week_loss_pause_until
 from jarvise_assist.quick import (
-    REG_TTL_MS,
     _cb,
     _expire_window_phrase,
     _fmt_pct,
     create_quick_registration,
     quick_symbol_busy_toast,
+    reg_ttl_ms,
     render_quick_menu,
 )
 from jarvise_assist.quick_card import (
@@ -463,8 +463,9 @@ def registration_success_message(
     tick: Decimal,
     now_ms: int,
 ) -> str:
-    expires = int(now_ms) + REG_TTL_MS
-    window = _expire_window_phrase(REG_TTL_MS)
+    ttl = reg_ttl_ms()
+    expires = int(now_ms) + ttl
+    window = _expire_window_phrase(ttl)
     side_label = _side_label(side)
     entry_s = _fmt_price_tick(entry, tick)
     stop_s = _fmt_price_tick(stop, tick)

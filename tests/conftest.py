@@ -197,3 +197,20 @@ def _no_entry_bar_15m_network(monkeypatch: pytest.MonkeyPatch) -> None:
     trail_advice._ENTRY_BAR_CACHE.clear()
     trail_advice._ENTRY_BAR_FAIL_MEMO.clear()
     monkeypatch.setattr(trail_advice, "_ENTRY_BAR_FETCH", lambda *_a, **_k: [])
+
+
+# Operator overrides for the 10-minute quick registration window and the Hermes
+# isolation CONNECT read. Cleared for every test so a shell export cannot change
+# a default assertion. A test that needs a value calls monkeypatch.setenv in the
+# test body, which runs after this fixture. Nothing else is removed.
+_OPERATOR_DEFAULT_ENV = (
+    "JARVISE_QUICK_REG_TTL_MS",
+    "JARVISE_HERMES_ISO_CONNECT_READ_MAX",
+    "JARVISE_HERMES_ISO_CONNECT_TIMEOUT_S",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_operator_registration_and_isolation_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _OPERATOR_DEFAULT_ENV:
+        monkeypatch.delenv(name, raising=False)

@@ -325,6 +325,7 @@ _PARITY_075_2_MARKUP = {
 )
 def test_record_only_card_parity_in_range(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     risk: float,
     cap: float,
     qty: int,
@@ -332,6 +333,7 @@ def test_record_only_card_parity_in_range(
     markup: dict[str, Any],
 ) -> None:
     """In-range risk≤cap: card matches frozen b46da90 quick_card literals."""
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     conn = open_db(tmp_path / f"card_{risk}_{cap}.db")
     ensure_settings(conn)
     write_quick_settings(conn, risk_pct=risk, cap_pct=cap)

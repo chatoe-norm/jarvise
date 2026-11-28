@@ -28,7 +28,12 @@ from jarvise_assist import partner_admin as pa
 from jarvise_assist import partner_store as ps
 from jarvise_assist.partner_audit import Finding
 from jarvise_assist.partner_value import AccountValue
-from jarvise_assist.quick import REG_TTL_MS, _expire_window_phrase
+from jarvise_assist.quick import (
+    REG_TTL_MS,
+    REG_TTL_MS_ENV,
+    _expire_window_phrase,
+    create_quick_registration,
+)
 from jarvise_assist.quick_card import (
     CARD_TTL_PREFIX,
     REFUSAL,
@@ -177,6 +182,7 @@ def _ey(
 
 
 def test_a1_bot_footer_matches_execute_button(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     _bot(monkeypatch)
     conn = _db(tmp_path, "footer.db")
     ts = _daytime_ms()
@@ -198,6 +204,7 @@ def test_a1_bot_footer_matches_execute_button(tmp_path: Path, monkeypatch: pytes
 
 
 def test_a1_footer_window_comes_from_reg_ttl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     monkeypatch.setattr("jarvise_assist.quick.REG_TTL_MS", 15 * 60_000)
     span = _expire_window_phrase(15 * 60_000)
     conn = _db(tmp_path, "win-off.db")
@@ -228,7 +235,10 @@ def test_a1_footer_window_comes_from_reg_ttl(tmp_path: Path, monkeypatch: pytest
     conn_on.close()
 
 
-def test_a1_record_only_footer_stays_when_button_hidden(tmp_path: Path) -> None:
+def test_a1_record_only_footer_stays_when_button_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     conn = _db(tmp_path, "record.db")
     card = build_quick_card(
         conn,
@@ -632,6 +642,7 @@ def test_r3_confirm_reuses_positions_already_read(tmp_path: Path, monkeypatch: p
 
 
 def test_r2_registration_success_window_follows_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     kwargs = {
         "sym": "BTCUSDT",
         "side": "long",
@@ -644,11 +655,95 @@ def test_r2_registration_success_window_follows_ttl(monkeypatch: pytest.MonkeyPa
     default = registration_success_message(**kwargs)
     assert "ภายใน 10 นาที" in default
     assert "เหลือ 10 นาที" in default
-    monkeypatch.setattr("jarvise_assist.quick_m1a1.REG_TTL_MS", 15 * 60_000)
+    # Call-time read of quick.REG_TTL_MS. Patching the name quick_m1a1 bound at
+    # import does not change the window.
+    monkeypatch.setattr("jarvise_assist.quick.REG_TTL_MS", 15 * 60_000)
     changed = registration_success_message(**kwargs)
     assert "ภายใน 15 นาที" in changed
     assert "เหลือ 15 นาที" in changed
     assert "10 นาที" not in changed
+
+
+def test_reg_ttl_override_is_call_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Env override and a post-import REG_TTL_MS patch both move expiry and copy."""
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
+    assert REG_TTL_MS_ENV == "JARVISE_QUICK_REG_TTL_MS"
+    conn = _db(tmp_path, "ttl-default.db")
+    t0 = _daytime_ms()
+    rid, reason = create_quick_registration(
+        conn,
+        symbol="BTCUSDT",
+        side="long",
+        planned_entry=100.0,
+        planned_stop=95.0,
+        qty=0.01,
+        now_ms=t0,
+    )
+    assert reason is None and rid is not None
+    row = conn.execute("SELECT expires_at_ms FROM assist_quick_registration WHERE id=?", (rid,)).fetchone()
+    assert int(row["expires_at_ms"]) == t0 + 10 * 60_000
+    conn.close()
+
+    monkeypatch.setenv("JARVISE_QUICK_REG_TTL_MS", "900000")
+    conn_env = _db(tmp_path, "ttl-env.db")
+    rid_env, reason_env = create_quick_registration(
+        conn_env,
+        symbol="ETHUSDT",
+        side="long",
+        planned_entry=100.0,
+        planned_stop=95.0,
+        qty=0.01,
+        now_ms=t0,
+    )
+    assert reason_env is None and rid_env is not None
+    row_env = conn_env.execute(
+        "SELECT expires_at_ms FROM assist_quick_registration WHERE id=?", (rid_env,)
+    ).fetchone()
+    assert int(row_env["expires_at_ms"]) == t0 + 900_000
+    msg = registration_success_message(
+        sym="ETHUSDT",
+        side="long",
+        entry=D("100"),
+        stop=D("95"),
+        qty=D("0.01"),
+        tick=D("0.1"),
+        now_ms=t0,
+    )
+    assert "ภายใน 15 นาที" in msg
+    assert "10 นาที" not in msg
+    conn_env.close()
+
+    for bad in ("0", "-5", "15m", "1.5", "  "):
+        monkeypatch.setenv("JARVISE_QUICK_REG_TTL_MS", bad)
+        fallback = registration_success_message(
+            sym="ETHUSDT",
+            side="long",
+            entry=D("100"),
+            stop=D("95"),
+            qty=D("0.01"),
+            tick=D("0.1"),
+            now_ms=t0,
+        )
+        assert "10 นาที" in fallback, bad
+
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
+    monkeypatch.setattr("jarvise_assist.quick.REG_TTL_MS", 20 * 60_000)
+    conn_patch = _db(tmp_path, "ttl-patch.db")
+    rid_patch, reason_patch = create_quick_registration(
+        conn_patch,
+        symbol="SOLUSDT",
+        side="short",
+        planned_entry=100.0,
+        planned_stop=110.0,
+        qty=0.01,
+        now_ms=t0,
+    )
+    assert reason_patch is None and rid_patch is not None
+    row_patch = conn_patch.execute(
+        "SELECT expires_at_ms FROM assist_quick_registration WHERE id=?", (rid_patch,)
+    ).fetchone()
+    assert int(row_patch["expires_at_ms"]) == t0 + 20 * 60_000
+    conn_patch.close()
 
 
 def test_a1_quick_cohort_menu_ids_are_owned(tmp_path: Path) -> None:

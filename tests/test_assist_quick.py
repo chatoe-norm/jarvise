@@ -189,7 +189,8 @@ def test_quick_existing_risk_05_unchanged_after_migrate(tmp_path: Path) -> None:
 # --- 1b registration --------------------------------------------------------
 
 
-def test_registration_create_and_refusals(tmp_path: Path) -> None:
+def test_registration_create_and_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     conn = open_db(tmp_path / "reg.db")
     t0 = _ms_bangkok(2026, 11, 10, 12, 0)
     ok, reason = create_quick_registration(

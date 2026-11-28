@@ -1159,9 +1159,9 @@ def build_quick_card(
                     f" เกินระดับเตือน {fmt_price(warn_pct)}%"
                 )
 
-    from jarvise_assist.quick import REG_TTL_MS, _expire_window_phrase
+    from jarvise_assist.quick import _expire_window_phrase, reg_ttl_ms
 
-    window = _expire_window_phrase(REG_TTL_MS)
+    window = _expire_window_phrase(reg_ttl_ms())
     if bot_eligible:
         footer_tail = f"⚡ = บอทส่งคำสั่งหลังยืนยัน · กดลงทะเบียน = เปิดเองใน Binance ภายใน {window}"
     else:

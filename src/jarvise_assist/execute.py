@@ -4542,6 +4542,10 @@ def cancel_owner_reducing_orders_for_symbol(
             )
 
         label = _label(order)
+        # Algo ids and order ids share the numeric space. A separate step keeps
+        # quick-owned classification (real_trades._ALGO_STEPS / *_algo) from
+        # treating an algoId as a trade orderId.
+        step = "exit_cancel_owner_algo" if source == "algo" else "exit_cancel_owner"
         try:
             if source == "algo":
                 algo_id = order.get("algoId")
@@ -4564,7 +4568,7 @@ def cancel_owner_reducing_orders_for_symbol(
                 _log_write(
                     conn,
                     intent_id=intent_id,
-                    step="exit_cancel_owner",
+                    step=step,
                     endpoint=endpoint,
                     http_status=200,
                     order_or_algo_id=order_ref,
@@ -4574,7 +4578,7 @@ def cancel_owner_reducing_orders_for_symbol(
                 _log_write(
                     conn,
                     intent_id=intent_id,
-                    step="exit_cancel_owner",
+                    step=step,
                     endpoint=("/fapi/v1/algoOrder" if source == "algo" else "/fapi/v1/order"),
                     http_status=exc.http_status,
                     binance_code=exc.binance_code,

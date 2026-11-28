@@ -37,11 +37,14 @@ from jarvise_intel.gateway import (
     wait_for_run,
 )
 from jarvise_intel.policy import (
+    DEFAULT_CONNECT_ALLOWLIST,
     allow_connect_target,
     allow_https_url,
     allow_redirect_url,
     allow_source_url,
     is_blocked_ip,
+    load_connect_allowlist,
+    load_source_policy,
     validate_host_addrs,
 )
 
@@ -345,7 +348,16 @@ def test_connect_allowlist_rejects_malformed_hosts_without_dns() -> None:
     assert lookups["n"] == 0
 
 
-def test_default_connect_allowlist_allows_openrouter_not_digest_source() -> None:
+def test_default_connect_allowlist_allows_openrouter_not_digest_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default CONNECT file is the shipped path, not CWD or a leftover env value."""
+    monkeypatch.setenv("JARVISE_HERMES_CONNECT_ALLOWLIST", str(tmp_path / "absent.json"))
+    monkeypatch.delenv("JARVISE_HERMES_CONNECT_ALLOWLIST", raising=False)
+    monkeypatch.chdir(tmp_path)
+    shipped = Path(__file__).resolve().parents[1] / "config" / "hermes" / "connect-allowlist.json"
+    assert DEFAULT_CONNECT_ALLOWLIST.is_absolute()
+    assert DEFAULT_CONNECT_ALLOWLIST == shipped
     ok, reason, addrs = allow_connect_target("openrouter.ai", 443, resolve=_public_resolve)
     assert ok is True
     assert reason == "ok"
@@ -405,15 +417,7 @@ def test_connect_allowlist_fail_closed(tmp_path: Path, monkeypatch: pytest.Monke
 
     monkeypatch.delenv("JARVISE_HERMES_CONNECT_ALLOWLIST", raising=False)
     monkeypatch.chdir(tmp_path)
-    default_missing, default_reason, _ = allow_connect_target(
-        "nvidia.com",
-        443,
-        resolve=_public_resolve,
-    )
-    assert default_missing is False
-    assert default_reason == "connect_allowlist_closed"
-
-    monkeypatch.chdir(ROOT)
+    # The shipped default is an absolute path, so a different CWD still loads it.
     default_ok, default_ok_reason, _ = allow_connect_target(
         "reuters.com",
         443,
@@ -3106,3 +3110,153 @@ def test_w1_marker_ahead_get_failure_keeps_run_id(tmp_path: Path, monkeypatch: A
     assert active.get("status") == "unknown"
     assert active.get("run_id") == "accepted-run"
     _ = digest_dir
+
+
+def test_load_provenance_rejects_undecodable_bytes(tmp_path: Path) -> None:
+    """Invalid UTF-8 provenance fails closed instead of raising."""
+    from jarvise_intel.digest import _provenance_path, load_provenance
+
+    slot = parse_slot("2026-11-26T19")
+    path = _provenance_path(tmp_path, slot)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe{")
+    assert load_provenance(tmp_path, slot) is None
+
+
+def test_suffix_list_rejects_bare_tld() -> None:
+    """A one-label suffix closes the allowlist; deny_hosts may stay one label."""
+    assert load_connect_allowlist(policy={"allow_suffixes": [".com"]}) is None
+    assert load_connect_allowlist(policy={"allow_suffixes": ["com"]}) is None
+    assert load_connect_allowlist(policy={"allow_suffixes": ["com."]}) is None
+    closed_deny = load_connect_allowlist(policy={"allow_suffixes": ["nvidia.com"], "deny_suffixes": [".com"]})
+    assert closed_deny is None
+    rules = load_connect_allowlist(
+        policy={
+            "allow_suffixes": ["nvidia.com", ".nvidia.com"],
+            "deny_hosts": ["localhost"],
+        }
+    )
+    assert rules is not None
+    assert rules["allow_suffixes"] == ["nvidia.com", "nvidia.com"]
+    assert rules["deny_hosts"] == ["localhost"]
+
+
+def test_shipped_hermes_policy_files_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_HERMES_CONNECT_ALLOWLIST", raising=False)
+    monkeypatch.chdir(tmp_path)
+    connect = load_connect_allowlist()
+    assert connect is not None
+    assert "openrouter.ai" in connect["allow_suffixes"]
+    assert "nvidia.com" in connect["allow_suffixes"]
+    source = load_source_policy(SOURCE_POLICY)
+    assert "nvidia.com" in source["allow_suffixes"]
+    assert "openrouter.ai" not in source["allow_suffixes"]
+
+
+def test_connect_allowlist_accepts_mapping_not_sequence() -> None:
+    from types import MappingProxyType
+
+    proxy = MappingProxyType({"allow_suffixes": ["nvidia.com"], "deny_hosts": ["localhost"]})
+    rules = load_connect_allowlist(policy=proxy)
+    assert rules is not None
+    assert rules["allow_suffixes"] == ["nvidia.com"]
+    assert rules["deny_hosts"] == ["localhost"]
+    assert load_connect_allowlist(policy=["nvidia.com"]) is None  # type: ignore[arg-type]
+
+    seen: list[str] = []
+
+    def resolve(host: str) -> list[str]:
+        seen.append(host)
+        return ["8.8.8.8"]
+
+    ok, reason, addrs = allow_connect_target("nvidia.com", 443, resolve=resolve, policy=proxy)
+    assert ok is True
+    assert reason == "ok"
+    assert addrs == ["8.8.8.8"]
+    seen.clear()
+    closed, why, got = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=resolve,
+        policy=["nvidia.com"],  # type: ignore[arg-type]
+    )
+    assert closed is False
+    assert why == "connect_allowlist_closed"
+    assert got == []
+    assert seen == []
+
+
+def test_allow_connect_target_resolves_normalized_host() -> None:
+    policy = {"allow_suffixes": ["nvidia.com"]}
+    forms = ("nvidia.com", "NVIDIA.COM", "nvidia.com.", "[nvidia.com]", "NVIDIA.COM.")
+    for host in forms:
+        seen: list[str] = []
+
+        def resolve(name: str, _seen: list[str] = seen) -> list[str]:
+            _seen.append(name)
+            return ["8.8.8.8"]
+
+        ok, reason, addrs = allow_connect_target(host, 443, resolve=resolve, policy=policy)
+        assert ok is True, (host, reason)
+        assert reason == "ok"
+        assert addrs == ["8.8.8.8"]
+        assert seen == ["nvidia.com"], (host, seen)
+
+
+def test_load_connect_allowlist_normalizes_deny_lists_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """deny_hosts and deny_suffixes are validated once, then reused in the result."""
+    import jarvise_intel.policy as policy_mod
+
+    calls: list[object] = []
+    real = policy_mod._suffix_list
+
+    def wrapped(value: object, *, reject_one_label: bool = False) -> list[str] | None:
+        calls.append(value)
+        return real(value, reject_one_label=reject_one_label)
+
+    monkeypatch.setattr(policy_mod, "_suffix_list", wrapped)
+    loaded = policy_mod.load_connect_allowlist(
+        policy={
+            "allow_suffixes": ["nvidia.com"],
+            "deny_hosts": ["localhost"],
+            "deny_suffixes": ["evil.example"],
+        }
+    )
+    assert loaded is not None
+    assert loaded["deny_hosts"] == ["localhost"]
+    assert loaded["deny_suffixes"] == ["evil.example"]
+    assert calls.count(["localhost"]) == 1
+    assert calls.count(["evil.example"]) == 1
+
+
+def test_source_suffixes_are_covered_by_connect_allowlist() -> None:
+    from jarvise_intel.policy import _connect_host_allowed, source_suffix_covered_by_connect
+
+    source = json.loads(SOURCE_POLICY.read_text(encoding="utf-8"))
+    connect_path = ROOT / "config" / "hermes" / "connect-allowlist.json"
+    connect = load_connect_allowlist(connect_path)
+    assert connect is not None
+    missing = [
+        suffix
+        for suffix in source["allow_suffixes"]
+        if not source_suffix_covered_by_connect(suffix, connect["allow_suffixes"])
+    ]
+    assert missing == []
+    blocked = [suffix for suffix in source["allow_suffixes"] if not _connect_host_allowed(suffix, connect)[0]]
+    assert blocked == []
+
+
+def test_source_suffix_coverage_helper_rejects_a_dropped_suffix() -> None:
+    from jarvise_intel.policy import source_suffix_covered_by_connect
+
+    allow = ["nvidia.com", "bbc.co.uk"]
+    assert source_suffix_covered_by_connect("nvidia.com", allow) is True
+    assert source_suffix_covered_by_connect("www.nvidia.com", allow) is True
+    assert source_suffix_covered_by_connect("news.bbc.co.uk", allow) is True
+    dropped = [suffix for suffix in allow if suffix != "nvidia.com"]
+    assert source_suffix_covered_by_connect("nvidia.com", dropped) is False
+    assert source_suffix_covered_by_connect("notnvidia.com", allow) is False
+    assert source_suffix_covered_by_connect("nvidia.com", [".NVIDIA.COM"]) is True
+    assert source_suffix_covered_by_connect("www.nvidia.com", [".NVIDIA.COM"]) is True
+    assert source_suffix_covered_by_connect("nvidia.com", ["com"]) is False
+    assert source_suffix_covered_by_connect("nvidia.com", [".com"]) is False

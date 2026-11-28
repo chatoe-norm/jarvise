@@ -961,12 +961,13 @@ def _quick_owned_client_and_order_ids(
             "move_stop_place",
             "move_stop_cancel",
             "exit_cancel",
+            "exit_cancel_owner_algo",
             "recover_move_cancel",
         }
     )
     rows = conn.execute(
         """
-        SELECT l.client_order_id, l.order_or_algo_id, l.step, i.preview_json, i.symbol
+        SELECT l.client_order_id, l.order_or_algo_id, l.step, l.endpoint, i.preview_json, i.symbol
         FROM assist_exec_log l
         JOIN assist_exec_intent i ON i.id = l.intent_id
         """
@@ -987,7 +988,10 @@ def _quick_owned_client_and_order_ids(
         if not oid or not sym:
             continue
         step = str(row["step"] or "")
-        if step in _ALGO_STEPS or step.endswith("_algo"):
+        endpoint = str(row["endpoint"] or "")
+        # Legacy rows logged algo DELETE under the shared step exit_cancel_owner.
+        legacy_algo = step == "exit_cancel_owner" and endpoint == "/fapi/v1/algoOrder"
+        if step in _ALGO_STEPS or step.endswith("_algo") or legacy_algo:
             algo_ids.add((sym, oid))
         else:
             order_ids.add((sym, oid))

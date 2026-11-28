@@ -2,7 +2,8 @@
 
 CONNECT targets must match ``allow_suffixes`` in ``JARVISE_HERMES_CONNECT_ALLOWLIST``.
 When that variable is unset, the file is ``config/hermes/connect-allowlist.json``
-(digest sources stay in ``source-policy.json`` and are not a provider allowlist).
+resolved from this module (not the process working directory).
+Digest sources stay in ``source-policy.json`` and are not a provider allowlist.
 A missing, empty, or unreadable allowlist denies every CONNECT.
 The hostname is checked against the allowlist before DNS resolution.
 """
@@ -27,7 +28,9 @@ BLOCKED_HOST_IPS = frozenset(
 
 Resolver = Callable[[str], list[str]]
 DEFAULT_SOURCE_POLICY = Path("config/hermes/source-policy.json")
-DEFAULT_CONNECT_ALLOWLIST = Path("config/hermes/connect-allowlist.json")
+# Absolute, from this file, so CONNECT does not depend on the process CWD.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONNECT_ALLOWLIST = _REPO_ROOT / "config" / "hermes" / "connect-allowlist.json"
 # Unset uses DEFAULT_CONNECT_ALLOWLIST. An empty value, or a missing/empty file, denies CONNECT.
 CONNECT_ALLOWLIST_ENV = "JARVISE_HERMES_CONNECT_ALLOWLIST"
 # Printable ASCII only — the exact string that will be rendered into Markdown.
@@ -169,7 +172,19 @@ def allow_https_url(
     return True, "ok"
 
 
-def _suffix_list(value: object) -> list[str] | None:
+def _suffix_list(value: object, *, reject_one_label: bool = False) -> list[str] | None:
+    """Normalize a list of host or suffix strings.
+
+    Each entry is stripped, lowercased, and leading/trailing dots removed.
+    A non-list ``value`` or a non-string entry returns None.
+
+    ``reject_one_label`` applies to suffix lists (``allow_suffixes`` and
+    ``deny_suffixes``). After normalization, an entry with no internal dot —
+    a bare label such as ``.com``, ``com``, or ``com.`` — rejects the whole
+    list (return None). A one-label suffix would allow or deny every host in
+    that TLD. ``deny_hosts`` leaves the flag false so single-label names such
+    as ``localhost`` stay valid.
+    """
     if not isinstance(value, list):
         return None
     out: list[str] = []
@@ -177,8 +192,11 @@ def _suffix_list(value: object) -> list[str] | None:
         if not isinstance(item, str):
             return None
         text = item.strip().lower().strip(".")
-        if text:
-            out.append(text)
+        if not text:
+            continue
+        if reject_one_label and "." not in text:
+            return None
+        out.append(text)
     return out
 
 
@@ -199,12 +217,18 @@ def load_connect_allowlist(
 ) -> dict[str, list[str]] | None:
     """CONNECT domain rules, or None when the allowlist must fail closed.
 
-    An explicit ``policy`` skips the file. Otherwise ``path`` wins, then
-    ``JARVISE_HERMES_CONNECT_ALLOWLIST``, then ``DEFAULT_CONNECT_ALLOWLIST``.
-    Missing, unreadable, non-object, or empty ``allow_suffixes`` returns None.
+    An explicit ``policy`` skips the file. Any ``collections.abc.Mapping`` is
+    accepted and copied with ``dict``; a non-mapping fails closed. Otherwise
+    ``path`` wins, then ``JARVISE_HERMES_CONNECT_ALLOWLIST``, then
+    ``DEFAULT_CONNECT_ALLOWLIST`` (absolute, independent of CWD).
+    Missing, unreadable, non-object, empty, or one-label ``allow_suffixes``
+    returns None. A one-label ``deny_suffixes`` entry also closes the list.
+    ``deny_hosts`` may still name a single label such as ``localhost``.
     """
     if policy is not None:
-        data: object = policy
+        if not isinstance(policy, Mapping):
+            return None
+        data: object = dict(policy)
     else:
         target = path if path is not None else _connect_allowlist_path()
         if target is None or not target.is_file():
@@ -215,17 +239,21 @@ def load_connect_allowlist(
             return None
     if not isinstance(data, dict):
         return None
-    allow = _suffix_list(data.get("allow_suffixes"))
+    allow = _suffix_list(data.get("allow_suffixes"), reject_one_label=True)
     if not allow:
         return None
-    if data.get("deny_hosts") is not None and _suffix_list(data.get("deny_hosts")) is None:
+    raw_deny_hosts = data.get("deny_hosts")
+    deny_hosts = _suffix_list(raw_deny_hosts)
+    if raw_deny_hosts is not None and deny_hosts is None:
         return None
-    if data.get("deny_suffixes") is not None and _suffix_list(data.get("deny_suffixes")) is None:
+    raw_deny_suffixes = data.get("deny_suffixes")
+    deny_suffixes = _suffix_list(raw_deny_suffixes, reject_one_label=True)
+    if raw_deny_suffixes is not None and deny_suffixes is None:
         return None
     return {
         "allow_suffixes": allow,
-        "deny_hosts": _suffix_list(data.get("deny_hosts")) or [],
-        "deny_suffixes": _suffix_list(data.get("deny_suffixes")) or [],
+        "deny_hosts": deny_hosts or [],
+        "deny_suffixes": deny_suffixes or [],
     }
 
 
@@ -244,6 +272,26 @@ def _connect_host_allowed(host: str, rules: dict[str, list[str]]) -> tuple[bool,
     return False, "connect_not_allowlisted"
 
 
+def source_suffix_covered_by_connect(source_suffix: str, allow_suffixes: list[str]) -> bool:
+    """True when a digest source suffix is equal to or under a CONNECT allow suffix.
+
+    The allow list is normalized with ``_suffix_list(..., reject_one_label=True)``
+    before matching. A rejected or empty list returns False. Matching is the
+    allow half of ``_connect_host_allowed``: after host normalization, equality
+    or ``host.endswith("." + suffix)``. Deny lists are empty here.
+    """
+    normalized = _suffix_list(list(allow_suffixes), reject_one_label=True)
+    if not normalized:
+        return False
+    rules = {
+        "allow_suffixes": normalized,
+        "deny_hosts": [],
+        "deny_suffixes": [],
+    }
+    ok, why = _connect_host_allowed(source_suffix, rules)
+    return ok and why == "ok"
+
+
 def allow_connect_target(
     host: str,
     port: int,
@@ -256,6 +304,8 @@ def allow_connect_target(
 
     Port 443 and hostname grammar run first, then the domain allowlist, then
     DNS/IP checks. A missing or empty allowlist denies without resolving DNS.
+    A non-mapping ``policy`` is closed by ``load_connect_allowlist`` before DNS.
+    The allowlist and DNS both see the normalized host.
     """
     if port != 443:
         return False, "port_not_443", []
@@ -269,10 +319,10 @@ def allow_connect_target(
     rules = load_connect_allowlist(policy_path, policy=policy)
     if rules is None:
         return False, "connect_allowlist_closed", []
-    ok, why = _connect_host_allowed(host, rules)
+    ok, why = _connect_host_allowed(host_norm, rules)
     if not ok:
         return False, why, []
-    addrs, reason = validate_host_addrs(host, resolve=resolve)
+    addrs, reason = validate_host_addrs(host_norm, resolve=resolve)
     if not addrs:
         return False, reason, []
     return True, "ok", addrs

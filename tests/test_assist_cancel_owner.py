@@ -26,6 +26,7 @@ from jarvise_assist.execute import (
     PREVIEW_TTL_MS,
     RECOVER_MAX_AGE_MS,
     BinanceTradeClient,
+    TradeClientError,
     _append_exit_retained_leftovers,
     _finish_flat_exit,
     _format_menu_exit_confirm,
@@ -38,6 +39,7 @@ from jarvise_assist.execute import (
 )
 from jarvise_assist.futures import FuturesPosition
 from jarvise_assist.messages import _fmt_price_tick, fmt_price
+from jarvise_assist.real_trades import _quick_owned_client_and_order_ids
 from jarvise_assist.store import (
     finish_exec_intent,
     get_exec_intent,
@@ -3117,4 +3119,158 @@ def test_z_flag_off_flat_close_no_extra_exchange_info(
     row = get_exec_intent(conn, rid)
     assert row is not None and row["status"] == "done"
     _assert_no_exchange_info(transport)
+    conn.close()
+
+
+def _owner_reduce_order(*, source: str, oid: int, label: str) -> dict[str, Any]:
+    """Owner reduce-only STOP that the cancel loop will DELETE (create time set)."""
+    common = {
+        "symbol": "BTCUSDT",
+        "type": "STOP_MARKET",
+        "side": "SELL",
+        "stopPrice": "90",
+        "origQty": "0.01",
+        "reduceOnly": True,
+        "positionSide": "BOTH",
+    }
+    if source == "algo":
+        return {**common, "algoId": oid, "clientAlgoId": label, "createTime": 1_000}
+    return {**common, "orderId": oid, "clientOrderId": label, "time": 1_000}
+
+
+class _OwnerCancelTrade:
+    def __init__(self, *, fail: bool) -> None:
+        self.fail = fail
+        self.plain = _owner_reduce_order(source="regular", oid=111, label="owner-plain")
+        self.algo = _owner_reduce_order(source="algo", oid=222, label="owner-algo")
+
+    def position_risk(self, **_k: Any) -> list[Any]:
+        return []
+
+    def open_orders(self, **_k: Any) -> list[Any]:
+        return [self.plain]
+
+    def open_algo_orders(self, **_k: Any) -> list[Any]:
+        return [self.algo]
+
+    def cancel_order(self, **_k: Any) -> dict[str, str]:
+        if self.fail:
+            raise TradeClientError("plain failed", http_status=400, binance_code=-1000)
+        return {"code": "200"}
+
+    def cancel_algo(self, **_k: Any) -> dict[str, str]:
+        if self.fail:
+            raise TradeClientError("algo failed", http_status=400, binance_code=-1000)
+        return {"code": "200"}
+
+
+def _quick_exit_intent(conn: Any, ts: int) -> str:
+    return insert_exec_intent(
+        conn,
+        kind="exit",
+        symbol="BTCUSDT",
+        side="long",
+        preview={"origin": "quick", "cohort": "quick", "symbol": "BTCUSDT"},
+        created_at_ms=ts,
+        expires_at_ms=ts + 60_000,
+    )
+
+
+def test_owner_cancel_logs_plain_and_algo_steps(tmp_path: Path) -> None:
+    """Plain DELETE stays exit_cancel_owner; algo DELETE is exit_cancel_owner_algo."""
+    conn = open_db(tmp_path / "owner-steps.db")
+    ts = 1_700_000_000_000
+    intent_id = _quick_exit_intent(conn, ts)
+    result = cancel_owner_reducing_orders_for_symbol(
+        _OwnerCancelTrade(fail=False),  # type: ignore[arg-type]
+        symbol="BTCUSDT",
+        side="long",
+        position_side="BOTH",
+        anchor_ms=2_000,
+        conn=conn,
+        intent_id=intent_id,
+    )
+    assert result.cancelled == ["owner-plain", "owner-algo"]
+    rows = conn.execute(
+        """
+        SELECT step, endpoint, order_or_algo_id, http_status
+        FROM assist_exec_log WHERE intent_id=? ORDER BY id
+        """,
+        (intent_id,),
+    ).fetchall()
+    by_step = {str(row["step"]): row for row in rows}
+    assert set(by_step) == {"exit_cancel_owner", "exit_cancel_owner_algo"}
+    assert str(by_step["exit_cancel_owner"]["endpoint"]) == "/fapi/v1/order"
+    assert str(by_step["exit_cancel_owner"]["order_or_algo_id"]) == "111"
+    assert int(by_step["exit_cancel_owner"]["http_status"]) == 200
+    assert str(by_step["exit_cancel_owner_algo"]["endpoint"]) == "/fapi/v1/algoOrder"
+    assert str(by_step["exit_cancel_owner_algo"]["order_or_algo_id"]) == "222"
+    _cids, order_ids, algo_ids = _quick_owned_client_and_order_ids(conn)
+    assert ("BTCUSDT", "111") in order_ids
+    assert ("BTCUSDT", "111") not in algo_ids
+    assert ("BTCUSDT", "222") in algo_ids
+    assert ("BTCUSDT", "222") not in order_ids
+    conn.close()
+
+
+def test_owner_cancel_error_logs_keep_step_names(tmp_path: Path) -> None:
+    """A failed DELETE uses the same step split so the id stays on the right side."""
+    conn = open_db(tmp_path / "owner-steps-err.db")
+    ts = 1_700_000_000_000
+    intent_id = _quick_exit_intent(conn, ts)
+    result = cancel_owner_reducing_orders_for_symbol(
+        _OwnerCancelTrade(fail=True),  # type: ignore[arg-type]
+        symbol="BTCUSDT",
+        side="long",
+        position_side="BOTH",
+        anchor_ms=2_000,
+        conn=conn,
+        intent_id=intent_id,
+    )
+    assert result.ok is False
+    assert result.failed_ids == ["owner-plain", "owner-algo"]
+    rows = conn.execute(
+        "SELECT step, endpoint, order_or_algo_id, binance_code FROM assist_exec_log WHERE intent_id=?",
+        (intent_id,),
+    ).fetchall()
+    by_step = {str(row["step"]): row for row in rows}
+    assert str(by_step["exit_cancel_owner"]["endpoint"]) == "/fapi/v1/order"
+    assert str(by_step["exit_cancel_owner"]["order_or_algo_id"]) == "111"
+    assert int(by_step["exit_cancel_owner"]["binance_code"]) == -1000
+    assert str(by_step["exit_cancel_owner_algo"]["endpoint"]) == "/fapi/v1/algoOrder"
+    assert str(by_step["exit_cancel_owner_algo"]["order_or_algo_id"]) == "222"
+    _cids, order_ids, algo_ids = _quick_owned_client_and_order_ids(conn)
+    assert ("BTCUSDT", "222") in algo_ids
+    assert ("BTCUSDT", "222") not in order_ids
+    assert ("BTCUSDT", "111") in order_ids
+    conn.close()
+
+
+def test_legacy_exit_cancel_owner_algo_endpoint_is_an_algo_id(tmp_path: Path) -> None:
+    """A pre-split algo DELETE used step exit_cancel_owner with the algo endpoint."""
+    conn = open_db(tmp_path / "legacy-algo-endpoint.db")
+    ts = 1_700_000_000_000
+    intent_id = _quick_exit_intent(conn, ts)
+
+    def log(step: str, endpoint: str, oid: str) -> None:
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step=step,
+            endpoint=endpoint,
+            order_or_algo_id=oid,
+            http_status=200,
+            created_at_ms=ts,
+        )
+
+    log("exit_cancel_owner", "/fapi/v1/algoOrder", "333")
+    log("exit_cancel_owner", "/fapi/v1/order", "111")
+    log("exit_cancel_owner_algo", "/fapi/v1/algoOrder", "222")
+    _cids, order_ids, algo_ids = _quick_owned_client_and_order_ids(conn)
+    assert ("BTCUSDT", "333") in algo_ids
+    assert ("BTCUSDT", "333") not in order_ids
+    assert ("BTCUSDT", "111") in order_ids
+    assert ("BTCUSDT", "111") not in algo_ids
+    assert ("BTCUSDT", "222") in algo_ids
+    assert ("BTCUSDT", "222") not in order_ids
     conn.close()
