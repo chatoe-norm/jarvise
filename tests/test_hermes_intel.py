@@ -3203,18 +3203,47 @@ def test_allow_connect_target_resolves_normalized_host() -> None:
         assert seen == ["nvidia.com"], (host, seen)
 
 
+def test_load_connect_allowlist_normalizes_deny_lists_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """deny_hosts and deny_suffixes are validated once, then reused in the result."""
+    import jarvise_intel.policy as policy_mod
+
+    calls: list[object] = []
+    real = policy_mod._suffix_list
+
+    def wrapped(value: object, *, reject_one_label: bool = False) -> list[str] | None:
+        calls.append(value)
+        return real(value, reject_one_label=reject_one_label)
+
+    monkeypatch.setattr(policy_mod, "_suffix_list", wrapped)
+    loaded = policy_mod.load_connect_allowlist(
+        policy={
+            "allow_suffixes": ["nvidia.com"],
+            "deny_hosts": ["localhost"],
+            "deny_suffixes": ["evil.example"],
+        }
+    )
+    assert loaded is not None
+    assert loaded["deny_hosts"] == ["localhost"]
+    assert loaded["deny_suffixes"] == ["evil.example"]
+    assert calls.count(["localhost"]) == 1
+    assert calls.count(["evil.example"]) == 1
+
+
 def test_source_suffixes_are_covered_by_connect_allowlist() -> None:
-    from jarvise_intel.policy import source_suffix_covered_by_connect
+    from jarvise_intel.policy import _connect_host_allowed, source_suffix_covered_by_connect
 
     source = json.loads(SOURCE_POLICY.read_text(encoding="utf-8"))
     connect_path = ROOT / "config" / "hermes" / "connect-allowlist.json"
-    connect = json.loads(connect_path.read_text(encoding="utf-8"))
+    connect = load_connect_allowlist(connect_path)
+    assert connect is not None
     missing = [
         suffix
         for suffix in source["allow_suffixes"]
         if not source_suffix_covered_by_connect(suffix, connect["allow_suffixes"])
     ]
     assert missing == []
+    blocked = [suffix for suffix in source["allow_suffixes"] if not _connect_host_allowed(suffix, connect)[0]]
+    assert blocked == []
 
 
 def test_source_suffix_coverage_helper_rejects_a_dropped_suffix() -> None:
@@ -3227,3 +3256,7 @@ def test_source_suffix_coverage_helper_rejects_a_dropped_suffix() -> None:
     dropped = [suffix for suffix in allow if suffix != "nvidia.com"]
     assert source_suffix_covered_by_connect("nvidia.com", dropped) is False
     assert source_suffix_covered_by_connect("notnvidia.com", allow) is False
+    assert source_suffix_covered_by_connect("nvidia.com", [".NVIDIA.COM"]) is True
+    assert source_suffix_covered_by_connect("www.nvidia.com", [".NVIDIA.COM"]) is True
+    assert source_suffix_covered_by_connect("nvidia.com", ["com"]) is False
+    assert source_suffix_covered_by_connect("nvidia.com", [".com"]) is False

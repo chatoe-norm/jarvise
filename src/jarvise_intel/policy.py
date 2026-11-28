@@ -242,17 +242,18 @@ def load_connect_allowlist(
     allow = _suffix_list(data.get("allow_suffixes"), reject_one_label=True)
     if not allow:
         return None
-    if data.get("deny_hosts") is not None and _suffix_list(data.get("deny_hosts")) is None:
+    raw_deny_hosts = data.get("deny_hosts")
+    deny_hosts = _suffix_list(raw_deny_hosts)
+    if raw_deny_hosts is not None and deny_hosts is None:
         return None
-    if (
-        data.get("deny_suffixes") is not None
-        and _suffix_list(data.get("deny_suffixes"), reject_one_label=True) is None
-    ):
+    raw_deny_suffixes = data.get("deny_suffixes")
+    deny_suffixes = _suffix_list(raw_deny_suffixes, reject_one_label=True)
+    if raw_deny_suffixes is not None and deny_suffixes is None:
         return None
     return {
         "allow_suffixes": allow,
-        "deny_hosts": _suffix_list(data.get("deny_hosts")) or [],
-        "deny_suffixes": _suffix_list(data.get("deny_suffixes"), reject_one_label=True) or [],
+        "deny_hosts": deny_hosts or [],
+        "deny_suffixes": deny_suffixes or [],
     }
 
 
@@ -274,11 +275,16 @@ def _connect_host_allowed(host: str, rules: dict[str, list[str]]) -> tuple[bool,
 def source_suffix_covered_by_connect(source_suffix: str, allow_suffixes: list[str]) -> bool:
     """True when a digest source suffix is equal to or under a CONNECT allow suffix.
 
-    Uses the allow half of ``_connect_host_allowed``: after host normalization,
-    equality or ``host.endswith("." + suffix)``. Deny lists are empty here.
+    The allow list is normalized with ``_suffix_list(..., reject_one_label=True)``
+    before matching. A rejected or empty list returns False. Matching is the
+    allow half of ``_connect_host_allowed``: after host normalization, equality
+    or ``host.endswith("." + suffix)``. Deny lists are empty here.
     """
+    normalized = _suffix_list(list(allow_suffixes), reject_one_label=True)
+    if not normalized:
+        return False
     rules = {
-        "allow_suffixes": list(allow_suffixes),
+        "allow_suffixes": normalized,
         "deny_hosts": [],
         "deny_suffixes": [],
     }
