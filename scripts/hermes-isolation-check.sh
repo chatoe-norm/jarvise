@@ -230,18 +230,56 @@ fi
 echo "[iso] hermes public bypass blocked OK"
 
 echo "[iso] proxy denies private/metadata and non-allowlisted CONNECT; allowlisted HTTPS must be HTTP 200"
+# Read cap and per-socket timeout. Defaults keep the previous 256-byte / 15s recv.
+# Blank, non-integer, and non-positive values fall back to those defaults inside Python.
 docker compose -p "${PROJECT}" --env-file "${ENV_FILE}" -f docker-compose.yml -f tmp-hermes-iso/compose.override.yml \
-  exec -T hermes python - <<'PY'
+  exec -T \
+  -e "JARVISE_HERMES_ISO_CONNECT_READ_MAX=${JARVISE_HERMES_ISO_CONNECT_READ_MAX:-256}" \
+  -e "JARVISE_HERMES_ISO_CONNECT_TIMEOUT_S=${JARVISE_HERMES_ISO_CONNECT_TIMEOUT_S:-15}" \
+  hermes python - <<'PY'
+import os
 import socket
 import sys
 
+def _positive_int_env(name: str, default: int) -> int:
+    """Positive integer env value, else default."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value <= 0:
+        return default
+    return value
+
 def connect_req(hostport: str) -> bytes:
+    """Read until the status line (first LF) or the byte cap.
+
+    JARVISE_HERMES_ISO_CONNECT_READ_MAX defaults to 256.
+    JARVISE_HERMES_ISO_CONNECT_TIMEOUT_S defaults to 15 (per-socket timeout).
+    """
+    read_max = _positive_int_env("JARVISE_HERMES_ISO_CONNECT_READ_MAX", 256)
+    timeout_s = _positive_int_env("JARVISE_HERMES_ISO_CONNECT_TIMEOUT_S", 15)
     s = socket.create_connection(("hermes-egress", 8899), 10)
-    s.settimeout(15)
+    s.settimeout(timeout_s)
     s.sendall(f"CONNECT {hostport} HTTP/1.1\r\nHost: {hostport}\r\n\r\n".encode())
-    data = s.recv(256)
+    chunks: list[bytes] = []
+    total = 0
+    while total < read_max:
+        try:
+            piece = s.recv(read_max - total)
+        except TimeoutError:
+            break
+        if not piece:
+            break
+        chunks.append(piece)
+        total += len(piece)
+        if b"\n" in b"".join(chunks):
+            break
     s.close()
-    return data
+    return b"".join(chunks)
 
 def http_status(data: bytes) -> int | None:
     """Status code from the HTTP status line only, not a later header or body."""
