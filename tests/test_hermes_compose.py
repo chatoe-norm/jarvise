@@ -183,10 +183,17 @@ def test_hermes_openrouter_key_is_not_the_shared_host_key() -> None:
     assert "OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}" in openclaw
     egress = _service_block(text, "hermes-egress")
     assert (
-        "JARVISE_HERMES_CONNECT_ALLOWLIST=${JARVISE_HERMES_CONNECT_ALLOWLIST:-/config/hermes/source-policy.json}"
+        "JARVISE_HERMES_CONNECT_ALLOWLIST=${JARVISE_HERMES_CONNECT_ALLOWLIST-/config/hermes/connect-allowlist.json}"
         in egress
     )
-    assert "./config/hermes/source-policy.json:/config/hermes/source-policy.json:ro" in egress
+    assert "${JARVISE_HERMES_CONNECT_ALLOWLIST:-" not in egress
+    assert "./config/hermes:/config/hermes:ro" in egress
+    allow = ROOT / "config" / "hermes" / "connect-allowlist.json"
+    assert allow.is_file()
+    connect_doc = json.loads(allow.read_text(encoding="utf-8"))
+    assert "openrouter.ai" in connect_doc["allow_suffixes"]
+    source_doc = json.loads((ROOT / "config" / "hermes" / "source-policy.json").read_text(encoding="utf-8"))
+    assert "openrouter.ai" not in source_doc["allow_suffixes"]
     env_ex = (ROOT / ".env.example").read_text(encoding="utf-8")
     match = re.search(r"^JARVISE_HERMES_OPENROUTER_KEY=(.*)$", env_ex, re.M)
     assert match is not None

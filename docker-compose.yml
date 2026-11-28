@@ -420,10 +420,11 @@ services:
     environment:
       - HERMES_EGRESS_HOST=0.0.0.0
       - HERMES_EGRESS_PORT=8899
-      # Domain allowlist. Missing or empty file denies every CONNECT (no fail-open).
-      - JARVISE_HERMES_CONNECT_ALLOWLIST=${JARVISE_HERMES_CONNECT_ALLOWLIST:-/config/hermes/source-policy.json}
+      # Domain allowlist. Unset uses the default file. An explicitly empty value
+      # stays empty and the proxy denies every CONNECT (no :- fallback).
+      - JARVISE_HERMES_CONNECT_ALLOWLIST=${JARVISE_HERMES_CONNECT_ALLOWLIST-/config/hermes/connect-allowlist.json}
     volumes:
-      - ./config/hermes/source-policy.json:/config/hermes/source-policy.json:ro
+      - ./config/hermes:/config/hermes:ro
     healthcheck:
       test:
         [

@@ -88,12 +88,18 @@ def test_policy_dns_rebinding_denied() -> None:
     ok, reason = allow_https_url("https://evil.example/", resolve=resolve)
     assert ok is False
     assert reason == "blocked_dns"
-    assert allow_connect_target("evil.example", 443, resolve=resolve)[0] is False
-    assert allow_connect_target("evil.example", 80, resolve=lambda h: ["8.8.8.8"])[0] is False
+    policy = {"allow_suffixes": ["evil.example"], "deny_hosts": [], "deny_suffixes": []}
+    assert allow_connect_target("evil.example", 443, resolve=resolve, policy=policy)[0] is False
+    assert allow_connect_target("evil.example", 80, resolve=lambda h: ["8.8.8.8"], policy=policy)[0] is False
 
 
 def test_policy_ipv6_unique_local_denied() -> None:
-    ok, reason, addrs = allow_connect_target("evil6.example", 443, resolve=lambda _h: ["fc00::1"])
+    ok, reason, addrs = allow_connect_target(
+        "evil6.example",
+        443,
+        resolve=lambda _h: ["fc00::1"],
+        policy={"allow_suffixes": ["evil6.example"], "deny_hosts": [], "deny_suffixes": []},
+    )
     assert ok is False
     assert reason == "blocked_dns"
     assert addrs == []
@@ -190,6 +196,82 @@ def test_connect_allowlist_denies_other_public_host() -> None:
     )
     assert denied is False
     assert denied_reason == "denied_suffix"
+
+
+def test_connect_allowlist_deny_hosts_and_no_dns_on_deny() -> None:
+    lookups = {"n": 0}
+
+    def resolve(_host: str) -> list[str]:
+        lookups["n"] += 1
+        return ["8.8.8.8"]
+
+    denied, reason, addrs = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=resolve,
+        policy={
+            "allow_suffixes": ["nvidia.com"],
+            "deny_hosts": ["nvidia.com"],
+            "deny_suffixes": [],
+        },
+    )
+    assert denied is False
+    assert reason == "denied_host"
+    assert addrs == []
+    assert lookups["n"] == 0
+
+    other, other_reason, _ = allow_connect_target(
+        "example.com",
+        443,
+        resolve=resolve,
+        policy={"allow_suffixes": ["nvidia.com"], "deny_hosts": [], "deny_suffixes": []},
+    )
+    assert other is False
+    assert other_reason == "connect_not_allowlisted"
+    assert lookups["n"] == 0
+
+    closed, closed_reason, _ = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=resolve,
+        policy_path=Path("/nonexistent/connect-allowlist.json"),
+    )
+    assert closed is False
+    assert closed_reason == "connect_allowlist_closed"
+    assert lookups["n"] == 0
+
+
+def test_connect_allowlist_rejects_malformed_hosts_without_dns() -> None:
+    lookups = {"n": 0}
+
+    def resolve(_host: str) -> list[str]:
+        lookups["n"] += 1
+        return ["8.8.8.8"]
+
+    policy = {"allow_suffixes": ["nvidia.com"], "deny_hosts": [], "deny_suffixes": []}
+    cases = (
+        (".nvidia.com", "hostname_not_dns"),
+        ("foo..nvidia.com", "hostname_not_dns"),
+        ("evil;.nvidia.com", "bad_host"),
+        ("evil%2f.nvidia.com", "bad_host"),
+        (r"evil\\.nvidia.com", "bad_host"),
+    )
+    for host, expected in cases:
+        ok, reason, addrs = allow_connect_target(host, 443, resolve=resolve, policy=policy)
+        assert ok is False, host
+        assert reason == expected, (host, reason)
+        assert addrs == []
+    assert lookups["n"] == 0
+
+
+def test_default_connect_allowlist_allows_openrouter_not_digest_source() -> None:
+    ok, reason, addrs = allow_connect_target("openrouter.ai", 443, resolve=_public_resolve)
+    assert ok is True
+    assert reason == "ok"
+    assert addrs == ["8.8.8.8"]
+    src_ok, src_reason = allow_source_url("https://openrouter.ai/models", policy_path=SOURCE_POLICY)
+    assert src_ok is False
+    assert src_reason == "unknown_source"
 
 
 def test_connect_allowlist_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
