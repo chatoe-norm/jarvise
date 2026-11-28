@@ -111,7 +111,7 @@ Stage A does **not** query production. Canonical cutover stays blocked until a l
    - the shadow study is closed, or the owner has documented a deviation
    - a non-digest OpenClaw function inventory is written
    - parity checks have passed
-   - an OpenClaw backup is retained for `JARVISE_HERMES_OPENCLAW_BACKUP_RETENTION_DAYS` (default **30** days; cutover procedure only, not read by the running stack)
+   - an OpenClaw backup is retained for `JARVISE_HERMES_OPENCLAW_BACKUP_RETENTION_DAYS` (default **30** days; cutover procedure only, not read by the running stack). The nightly job `infra/backup/backup.sh` prunes dated backups under `backups/` after `JARVISE_BACKUP_KEEP` (default **14** days). Archive the pre-cutover OpenClaw backup outside `backups/`, or raise `JARVISE_BACKUP_KEEP` to at least the cutover retention days. Otherwise the 14-day prune deletes the 30-day backup.
    - rollback has been rehearsed
 9. Set `JARVISE_DIGEST_PRODUCER=hermes` only after step 8 is complete, including Chana's explicit OK, and a later reviewed change has made Hermes the sole canonical producer. While OpenClaw is still a producer, leave this flag unset.
 

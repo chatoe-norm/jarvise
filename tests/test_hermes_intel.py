@@ -241,6 +241,87 @@ def test_connect_allowlist_deny_hosts_and_no_dns_on_deny() -> None:
     assert lookups["n"] == 0
 
 
+def test_suffix_list_strips_trailing_dots_and_rejects_non_strings() -> None:
+    lookups = {"n": 0}
+
+    def resolve(_host: str) -> list[str]:
+        lookups["n"] += 1
+        return ["8.8.8.8"]
+
+    for host in ("nvidia.com", "nvidia.com."):
+        denied, reason, addrs = allow_connect_target(
+            host,
+            443,
+            resolve=resolve,
+            policy={
+                "allow_suffixes": ["nvidia.com"],
+                "deny_hosts": ["nvidia.com."],
+                "deny_suffixes": [],
+            },
+        )
+        assert denied is False
+        assert reason == "denied_host"
+        assert addrs == []
+    assert lookups["n"] == 0
+
+    suffix_denied, suffix_reason, suffix_addrs = allow_connect_target(
+        "a.tinyurl.com",
+        443,
+        resolve=resolve,
+        policy={
+            "allow_suffixes": ["tinyurl.com"],
+            "deny_hosts": [],
+            "deny_suffixes": ["tinyurl.com."],
+        },
+    )
+    assert suffix_denied is False
+    assert suffix_reason == "denied_suffix"
+    assert suffix_addrs == []
+    assert lookups["n"] == 0
+
+    # Dots-only and blank items are skipped, so they are not a wildcard deny or allow.
+    allowed, allow_reason, allow_addrs = allow_connect_target(
+        "nvidia.com",
+        443,
+        resolve=resolve,
+        policy={
+            "allow_suffixes": ["nvidia.com.", ".", ""],
+            "deny_hosts": ["."],
+            "deny_suffixes": ["."],
+        },
+    )
+    assert allowed is True
+    assert allow_reason == "ok"
+    assert allow_addrs == ["8.8.8.8"]
+    assert lookups["n"] == 1
+    other, other_reason, other_addrs = allow_connect_target(
+        "example.com",
+        443,
+        resolve=resolve,
+        policy={
+            "allow_suffixes": ["nvidia.com.", ".", ""],
+            "deny_hosts": ["."],
+            "deny_suffixes": ["."],
+        },
+    )
+    assert other is False
+    assert other_reason == "connect_not_allowlisted"
+    assert other_addrs == []
+    assert lookups["n"] == 1
+
+    closed_policies: tuple[dict[str, object], ...] = (
+        {"allow_suffixes": ["nvidia.com", 1], "deny_hosts": [], "deny_suffixes": []},
+        {"allow_suffixes": ["nvidia.com"], "deny_hosts": [1], "deny_suffixes": []},
+        {"allow_suffixes": ["nvidia.com"], "deny_hosts": [], "deny_suffixes": [None]},
+    )
+    for policy in closed_policies:
+        closed, why, got = allow_connect_target("nvidia.com", 443, resolve=resolve, policy=policy)
+        assert closed is False
+        assert why == "connect_allowlist_closed"
+        assert got == []
+    assert lookups["n"] == 1
+
+
 def test_connect_allowlist_rejects_malformed_hosts_without_dns() -> None:
     lookups = {"n": 0}
 

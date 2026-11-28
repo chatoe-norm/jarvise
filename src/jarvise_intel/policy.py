@@ -176,7 +176,7 @@ def _suffix_list(value: object) -> list[str] | None:
     for item in value:
         if not isinstance(item, str):
             return None
-        text = item.strip().lower().lstrip(".")
+        text = item.strip().lower().strip(".")
         if text:
             out.append(text)
     return out
