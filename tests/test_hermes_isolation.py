@@ -67,10 +67,14 @@ def _isolation_connect_ns() -> dict[str, Any]:
     return ns
 
 
-def test_isolation_script_connect_read_is_a_bounded_loop() -> None:
+def test_isolation_script_connect_read_is_a_bounded_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_HERMES_ISO_CONNECT_READ_MAX", raising=False)
+    monkeypatch.delenv("JARVISE_HERMES_ISO_CONNECT_TIMEOUT_S", raising=False)
     text = SCRIPT.read_text(encoding="utf-8")
     assert "while total < read_max:" in text
     assert "s.recv(read_max - total)" in text
+    assert 'if b"\\n" in piece:' in text
+    assert "finally:" in text
     assert "JARVISE_HERMES_ISO_CONNECT_READ_MAX" in text
     assert "JARVISE_HERMES_ISO_CONNECT_TIMEOUT_S" in text
     assert "${JARVISE_HERMES_ISO_CONNECT_READ_MAX:-256}" in text
@@ -180,3 +184,187 @@ def test_connect_req_honors_read_cap_and_timeout(monkeypatch: pytest.MonkeyPatch
     assert seen["timeout"] == 15
     assert seen["n"] == 256
     assert ns["http_status"](data) == 403
+
+
+def _clear_iso_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_HERMES_ISO_CONNECT_READ_MAX", raising=False)
+    monkeypatch.delenv("JARVISE_HERMES_ISO_CONNECT_TIMEOUT_S", raising=False)
+
+
+class _ScriptedSocket:
+    """Fake socket. ``recv`` yields scripted bytes or raises the scripted error."""
+
+    def __init__(self, steps: list[bytes | type[BaseException] | BaseException]) -> None:
+        self._steps = list(steps)
+        self.closed = False
+        self.calls = 0
+
+    def settimeout(self, _value: float) -> None:
+        return None
+
+    def sendall(self, _data: bytes) -> None:
+        return None
+
+    def recv(self, n: int) -> bytes:
+        self.calls += 1
+        if not self._steps:
+            raise AssertionError("recv past script")
+        step = self._steps.pop(0)
+        if isinstance(step, type) and issubclass(step, BaseException):
+            raise step()
+        if isinstance(step, BaseException):
+            raise step
+        return step[:n]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize("code", [b"200", b"403"])
+def test_http_status_rejects_a_partial_status_line(code: bytes) -> None:
+    """No LF means the status line is incomplete, even when the digits are present."""
+    ns = _isolation_connect_ns()
+    partial = b"HTTP/1.1 " + code
+    assert b"\n" not in partial
+    assert ns["http_status"](partial) is None
+    assert ns["http_status"](partial + b" OK") is None
+
+
+def test_http_status_accepts_lf_terminated_lines() -> None:
+    ns = _isolation_connect_ns()
+    assert ns["http_status"](b"HTTP/1.1 200 OK\r\n") == 200
+    assert ns["http_status"](b"HTTP/1.1 403 Forbidden\r\n") == 403
+
+
+@pytest.mark.parametrize("code", [b"200", b"403"])
+def test_connect_req_partial_status_then_timeout_is_not_a_code(
+    monkeypatch: pytest.MonkeyPatch, code: bytes
+) -> None:
+    ns = _isolation_connect_ns()
+    _clear_iso_env(monkeypatch)
+    sock = _ScriptedSocket([b"HTTP/1.1 " + code, TimeoutError])
+    monkeypatch.setattr(ns["socket"], "create_connection", lambda *_a, **_k: sock)
+    data = ns["connect_req"]("nvidia.com:443")
+    assert data == b"HTTP/1.1 " + code
+    assert ns["http_status"](data) is None
+    assert sock.closed is True
+
+
+@pytest.mark.parametrize("code", [b"200", b"403"])
+def test_connect_req_partial_status_then_eof_is_not_a_code(
+    monkeypatch: pytest.MonkeyPatch, code: bytes
+) -> None:
+    """Empty recv ends the read. A missing break must fail this test, not hang it."""
+    ns = _isolation_connect_ns()
+    _clear_iso_env(monkeypatch)
+    stop = threading.Event()
+    partial = b"HTTP/1.1 " + code
+
+    class _Eof:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closed = False
+
+        def settimeout(self, _value: float) -> None:
+            return None
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, _n: int) -> bytes:
+            if stop.is_set():
+                raise RuntimeError("eof test guard")
+            self.calls += 1
+            if self.calls == 1:
+                return partial
+            return b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    sock = _Eof()
+    monkeypatch.setattr(ns["socket"], "create_connection", lambda *_a, **_k: sock)
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["data"] = ns["connect_req"]("nvidia.com:443")
+        except Exception as exc:  # noqa: BLE001 — guard raises only if EOF never stops the read
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(2.0)
+    hung = thread.is_alive()
+    stop.set()
+    thread.join(1.0)
+    assert not hung, "connect_req did not return after EOF"
+    assert "error" not in box
+    assert box["data"] == partial
+    assert ns["http_status"](box["data"]) is None
+    assert sock.closed is True
+    assert sock.calls == 2
+
+
+@pytest.mark.parametrize("code", [b"200", b"403"])
+def test_connect_req_partial_status_at_read_cap_is_not_a_code(
+    monkeypatch: pytest.MonkeyPatch, code: bytes
+) -> None:
+    ns = _isolation_connect_ns()
+    _clear_iso_env(monkeypatch)
+    partial = b"HTTP/1.1 " + code
+    monkeypatch.setenv("JARVISE_HERMES_ISO_CONNECT_READ_MAX", str(len(partial)))
+    sock = _ScriptedSocket([partial])
+    monkeypatch.setattr(ns["socket"], "create_connection", lambda *_a, **_k: sock)
+    data = ns["connect_req"]("nvidia.com:443")
+    assert data == partial
+    assert b"\n" not in data
+    assert ns["http_status"](data) is None
+    assert sock.closed is True
+
+
+def test_connect_req_split_complete_status_line_is_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``HTTP/1.1 200 OK\\r\\n`` split across two recvs is still status 200."""
+    ns = _isolation_connect_ns()
+    _clear_iso_env(monkeypatch)
+    sock = _ScriptedSocket([b"HTTP/1.1 200 OK\r", b"\n"])
+    monkeypatch.setattr(ns["socket"], "create_connection", lambda *_a, **_k: sock)
+    data = ns["connect_req"]("nvidia.com:443")
+    assert data == b"HTTP/1.1 200 OK\r\n"
+    assert ns["http_status"](data) == 200
+    assert sock.closed is True
+    assert sock.calls == 2
+
+
+def test_connect_req_complete_403_is_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    ns = _isolation_connect_ns()
+    _clear_iso_env(monkeypatch)
+    sock = _ScriptedSocket([b"HTTP/1.1 403 Forbidden\r\n"])
+    monkeypatch.setattr(ns["socket"], "create_connection", lambda *_a, **_k: sock)
+    data = ns["connect_req"]("example.com:443")
+    assert ns["http_status"](data) == 403
+    assert sock.closed is True
+
+
+def test_connect_req_closes_socket_when_send_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    ns = _isolation_connect_ns()
+    _clear_iso_env(monkeypatch)
+    seen: dict[str, bool] = {}
+
+    class _Boom:
+        def settimeout(self, _value: float) -> None:
+            return None
+
+        def sendall(self, _data: bytes) -> None:
+            raise RuntimeError("send failed")
+
+        def recv(self, _n: int) -> bytes:
+            raise AssertionError("recv after a failed send")
+
+        def close(self) -> None:
+            seen["closed"] = True
+
+    monkeypatch.setattr(ns["socket"], "create_connection", lambda *_a, **_k: _Boom())
+    with pytest.raises(RuntimeError, match="send failed"):
+        ns["connect_req"]("nvidia.com:443")
+    assert seen.get("closed") is True
