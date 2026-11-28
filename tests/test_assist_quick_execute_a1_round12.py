@@ -588,6 +588,7 @@ def test_r12_qk_ex_stop_far_uses_config(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_r12_flag_off_card_byte_identical(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     monkeypatch.delenv("JARVISE_QUICK_EXECUTE", raising=False)
     monkeypatch.delenv("JARVISE_ASSIST_EXECUTE", raising=False)
     conn = _db(tmp_path, "flag-off.db")
@@ -802,6 +803,7 @@ def _sync_notice(conn: Any, now: int, monkeypatch: pytest.MonkeyPatch) -> list[s
 
 
 def test_r12_expire_notice_default_ten_minutes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     conn = _db(tmp_path, "exp10.db")
     created = _daytime_ms()
     rid, reason = create_quick_registration(

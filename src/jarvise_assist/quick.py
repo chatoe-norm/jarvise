@@ -81,7 +81,8 @@ def reg_ttl_ms() -> int:
     is used. Monkeypatch ``REG_TTL_MS`` to change that default without an
     env override. Callers must use this function, not a name imported once.
     """
-    raw = (os.environ.get(REG_TTL_MS_ENV) or "").strip()
+    # Literal key so tests/test_compose_env.py sees it. REG_TTL_MS_ENV is the same string.
+    raw = (os.environ.get("JARVISE_QUICK_REG_TTL_MS") or "").strip()
     if raw:
         try:
             value = int(raw)

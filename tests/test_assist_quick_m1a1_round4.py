@@ -531,7 +531,8 @@ def test_sync_tag_notice_three_lines(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_sync_expire_notices_exact(tmp_path: Path) -> None:
+def test_sync_expire_notices_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     tag = quick_mode_tag()
     # no_fill
     conn = open_db(tmp_path / "enf.db")
@@ -1062,8 +1063,9 @@ def test_menu_line2_mode_tag_and_qs_labels(tmp_path: Any, monkeypatch: pytest.Mo
         conn.close()
 
 
-def test_registration_success_countdown_line() -> None:
+def test_registration_success_countdown_line(monkeypatch: pytest.MonkeyPatch) -> None:
     """S14."""
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     msg = registration_success_message(
         sym="BTCUSDT",
         side="long",
@@ -1154,6 +1156,7 @@ def test_quoted_card_leftovers_and_ttl(tmp_path: Path, monkeypatch: pytest.Monke
     """S17/S18."""
     from jarvise_assist.quick_card import CARD_TTL_PREFIX, _hhmmss
 
+    monkeypatch.delenv("JARVISE_QUICK_REG_TTL_MS", raising=False)
     _forbid_trade_client(monkeypatch)
     conn = open_db(tmp_path / "card-lo.db")
     _seed_settings(conn)
