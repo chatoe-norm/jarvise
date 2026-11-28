@@ -111,9 +111,19 @@ Stage A does **not** query production. Canonical cutover stays blocked until a l
    - the shadow study is closed, or the owner has documented a deviation
    - a non-digest OpenClaw function inventory is written
    - parity checks have passed
-   - an OpenClaw backup is retained for `JARVISE_HERMES_OPENCLAW_BACKUP_RETENTION_DAYS` (default **30** days; cutover procedure only, not read by the running stack). The nightly job `infra/backup/backup.sh` prunes dated backups under `backups/` after `JARVISE_BACKUP_KEEP` (default **14** days). Archive the pre-cutover OpenClaw backup outside `backups/`, or raise `JARVISE_BACKUP_KEEP` to at least the cutover retention days. Otherwise the 14-day prune deletes the 30-day backup.
+   - an OpenClaw backup is retained for `JARVISE_HERMES_OPENCLAW_BACKUP_RETENTION_DAYS` (default **30** days; cutover procedure only, not read by the running stack). The nightly job `infra/backup/backup.sh` prunes dated backups under `backups/` after `JARVISE_BACKUP_KEEP` (default **14** days). Archive the pre-cutover OpenClaw backup outside `backups/`. Raising `JARVISE_BACKUP_KEEP` alone does not protect that copy: when `JARVISE_BACKUP_DEST` is set, the job runs `rsync -a --delete` of `backups/` onto the destination and deletes anything there that is not in `backups/`. A cutover or OpenClaw archive stored inside the mirror destination is deleted on the next off-box sync. Archive it outside `backups/` and outside the mirror destination. The 14-day prune still deletes a copy that was left under `backups/`.
    - rollback has been rehearsed
 9. Set `JARVISE_DIGEST_PRODUCER=hermes` only after step 8 is complete, including Chana's explicit OK, and a later reviewed change has made Hermes the sole canonical producer. While OpenClaw is still a producer, leave this flag unset.
+
+### Stage C search-backend host
+
+If the owner approves an external web-search backend for Stage C, the owner reviews its hostname and adds it explicitly to `config/hermes/connect-allowlist.json` `allow_suffixes` before the pilot. Add the same host to `config/hermes/source-policy.json` only when it is also a citation source. Until that allowlist entry exists, the proxy denies the host with `connect_not_allowlisted`. No search-backend host is added by this note.
+
+### Deploy does not rebuild Hermes images
+
+The automatic GitHub Deploy workflow (`infra/deploy/vps-deploy.sh` on push to `main`) rebuilds only the `jobs` and `web` images. The `hermes`, `hermes-ingest`, and `hermes-egress` images and containers are not rebuilt or recreated by it: those services are `profiles: [hermes]`, and the default compose build and `up` omit that profile.
+
+Before Stage C activation, the owner-approved procedure must rebuild and recreate `hermes-ingest` and `hermes-egress` (and the `hermes` container if its image, config, plugins, or entrypoint changed), then verify baked file hashes in those containers against merged `main` (for example `src/jarvise_intel/digest.py` and `policy.py` inside `hermes-ingest` and `hermes-egress`) and run `scripts/hermes-isolation-check.sh`. This PR does not do that rebuild.
 
 ## Rollback
 
@@ -135,6 +145,8 @@ Order:
 - [ ] Shadow window status decided
 - [ ] Claude Stage B approval on the PR
 - [ ] Explicit owner cutover / `fdpy` instruction for Stage C
+- [ ] If the owner approves an external web-search backend for Stage C, its hostname is reviewed by the owner and added to `config/hermes/connect-allowlist.json` `allow_suffixes` before the pilot (and to `source-policy.json` only if it is also a citation source). Otherwise the proxy denies it with `connect_not_allowlisted`
+- [ ] Before Stage C activation, rebuild and recreate `hermes-ingest` and `hermes-egress` (and `hermes` if its image, config, plugins, or entrypoint changed), verify baked `digest.py` and `policy.py` hashes in those containers against merged `main`, and run `scripts/hermes-isolation-check.sh`. GitHub Deploy rebuilds only `jobs` and `web` and does not do this. This PR does not do it
 
 ## MCP manual check (when profile is running)
 
