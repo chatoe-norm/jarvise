@@ -2152,6 +2152,79 @@ def test_t2_valid_marker_corrupt_slot_keeps_attempt2(tmp_path: Path, monkeypatch
     _ = digest_dir
 
 
+def test_t2_invalid_utf8_slot_blocks_list(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: invalid UTF-8 slot bytes fail closed as slot_unreadable on the index scan."""
+    from jarvise_intel.digest import ActiveAdmissionError, list_unresolved_slot_records
+
+    _digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    name = "2026-11-27T07.json"
+    (slots / name).write_bytes(b"\xff\xfe{")
+    with pytest.raises(ActiveAdmissionError, match=r"^slot_unreadable:") as exc:
+        list_unresolved_slot_records(state_dir)
+    assert str(exc.value).startswith("slot_unreadable:")
+    assert name in str(exc.value)
+    assert isinstance(exc.value.__cause__, UnicodeError)
+
+
+def test_t2_invalid_utf8_slot_blocks_load(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: the same invalid UTF-8 slot file fails closed on a direct slot load."""
+    from jarvise_intel.digest import ActiveAdmissionError, load_slot_record
+
+    _digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    name = "2026-11-27T07.json"
+    (slots / name).write_bytes(b"\xff\xfe{")
+    slot = parse_slot("2026-11-27T07")
+    with pytest.raises(ActiveAdmissionError, match=r"^slot_unreadable:") as exc:
+        load_slot_record(state_dir, slot)
+    assert str(exc.value).startswith("slot_unreadable:")
+    assert name in str(exc.value)
+    assert isinstance(exc.value.__cause__, UnicodeError)
+
+
+def test_t2_invalid_utf8_slot_blocks_index_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: absent index + invalid UTF-8 slot must fail closed with zero creates."""
+    digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    slots = state_dir / "slots"
+    slots.mkdir(parents=True)
+    (slots / "2026-11-27T07.json").write_bytes(b"\xff\xfe{")
+    creates = {"n": 0}
+
+    def fake_run(*_a: Any, **_k: Any) -> Any:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    def fake_create(*_a: Any, **_k: Any) -> str:
+        creates["n"] += 1
+        raise AssertionError("must not create")
+
+    monkeypatch.setattr("jarvise_intel.app.run_research", fake_run)
+    monkeypatch.setattr("jarvise_intel.app.create_run", fake_create)
+    cfg = AdapterConfig()
+    cfg.now = _slot_now("2026-11-27T19")
+    code, body = handle_ingest(cfg, {"slot": "2026-11-27T19"})
+    assert code == 409
+    assert body.get("error") == "admission_state_invalid"
+    assert creates["n"] == 0
+    _ = digest_dir
+
+
+def test_t2_invalid_utf8_admission_marker_unreadable(tmp_path: Path, monkeypatch: Any) -> None:
+    """T2: invalid UTF-8 active-admission marker fails closed as admission_unreadable."""
+    from jarvise_intel.digest import ActiveAdmissionError, load_active_admission
+
+    _digest_dir, state_dir = _cfg_env(tmp_path, monkeypatch)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "active_admission.json").write_bytes(b"\xff\xfe{")
+    with pytest.raises(ActiveAdmissionError, match=r"^admission_unreadable$") as exc:
+        load_active_admission(state_dir)
+    assert str(exc.value) == "admission_unreadable"
+    assert isinstance(exc.value.__cause__, UnicodeError)
+
+
 def test_t3_create_time_deducted_from_wait(monkeypatch: Any) -> None:
     """T3: 1s budget + 10s create → first post-id action is stop, not a poll GET."""
     from jarvise_intel.gateway import GatewayConfig, run_research
