@@ -7,5 +7,5 @@ pydantic>=2.14.1
 fastapi==0.163.2
 uvicorn[standard]==0.54.0
 python-multipart==0.0.34
-redis==8.1.0
+redis==8.2.0
 qdrant-client==1.20.0
