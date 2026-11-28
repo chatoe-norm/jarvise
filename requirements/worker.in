@@ -4,7 +4,7 @@ httpx>=0.28.1
 typer>=0.27.3
 cryptography>=50.0.2
 pydantic>=2.14.1
-redis==8.1.0
+redis==8.2.0
 qdrant-client==1.20.0
 sentence-transformers>=6.1.0
 notebooklm-mcp-cli==0.16.5
