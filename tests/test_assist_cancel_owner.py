@@ -3244,3 +3244,33 @@ def test_owner_cancel_error_logs_keep_step_names(tmp_path: Path) -> None:
     assert ("BTCUSDT", "222") not in order_ids
     assert ("BTCUSDT", "111") in order_ids
     conn.close()
+
+
+def test_legacy_exit_cancel_owner_algo_endpoint_is_an_algo_id(tmp_path: Path) -> None:
+    """A pre-split algo DELETE used step exit_cancel_owner with the algo endpoint."""
+    conn = open_db(tmp_path / "legacy-algo-endpoint.db")
+    ts = 1_700_000_000_000
+    intent_id = _quick_exit_intent(conn, ts)
+
+    def log(step: str, endpoint: str, oid: str) -> None:
+        insert_exec_log(
+            conn,
+            intent_id=intent_id,
+            step=step,
+            endpoint=endpoint,
+            order_or_algo_id=oid,
+            http_status=200,
+            created_at_ms=ts,
+        )
+
+    log("exit_cancel_owner", "/fapi/v1/algoOrder", "333")
+    log("exit_cancel_owner", "/fapi/v1/order", "111")
+    log("exit_cancel_owner_algo", "/fapi/v1/algoOrder", "222")
+    _cids, order_ids, algo_ids = _quick_owned_client_and_order_ids(conn)
+    assert ("BTCUSDT", "333") in algo_ids
+    assert ("BTCUSDT", "333") not in order_ids
+    assert ("BTCUSDT", "111") in order_ids
+    assert ("BTCUSDT", "111") not in algo_ids
+    assert ("BTCUSDT", "222") in algo_ids
+    assert ("BTCUSDT", "222") not in order_ids
+    conn.close()
